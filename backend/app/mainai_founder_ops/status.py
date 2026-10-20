@@ -1,6 +1,7 @@
 """Canonical founder-facing work status.
 
-Never infers activity from an assignment existing. `assigned` is queued, not running.
+Never infers activity from an assignment existing. `assigned` is not running.
+`acknowledged` means a worker claimed the lease (or recorded dispatch) without live execution.
 `independently_verified` requires durable verification evidence from a party that is not
 the builder of the work. Agent-orchestration self-review is `completed`, not verified.
 """
@@ -19,6 +20,8 @@ from app.models.workforce import WorkforceAssignment
 
 class FounderWorkStatus(str, enum.Enum):
     queued = "queued"
+    assigned = "assigned"
+    acknowledged = "acknowledged"
     running = "running"
     waiting_on_dependency = "waiting_on_dependency"
     failed = "failed"
@@ -26,6 +29,7 @@ class FounderWorkStatus(str, enum.Enum):
     independently_verified = "independently_verified"
 
 
+ACTIVE_EXECUTION_STATUSES = frozenset({FounderWorkStatus.running.value})
 _LIVE_ASSIGNMENT_STATUSES = frozenset({"assigned", "running", "awaiting_verification"})
 
 # Agent-orchestration statuses that still justify a paid dispatch. Anything else is a
@@ -47,9 +51,11 @@ def classify_mainai_task(
 
     Liveness `idle` while status is `ready` is queued. `pending`/`blocked` wait on a
     dependency. A running task whose lease is dead/stalled is failed, not still running.
+    A queued job with `locked_by` is acknowledged, not running.
     """
     liveness = task_liveness(task, job)
     source_status = task.status.value if isinstance(task.status, enum.Enum) else str(task.status)
+    event_list = list(events) if events is not None else []
     evidence: dict[str, Any] = {
         "source": "mainai_task",
         "source_status": source_status,
@@ -59,11 +65,14 @@ def classify_mainai_task(
         "goal_id": str(task.goal_id),
         "task_id": str(task.id),
         "description": task.description,
+        "approval_required": bool(getattr(task, "approval_required", False)),
+        "approval_granted": _has_event(event_list, MainAITaskEventType.approval_granted),
+        "dispatched": _has_event(event_list, MainAITaskEventType.dispatched),
     }
 
     verified = _task_independently_verified(
         task,
-        events=events,
+        events=event_list,
         checkpoint_test_status=checkpoint_test_status,
         checkpoint_ci_status=checkpoint_ci_status,
     )
@@ -85,6 +94,9 @@ def classify_mainai_task(
         MainAITaskStatus.waiting_ci,
     }:
         status = FounderWorkStatus.waiting_on_dependency
+    elif _job_acknowledged(job) or evidence["dispatched"]:
+        # Claimed or dispatched without a live running lease — accepted, not executing.
+        status = FounderWorkStatus.acknowledged
     elif task.status == MainAITaskStatus.ready:
         status = FounderWorkStatus.queued
     else:
@@ -96,7 +108,10 @@ def classify_mainai_task(
 
 def classify_mainai_job(job: MainAIJob) -> dict[str, Any]:
     source = job.status.value if isinstance(job.status, enum.Enum) else str(job.status)
-    if job.status == MainAIJobStatus.queued:
+    locked_by = getattr(job, "locked_by", None)
+    if job.status == MainAIJobStatus.queued and locked_by:
+        status = FounderWorkStatus.acknowledged
+    elif job.status == MainAIJobStatus.queued:
         status = FounderWorkStatus.queued
     elif job.status == MainAIJobStatus.running:
         status = FounderWorkStatus.running
@@ -114,12 +129,13 @@ def classify_mainai_job(job: MainAIJob) -> dict[str, Any]:
         "job_type": job.job_type,
         "public_message": job.public_message,
         "error_category": job.error_category,
+        "locked_by": locked_by,
         "independently_verified": False,
     }
 
 
 def classify_workforce_assignment(assignment: WorkforceAssignment) -> dict[str, Any]:
-    """Assignment existence is not activity. `assigned` stays queued until status is running."""
+    """Assignment existence is not activity. `assigned` stays assigned until running."""
     source = assignment.status
     verification = assignment.verification_status or "UNVERIFIED"
     evidence = {
@@ -136,6 +152,8 @@ def classify_workforce_assignment(assignment: WorkforceAssignment) -> dict[str, 
         status = FounderWorkStatus.running
     elif source == "awaiting_verification":
         status = FounderWorkStatus.waiting_on_dependency
+    elif source == "acknowledged":
+        status = FounderWorkStatus.acknowledged
     elif source == "completed" and verification == "VERIFIED" and assignment.verifier_profile_id:
         if assignment.verifier_profile_id != assignment.profile_id:
             status = FounderWorkStatus.independently_verified
@@ -144,8 +162,9 @@ def classify_workforce_assignment(assignment: WorkforceAssignment) -> dict[str, 
             evidence["unjustified_self_verification"] = True
     elif source == "completed":
         status = FounderWorkStatus.completed
+    elif source == "assigned":
+        status = FounderWorkStatus.assigned
     else:
-        # assigned / unknown → queued. Never "running" just because work was handed out.
         status = FounderWorkStatus.queued
     evidence["independently_verified"] = status == FounderWorkStatus.independently_verified
     return {"founder_status": status.value, **evidence}
@@ -153,8 +172,8 @@ def classify_workforce_assignment(assignment: WorkforceAssignment) -> dict[str, 
 
 def classify_agent_task(task: AgentTask) -> dict[str, Any]:
     source = task.status.value if isinstance(task.status, enum.Enum) else str(task.status)
-    if task.status in {AgentTaskStatus.created}:
-        status = FounderWorkStatus.queued
+    if task.status == AgentTaskStatus.created:
+        status = FounderWorkStatus.assigned
     elif task.status == AgentTaskStatus.dispatched:
         status = FounderWorkStatus.running
     elif task.status in {
@@ -182,6 +201,18 @@ def classify_agent_task(task: AgentTask) -> dict[str, Any]:
         "title": task.title,
         "independently_verified": False,
     }
+
+
+def _job_acknowledged(job: MainAIJob | None) -> bool:
+    if job is None:
+        return False
+    if job.status != MainAIJobStatus.queued:
+        return False
+    return bool(getattr(job, "locked_by", None))
+
+
+def _has_event(events: Iterable[MainAITaskEvent], event_type: MainAITaskEventType) -> bool:
+    return any(e.event_type == event_type for e in events)
 
 
 def _task_independently_verified(

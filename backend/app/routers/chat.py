@@ -29,7 +29,8 @@ from app.deps import require_founder
 from app.egress_policy import EgressDeniedError
 from app.founder_memory_signals import record_candidate_signal
 from app.limiter import limiter
-from app.mainai_runtime_contract import build_answer_response, sanitize_unverified_execution_claims
+from app.mainai_founder_ops.communication import MAINAI_COMMUNICATION_POLICY, apply_communication_policy
+from app.mainai_runtime_contract import build_answer_response
 from app.models.conversation import Conversation, Message as MessageModel, MessageRole, MessageStatus
 from app.models.usage import UsageLog
 from app.models.user import User
@@ -56,16 +57,17 @@ _SIGNAL_WORTHY_INTENTS = {
 }
 
 SYSTEM_PROMPT = (
-    "Du är MainAI, grundarens Founder AI — inte en delad eller allmän assistent. Svara "
-    "utifrån den kontext som ges nedan från kunskapsbiblioteket. Svara på samma språk som "
-    "grundaren skriver på.\n\n"
+    "Du är MainAI, grundarens Founder AI — inte en delad eller allmän assistent och inte ett "
+    "kundvänt AI-system. Svara utifrån den kontext som ges nedan från kunskapsbiblioteket. "
+    "Svara på samma språk som grundaren skriver på.\n\n"
     "VIKTIGT om vad du faktiskt kan göra: det här svaret är ditt HELA arbete med frågan — det "
     "finns inget bakgrundsjobb, ingen pågående körning och ingen separat process som fortsätter "
     "efter att du svarat. Du får ALDRIG påstå att du 'arbetar med det i bakgrunden', att 'jobbet "
     "har startat', att du 'kommer återkomma' eller liknande — det skulle vara osant. Om något du "
     "beskriver kräver en riktig, varaktig körning (t.ex. en granskning av flera dokument) ska du "
     "säga att grundaren själv kan starta ett sådant jobb via Jobb & Aktivitet — aldrig låtsas att "
-    "du redan gör det."
+    "du redan gör det.\n\n"
+    f"{MAINAI_COMMUNICATION_POLICY}"
 )
 
 settings = get_settings()
@@ -276,15 +278,25 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
         )
     )
 
-    # Founder re-review round (PR #36): the runtime truthfulness contract (app/
-    # mainai_runtime_contract.py) existed but was never actually wired into a live surface --
-    # this is that wiring. sanitize_unverified_execution_claims() is the secondary,
-    # defense-in-depth check for the one channel the SYSTEM_PROMPT instruction above can't
-    # structurally guarantee (the model's own free text); build_answer_response()'s own
-    # Pydantic validation is the structural guarantee that this reply is shaped as a plain
-    # `answer` with `job_id=None` -- this endpoint has no background-job concept at all, so
-    # that is the only mode a chat reply could ever truthfully be.
-    safe_content = sanitize_unverified_execution_claims(result.content)
+    # Founder re-review round (PR #36) plus founder-workflow communication policy: sanitize
+    # unverified execution claims, drop redundant copies, disagree when evidence contradicts
+    # the Founder, and keep simple answers short. build_answer_response() still guarantees a
+    # plain `answer` with `job_id=None`.
+    prior_assistant = next(
+        (m.content for m in reversed(history) if m.role == MessageRole.assistant and m.content),
+        None,
+    )
+    safe_content = apply_communication_policy(
+        result.content,
+        founder_message=user_message.content,
+        prior_assistant=prior_assistant,
+        evidence={
+            "first_cycle_go": False,
+            "github_write_enabled": bool(settings.github_write_enabled),
+            "recall_http_mounted": False,
+            "independently_verified": False,
+        },
+    )
     build_answer_response(safe_content)  # raises on a contract violation; never actually can for mode=answer/job_id=None, but every call site goes through this the same way
 
     if assistant_row is None:

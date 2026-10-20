@@ -1,7 +1,8 @@
-"""Refuse duplicate live assignments and repeated paid prompts.
+"""Refuse duplicate live assignments, repeated paid prompts, and cyclic task graphs.
 
 Durable state is the source of truth. An open request, a live assignment, or an already
 dispatched agent task is enough to refuse a second grant/prompt for the same work.
+A stored dependency cycle is never assignable.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.mainai_founder_ops.status import REDISPATCHABLE_AGENT_STATUSES
+from app.mainai_founder_ops.workflow import detect_dependency_cycles, load_dependency_edges, task_ids_in_cycles
 from app.models.agent_task import AgentTask
 from app.models.workforce import WorkforceAssignment, WorkforceDelegationRequest
 
@@ -25,7 +27,11 @@ class DuplicateWorkError(Exception):
         self.existing_id = existing_id
 
 
-LIVE_ASSIGNMENT_STATUSES = ("assigned", "running", "awaiting_verification")
+class CircularDependencyError(DuplicateWorkError):
+    """Assignment refused because the task sits in a stored dependency cycle."""
+
+
+LIVE_ASSIGNMENT_STATUSES = ("assigned", "acknowledged", "running", "awaiting_verification")
 OPEN_REQUEST_STATUSES = ("open", "resolving", "assigned")
 
 
@@ -64,6 +70,19 @@ def open_request_for_task(
     ).scalars().first()
 
 
+def assert_no_circular_dependency(db: Session, *, owner_id: uuid.UUID, task_id: uuid.UUID | None) -> None:
+    if task_id is None:
+        return
+    cycles = detect_dependency_cycles(load_dependency_edges(db, owner_id=owner_id))
+    if str(task_id) in task_ids_in_cycles(cycles):
+        matching = next(cycle for cycle in cycles if str(task_id) in cycle)
+        raise CircularDependencyError(
+            f"circular_dependency: task {task_id} sits in cycle {matching}",
+            code="circular_dependency",
+            existing_id=str(task_id),
+        )
+
+
 def assert_no_duplicate_task_assignment(
     db: Session,
     *,
@@ -74,6 +93,7 @@ def assert_no_duplicate_task_assignment(
     """Fail closed if this MainAI task already has an open request or live assignment."""
     if task_id is None:
         return
+    assert_no_circular_dependency(db, owner_id=owner_id, task_id=task_id)
     live = live_assignment_for_task(db, owner_id=owner_id, task_id=task_id)
     if live is not None:
         raise DuplicateWorkError(

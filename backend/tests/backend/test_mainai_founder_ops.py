@@ -25,7 +25,12 @@ from app.founder import FOUNDER_USER_ID
 from app.mainai_execution.planner import PlannedTaskSpec, create_goal, create_plan
 from app.mainai_founder_ops.assignment_guard import DuplicateWorkError, assert_agent_dispatch_allowed
 from app.mainai_founder_ops.snapshot import build_founder_ops_snapshot
-from app.mainai_founder_ops.status import classify_agent_task, classify_mainai_task, classify_workforce_assignment
+from app.mainai_founder_ops.status import (
+    classify_agent_task,
+    classify_mainai_job,
+    classify_mainai_task,
+    classify_workforce_assignment,
+)
 from app.models.agent_task import AgentTaskStatus
 from app.models.mainai_execution import MainAITask, MainAITaskEvent, MainAITaskEventType, MainAITaskStatus
 from app.models.mainai_job import MainAIJob, MainAIJobStatus
@@ -76,9 +81,43 @@ def _assignment(**overrides):
     return SimpleNamespace(**values)
 
 
-def test_assignment_is_queued_not_running():
+def test_assignment_is_assigned_not_running():
     item = classify_workforce_assignment(_assignment(status="assigned"))
-    assert item["founder_status"] == "queued"
+    assert item["founder_status"] == "assigned"
+    assert item["independently_verified"] is False
+    assert item["founder_status"] != "running"
+
+
+def test_acknowledged_job_is_not_running():
+    job = SimpleNamespace(
+        id=uuid.uuid4(),
+        status=MainAIJobStatus.queued,
+        locked_by="worker-1",
+        job_type="task_execution",
+        public_message=None,
+        error_category=None,
+    )
+    item = classify_mainai_job(job)
+    assert item["founder_status"] == "acknowledged"
+    assert item["locked_by"] == "worker-1"
+
+
+def test_queued_job_without_lock_is_queued_not_running():
+    job = SimpleNamespace(
+        id=uuid.uuid4(),
+        status=MainAIJobStatus.queued,
+        locked_by=None,
+        job_type="task_execution",
+        public_message=None,
+        error_category=None,
+    )
+    assert classify_mainai_job(job)["founder_status"] == "queued"
+
+
+def test_agent_created_is_assigned_not_running():
+    task = SimpleNamespace(id=uuid.uuid4(), title="x", status=AgentTaskStatus.created)
+    item = classify_agent_task(task)
+    assert item["founder_status"] == "assigned"
     assert item["independently_verified"] is False
 
 
@@ -143,6 +182,14 @@ def test_completed_with_verification_passed_is_independently_verified():
     event = SimpleNamespace(event_type=MainAITaskEventType.verification_passed)
     item = classify_mainai_task(_task(status=MainAITaskStatus.completed), events=[event])
     assert item["founder_status"] == "independently_verified"
+
+
+def test_dispatched_event_without_running_lease_is_acknowledged_not_running():
+    event = SimpleNamespace(event_type=MainAITaskEventType.dispatched)
+    item = classify_mainai_task(_task(status=MainAITaskStatus.ready), events=[event])
+    assert item["founder_status"] == "acknowledged"
+    assert item["founder_status"] != "running"
+    assert item["description"] == "keep this context"
 
 
 def test_agent_self_review_is_completed_not_independently_verified():
@@ -271,6 +318,11 @@ def test_snapshot_never_claims_go_and_keeps_task_context(db_session):
     matching = next(item for item in snap["work_items"] if item.get("description") == "unique task context")
     assert matching["task_id"]
     assert matching["goal_id"] == str(goal.id)
+    assert "agents" in snap
+    assert "next_actions" in snap
+    assert "independent_ready_work" in snap
+    assert snap["circular_dependencies"] == []
+    assert matching["task_id"] in str(snap["work_items"])
 
 
 def test_app_registers_founder_ops_routes():
@@ -318,6 +370,11 @@ def test_snapshot_http_is_founder_only(client, make_verified_user):
     assert "queued" in body["work_item_counts"] or body["work_item_counts"] == {} or isinstance(body["work_items"], list)
     assert body["spend"]["spend_live"] is True
     assert "provider_invoke_disabled" not in body["spend"]
+    assert isinstance(body["agents"], list)
+    assert isinstance(body["next_actions"], list)
+    assert isinstance(body["independent_ready_work"], list)
+    assert isinstance(body["circular_dependencies"], list)
+    assert body["communication_policy"] == "factual_accuracy_over_agreement"
 
 
 def test_stop_http_activates_owner_stop(client):

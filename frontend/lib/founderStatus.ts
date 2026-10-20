@@ -2,6 +2,8 @@ import type { FounderWorkStatus, MainAITask, MainAITaskLiveness } from "@/lib/ap
 
 export const FOUNDER_STATUS_LABELS: Record<FounderWorkStatus, string> = {
   queued: "Köad",
+  assigned: "Tilldelad",
+  acknowledged: "Kvitterad",
   running: "Kör",
   waiting_on_dependency: "Väntar på beroende",
   failed: "Misslyckades",
@@ -11,6 +13,8 @@ export const FOUNDER_STATUS_LABELS: Record<FounderWorkStatus, string> = {
 
 export const FOUNDER_STATUS_COLORS: Record<FounderWorkStatus, string> = {
   queued: "text-white/50",
+  assigned: "text-white/70",
+  acknowledged: "text-sky-300",
   running: "text-blue-300",
   waiting_on_dependency: "text-amber-300",
   failed: "text-red-300",

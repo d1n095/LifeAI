@@ -1,0 +1,73 @@
+import { expect, test } from "@playwright/test";
+import { FRONTEND_URL } from "../playwright.config";
+import { loginViaUi } from "./helpers";
+
+const FOUNDER_EMAIL = "founder@lifeos.local";
+const FOUNDER_PASSWORD = process.env.E2E_FOUNDER_PASSWORD || "TestFounderPassword123!";
+
+test.describe("Founder workflow in safe local mode", () => {
+  test.beforeEach(async ({ page }) => {
+    await loginViaUi(page, FRONTEND_URL, FOUNDER_EMAIL, FOUNDER_PASSWORD);
+    await page.waitForURL(FRONTEND_URL + "/", { timeout: 5000 });
+  });
+
+  test("dashboard and founder-ops show durable status, never a fabricated GO", async ({ page }) => {
+    await expect(page.getByRole("heading", { name: /God kväll/ })).toBeVisible();
+    await expect(page.getByTestId("dashboard-health")).not.toContainText("GO (oväntat)");
+    await expect(page.locator('a[href="#main-content"]')).toHaveCount(1);
+
+    await page.getByRole("link", { name: "Founder-status" }).first().click();
+    await expect(page.getByRole("heading", { name: "Founder-status" })).toBeVisible({ timeout: 8000 });
+    await expect(page.getByText("Första cykelns GO = false")).toBeVisible();
+    await expect(page.getByText("Recall HTTP inte monterad")).toBeVisible();
+    await expect(page.getByText("GitHub-skrivning av")).toBeVisible();
+    await expect(page.getByTestId("work-status-counts")).toContainText("Tilldelad");
+    await expect(page.getByTestId("work-status-counts")).toContainText("Kvitterad");
+    await expect(page.getByTestId("founder-agents")).toBeVisible();
+    await expect(page.getByTestId("founder-next-actions")).toBeVisible();
+    await expect(page.getByTestId("independent-ready-work")).toBeVisible();
+    await expect(page.getByTestId("founder-dependencies")).toBeVisible();
+    await expect(page.getByTestId("readiness-level")).toBeVisible();
+  });
+
+  test("shell navigation, skip link, and mobile menu remain usable", async ({ page }) => {
+    await expect(page.locator("#main-content")).toBeVisible();
+    await page.getByRole("link", { name: "Chat" }).click();
+    await expect(page.getByRole("heading", { name: "Chat med MainAI" })).toBeVisible();
+    await page.getByRole("link", { name: "Knowledge Studio" }).click();
+    await expect(page.getByRole("heading", { name: "Life Library" })).toBeVisible();
+    await page.getByRole("link", { name: "Projekt" }).click();
+    await expect(page.getByRole("heading", { name: "Projekt & roadmap" })).toBeVisible();
+    await page.getByRole("link", { name: "Konto" }).click();
+    await expect(page.getByRole("heading", { name: "Mitt konto" })).toBeVisible();
+    await page.getByRole("link", { name: "Agentuppdrag" }).click();
+    await expect(page.getByRole("heading", { name: "Agentuppdrag" })).toBeVisible();
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.getByRole("button", { name: "Öppna meny" })).toBeVisible();
+    await page.getByRole("button", { name: "Öppna meny" }).click();
+    await expect(page.getByRole("navigation", { name: "Huvudmeny" })).toBeVisible();
+    await page.getByRole("link", { name: "Founder-status" }).click();
+    await expect(page.getByRole("heading", { name: "Founder-status" })).toBeVisible();
+  });
+
+  test("snapshot API stays fail-closed: no GO, no Recall, assigned is not running", async ({ page }) => {
+    const snapshot = await page.evaluate(async () => {
+      const res = await fetch("/api/mainai/founder-ops/snapshot", { credentials: "include" });
+      return { status: res.status, body: await res.json() };
+    });
+    expect(snapshot.status).toBe(200);
+    expect(snapshot.body.first_cycle_go).toBe(false);
+    expect(snapshot.body.fabricated_progress).toBe(false);
+    expect(snapshot.body.safe_launch.github_write_enabled).toBe(false);
+    expect(snapshot.body.safe_launch.recall_http_mounted).toBe(false);
+    expect(Array.isArray(snapshot.body.agents)).toBe(true);
+    expect(Array.isArray(snapshot.body.next_actions)).toBe(true);
+    for (const item of snapshot.body.work_items || []) {
+      if (item.source === "workforce_assignment" && item.source_status === "assigned") {
+        expect(item.founder_status).toBe("assigned");
+        expect(item.founder_status).not.toBe("running");
+      }
+    }
+  });
+});

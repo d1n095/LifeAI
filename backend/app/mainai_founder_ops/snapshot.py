@@ -18,6 +18,15 @@ from app.mainai_founder_ops.status import (
     classify_mainai_task,
     classify_workforce_assignment,
 )
+from app.mainai_founder_ops.workflow import (
+    build_next_actions,
+    dependency_records,
+    detect_dependency_cycles,
+    independent_ready_work,
+    load_dependency_edges,
+    pending_approval_tasks,
+    task_ids_in_cycles,
+)
 from app.mainai_startup_readiness import evaluate_startup_readiness
 from app.models.agent_task import AgentTask
 from app.models.conversation import Conversation
@@ -26,8 +35,11 @@ from app.models.mainai_job import MainAIJob
 from app.models.provider_spend import ProviderSpendAuthorization, ProviderSpendAuthorizationStatus
 from app.models.usage import UsageLog
 from app.models.work_candidate import WorkCandidate
-from app.models.workforce import WorkforceAssignment, WorkforceDelegationRequest
+from app.models.workforce import WorkforceAgentProfile, WorkforceAssignment, WorkforceDelegationRequest
 from app.workforce.kill_switch import query_stop_status
+
+_ACTIVE_PROFILE_STATUSES = frozenset({"active", "probation", "candidate"})
+_LIVE_ASSIGNMENT_STATUSES = frozenset({"assigned", "acknowledged", "running", "awaiting_verification"})
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -175,6 +187,54 @@ def _safe_launch_flags(*, recall_http_mounted: bool) -> dict[str, Any]:
     }
 
 
+def _active_agents(
+    db: Session,
+    *,
+    owner_id: uuid.UUID,
+    assignments: list[WorkforceAssignment],
+) -> list[dict[str, Any]]:
+    """Workforce profiles that exist. Current work comes from live assignments only."""
+    profiles = list(
+        db.execute(
+            select(WorkforceAgentProfile)
+            .where(
+                WorkforceAgentProfile.owner_id == owner_id,
+                WorkforceAgentProfile.retired_at.is_(None),
+                WorkforceAgentProfile.status.in_(tuple(_ACTIVE_PROFILE_STATUSES)),
+            )
+            .order_by(WorkforceAgentProfile.created_at.desc())
+            .limit(40)
+        ).scalars()
+    )
+    live_by_profile: dict[uuid.UUID, WorkforceAssignment] = {}
+    for assignment in assignments:
+        if assignment.revoked_at is not None:
+            continue
+        if assignment.status not in _LIVE_ASSIGNMENT_STATUSES:
+            continue
+        live_by_profile.setdefault(assignment.profile_id, assignment)
+
+    agents: list[dict[str, Any]] = []
+    for profile in profiles:
+        live = live_by_profile.get(profile.id)
+        classified = classify_workforce_assignment(live) if live is not None else None
+        agents.append(
+            {
+                "id": str(profile.id),
+                "agent_key": profile.agent_key,
+                "name": profile.name,
+                "role": profile.role,
+                "status": profile.status,
+                "trust_zone": profile.trust_zone,
+                "current_assignment_id": str(live.id) if live is not None else None,
+                "current_assignment_status": live.status if live is not None else None,
+                "founder_status": classified["founder_status"] if classified else "idle",
+                "running": classified["founder_status"] == "running" if classified else False,
+            }
+        )
+    return agents
+
+
 def build_founder_ops_snapshot(
     db: Session,
     *,
@@ -244,6 +304,9 @@ def build_founder_ops_snapshot(
     )
 
     job_map = _jobs_by_id(db, [t.mainai_job_id for t in tasks if t.mainai_job_id])
+    events_by_task = {task.id: _task_events(db, task.id) for task in tasks}
+    tasks_by_id = {task.id: task for task in tasks}
+
     work_items: list[dict[str, Any]] = []
     for task in tasks:
         checkpoint = _latest_checkpoint_for_task(db, task.id)
@@ -251,7 +314,7 @@ def build_founder_ops_snapshot(
             classify_mainai_task(
                 task,
                 job_map.get(task.mainai_job_id) if task.mainai_job_id else None,
-                events=_task_events(db, task.id),
+                events=events_by_task[task.id],
                 checkpoint_test_status=checkpoint.test_status if checkpoint else None,
                 checkpoint_ci_status=checkpoint.ci_status if checkpoint else None,
             )
@@ -260,9 +323,23 @@ def build_founder_ops_snapshot(
     work_items.extend(classify_workforce_assignment(a) for a in assignments)
     work_items.extend(classify_agent_task(t) for t in agent_tasks)
 
+    cycles = detect_dependency_cycles(load_dependency_edges(db, owner_id=owner_id))
+    cyclic_ids = task_ids_in_cycles(cycles)
+    independent = independent_ready_work(tasks)
+    approvals_pending = pending_approval_tasks(tasks, events_by_task)
+    dependencies = dependency_records(db, owner_id=owner_id, tasks_by_id=tasks_by_id)
+
     blockers: list[dict[str, Any]] = []
     if stop.get("blocked"):
         blockers.append({"kind": "stop", "code": stop.get("code"), "detail": stop})
+    for cycle in cycles:
+        blockers.append(
+            {
+                "kind": "circular_dependency",
+                "task_ids": cycle,
+                "detail": "Stored dependency cycle; no task in the cycle can become ready.",
+            }
+        )
     for item in work_items:
         if item.get("blocker_reason"):
             blockers.append(
@@ -280,6 +357,14 @@ def build_founder_ops_snapshot(
                     "id": item.get("task_id") or item.get("job_id") or item.get("assignment_id"),
                     "source_status": item.get("source_status"),
                     "failure_class": item.get("failure_class") or item.get("error_category"),
+                }
+            )
+        if item.get("task_id") in cyclic_ids:
+            blockers.append(
+                {
+                    "kind": "task_in_cycle",
+                    "task_id": item.get("task_id"),
+                    "description": item.get("description"),
                 }
             )
     for goal in goals:
@@ -303,21 +388,17 @@ def build_founder_ops_snapshot(
         }
         for c in candidates
     ]
-    authorization_requests.extend(
-        {
-            "id": str(t.id),
-            "title": t.description,
-            "status": t.status.value if hasattr(t.status, "value") else str(t.status),
-            "authorized": False,
-            "source": "mainai_task_approval",
-            "approval_required": True,
-        }
-        for t in tasks
-        if t.approval_required
-    )
-    # Only keep those that have not actually been approved — approval_granted lives on the
-    # task detail join, not the row. Surface every approval_required task; the UI must not
-    # invent "already approved".
+    for task in approvals_pending:
+        authorization_requests.append(
+            {
+                "id": str(task.id),
+                "title": task.description,
+                "status": task.status.value if hasattr(task.status, "value") else str(task.status),
+                "authorized": False,
+                "source": "mainai_task_approval",
+                "approval_required": True,
+            }
+        )
     authorization_requests.extend(
         {
             "id": str(r.id),
@@ -340,6 +421,17 @@ def build_founder_ops_snapshot(
     review_results.extend(
         item for item in work_items if item.get("founder_status") == "independently_verified"
     )
+
+    failed_items = [item for item in work_items if item.get("founder_status") == "failed"]
+    next_actions = build_next_actions(
+        stop=stop,
+        cycles=cycles,
+        pending_approvals=approvals_pending,
+        independent_ready=independent,
+        failed_items=failed_items,
+        authorization_open=len(authorization_requests),
+    )
+    agents = _active_agents(db, owner_id=owner_id, assignments=assignments)
 
     counts: dict[str, int] = {}
     for item in work_items:
@@ -379,6 +471,11 @@ def build_founder_ops_snapshot(
             }
             for g in goals
         ],
+        "agents": agents,
+        "dependencies": dependencies,
+        "circular_dependencies": cycles,
+        "independent_ready_work": independent,
+        "next_actions": next_actions,
         "work_items": work_items,
         "work_item_counts": counts,
         "blockers": blockers,
@@ -387,6 +484,7 @@ def build_founder_ops_snapshot(
         "first_cycle_go": False,
         "first_cycle": first_cycle,
         "invariant": "NEVER_COLLAPSE_TO_ONE_BOOLEAN",
+        "communication_policy": "factual_accuracy_over_agreement",
     }
 
 
