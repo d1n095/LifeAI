@@ -32,23 +32,24 @@ test.describe("Founder workflow in safe local mode", () => {
 
   test("shell navigation, skip link, and mobile menu remain usable", async ({ page }) => {
     await expect(page.locator("#main-content")).toBeVisible();
-    await page.getByRole("link", { name: "Chat" }).click();
-    await expect(page.getByRole("heading", { name: "Chat med MainAI" })).toBeVisible();
-    await page.getByRole("link", { name: "Knowledge Studio" }).click();
-    await expect(page.getByRole("heading", { name: "Life Library" })).toBeVisible();
-    await page.getByRole("link", { name: "Projekt" }).click();
-    await expect(page.getByRole("heading", { name: "Projekt & roadmap" })).toBeVisible();
-    await page.getByRole("link", { name: "Konto" }).click();
-    await expect(page.getByRole("heading", { name: "Mitt konto" })).toBeVisible();
-    await page.getByRole("link", { name: "Agentuppdrag" }).click();
-    await expect(page.getByRole("heading", { name: "Agentuppdrag" })).toBeVisible();
+    const nav = page.getByRole("navigation", { name: "Huvudmeny" });
+    await nav.getByRole("link", { name: "Chat", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Chat med MainAI", exact: true })).toBeVisible();
+    await nav.getByRole("link", { name: "Knowledge Studio", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Life Library", exact: true })).toBeVisible();
+    await nav.getByRole("link", { name: "Projekt", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Projekt & roadmap", exact: true })).toBeVisible();
+    await nav.getByRole("link", { name: "Konto", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Mitt konto", exact: true })).toBeVisible();
+    await nav.getByRole("link", { name: "Agentuppdrag", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Agentuppdrag", exact: true })).toBeVisible();
 
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.getByRole("button", { name: "Öppna meny" })).toBeVisible();
     await page.getByRole("button", { name: "Öppna meny" }).click();
-    await expect(page.getByRole("navigation", { name: "Huvudmeny" })).toBeVisible();
-    await page.getByRole("link", { name: "Founder-status" }).click();
-    await expect(page.getByRole("heading", { name: "Founder-status" })).toBeVisible();
+    await expect(page.locator("#mobile-nav")).toBeVisible();
+    await page.locator("#mobile-nav").getByRole("link", { name: "Founder-status", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Founder-status", exact: true })).toBeVisible();
   });
 
   test("snapshot API stays fail-closed: no GO, no Recall, assigned is not running", async ({ page }) => {
