@@ -7,8 +7,8 @@ import { ATTACKER_URL, FRONTEND_URL } from "./e2e/urls";
 // `from "../playwright.config"` imports in the spec files keep working unchanged.
 export { ATTACKER_URL, FRONTEND_URL };
 
-const FRONTEND_PORT = 3020;
-const ATTACKER_PORT = 9099;
+const FRONTEND_PORT = Number(process.env.E2E_FRONTEND_PORT || 3020);
+const ATTACKER_PORT = Number(process.env.E2E_ATTACKER_PORT || 9099);
 
 export default defineConfig({
   testDir: "./e2e",

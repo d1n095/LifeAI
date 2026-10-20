@@ -1,7 +1,9 @@
 # Application-readiness (website + MainAI Founder interface)
 
 Isolated successor of frozen `#291` @ `0b1871bf63e4c9b6d0d32633af097b281e644679`.
-Does **not** amend `#291`, compose Codex transport/grants, enable Recall, merge, or claim first-cycle GO.
+Frozen itself @ `5e3cd01ac3a2cded69ef19bfa074d15196d3afaa`. Do not amend this package;
+the Founder-workflow successor is `cursor/founder-workflow-readiness-91c1`.
+Does **not** compose Codex transport/grants, enable Recall, merge, or claim first-cycle GO.
 
 Machine-readable flags: `GET /api/mainai/founder-ops/snapshot` (`first_cycle_go: false`).
 

@@ -92,6 +92,29 @@ export default function DashboardPage() {
         />
       </div>
 
+      {snapshot && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <Panel title="Aktiva agenter">
+            {(snapshot.agents || []).slice(0, 5).map((agent) => (
+              <div key={agent.id} className="flex justify-between text-sm py-2 border-b border-border/60 last:border-0">
+                <span className="text-white/80">{agent.name}</span>
+                <span className="text-white/40">{agent.running ? "Kör" : agent.founder_status}</span>
+              </div>
+            ))}
+            {(snapshot.agents || []).length === 0 && <EmptyRow />}
+          </Panel>
+          <Panel title="Nästa åtgärder">
+            {(snapshot.next_actions || []).slice(0, 5).map((action, i) => (
+              <div key={`${action.kind}-${i}`} className="text-sm py-2 border-b border-border/60 last:border-0">
+                <span className="text-white/80">{action.kind}</span>
+                {action.description ? <span className="text-white/40"> — {action.description}</span> : null}
+              </div>
+            ))}
+            {(snapshot.next_actions || []).length === 0 && <EmptyRow />}
+          </Panel>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <Panel title="Senaste dokument">
           {documents.slice(0, 5).map((d) => (

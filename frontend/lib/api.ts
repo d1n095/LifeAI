@@ -559,6 +559,8 @@ export type MainAIJobStatus = "queued" | "running" | "paused" | "completed" | "f
 
 export type FounderWorkStatus =
   | "queued"
+  | "assigned"
+  | "acknowledged"
   | "running"
   | "waiting_on_dependency"
   | "failed"
@@ -580,6 +582,29 @@ export type FounderWorkItem = {
   failure_class?: string;
   error_category?: string | null;
   goal_id?: string;
+  locked_by?: string | null;
+};
+
+export type FounderAgent = {
+  id: string;
+  agent_key: string;
+  name: string;
+  role: string;
+  status: string;
+  current_assignment_id: string | null;
+  current_assignment_status: string | null;
+  founder_status: string;
+  running: boolean;
+};
+
+export type FounderNextAction = {
+  kind: string;
+  priority?: number;
+  detail?: string;
+  task_id?: string;
+  description?: string;
+  task_ids?: string[];
+  invented_activity?: boolean;
 };
 
 export type FounderOpsSnapshot = {
@@ -623,6 +648,11 @@ export type FounderOpsSnapshot = {
   };
   conversation_count_today: number;
   goals: { id: string; title: string; status: string; final_outcome: string | null }[];
+  agents: FounderAgent[];
+  dependencies: Record<string, unknown>[];
+  circular_dependencies: string[][];
+  independent_ready_work: Record<string, unknown>[];
+  next_actions: FounderNextAction[];
   work_items: FounderWorkItem[];
   work_item_counts: Record<string, number>;
   blockers: Record<string, unknown>[];

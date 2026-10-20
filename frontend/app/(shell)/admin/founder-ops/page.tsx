@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, FounderOpsSnapshot, FounderWorkItem } from "@/lib/api";
+import { api, FounderAgent, FounderNextAction, FounderOpsSnapshot, FounderWorkItem } from "@/lib/api";
 import { FOUNDER_STATUS_COLORS, FOUNDER_STATUS_LABELS } from "@/lib/founderStatus";
 
 const POLL_INTERVAL_MS = 5000;
@@ -46,8 +46,8 @@ export default function FounderOpsPage() {
       <div>
         <h1 className="text-xl font-semibold">Founder-status</h1>
         <p className="text-sm text-white/50 mt-1">
-          Hållbar status från databasen. Tilldelning är inte aktivitet. Första cykelns GO är
-          avstängd tills transport/grants är sammansatta.
+          Hållbar status från databasen. Tilldelning är inte aktivitet. Kvittering är inte
+          körning. Första cykelns GO är avstängd tills transport/grants är sammansatta.
         </p>
       </div>
 
@@ -120,6 +120,14 @@ export default function FounderOpsPage() {
 
           <Counts counts={snapshot.work_item_counts} />
 
+          <Agents agents={snapshot.agents || []} />
+          <NextActions actions={snapshot.next_actions || []} />
+          <IndependentReady items={snapshot.independent_ready_work || []} />
+          <Dependencies
+            dependencies={snapshot.dependencies || []}
+            cycles={snapshot.circular_dependencies || []}
+          />
+
           <section className="space-y-2">
             <div className="text-xs uppercase tracking-wide text-white/40">Blockeringar ({snapshot.blockers.length})</div>
             {snapshot.blockers.length === 0 && <p className="text-sm text-white/30">Inga registrerade blockeringar.</p>}
@@ -187,13 +195,111 @@ function Flag({ ok, label }: { ok: boolean; label: string }) {
 
 function Counts({ counts }: { counts: Record<string, number> }) {
   return (
-    <div className="flex flex-wrap gap-2 text-xs">
+    <div className="flex flex-wrap gap-2 text-xs" data-testid="work-status-counts">
       {Object.entries(FOUNDER_STATUS_LABELS).map(([key, label]) => (
         <span key={key} className="rounded-full border border-border px-3 py-1 text-white/70">
           {label}: {counts[key] ?? 0}
         </span>
       ))}
     </div>
+  );
+}
+
+function Agents({ agents }: { agents: FounderAgent[] }) {
+  return (
+    <section className="space-y-2" data-testid="founder-agents">
+      <div className="text-xs uppercase tracking-wide text-white/40">Aktiva agenter ({agents.length})</div>
+      {agents.length === 0 && (
+        <p className="text-sm text-white/30">Inga registrerade workforce-agenter. Idle är inte körning.</p>
+      )}
+      <ul className="space-y-1 text-sm">
+        {agents.map((agent) => (
+          <li key={agent.id} className="rounded-lg border border-border px-3 py-2">
+            <div className="flex justify-between gap-2">
+              <span>{agent.name}</span>
+              <span className="text-white/50">{agent.running ? "Kör" : agent.founder_status}</span>
+            </div>
+            <div className="text-white/40 text-xs mt-1">
+              {agent.role} · {agent.status}
+              {agent.current_assignment_id
+                ? ` · uppdrag ${agent.current_assignment_status}`
+                : " · inget live-uppdrag"}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function NextActions({ actions }: { actions: FounderNextAction[] }) {
+  return (
+    <section className="space-y-2" data-testid="founder-next-actions">
+      <div className="text-xs uppercase tracking-wide text-white/40">Nästa åtgärder ({actions.length})</div>
+      {actions.length === 0 && <p className="text-sm text-white/30">Inga registrerade nästa åtgärder.</p>}
+      <ul className="space-y-1 text-sm">
+        {actions.map((action, i) => (
+          <li key={`${action.kind}-${action.task_id || i}`} className="rounded-lg border border-border px-3 py-2">
+            <span className="text-white/70">{action.kind}</span>
+            {action.description ? ` — ${action.description}` : ""}
+            {action.detail ? <div className="text-white/40 text-xs mt-1">{action.detail}</div> : null}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function IndependentReady({ items }: { items: Record<string, unknown>[] }) {
+  return (
+    <section className="space-y-2" data-testid="independent-ready-work">
+      <div className="text-xs uppercase tracking-wide text-white/40">
+        Oberoende redo arbete ({items.length})
+      </div>
+      {items.length === 0 && (
+        <p className="text-sm text-white/30">
+          Inget redo-arbete medan syskon väntar. Redo är inte körning.
+        </p>
+      )}
+      <ul className="space-y-1 text-sm">
+        {items.map((item) => (
+          <li key={String(item.task_id)} className="rounded-lg border border-border px-3 py-2">
+            {String(item.description ?? item.task_id)}
+            <div className="text-white/40 text-xs mt-1">{String(item.note ?? "")}</div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function Dependencies({
+  dependencies,
+  cycles,
+}: {
+  dependencies: Record<string, unknown>[];
+  cycles: string[][];
+}) {
+  return (
+    <section className="space-y-2" data-testid="founder-dependencies">
+      <div className="text-xs uppercase tracking-wide text-white/40">Beroenden ({dependencies.length})</div>
+      {cycles.length > 0 && (
+        <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
+          Cirkulära beroenden: {cycles.map((c) => c.join(" → ")).join(" · ")}
+        </div>
+      )}
+      {dependencies.length === 0 && cycles.length === 0 && (
+        <p className="text-sm text-white/30">Inga lagrade uppgiftsberoenden.</p>
+      )}
+      <ul className="space-y-1 text-xs text-white/60">
+        {dependencies.map((dep, i) => (
+          <li key={i} className="rounded-lg border border-border/60 px-3 py-2">
+            {String(dep.task_description || dep.task_id)} väntar på{" "}
+            {String(dep.depends_on_description || dep.depends_on_task_id)} ({String(dep.depends_on_status)})
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -205,8 +311,8 @@ function WorkList({ items }: { items: FounderWorkItem[] }) {
         <li key={`${item.source}-${item.task_id || item.job_id || item.assignment_id || i}`} className="rounded-lg border border-border/60 p-3 text-xs">
           <div className="flex justify-between gap-2">
             <span className="text-white/50">{item.source}</span>
-            <span className={FOUNDER_STATUS_COLORS[item.founder_status]}>
-              {FOUNDER_STATUS_LABELS[item.founder_status]}
+            <span className={FOUNDER_STATUS_COLORS[item.founder_status] || "text-white/50"}>
+              {FOUNDER_STATUS_LABELS[item.founder_status] || item.founder_status}
             </span>
           </div>
           <div className="text-white/80 mt-1">{item.title || item.description || item.source_status}</div>
