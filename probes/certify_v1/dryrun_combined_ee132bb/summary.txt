@@ -1,0 +1,60 @@
+app_readiness          pass=15   BLOCKER=11  REGRESSION=0   KNOWN_P2=0   FIXED_P2=0   SUPERSEDED=0
+    ! test_ar14_founder_workflow.py::test_AR14a_question_about_go_is_not_contradicted
+    ! test_ar14_founder_workflow.py::test_AR14b_recall_claim_gets_a_recall_disagreement
+    ! test_ar14_founder_workflow.py::test_AR14d_chat_route_does_not_hardcode_policy_evidence
+    ! test_ar14_founder_workflow.py::test_AR15_requeued_task_is_not_acknowledged
+    ! test_ar2_founder_ops.py::test_AR17_blocked_readiness_is_counted_as_a_blocker
+    ! test_ar9_races_and_truth.py::test_AR9_concurrent_dispatch_single_paid_call
+    ! test_ar9_races_and_truth.py::test_AR9h_concurrent_dispatch_over_http
+    ! test_ar9_races_and_truth.py::test_AR10_concurrent_delegation_single_request
+    ! test_ar9_races_and_truth.py::test_AR11_builder_self_verification_is_not_independent
+    ! test_ar9_races_and_truth.py::test_AR11b_unopened_pr_with_zero_checks_is_not_independently_verified
+    ! test_ar9_races_and_truth.py::test_AR13b_safe_launch_never_writes_the_server_checkout_unannounced
+authorization_grants   pass=0    BLOCKER=1   REGRESSION=0   KNOWN_P2=0   FIXED_P2=0   SUPERSEDED=0
+    ! test_activation_280_exam.py
+backend_regression     pass=788  BLOCKER=0   REGRESSION=0   KNOWN_P2=0   FIXED_P2=0   SUPERSEDED=0
+credential_canary      pass=6    BLOCKER=0   REGRESSION=0   KNOWN_P2=0   FIXED_P2=1   SUPERSEDED=0
+fc4_bypass             pass=9    BLOCKER=0   REGRESSION=0   KNOWN_P2=5   FIXED_P2=0   SUPERSEDED=0
+fc4_policy             pass=59   BLOCKER=0   REGRESSION=0   KNOWN_P2=0   FIXED_P2=0   SUPERSEDED=0
+grant_contract         pass=0    BLOCKER=11  REGRESSION=0   KNOWN_P2=0   FIXED_P2=0   SUPERSEDED=0
+    ! test_grant_contract.py::test_GC1_one_use_across_sessions
+    ! test_grant_contract.py::test_GC2_concurrent_consumers_exactly_one_wins
+    ! test_grant_contract.py::test_GC3_expired_grant_denied
+    ! test_grant_contract.py::test_GC4_cancelled_grant_denied
+    ! test_grant_contract.py::test_GC5_exact_binding[job_id-value0]
+    ! test_grant_contract.py::test_GC5_exact_binding[local_commit_sha-dddddddddddddddddddddddddddddddddddddddd]
+    ! test_grant_contract.py::test_GC5_exact_binding[observed_base_sha-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee]
+    ! test_grant_contract.py::test_GC5_exact_binding[authority_version-8]
+    ! test_grant_contract.py::test_GC6_push_grant_never_authorizes_draft_pr
+    ! test_grant_contract.py::test_GC7_no_reissue_from_a_consumed_preflight
+    ! test_grant_contract.py::test_GC8_denials_are_typed_external_boundary_errors
+migration_integrity    pass=4    BLOCKER=0   REGRESSION=0   KNOWN_P2=0   FIXED_P2=0   SUPERSEDED=0
+proxy                  pass=5    BLOCKER=3   REGRESSION=0   KNOWN_P2=0   FIXED_P2=0   SUPERSEDED=0
+    ! proxy::PX-1_traversal_stays_in_api
+    ! proxy::PX-2_client_xff_not_trusted
+    ! proxy::PX-9_rotating_xff_cannot_bypass_login_limit
+review_stop            pass=0    BLOCKER=0   REGRESSION=0   KNOWN_P2=0   FIXED_P2=0   SUPERSEDED=0
+spend                  pass=19   BLOCKER=0   REGRESSION=0   KNOWN_P2=0   FIXED_P2=0   SUPERSEDED=0
+stop_classification    pass=28   BLOCKER=4   REGRESSION=0   KNOWN_P2=0   FIXED_P2=3   SUPERSEDED=0
+    ! test_a_failure_origins.py::test_FO_external_failure_is_terminal_and_never_paid_again[untyped_boundary_exception]
+    ! test_f_untyped_recovery.py::test_FO6b_bare_runtime_error_at_push_is_contained_and_founder_visible
+    ! test_h_fo6_fo7_exact_paths.py::test_FO6x_exact_path_bare_runtime_error_at_push_ends_terminal
+    ! test_k_recovery_loop_bound.py::test_RL_persistent_push_boundary_crash_recovery_is_bounded
+task_authority         pass=15   BLOCKER=2   REGRESSION=0   KNOWN_P2=0   FIXED_P2=0   SUPERSEDED=0
+    ! TA-13 (P2 probe) a symlink object at an authorized path is not published
+    ! TA-12 (P2 probe) out-of-scope content cannot ride in intermediate commits of the published branch
+transport_contract     pass=2    BLOCKER=2   REGRESSION=0   KNOWN_P2=0   FIXED_P2=0   SUPERSEDED=0
+    ! test_transport_contract.py::test_TC1_production_git_never_consults_host_helpers
+    ! test_transport_contract.py::test_TC3_askpass_never_invoked
+ui                     pass=0    BLOCKER=2   REGRESSION=0   KNOWN_P2=0   FIXED_P2=0   SUPERSEDED=0
+    ! ui::UI-1
+    ! ui::UI-2
+candidate_harness      pass=0    BLOCKER=5   REGRESSION=0   KNOWN_P2=1   FIXED_P2=0   SUPERSEDED=0
+    ! FAIL E2E-3 production finalize requires exact-SHA push grant
+    ! BLOCKED GRANT-PROD production push/PR grant interface
+    ! FAIL TA-12 production publication inspects full history
+    ! FAIL TA-13 production rejects authorized-path symlink
+    ! FAIL PUB-2 production rejects gitlink/submodule
+ci_exact_sha           pass=12   BLOCKER=0   REGRESSION=0   KNOWN_P2=0   FIXED_P2=0   SUPERSEDED=0
+
+EXECUTABLE GATE: FAIL (41 blocker/regression items). Founder/GitHub evidence (MATRIX.md, class F) is never covered by this gate.

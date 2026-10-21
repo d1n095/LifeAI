@@ -7,8 +7,11 @@ exp = json.loads((Path(__file__).parent / "expectations" / "expectations.json").
 rows, verdict_blockers = [], 0
 
 def spec(suite):
-    s = exp.get(suite, {}).get(profile)
-    if s and "same_as" in s:
+    s, seen = exp.get(suite, {}).get(profile), set()
+    while s and "same_as" in s:  # resolve chains (combined -> codex -> cursor)
+        if s["same_as"] in seen:
+            raise SystemExit(f"expectations: same_as cycle in {suite}")
+        seen.add(s["same_as"])
         s = exp[suite][s["same_as"]]
     return s
 
@@ -46,6 +49,8 @@ for log in sorted(out.glob("*.log")):
         for node, res in pytest_results(text).items():
             if res in ("FAILED", "ERROR"):
                 status["regression"].append(node)
+    elif "required" not in s:
+        status["blocker"].append(f"SPEC_INVALID: no requirements resolved for {suite}/{profile}")
     elif "required" in s:
         res_all = pytest_results(text)
         if not res_all and re.search(r"ImportError|ModuleNotFoundError|AttributeError: module", text):
