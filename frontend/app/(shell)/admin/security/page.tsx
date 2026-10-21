@@ -168,16 +168,16 @@ export default function FounderSecurityPage() {
                 <div className="text-white/60">Klass: {String(item.change_class)}</div>
                 <div>Kräver Founder-godkännande: {item.requires_founder_approval ? "ja" : "nej"}</div>
                 <div>Tillämpad: {item.applied ? "ja" : "nej"}</div>
-                {item.proposal_id && (
+                {typeof item.proposal_id === "string" && item.proposal_id ? (
                   <button
                     type="button"
-                    onClick={() => approve(String(item.proposal_id))}
+                    onClick={() => approve(item.proposal_id as string)}
                     disabled={busy}
                     className="rounded-lg border border-border px-3 py-1 text-sm disabled:opacity-40"
                   >
                     Godkänn avsikt
                   </button>
-                )}
+                ) : null}
               </article>
             ))}
           </section>
