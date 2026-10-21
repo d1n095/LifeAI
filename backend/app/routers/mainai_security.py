@@ -1,7 +1,5 @@
 """Founder-only HTTP for security diagnostics. Never applies sensitive changes."""
 
-from __future__ import annotations
-
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session

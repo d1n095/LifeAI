@@ -232,7 +232,13 @@ def analyze_python_requirements(text: str | None = None, *, source: str = "backe
         if not stripped or stripped.startswith("#"):
             continue
         lower = stripped.lower()
-        if lower.startswith(("git+http://", "http://")) or lower.endswith("==*") or "@http://" in lower:
+        if (
+            lower.startswith(("git+http://", "http://"))
+            or lower.endswith("==*")
+            or "@http://" in lower
+            or "@ http://" in lower
+            or "http://" in lower
+        ):
             findings.append(
                 {
                     "id": f"sec_pydep_{stripped.split('=')[0].split('@')[0]}",
