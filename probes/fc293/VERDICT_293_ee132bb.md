@@ -57,3 +57,18 @@ FE_BUILT=$FE REDIS_URL=redis://127.0.0.1:6390/0 probes/first_cycle_acceptance_v1
 ```
 
 The UI suite needs Playwright Chromium in `<scratch>/fe293/pw-browsers`. Without it, the suite reports `SETUP_BROWSER_MISSING`.
+
+## Addendum (2026-10-21)
+
+**D3 is re-rated from P2 to P3 (latent).** The only production callers of `submit_delegation_request` pass no `task_id`:
+- `workforce/vertical_slice.py`, reached from `mainai_executive/loop.py`;
+- `workforce/first_delegation_scenario.py`, reached from `safe_internal_run.py`.
+
+With no task ID, the duplicate guard returns early. The race (20/20 duplicates) is real in the guard, but no production path reaches it at ee132bb. AR-10 stays as a regression for future task-bound callers.
+
+**D4/D5 now have executable browser evidence.** I ran Playwright (Chromium 141, `ui_v1`) against the live local stack at ee132bb:
+- **UI-1.** After snapshot polls fail, `getByText('Backend: nåbar')` still resolves to 1 element.
+- **UI-2.** After the backend is lost, the dashboard health line still reads "Backend nåbar · beredskap BLOCKED · STOP inaktiv · …".
+- **UI-3.** With readiness BLOCKED, the page shows "BLOCKERINGAR (0)".
+
+All three fail on the defect itself, not on setup. The verdict is unchanged: RETURN_TO_BUILDER.

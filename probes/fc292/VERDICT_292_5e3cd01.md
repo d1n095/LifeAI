@@ -111,3 +111,9 @@ probes/proxy_v1/xff_ratelimit.sh ../wt292 <built-frontend>  # PX-9 (real backend
 probes/proxy_v1/live_stack.sh up ../wt292 <built-frontend>  # D4/D5: log in at :13073, open /admin/founder-ops,
 #   kill the backend process (run_live_backend.py), wait one poll, read the cards; then `live_stack.sh down`
 ```
+
+## Addendum (2026-10-21)
+
+D3 is re-rated to P3 (latent): no production caller passes a `task_id` to `submit_delegation_request`. See `../fc293/VERDICT_293_ee132bb.md`.
+
+D4/D5 now fail as executable Playwright regressions (`ui_v1`). The verdict is unchanged.

@@ -7,5 +7,5 @@ export default defineConfig({
   reporter: "list",
   timeout: 60_000,
   use: { baseURL: process.env.UI_BASE_URL || "http://127.0.0.1:13073", trace: "off" },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"], channel: "chromium" } }],
 });
