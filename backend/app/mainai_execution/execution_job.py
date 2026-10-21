@@ -230,11 +230,16 @@ def _hydrate_isolated_workspace_for_verification(dest: Path, *, source: Path | N
     """Copy enough of the source tree so isolated proposals can pass verification."""
     source = (source or _repo_root()).resolve()
     dest = dest.resolve()
+    if dest == source or dest == _live_server_checkout():
+        return dest
     backend_src = source / "backend"
     backend_dest = dest / "backend"
-    if backend_src.is_dir() and not (backend_dest / "app").exists():
-        ignore = shutil.ignore_patterns(".venv", "__pycache__", ".pytest_cache", "*.pyc", ".ruff_cache")
-        shutil.copytree(backend_src, backend_dest, dirs_exist_ok=True, ignore=ignore)
+    if not backend_src.is_dir() or (backend_dest / "app").exists():
+        return dest
+    if backend_dest.exists() and backend_dest.samefile(backend_src):
+        return dest
+    ignore = shutil.ignore_patterns(".venv", "__pycache__", ".pytest_cache", "*.pyc", ".ruff_cache")
+    shutil.copytree(backend_src, backend_dest, dirs_exist_ok=True, ignore=ignore)
     return dest
 
 

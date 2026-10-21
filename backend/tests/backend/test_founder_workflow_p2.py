@@ -25,6 +25,7 @@ from app.mainai_execution.checkpoint import record_checkpoint
 from app.mainai_execution.execution_job import (
     _backend_root,
     _finalize_task_outcome,
+    _hydrate_isolated_workspace_for_verification,
     _reusable_work_result_checkpoint,
     _verification_cwd_for_work_result,
 )
@@ -384,6 +385,7 @@ def test_isolated_workspace_verification_can_pass(tmp_path, monkeypatch):
         text=True,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert _hydrate_isolated_workspace_for_verification(dest, source=dest) == dest.resolve()
 
 
 def test_cancelled_work_is_not_a_failed_blocker(db_session):
