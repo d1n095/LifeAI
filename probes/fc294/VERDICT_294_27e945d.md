@@ -55,3 +55,12 @@
 probes/certify_v1/intake.sh 27e945db8ee414c813248bbeb9e7462b93903cee   # needs PW_BROWSERS for the UI suite
 probes/proxy_v1/identity_collapse.sh ../wtcert-27e945d <built-frontend>   # R1 alone
 ```
+
+## Exact-SHA status (final)
+
+- **Head:** `27e945db8ee414c813248bbeb9e7462b93903cee`, unchanged at verdict time (public API).
+- **CI:** all 12 required checks plus the aggregate are `success` in both the push and pull_request suites at this SHA. The PR's own freeze condition ("not frozen until all 12 required GitHub CI checks are green on this head") is therefore met at this SHA.
+- **The examination run is valid for this SHA.** It ran on exactly this commit, and its only CI blockers were the then-in-progress backend job and the aggregate. Both are now green.
+- **The CI row of the GO/NO-GO matrix is now GO.** Every other NO-GO row is unchanged.
+
+**Verdict: RETURN_TO_BUILDER at `27e945db8ee414c813248bbeb9e7462b93903cee`.** The release blocker is R1 (P1).
