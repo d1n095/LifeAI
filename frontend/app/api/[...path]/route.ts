@@ -1,4 +1,6 @@
 import { NextRequest } from "next/server";
+import { applyTrustedForwardingHeaders, isClientForgedForwardHeader, trustedClientIp } from "@/lib/proxyRequestIdentity";
+import { assertSafeProxyPath } from "@/lib/proxyPathSafety";
 
 // Same-origin API proxy. Every browser request under /api/* lands here and is forwarded to
 // the real backend — the browser itself never sees or calls the backend's actual address.
@@ -52,24 +54,36 @@ const HOP_BY_HOP_HEADERS = new Set([
 function copyHeaders(source: Headers): Headers {
   const dest = new Headers();
   source.forEach((value, key) => {
-    if (!HOP_BY_HOP_HEADERS.has(key.toLowerCase())) {
-      dest.set(key, value);
+    const lower = key.toLowerCase();
+    if (HOP_BY_HOP_HEADERS.has(lower) || isClientForgedForwardHeader(lower)) {
+      return;
     }
+    dest.set(key, value);
   });
   return dest;
 }
 
 async function proxy(request: NextRequest, path: string[]): Promise<Response> {
-  const targetUrl = new URL(`${INTERNAL_API_URL}/api/${path.join("/")}`);
+  let safePath: string[];
+  try {
+    safePath = assertSafeProxyPath(path);
+  } catch {
+    return Response.json({ detail: "Ogiltig sökväg.", proxy_error: true }, { status: 400 });
+  }
+  const targetUrl = new URL(`${INTERNAL_API_URL}/api/${safePath.join("/")}`);
   targetUrl.search = new URL(request.url).search;
 
   const hasBody = !["GET", "HEAD"].includes(request.method);
 
   let backendResponse: Response;
   try {
+    const outboundHeaders = applyTrustedForwardingHeaders(
+      copyHeaders(request.headers),
+      trustedClientIp(request),
+    );
     backendResponse = await fetch(targetUrl, {
       method: request.method,
-      headers: copyHeaders(request.headers),
+      headers: outboundHeaders,
       body: hasBody ? request.body : undefined,
       // Required by undici whenever the body is a ReadableStream rather than a buffered value.
       // @ts-expect-error -- `duplex` is a real, required fetch option for streamed bodies but

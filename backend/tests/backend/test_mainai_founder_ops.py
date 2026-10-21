@@ -178,10 +178,12 @@ def test_completed_without_verification_event_is_completed_not_verified():
     assert item["independently_verified"] is False
 
 
-def test_completed_with_verification_passed_is_independently_verified():
+def test_completed_with_verification_passed_is_not_independently_verified():
     event = SimpleNamespace(event_type=MainAITaskEventType.verification_passed)
     item = classify_mainai_task(_task(status=MainAITaskStatus.completed), events=[event])
-    assert item["founder_status"] == "independently_verified"
+    assert item["founder_status"] == "completed"
+    assert item["independently_verified"] is False
+    assert item["builder_self_verification"] is True
 
 
 def test_dispatched_event_without_running_lease_is_acknowledged_not_running():

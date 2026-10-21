@@ -124,6 +124,19 @@ def get_task(db: Session, task_id: uuid.UUID) -> AgentTask:
     return task
 
 
+def _lock_agent_task(db: Session, task_id: uuid.UUID) -> AgentTask:
+    """Serialize paid dispatch on the AgentTask row (D2)."""
+    task = db.execute(
+        select(AgentTask)
+        .where(AgentTask.id == task_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if task is None:
+        raise ValueError(f"Ingen AgentTask med id={task_id}")
+    return task
+
+
 def list_tasks(db: Session, *, status: AgentTaskStatus | None = None) -> list[AgentTask]:
     stmt = select(AgentTask).order_by(AgentTask.created_at.desc())
     if status is not None:
@@ -187,11 +200,29 @@ async def dispatch_task(db: Session, task_id: uuid.UUID, *, dispatched_by: str) 
     """Sends the task to the code agent (a chat_with_fallback() call, same provider chain as
     ordinary chat) and records the raw response as an event. Does not parse/apply the diff —
     that is a deliberately separate, later increment (see module docstring's scope note); this
-    slice proves the dispatch -> record -> review -> propose chain end to end."""
-    task = get_task(db, task_id)
+    slice proves the dispatch -> record -> review -> propose chain end to end.
+
+    Ownership is taken atomically (FOR UPDATE + status → dispatched) BEFORE the paid
+    provider call so concurrent HTTP dispatch cannot buy two prompts for one task (D2).
+    A failed paid call reverts `dispatched` → `created` so a later retry is recoverable
+    (R3) without opening a second in-flight prompt.
+    """
+    task = _lock_agent_task(db, task_id)
     assert_agent_dispatch_allowed(task)
+    task.status = AgentTaskStatus.dispatched
+    task.updated_at = datetime.utcnow()
+    db.commit()
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=_build_task_prompt(task))]
-    result, attempted = await chat_with_fallback(db, messages)
+    try:
+        result, attempted = await chat_with_fallback(db, messages)
+    except Exception:
+        failed = _lock_agent_task(db, task_id)
+        if failed.status == AgentTaskStatus.dispatched:
+            failed.status = AgentTaskStatus.created
+            failed.updated_at = datetime.utcnow()
+            db.commit()
+        raise
+    task = get_task(db, task_id)
     return _record_event(
         db,
         task,

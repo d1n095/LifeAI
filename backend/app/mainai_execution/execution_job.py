@@ -29,9 +29,12 @@ what "close the stub gap" means in V0.1: the capability is real and independentl
 (tests/backend/test_github_client.py, tests/backend/test_mainai_execution_executor.py), not
 that it defaults to pushing to a live repo."""
 
+import json
 import logging
+import shutil
 import subprocess
 import sys
+import tempfile
 import unicodedata
 import uuid
 from datetime import datetime, timedelta
@@ -45,7 +48,7 @@ from app.integrations.github_client import GitHubClientError, get_github_client
 from app.jobs.mainai_job_lease import JobLeaseLostError, renew_mainai_job_lease
 from app.jobs.retry import compute_backoff_seconds
 from app.jobs.service import mark_cancelled, mark_completed, mark_failed, update_progress
-from app.mainai_execution.checkpoint import latest_checkpoint_for_step, record_checkpoint
+from app.mainai_execution.checkpoint import latest_checkpoint_for_step, latest_task_checkpoint_for_step, record_checkpoint
 from app.mainai_execution.ci_wait import poll_ci_wait, start_ci_wait
 from app.mainai_execution.first_cycle_stop import (
     STATE_EXTERNAL_CI_FAILED,
@@ -106,6 +109,7 @@ from app.mainai_execution.envelope_scope import (
 from app.mainai_execution.verification_feedback import latest_verification_failure_text
 from app.mainai_execution.worktree import (
     WorktreeError,
+    WorktreePushRejected,
     WorktreeTimeoutError,
     commit_worktree_changes,
     create_task_worktree,
@@ -171,6 +175,11 @@ def _check_cancel_requested(db: Session, job_id: uuid.UUID, *, task: MainAITask 
             raise TaskCancelledCooperatively()
 
 
+def _live_server_checkout() -> Path:
+    """The checkout this backend process is running from. Never infer a fixture path is live."""
+    return Path(__file__).resolve().parents[3]
+
+
 def _repo_root() -> Path:
     """This file lives at <repo>/backend/app/mainai_execution/execution_job.py -- three
     parents up is the repo root, the same directory GitHub paths in a task's
@@ -180,6 +189,78 @@ def _repo_root() -> Path:
 
 def _backend_root() -> Path:
     return _repo_root() / "backend"
+
+
+def _reusable_work_result_checkpoint(db: Session, *, task_id: uuid.UUID, job_id: uuid.UUID):
+    """Reuse paid work only for this job, or across jobs after publication started.
+
+    A genuine local verification retry must still be allowed to buy a new proposal.
+    Ambiguous publication (R5) must not.
+    """
+    same_job = latest_checkpoint_for_step(db, task_id=task_id, job_id=job_id, step="work_result")
+    if same_job is not None:
+        return same_job
+    if (
+        latest_task_checkpoint_for_step(db, task_id=task_id, step="finalized") is None
+        and latest_task_checkpoint_for_step(db, task_id=task_id, step="publication_attempt") is None
+    ):
+        return None
+    return latest_task_checkpoint_for_step(db, task_id=task_id, step="work_result")
+
+
+def _ensure_isolated_proposal_workspace(task: MainAITask, *, source: Path) -> Path:
+    dest = Path(tempfile.gettempdir()) / "mainai-proposal-workspaces" / str(task.id)
+    dest.mkdir(parents=True, exist_ok=True)
+    marker = dest / ".mainai_isolated_workspace.json"
+    if not marker.exists():
+        marker.write_text(
+            json.dumps(
+                {
+                    "task_id": str(task.id),
+                    "source": str(source),
+                    "authorized_live_checkout": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+    return dest.resolve()
+
+
+def _hydrate_isolated_workspace_for_verification(dest: Path, *, source: Path | None = None) -> Path:
+    """Copy enough of the source tree so isolated proposals can pass verification."""
+    source = (source or _repo_root()).resolve()
+    dest = dest.resolve()
+    if dest == source or dest == _live_server_checkout():
+        return dest
+    backend_src = source / "backend"
+    backend_dest = dest / "backend"
+    if not backend_src.is_dir() or (backend_dest / "app").exists():
+        return dest
+    if backend_dest.exists() and backend_dest.samefile(backend_src):
+        return dest
+    ignore = shutil.ignore_patterns(".venv", "__pycache__", ".pytest_cache", "*.pyc", ".ruff_cache")
+    shutil.copytree(backend_src, backend_dest, dirs_exist_ok=True, ignore=ignore)
+    return dest
+
+
+def _verification_cwd_for_work_result(work_result: dict) -> str:
+    root = work_result.get("worktree_path") or work_result.get("workspace_root")
+    if not root:
+        return str(_backend_root())
+    root_path = Path(str(root))
+    if work_result.get("isolated_workspace"):
+        _hydrate_isolated_workspace_for_verification(root_path)
+    backend = root_path / "backend"
+    return str(backend if backend.exists() else root_path)
+
+
+def _proposal_write_root(task: MainAITask) -> Path:
+    """Write proposals to an isolated workspace unless the Founder authorized live checkout."""
+    settings = get_settings()
+    root = _repo_root().resolve()
+    if root == _live_server_checkout() and not bool(getattr(settings, "mainai_allow_live_checkout_writes", False)):
+        return _ensure_isolated_proposal_workspace(task, source=root)
+    return root
 
 
 class TaskExecutionError(Exception):
@@ -346,6 +427,8 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
     behavior (test_run_task_execution_job_repo_edit_with_an_absolute_ai_proposed_path_..., et
     al.) keep exercising the identical code, unchanged."""
     repo_root = _repo_root().resolve()
+    write_root = _proposal_write_root(task)
+    live_checkout_mutated = write_root == _live_server_checkout()
     envelope = _envelope_for_path_a_task(db, task)
     failure_context = latest_verification_failure_text(db, task.id)
     declared = _explicit_edit_targets(db, task)
@@ -375,17 +458,17 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
         task_id=task.id,
     )
     parsed = _parse_code_agent_response(result.content)
-    _assert_repo_edit_writes_allowed(repo_root, parsed["files"], prompt, envelope=envelope)
+    _assert_repo_edit_writes_allowed(write_root, parsed["files"], prompt, envelope=envelope)
     previous_contents: dict[str, str | None] = {}
     for file in parsed["files"]:
         # Defense in depth beyond _validate_repo_edit_file_path()'s absolute/'..' rejection --
         # resolves symlinks too, so a pre-existing symlink inside the repo tree pointing outside
         # it (a separate, lower-likelihood attack surface -- would require a malicious symlink
         # already merged into the repo, not just a malicious AI response) still can't be used to
-        # escape repo_root via a syntactically clean relative path.
-        abs_path = (repo_root / file["path"]).resolve()
-        if abs_path != repo_root and repo_root not in abs_path.parents:
-            raise TaskExecutionError(f"Refusing to write outside the repo root: {file['path']!r} resolved to {abs_path}.")
+        # escape write_root via a syntactically clean relative path.
+        abs_path = (write_root / file["path"]).resolve()
+        if abs_path != write_root and write_root not in abs_path.parents:
+            raise TaskExecutionError(f"Refusing to write outside the proposal workspace: {file['path']!r} resolved to {abs_path}.")
         previous_contents[file["path"]] = abs_path.read_text() if abs_path.exists() else None
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         abs_path.write_text(file["content"])
@@ -400,6 +483,10 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
         "previous_contents": previous_contents,
         "provider": result.provider,
         "model": result.model,
+        "workspace_root": str(write_root),
+        "worktree_path": str(write_root),
+        "live_checkout_mutated": live_checkout_mutated,
+        "isolated_workspace": write_root != _live_server_checkout(),
     }
 
 
@@ -814,7 +901,7 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
         # real, possibly expensive, possibly non-deterministic AI call) and then crashed before
         # finishing -- reuse it instead of repeating the call. The checkpoint, not this
         # function's own in-memory state, is the only thing trusted for "was this already done".
-        work_checkpoint = latest_checkpoint_for_step(db, task_id=task.id, job_id=job_id, step="work_result")
+        work_checkpoint = _reusable_work_result_checkpoint(db, task_id=task.id, job_id=job_id)
         if work_checkpoint is not None:
             logger.info("task_execution job %s (task %s): resuming work_result from durable checkpoint.", job_id, task.id)
             work_result = work_checkpoint.executor_state["work_result"]
@@ -898,15 +985,13 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             steps = [VerificationStepResult(kind="targeted_tests", passed=r["passed"], detail=r) for r in work_result["results"]]
             verification = VerificationResult(passed=all(s.passed for s in steps), steps=steps)
         else:
-            # Hardening-pass finding: a repo_edit task whose real edits now live inside an
-            # isolated worktree (see _handle_repo_edit()) must be verified against THAT
-            # worktree's own backend/ subdirectory -- the exact same repo layout as
-            # _backend_root(), just at a different, per-attempt path -- never against the
-            # shared checkout, which never received these edits at all once worktree.py is
-            # wired into the live path. Proposal mode (no worktree_path in work_result) keeps
-            # verifying against the shared checkout, unchanged from V0.1.
-            worktree_path = work_result.get("worktree_path") if task.task_type == "repo_edit" else None
-            verify_cwd = str(Path(worktree_path) / "backend") if worktree_path else str(_backend_root())
+            # Isolated worktrees and safe-mode proposal workspaces are verified in their
+            # own tree (R6). Live checkout is used only when no isolated root exists.
+            verify_cwd = (
+                _verification_cwd_for_work_result(work_result)
+                if task.task_type == "repo_edit"
+                else str(_backend_root())
+            )
             verify_envelope = _envelope_for_path_a_task(db, task)
             verify_paths = [
                 map_verification_target_to_repo_path(str(step.get("target") or ""))
@@ -937,9 +1022,28 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             # second commit), so a crash between a successful push and this checkpoint landing
             # must not cause resume to push again.
             finalize_checkpoint = latest_checkpoint_for_step(db, task_id=task.id, job_id=job_id, step="finalized")
+            if finalize_checkpoint is None:
+                finalize_checkpoint = latest_task_checkpoint_for_step(db, task_id=task.id, step="finalized")
             if finalize_checkpoint is not None:
                 finalize_info = finalize_checkpoint.executor_state["finalize_info"]
             else:
+                publication_identity = work_result.get("worktree_id") or work_result.get("workspace_root") or str(task.id)
+                record_checkpoint(
+                    db,
+                    task=task,
+                    goal=goal,
+                    job_id=job_id,
+                    step="publication_attempt",
+                    data={
+                        "publication_identity": publication_identity,
+                        "work_result": {
+                            "worktree_id": work_result.get("worktree_id"),
+                            "worktree_path": work_result.get("worktree_path") or work_result.get("workspace_root"),
+                            "branch": work_result.get("branch"),
+                        },
+                    },
+                )
+                db.commit()
                 # V0.2 fencing finding (same reasoning as the work_result checkpoint above,
                 # applied before the ACTUAL irreversible side effect this time, not just
                 # before its checkpoint): a stale worker whose lease already expired must
@@ -1040,7 +1144,7 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
         # is still `running`, correctly reclaimable and resumable from its existing
         # checkpoints); a crash after it has nothing left to lose.
         boundary = exc if isinstance(exc, ExternalBoundaryError) else None
-        if boundary is None and isinstance(exc, WorktreeTimeoutError):
+        if boundary is None and isinstance(exc, (WorktreeTimeoutError, WorktreePushRejected)):
             boundary = map_publication_boundary_error(exc)
         evidence = {"error": type(exc).__name__}
         if boundary is not None:
@@ -1134,6 +1238,14 @@ def _finalize_task_outcome(
 
     External publication / grant / CI / review failures are classified by cause (evidence and
     optional `cause` exception) and fail closed: no retry, no paid replan, goal-level STOP."""
+    locked = db.execute(
+        select(MainAITask)
+        .where(MainAITask.id == task.id)
+        .with_for_update()
+    ).scalar_one()
+    if locked.status == MainAITaskStatus.cancelled:
+        return
+    task = locked
     db.add(
         MainAITaskEvent(
             task_id=task.id,
@@ -1147,13 +1259,6 @@ def _finalize_task_outcome(
         # Cancel vs success-finalize race: founder cancel_requested on the live job must not
         # lose to a concurrent _finalize_task_outcome(passed=True). Already-cancelled tasks
         # stay cancelled (no completed overwrite).
-        locked = db.execute(
-            select(MainAITask)
-            .where(MainAITask.id == task.id)
-            .with_for_update()
-        ).scalar_one()
-        if locked.status == MainAITaskStatus.cancelled:
-            return
         goal = db.get(MainAIGoal, locked.goal_id, populate_existing=True)
         if goal_is_first_cycle_stopped(db, goal):
             stop_state = first_cycle_state_from_goal(goal) or STATE_STOP_BEFORE_MERGE
