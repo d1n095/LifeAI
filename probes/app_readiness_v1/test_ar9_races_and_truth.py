@@ -241,20 +241,30 @@ async def _safe_mode_cycle(db_session, superuser_db, owner_id, monkeypatch, gith
     items = [i for i in snap["work_items"] if i["source"] == "mainai_task"]
     print(f"SAFE|remote_task_branches={branches} prs={len(github.prs)} local_server_checkout_writes={local} "
           f"labels={sorted((i['description'][:20], i['source_status'], i['founder_status']) for i in items)} trail_tail={trail(superuser_db, goal.id)[-1:]}")
-    return branches, github.prs, items
+    return branches, github.prs, items, local, snap
 
 
 @pytest.mark.asyncio
 async def test_AR13_safe_launch_default_never_pushes_or_opens_pr(db_session, superuser_db, owner_id, monkeypatch, github, tmp_path):
-    branches, prs, _ = await _safe_mode_cycle(db_session, superuser_db, owner_id, monkeypatch, github, tmp_path)
+    branches, prs, _, _, _ = await _safe_mode_cycle(db_session, superuser_db, owner_id, monkeypatch, github, tmp_path)
     assert branches == [] and prs == [], f"remote effect with github_write_enabled=False: branches={branches} prs={prs}"
 
 
 @pytest.mark.asyncio
 async def test_AR11b_unopened_pr_with_zero_checks_is_not_independently_verified(db_session, superuser_db, owner_id, monkeypatch, github, tmp_path):
-    _, prs, items = await _safe_mode_cycle(db_session, superuser_db, owner_id, monkeypatch, github, tmp_path)
+    _, prs, items, _, _ = await _safe_mode_cycle(db_session, superuser_db, owner_id, monkeypatch, github, tmp_path)
     pr_task = next(i for i in items if "PR" in i["description"])
     assert not prs
     assert pr_task["founder_status"] != "independently_verified", (
         "AR-11b the 'Open a draft PR' task opened NO pull request and ran ZERO verification steps, yet the Founder sees "
         "'Självständigt verifierad'")
+
+
+@pytest.mark.asyncio
+async def test_AR13b_safe_launch_never_writes_the_server_checkout_unannounced(db_session, superuser_db, owner_id, monkeypatch, github, tmp_path):
+    """P-3: in the safe-launch profile the paid code agent's output must not be written into the backend's own
+    checkout, unless the Founder-facing safe_launch flags say so explicitly (a key naming local writes, set true)."""
+    _, _, _, local, snap = await _safe_mode_cycle(db_session, superuser_db, owner_id, monkeypatch, github, tmp_path)
+    announced = any("local" in k and v is True for k, v in snap["safe_launch"].items())
+    print(f"AR13b|server_checkout_writes={local} announced_in_safe_launch={announced}")
+    assert not local or announced, f"P-3 safe mode wrote {local} into the server checkout; safe_launch={snap['safe_launch']}"

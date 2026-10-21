@@ -64,6 +64,8 @@ for log in sorted(out.glob("*.log")):
                 status["blocker"].append(node)
             else:
                 status["regression"].append(node)
+        if not res_all and not re.search(r"^ℹ pass \d+", text, re.M) and not status["blocker"]:
+            status["blocker"].append("NO_RESULTS: required suite produced no parseable test results (crash, missing tool or empty run)")
         if re.search(r"^ℹ fail [1-9]", text, re.M):
             status["blocker"].append("node --test failures")
         if re.search(r"^ℹ pass (\d+)", text, re.M):

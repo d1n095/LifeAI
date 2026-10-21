@@ -224,3 +224,24 @@ def test_AR8_reading_status_is_free_and_offline(client, egress, no_limits):
         client.get(p)
     assert not egress.provider_calls, egress.provider_calls
     assert not egress.sockets, egress.sockets
+
+
+# ------------------------------------------------------------------ AR-17 (D5)
+def test_AR17_blocked_readiness_is_counted_as_a_blocker(client, no_limits, monkeypatch):
+    """The Founder-status page renders `blockers` as "BLOCKERINGAR (n)". When startup readiness is BLOCKED with
+    reasons (as on the examiner's live stack), those reasons must be among the blockers; otherwise the page shows
+    BLOCKED next to "(0)". Readiness is pinned to BLOCKED so the check does not depend on the host profile."""
+    import app.mainai_founder_ops.snapshot as snap_mod
+
+    class _Blocked:
+        def as_dict(self):
+            return {"level": "BLOCKED", "blocking": ["examiner_pinned_reason"], "invariant": "NEVER_COLLAPSE_TO_ONE_BOOLEAN"}
+
+    monkeypatch.setattr(snap_mod, "evaluate_startup_readiness", lambda *a, **k: _Blocked())
+    _login(client)
+    body = client.get(SNAP).json()
+    blockers = body.get("blockers") or []
+    print(f"AR17|readiness={body['startup_readiness'].get('level')} blockers={[b.get('kind') for b in blockers]}")
+    assert any("readiness" in str(b.get("kind", "")) or "examiner_pinned_reason" in str(b) for b in blockers), (
+        f"AR-17 readiness BLOCKED but blockers={[b.get('kind') for b in blockers]} (page shows BLOCKERINGAR (0))")
+

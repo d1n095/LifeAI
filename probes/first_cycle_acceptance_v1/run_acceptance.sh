@@ -52,6 +52,14 @@ if [ -n "${FE_BUILT:-}" ] && [ -d "$FE_BUILT/.next" ]; then
 else
   echo "FAILED proxy::FRONTEND_NOT_BUILT (set FE_BUILT from proxy_v1/build_frontend.sh)" > "$OUT/proxy.log"
 fi
+# 12 migration integrity (single head, unique ids/prefixes, linear chain; catches the dual-0089 composition)
+"$ACCEPT_VENV" "$PROBES/migration_integrity_v1/check.py" "$TARGET/backend" > "$OUT/migration_integrity.log" 2>&1
+# 13 UI truthfulness in a real browser (D4 stale status, D5 blocker count) against a live local stack
+if [ -n "${FE_BUILT:-}" ] && [ -d "$FE_BUILT/../pw-browsers" ]; then
+  env HOME="$REAL_HOME" "$PROBES/ui_v1/run.sh" "$TARGET" "$FE_BUILT" > "$OUT/ui.log" 2>&1 < /dev/null
+else
+  echo "FAILED ui::BROWSER_OR_FRONTEND_MISSING (FE_BUILT with ../pw-browsers required)" > "$OUT/ui.log"
+fi
 # 9 exact-SHA CI (read-only, unauthenticated public API; no credentials)
 "$ACCEPT_VENV" - "$SHA" > "$OUT/ci_exact_sha.json" <<'PY'
 import json, sys, urllib.request

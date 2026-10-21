@@ -312,14 +312,19 @@
    "required": [
     "test_AR"
    ],
-   "known_p2": [],
-   "_note": "#292 5e3cd01: AR-9/AR-9h (paid dispatch race, P1), AR-11/AR-11b (self-verification shown as independent, P1), AR-10 (delegation race, P2) fail."
+   "known_p2": [
+    "test_AR13b_"
+   ],
+   "_note": "#292 5e3cd01: AR-9/AR-9h (paid dispatch race, P1), AR-11/AR-11b (self-verification shown as independent, P1), AR-10 (delegation race, P2) fail. AR-13b (P-3 safe mode writes the server checkout) is pre-existing: known for cursor/codex, REQUIRED for combined. AR-14..16 apply from #293 (skipped before)."
   },
   "codex": {
    "same_as": "cursor"
   },
   "combined": {
-   "same_as": "cursor"
+   "required": [
+    "test_AR"
+   ],
+   "known_p2": []
   }
  },
  "proxy": {
@@ -342,6 +347,35 @@
     "proxy::"
    ],
    "known_p2": []
+  }
+ },
+ "migration_integrity": {
+  "cursor": {
+   "required": [
+    "migration::"
+   ],
+   "known_p2": []
+  },
+  "codex": {
+   "same_as": "cursor"
+  },
+  "combined": {
+   "same_as": "cursor"
+  }
+ },
+ "ui": {
+  "cursor": {
+   "required": [
+    "ui::"
+   ],
+   "known_p2": [],
+   "_note": "UI-1/UI-2 = D4, UI-3 = D5 (#292 defects)."
+  },
+  "codex": {
+   "same_as": "cursor"
+  },
+  "combined": {
+   "same_as": "cursor"
   }
  }
 }
