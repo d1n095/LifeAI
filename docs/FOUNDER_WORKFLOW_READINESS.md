@@ -1,11 +1,40 @@
 # Founder-interface and autonomous-workflow readiness
 
-Isolated P1 successor of frozen `#293` @ `ee132bb8e87fcc99f2f3607cfc2b46a5364d23c7`.
-Does **not** amend `#293`/`#292`/`#291`, compose Codex transport/grants, enable Recall, merge, or claim first-cycle GO.
+Isolated P2 successor of frozen `#294` @ `27e945db8ee414c813248bbeb9e7462b93903cee`
+(parent `#293` @ `ee132bb8e87fcc99f2f3607cfc2b46a5364d23c7`).
+Does **not** amend `#294`/`#293`/`#292`/`#291`, compose Codex transport/grants, enable Recall, merge, or claim first-cycle GO.
 
 Machine-readable flags: `GET /api/mainai/founder-ops/snapshot` (`first_cycle_go: false`).
 
-## P1 remediations (this successor)
+## P2 remediations (this successor)
+
+Claude's correction gate against `#294` `27e945d` (evidence `27c91b4e`). Equivalent
+executable cases live in `test_founder_workflow_p2.py` and the proxy identity tests.
+This package does not claim to have run Claude's local suite.
+
+1. R1 / PX-9/10/11: proxy overwrites forwarding headers with a trusted client IP.
+   Rate-limit keys use that IP (or user+surface). Forged XFF cannot spoof; one
+   Founder surface or client cannot lock the others.
+2. R2: independent verification binds to the task's actual commit SHA. A later
+   FAIL / `invalidates_verification_id` revokes PASS.
+3. R3: a failed paid `dispatch_task` reverts `dispatched` → `created` so retry is
+   recoverable without a second in-flight prompt.
+4. R4: Founder `cancel_requested` / `cancelled` survives a worker crash (not
+   overwritten to `failed`).
+5. R5: ambiguous publication records a reconcilable identity. Prior `work_result`
+   / `finalized` checkpoints are reused across jobs so a crash cannot buy a
+   second paid run or a second remote effect.
+6. R6: safe-mode proposals verify in the isolated workspace (hydrated for tests)
+   and can pass verification there.
+7. D4/D5: dashboard health uses the snapshot for backend/STOP. Cancelled work is
+   not a failed blocker. `blocker_counts` separates operational / readiness / STOP.
+8. N1/N4: unavailable live evidence does not fabricate disagreement. Agent
+   `dispatched` is `acknowledged`, not running.
+
+Preserved from `#294`: FO-6 typed push-reject, FO-7, D1–D3, Founder authorization,
+STOP fail-closed, FC-4, and security controls.
+
+## P1 remediations (frozen `#294`)
 
 1. FO-6: `WorktreePushRejected` maps to typed `PushRejectedError`. Stored evidence
    suppresses paid replan. Worker crashes finalize `task_execution` instead of leaving
@@ -31,7 +60,8 @@ Machine-readable flags: `GET /api/mainai/founder-ops/snapshot` (`first_cycle_go:
    agents, assignments, execution status, dependencies, blockers, next actions, live
    spend, and review outcomes. Backend rows are the only source of truth.
 2. Status vocabulary distinguishes `queued`, `assigned`, `acknowledged`, `running`,
-   `waiting_on_dependency`, `failed`, `completed`, `independently_verified`.
+   `waiting_on_dependency`, `failed`, `completed`, `independently_verified`,
+   `cancelled`.
    Assignment issuance is never treated as running. A queued job with `locked_by` is
    acknowledged, not running. Self-review is completed, not independently verified.
 3. Independent ready work is surfaced when siblings wait on CI or another task.

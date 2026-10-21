@@ -28,6 +28,7 @@ class FounderWorkStatus(str, enum.Enum):
     failed = "failed"
     completed = "completed"
     independently_verified = "independently_verified"
+    cancelled = "cancelled"
 
 
 ACTIVE_EXECUTION_STATUSES = frozenset({FounderWorkStatus.running.value})
@@ -43,16 +44,21 @@ REDISPATCHABLE_AGENT_STATUSES = frozenset(
 _SHA40 = re.compile(r"^[0-9a-f]{40}$")
 
 
-def is_independent_exact_sha_receipt(receipt: Any) -> bool:
+def is_independent_exact_sha_receipt(receipt: Any, *, expected_sha: str | None = None) -> bool:
     """True only for a durable independent PASS bound to an exact 40-hex SHA.
 
     Builder self-verification, checkpoint CI/tests, and `verification_passed`
-    events are not independent review receipts.
+    events are not independent review receipts. A later FAIL/invalidation
+    (`revoked`) or a SHA that is not the task commit cannot verify the work.
     """
     if not isinstance(receipt, dict):
         return False
+    if receipt.get("revoked") is True:
+        return False
     sha = receipt.get("candidate_sha") or receipt.get("sha")
     if not isinstance(sha, str) or _SHA40.fullmatch(sha) is None:
+        return False
+    if expected_sha is not None and sha != expected_sha:
         return False
     builder = str(receipt.get("builder_identity") or "").strip()
     examiner = str(receipt.get("examiner_identity") or "").strip()
@@ -105,7 +111,10 @@ def classify_mainai_task(
         status = FounderWorkStatus.independently_verified
     elif task.status == MainAITaskStatus.completed:
         status = FounderWorkStatus.completed
-    elif task.status in {MainAITaskStatus.failed, MainAITaskStatus.cancelled, MainAITaskStatus.retryable_failed}:
+    elif task.status == MainAITaskStatus.cancelled:
+        status = FounderWorkStatus.cancelled
+        evidence["cancelled"] = True
+    elif task.status in {MainAITaskStatus.failed, MainAITaskStatus.retryable_failed}:
         status = FounderWorkStatus.failed
     elif liveness in {TaskLiveness.stalled, TaskLiveness.dead}:
         status = FounderWorkStatus.failed
@@ -205,7 +214,8 @@ def classify_agent_task(task: AgentTask) -> dict[str, Any]:
     if task.status == AgentTaskStatus.created:
         status = FounderWorkStatus.assigned
     elif task.status == AgentTaskStatus.dispatched:
-        status = FounderWorkStatus.running
+        # Dispatch recorded ownership, not live execution (N4).
+        status = FounderWorkStatus.acknowledged
     elif task.status in {
         AgentTaskStatus.result_recorded,
         AgentTaskStatus.reviewed_needs_correction,
@@ -252,4 +262,9 @@ def _task_independently_verified(
 ) -> bool:
     if task.status != MainAITaskStatus.completed:
         return False
-    return is_independent_exact_sha_receipt(independent_receipt)
+    expected = None
+    if isinstance(independent_receipt, dict):
+        expected = independent_receipt.get("expected_sha") or independent_receipt.get("task_commit_sha")
+        if not isinstance(expected, str) or _SHA40.fullmatch(expected) is None:
+            expected = None
+    return is_independent_exact_sha_receipt(independent_receipt, expected_sha=expected)

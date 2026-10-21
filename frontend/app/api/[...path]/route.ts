@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { applyTrustedForwardingHeaders, isClientForgedForwardHeader, trustedClientIp } from "@/lib/proxyRequestIdentity";
 import { assertSafeProxyPath } from "@/lib/proxyPathSafety";
 
 // Same-origin API proxy. Every browser request under /api/* lands here and is forwarded to
@@ -50,21 +51,11 @@ const HOP_BY_HOP_HEADERS = new Set([
   "expect",
 ]);
 
-// Client-controlled forwarding headers must never reach uvicorn -- --forwarded-allow-ips=*
-// would otherwise treat a forged X-Forwarded-For as the rate-limit identity.
-const CLIENT_FORGED_FORWARD_HEADERS = new Set([
-  "x-forwarded-for",
-  "x-forwarded-host",
-  "x-forwarded-proto",
-  "x-real-ip",
-  "forwarded",
-]);
-
 function copyHeaders(source: Headers): Headers {
   const dest = new Headers();
   source.forEach((value, key) => {
     const lower = key.toLowerCase();
-    if (HOP_BY_HOP_HEADERS.has(lower) || CLIENT_FORGED_FORWARD_HEADERS.has(lower)) {
+    if (HOP_BY_HOP_HEADERS.has(lower) || isClientForgedForwardHeader(lower)) {
       return;
     }
     dest.set(key, value);
@@ -86,9 +77,13 @@ async function proxy(request: NextRequest, path: string[]): Promise<Response> {
 
   let backendResponse: Response;
   try {
+    const outboundHeaders = applyTrustedForwardingHeaders(
+      copyHeaders(request.headers),
+      trustedClientIp(request),
+    );
     backendResponse = await fetch(targetUrl, {
       method: request.method,
-      headers: copyHeaders(request.headers),
+      headers: outboundHeaders,
       body: hasBody ? request.body : undefined,
       // Required by undici whenever the body is a ReadableStream rather than a buffered value.
       // @ts-expect-error -- `duplex` is a real, required fetch option for streamed bodies but

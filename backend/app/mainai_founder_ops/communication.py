@@ -36,6 +36,9 @@ _RECALL_DISAGREEMENT_SV = (
 _VERIFIED_DISAGREEMENT_SV = (
     "Nej. Självständig verifiering kräver hållbar evidens från någon annan än den som byggde arbetet."
 )
+_EVIDENCE_UNAVAILABLE_SV = (
+    "Osäker: live evidens kunde inte läsas. Ingen driftsstatus påstås."
+)
 
 _FILLER_RE = re.compile(
     r"^\s*((självklart|absolut|precis så|jag håller med|great question|of course|sure!?)"
@@ -77,6 +80,8 @@ def contradiction_notices(*, founder_message: str | None, evidence: dict[str, An
     if not founder_message:
         return []
     evidence = evidence or {}
+    if evidence.get("evidence_unavailable"):
+        return []
     notices: list[str] = []
     if _GO_CLAIM_RE.search(founder_message) and evidence.get("first_cycle_go") is not True:
         notices.append(_GO_DISAGREEMENT_SV)
@@ -84,7 +89,7 @@ def contradiction_notices(*, founder_message: str | None, evidence: dict[str, An
         notices.append(_WRITE_DISAGREEMENT_SV)
     if _RECALL_CLAIM_RE.search(founder_message) and evidence.get("recall_http_mounted") is not True:
         notices.append(_RECALL_DISAGREEMENT_SV)
-    if _VERIFIED_CLAIM_RE.search(founder_message) and not evidence.get("independently_verified"):
+    if _VERIFIED_CLAIM_RE.search(founder_message) and evidence.get("independently_verified") is False:
         notices.append(_VERIFIED_DISAGREEMENT_SV)
     return notices
 
@@ -115,6 +120,8 @@ def apply_communication_policy(
         return f"{prefix} {body}".strip()
 
     evidence = evidence or {}
+    if evidence.get("evidence_unavailable") and _EVIDENCE_UNAVAILABLE_SV not in body:
+        body = f"{_EVIDENCE_UNAVAILABLE_SV} {body}".strip()
     if evidence.get("usage_cost_usd") is None and "USD" in body and not _UNCERTAINTY_RE.search(body):
         if re.search(r"\b(kostnad|spend|cost)\b", body, re.IGNORECASE):
             body = f"{body} Kostnaden är okänd där pris saknas.".strip()

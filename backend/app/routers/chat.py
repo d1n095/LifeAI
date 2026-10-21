@@ -116,7 +116,8 @@ def _live_communication_evidence(db: Session, user: User, app: Any | None) -> di
         "first_cycle_go": False,
         "github_write_enabled": bool(get_settings().github_write_enabled),
         "recall_http_mounted": False,
-        "independently_verified": False,
+        "independently_verified": None,
+        "evidence_unavailable": False,
     }
     try:
         mounted = bool(app is not None and recall_http_mounted(app))
@@ -128,7 +129,8 @@ def _live_communication_evidence(db: Session, user: User, app: Any | None) -> di
         )
         evidence["first_cycle_go"] = False
     except Exception:  # noqa: BLE001 — communication must fail closed, not invent status
-        pass
+        evidence["evidence_unavailable"] = True
+        evidence["independently_verified"] = None
     return evidence
 
 

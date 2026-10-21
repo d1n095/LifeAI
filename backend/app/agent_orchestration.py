@@ -204,6 +204,8 @@ async def dispatch_task(db: Session, task_id: uuid.UUID, *, dispatched_by: str) 
 
     Ownership is taken atomically (FOR UPDATE + status → dispatched) BEFORE the paid
     provider call so concurrent HTTP dispatch cannot buy two prompts for one task (D2).
+    A failed paid call reverts `dispatched` → `created` so a later retry is recoverable
+    (R3) without opening a second in-flight prompt.
     """
     task = _lock_agent_task(db, task_id)
     assert_agent_dispatch_allowed(task)
@@ -211,7 +213,15 @@ async def dispatch_task(db: Session, task_id: uuid.UUID, *, dispatched_by: str) 
     task.updated_at = datetime.utcnow()
     db.commit()
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=_build_task_prompt(task))]
-    result, attempted = await chat_with_fallback(db, messages)
+    try:
+        result, attempted = await chat_with_fallback(db, messages)
+    except Exception:
+        failed = _lock_agent_task(db, task_id)
+        if failed.status == AgentTaskStatus.dispatched:
+            failed.status = AgentTaskStatus.created
+            failed.updated_at = datetime.utcnow()
+            db.commit()
+        raise
     task = get_task(db, task_id)
     return _record_event(
         db,

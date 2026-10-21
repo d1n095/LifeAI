@@ -164,7 +164,13 @@ export default function FounderOpsPage() {
           />
 
           <section className="space-y-2">
-            <div className="text-xs uppercase tracking-wide text-white/40">Blockeringar ({snapshot.blockers.length})</div>
+            <div className="text-xs uppercase tracking-wide text-white/40" data-testid="blocker-counts">
+              Blockeringar (operativa {snapshot.blocker_counts?.operational ?? snapshot.blockers.length}
+              {snapshot.blocker_counts
+                ? ` · beredskap ${snapshot.blocker_counts.startup_readiness} · STOP ${snapshot.blocker_counts.stop}`
+                : ""}
+              )
+            </div>
             {snapshot.blockers.length === 0 && <p className="text-sm text-white/30">Inga registrerade blockeringar.</p>}
             <ul className="space-y-1 text-sm">
               {snapshot.blockers.map((b, i) => (

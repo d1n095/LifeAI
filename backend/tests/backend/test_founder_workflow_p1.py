@@ -44,7 +44,7 @@ from app.mainai_founder_ops.snapshot import build_founder_ops_snapshot
 from app.mainai_founder_ops.status import classify_mainai_task, is_independent_exact_sha_receipt
 from app.mainai_verification_registry.service import record_verification_attestation
 from app.models.agent_task import AgentTaskStatus
-from app.models.mainai_execution import MainAITask, MainAITaskEventType, MainAITaskStatus
+from app.models.mainai_execution import MainAITask, MainAITaskEvent, MainAITaskEventType, MainAITaskStatus
 from app.models.mainai_job import MainAIJob, MainAIJobStatus
 from app.models.user import User
 from app.providers.base import ChatResult
@@ -249,6 +249,14 @@ def test_independent_exact_sha_receipt_is_required(db_session, superuser_db):
     goal, task = _goal_and_task(db_session, FOUNDER_USER_ID, task_type="read_only_audit")
     task.status = MainAITaskStatus.completed
     task.completed_at = datetime.utcnow()
+    db_session.add(
+        MainAITaskEvent(
+            task_id=task.id,
+            owner_id=FOUNDER_USER_ID,
+            event_type=MainAITaskEventType.completed,
+            detail={"work_result": {"commit_sha": SHA}},
+        )
+    )
     db_session.commit()
     snap = build_founder_ops_snapshot(db_session, owner_id=FOUNDER_USER_ID, health={"status": "ok", "worker": "unknown"})
     item = next(i for i in snap["work_items"] if i.get("task_id") == str(task.id))

@@ -565,7 +565,8 @@ export type FounderWorkStatus =
   | "waiting_on_dependency"
   | "failed"
   | "completed"
-  | "independently_verified";
+  | "independently_verified"
+  | "cancelled";
 
 export type FounderWorkItem = {
   founder_status: FounderWorkStatus;
@@ -664,6 +665,11 @@ export type FounderOpsSnapshot = {
   next_actions: FounderNextAction[];
   work_items: FounderWorkItem[];
   work_item_counts: Record<string, number>;
+  blocker_counts?: {
+    operational: number;
+    startup_readiness: number;
+    stop: number;
+  };
   blockers: Record<string, unknown>[];
   authorization_requests: Record<string, unknown>[];
   review_results: FounderWorkItem[];
@@ -766,6 +772,7 @@ export type MainAITask = {
   max_attempts: number;
   blocker_reason: string | null;
   mainai_job_id: string | null;
+  independently_verified?: boolean;
   // V0.3: when this task becomes eligible for the worker's automatic retry-with-backoff scan
   // -- null means no automatic retry is currently scheduled.
   next_retry_at: string | null;

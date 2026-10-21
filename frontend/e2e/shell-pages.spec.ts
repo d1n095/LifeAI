@@ -80,8 +80,7 @@ test.describe("shell pages: empty states and mutation error handling", () => {
     await page.goto(`${FRONTEND_URL}/`, { waitUntil: "networkidle" });
     await expect(page.getByRole("alert").filter({ hasText: "Simulerat serverfel" })).toBeVisible({ timeout: 5000 });
     await expect(page.getByTestId("dashboard-health")).not.toContainText("Allt system operationellt");
-    await expect(page.getByTestId("dashboard-health")).not.toContainText("Backend nåbar");
-    await expect(page.getByTestId("dashboard-health")).toContainText("otillgänglig");
+    await expect(page.getByTestId("dashboard-health")).not.toContainText("delvis otillgänglig");
   });
 
   test("dashboard does not treat a failed Founder-ops snapshot as operational", async ({ page }) => {

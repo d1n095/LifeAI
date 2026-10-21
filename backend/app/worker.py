@@ -48,7 +48,13 @@ from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.jobs.service import mark_failed, record_claimed
 from app.mainai_execution.approval import ApprovalRequiredError
 from app.mainai_execution.first_cycle_stop import FirstCycleGoalStoppedError, goal_is_autonomous_terminal
-from app.mainai_execution.execution_job import _finalize_task_outcome, resume_waiting_ci_task, run_task_execution_job
+from app.mainai_execution.checkpoint import latest_task_checkpoint_for_step
+from app.mainai_execution.execution_job import (
+    _finalize_cancelled_task,
+    _finalize_task_outcome,
+    resume_waiting_ci_task,
+    run_task_execution_job,
+)
 from app.mainai_execution.executor import dispatch_ready_task, retry_task, task_for_job
 from app.mainai_execution.envelope_scope import PATH_A_CAPABILITY, path_a_dispatch_is_authorized
 from app.mainai_execution.final_report import record_final_report
@@ -238,19 +244,37 @@ async def process_claimed_mainai_job(
             # treated as live work and can trigger another paid attempt.
             if job.job_type == "task_execution":
                 task = task_for_job(db, job)
-                if task is not None and task.status == MainAITaskStatus.running:
+                job = db.get(MainAIJob, job_id, populate_existing=True)
+                if task is None:
+                    pass
+                elif task.status == MainAITaskStatus.cancelled or (job is not None and job.cancel_requested):
+                    if task.status != MainAITaskStatus.cancelled:
+                        _finalize_cancelled_task(db, task, reason="founder_cancel_survives_worker_crash")
+                    db.commit()
+                elif task.status == MainAITaskStatus.running:
+                    publication = latest_task_checkpoint_for_step(db, task_id=task.id, step="finalized")
+                    attempt = latest_task_checkpoint_for_step(db, task_id=task.id, step="publication_attempt")
+                    work = latest_task_checkpoint_for_step(db, task_id=task.id, step="work_result")
+                    evidence = {
+                        "error": "unexpected_worker_crash",
+                        "failure_class": "unexpected",
+                        "job_type": job.job_type,
+                        "mainai_job_id": str(job.id),
+                        "origin": "unknown",
+                        "first_cycle_state": "external_boundary_failed",
+                    }
+                    if publication is not None or attempt is not None or work is not None:
+                        evidence["reconcilable"] = True
+                        evidence["publication_ambiguous"] = publication is None
+                        state = (publication or attempt or work).executor_state if (publication or attempt or work) else {}
+                        identity = state.get("publication_identity") or state.get("worktree_id") or state.get("work_result", {}).get("worktree_id")
+                        if identity:
+                            evidence["publication_identity"] = identity
                     _finalize_task_outcome(
                         db,
                         task,
                         passed=False,
-                        evidence={
-                            "error": "unexpected_worker_crash",
-                            "failure_class": "unexpected",
-                            "job_type": job.job_type,
-                            "mainai_job_id": str(job.id),
-                            "origin": "unknown",
-                            "first_cycle_state": "external_boundary_failed",
-                        },
+                        evidence=evidence,
                     )
                     db.commit()
 

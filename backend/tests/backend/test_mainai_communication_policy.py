@@ -81,6 +81,14 @@ def test_github_write_claim_is_rejected_when_disabled():
     assert text.startswith("Nej.")
 
 
+def test_unavailable_live_evidence_does_not_fabricate_disagreement():
+    notices = contradiction_notices(
+        founder_message="All work is independently verified.",
+        evidence={"evidence_unavailable": True},
+    )
+    assert notices == []
+
+
 def test_recall_claim_uses_recall_notice_not_github_write():
     text = apply_communication_policy(
         "Recall är avstängd.",
