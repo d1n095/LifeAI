@@ -1,6 +1,7 @@
 # Founder-interface and autonomous-workflow readiness
 
 Isolated P1 successor of frozen `#293` @ `ee132bb8e87fcc99f2f3607cfc2b46a5364d23c7`.
+Frozen exam SHA: `27e945db8ee414c813248bbeb9e7462b93903cee`.
 Does **not** amend `#293`/`#292`/`#291`, compose Codex transport/grants, enable Recall, merge, or claim first-cycle GO.
 
 Machine-readable flags: `GET /api/mainai/founder-ops/snapshot` (`first_cycle_go: false`).
