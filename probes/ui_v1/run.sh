@@ -9,6 +9,9 @@ mkdir -p "$FE/examiner-ui" && cp "$HERE/founder_status.spec.ts" "$HERE/playwrigh
 OUT="$(cd "$FE" && PLAYWRIGHT_BROWSERS_PATH="$FE/../pw-browsers" NEXT_TELEMETRY_DISABLED=1 npx playwright test -c examiner-ui/playwright.examiner.config.ts 2>&1)"
 RC=$?
 echo "$OUT" | grep -E "✓|✘|-  |passed|failed|skipped|Error:" | head -40
+if echo "$OUT" | grep -q "Executable doesn't exist\|browserType.launch"; then
+  echo "FAILED ui::SETUP_BROWSER_MISSING (results for UI-1..3 are not evidence)"; "$HERE/../proxy_v1/live_stack.sh" down >/dev/null 2>&1 < /dev/null; exit 1
+fi
 for id in UI-1 UI-2 UI-3; do
   line="$(echo "$OUT" | grep -E "(✓|✘|-) .*$id" | head -1)"
   case "$line" in *✓*) echo "PASSED ui::$id";; *✘*) echo "FAILED ui::$id";; *) echo "SKIPPED ui::$id";; esac

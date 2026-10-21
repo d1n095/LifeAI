@@ -1,0 +1,223 @@
+{
+  "profile": "cursor",
+  "blockers_and_regressions": 17,
+  "suites": [
+    {
+      "suite": "app_readiness",
+      "blocker": [
+        "test_ar14_founder_workflow.py::test_AR14a_question_about_go_is_not_contradicted",
+        "test_ar14_founder_workflow.py::test_AR14b_recall_claim_gets_a_recall_disagreement",
+        "test_ar14_founder_workflow.py::test_AR14d_chat_route_does_not_hardcode_policy_evidence",
+        "test_ar14_founder_workflow.py::test_AR15_requeued_task_is_not_acknowledged",
+        "test_ar2_founder_ops.py::test_AR17_blocked_readiness_is_counted_as_a_blocker",
+        "test_ar9_races_and_truth.py::test_AR9_concurrent_dispatch_single_paid_call",
+        "test_ar9_races_and_truth.py::test_AR9h_concurrent_dispatch_over_http",
+        "test_ar9_races_and_truth.py::test_AR10_concurrent_delegation_single_request",
+        "test_ar9_races_and_truth.py::test_AR11_builder_self_verification_is_not_independent",
+        "test_ar9_races_and_truth.py::test_AR11b_unopened_pr_with_zero_checks_is_not_independently_verified"
+      ],
+      "regression": [],
+      "known_p2": [
+        "test_ar9_races_and_truth.py::test_AR13b_safe_launch_never_writes_the_server_checkout_unannounced"
+      ],
+      "fixed": [],
+      "superseded": [],
+      "passed": 15
+    },
+    {
+      "suite": "backend_regression",
+      "blocker": [],
+      "regression": [],
+      "known_p2": [],
+      "fixed": [],
+      "superseded": [],
+      "passed": 788
+    },
+    {
+      "suite": "credential_canary",
+      "blocker": [],
+      "regression": [],
+      "known_p2": [],
+      "fixed": [
+        "test_d_credential_extra_env.py::test_C4_extra_env_injected_helper_via_config_count"
+      ],
+      "superseded": [],
+      "passed": 6
+    },
+    {
+      "suite": "fc4_bypass",
+      "blocker": [],
+      "regression": [],
+      "known_p2": [
+        "B1 a HIGH advisory under a node whose own severity says moderate (inconsistent metadata) fails",
+        "B2 non-canonical severity casing ('High') fails closed",
+        "B3 unknown severity vocabulary fails closed",
+        "B7 production report with empty vulnerabilities but metadata counting 2 highs fails closed",
+        "B8 full report with empty vulnerabilities but metadata counting a critical fails closed"
+      ],
+      "fixed": [],
+      "superseded": [],
+      "passed": 9
+    },
+    {
+      "suite": "fc4_policy",
+      "blocker": [],
+      "regression": [],
+      "known_p2": [],
+      "fixed": [],
+      "superseded": [],
+      "passed": 59
+    },
+    {
+      "suite": "migration_integrity",
+      "blocker": [],
+      "regression": [],
+      "known_p2": [],
+      "fixed": [],
+      "superseded": [],
+      "passed": 4
+    },
+    {
+      "suite": "proxy",
+      "blocker": [],
+      "regression": [],
+      "known_p2": [
+        "proxy::PX-1_traversal_stays_in_api",
+        "proxy::PX-2_client_xff_not_trusted",
+        "proxy::PX-9_rotating_xff_cannot_bypass_login_limit"
+      ],
+      "fixed": [],
+      "superseded": [],
+      "passed": 5
+    },
+    {
+      "suite": "review_stop",
+      "blocker": [],
+      "regression": [],
+      "known_p2": [
+        "test_review_stop_286_exam.py::test_S5_receipt_recorded_after_ci_is_never_evaluated",
+        "test_review_stop_286_exam.py::test_S8_founder_can_cancel_a_stopped_task",
+        "test_review_stop_286_exam.py::test_R2_builder_identity_variants_are_not_independent[path_a.builder",
+        "test_review_stop_286_exam.py::test_R2_builder_identity_variants_are_not_independent[PATH_A.BUILDER]",
+        "test_review_stop_286_exam.py::test_R2_builder_identity_variants_are_not_independent[path_a.builder\\u200b]",
+        "test_review_stop_286_exam.py::test_R3_later_fail_is_not_shadowed_by_a_future_dated_pass",
+        "test_review_stop_286_exam.py::test_R5_account_erasure_succeeds_after_an_owner_scoped_review_receipt"
+      ],
+      "fixed": [
+        "test_review_stop_286_exam.py::test_N4_model_chosen_path_cannot_force_stop"
+      ],
+      "superseded": [
+        "test_review_stop_286_exam.py::test_P3_external_publication_failure_inside_repo_edit_never_paid_replans[stale_base]",
+        "test_review_stop_286_exam.py::test_P3_external_publication_failure_inside_repo_edit_never_paid_replans[push_rejected]",
+        "test_review_stop_286_exam.py::test_P3_external_publication_failure_inside_repo_edit_never_paid_replans[grant_missing]",
+        "test_review_stop_286_exam.py::test_P3b_external_publication_failure_inside_repo_edit_is_auto_retried",
+        "test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[approved_base_moved]",
+        "test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[git_https_403_denied]",
+        "test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[git_network]",
+        "test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[git_non_fast_forward]",
+        "test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[git_pre_receive_declined]",
+        "test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[git_push_timeout]",
+        "test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[git_remote_unreachable]",
+        "test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[github_get_ref_404]",
+        "test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[grant280_base_moved]",
+        "test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[grant280_consumed]",
+        "test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[grant280_envelope_superseded]",
+        "test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[grant280_expired]",
+        "test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[grant280_head_mismatch]",
+        "test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[grant280_receipt_stale]",
+        "test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[grant280_version]",
+        "test_review_stop_286_exam.py::test_N1_external_push_grant_failures_never_retry_or_paid_replan[post_push_remote_mismatch]",
+        "test_review_stop_286_exam.py::test_N1b_misclassified_push_failure_is_redispatched",
+        "test_review_stop_286_exam.py::test_N1c_misclassified_grant_failure_is_paid_replanned"
+      ],
+      "passed": 22
+    },
+    {
+      "suite": "spend",
+      "blocker": [],
+      "regression": [],
+      "known_p2": [],
+      "fixed": [],
+      "superseded": [],
+      "passed": 19
+    },
+    {
+      "suite": "stop_classification",
+      "blocker": [
+        "test_a_failure_origins.py::test_FO_external_failure_is_terminal_and_never_paid_again[untyped_boundary_exception]",
+        "test_f_untyped_recovery.py::test_FO6b_bare_runtime_error_at_push_is_contained_and_founder_visible",
+        "test_h_fo6_fo7_exact_paths.py::test_FO6x_exact_path_bare_runtime_error_at_push_ends_terminal",
+        "test_k_recovery_loop_bound.py::test_RL_persistent_push_boundary_crash_recovery_is_bounded"
+      ],
+      "regression": [],
+      "known_p2": [],
+      "fixed": [
+        "test_b_local_retries.py::test_LR3_model_controlled_filename_cannot_force_external_stop",
+        "test_e_worktree_creation.py::test_FO7_base_fetch_network_failure_is_terminal_and_never_paid",
+        "test_h_fo6_fo7_exact_paths.py::test_FO7x_exact_path_base_fetch_failure_is_typed_boundary_error"
+      ],
+      "superseded": [],
+      "passed": 28
+    },
+    {
+      "suite": "task_authority",
+      "blocker": [],
+      "regression": [],
+      "known_p2": [
+        "TA-13 (P2 probe) a symlink object at an authorized path is not published",
+        "TA-12 (P2 probe) out-of-scope content cannot ride in intermediate commits of the published branch"
+      ],
+      "fixed": [],
+      "superseded": [],
+      "passed": 15
+    },
+    {
+      "suite": "transport_contract",
+      "blocker": [],
+      "regression": [],
+      "known_p2": [
+        "test_transport_contract.py::test_TC1_production_git_never_consults_host_helpers",
+        "test_transport_contract.py::test_TC3_askpass_never_invoked"
+      ],
+      "fixed": [],
+      "superseded": [],
+      "passed": 2
+    },
+    {
+      "suite": "ui",
+      "blocker": [
+        "ui::UI-1",
+        "ui::UI-2",
+        "ui::UI-3"
+      ],
+      "regression": [],
+      "known_p2": [],
+      "fixed": [],
+      "superseded": [],
+      "passed": 0
+    },
+    {
+      "suite": "candidate_harness",
+      "blocker": [],
+      "regression": [],
+      "known_p2": [
+        "FAIL CI-6 production evaluate_check_runs success-only",
+        "FAIL E2E-3 production finalize requires exact-SHA push grant",
+        "BLOCKED GRANT-PROD production push/PR grant interface",
+        "FAIL TA-12 production publication inspects full history",
+        "FAIL TA-13 production rejects authorized-path symlink",
+        "FAIL PUB-2 production rejects gitlink/submodule"
+      ],
+      "fixed": [],
+      "passed": 0
+    },
+    {
+      "suite": "ci_exact_sha",
+      "blocker": [],
+      "regression": [],
+      "known_p2": [],
+      "fixed": [],
+      "passed": 12
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+canary_invoked=no
+secret_in_outputs=0
+secret_in_target=0
+target_unchanged=yes
+matrix_go=False counts={'BLOCKED': 1, 'FAIL': 5, 'PASS': 54, 'UNKNOWN': 0}
+matrix_row FAIL CI-6 production evaluate_check_runs success-only
+matrix_row FAIL E2E-3 production finalize requires exact-SHA push grant
+matrix_row BLOCKED GRANT-PROD production push/PR grant interface
+matrix_row FAIL TA-12 production publication inspects full history
+matrix_row FAIL TA-13 production rejects authorized-path symlink
+matrix_row FAIL PUB-2 production rejects gitlink/submodule

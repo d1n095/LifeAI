@@ -1,0 +1,36 @@
+FF.FFAR16|refused=[True, True, True] kinds=['break_circular_dependency', 'circular_dependency', 'task_in_cycle']
+.AR1|routes=131 violations=0 provider_calls=0 egress=[]
+..AR3|limit=120/min codes_tail=[200, 200, 429, 429]
+.........AR17|readiness=BLOCKED blockers=[]
+FAR9|results=['ok', 'ok'] paid_calls=2
+FAR9h|url=/api/admin/agents/tasks/{task_id}/dispatch codes=[200, 200] paid_calls=2
+FAR10|races=20 duplicated=20 counts=[2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
+FAR11|verification_events=1 dispatch_jobs=1 founder_status=independently_verified independently_verified=True
+FAR12|chat_status=200 provider_attempts=[('OpenAIProvider', 'embed'), ('OpenAIProvider', 'chat')] egress=[]
+AR13b|server_checkout_writes=['?? backend/app/greeting.py', '?? backend/tests/test_greeting_doc.py'] announced_in_safe_launch=False
+PASSED test_ar14_founder_workflow.py::test_AR14c_known_cost_not_rewritten_as_unknown
+PASSED test_ar14_founder_workflow.py::test_AR16_cycle_refuses_assignment_and_is_reported
+PASSED test_ar1_route_authz_matrix.py::test_AR1_every_api_route
+PASSED test_ar2_founder_ops.py::test_AR2_stop_post_denied_without_founder_or_csrf
+PASSED test_ar2_founder_ops.py::test_AR3_stop_post_is_rate_limited
+PASSED test_ar2_founder_ops.py::test_AR4_stop_and_readiness_read_failures_fail_closed
+PASSED test_ar2_founder_ops.py::test_AR5_dependency_failure_is_not_reported_reachable[redis]
+PASSED test_ar2_founder_ops.py::test_AR5_dependency_failure_is_not_reported_reachable[database]
+PASSED test_ar2_founder_ops.py::test_AR5b_stale_worker_heartbeat_not_alive
+PASSED test_ar2_founder_ops.py::test_AR6_snapshot_and_conversations_are_account_isolated
+PASSED test_ar2_founder_ops.py::test_AR7_recall_unmounted_and_flags_truthful
+PASSED test_ar2_founder_ops.py::test_AR7b_recall_detector_detects_a_real_mount
+PASSED test_ar2_founder_ops.py::test_AR8_reading_status_is_free_and_offline
+PASSED test_ar9_races_and_truth.py::test_AR12_chat_safe_mode_no_paid_egress_and_failed_turn_visible
+PASSED test_ar9_races_and_truth.py::test_AR13_safe_launch_default_never_pushes_or_opens_pr
+FAILED test_ar14_founder_workflow.py::test_AR14a_question_about_go_is_not_contradicted
+FAILED test_ar14_founder_workflow.py::test_AR14b_recall_claim_gets_a_recall_disagreement
+FAILED test_ar14_founder_workflow.py::test_AR14d_chat_route_does_not_hardcode_policy_evidence
+FAILED test_ar14_founder_workflow.py::test_AR15_requeued_task_is_not_acknowledged
+FAILED test_ar2_founder_ops.py::test_AR17_blocked_readiness_is_counted_as_a_blocker
+FAILED test_ar9_races_and_truth.py::test_AR9_concurrent_dispatch_single_paid_call
+FAILED test_ar9_races_and_truth.py::test_AR9h_concurrent_dispatch_over_http
+FAILED test_ar9_races_and_truth.py::test_AR10_concurrent_delegation_single_request
+FAILED test_ar9_races_and_truth.py::test_AR11_builder_self_verification_is_not_independent
+FAILED test_ar9_races_and_truth.py::test_AR11b_unopened_pr_with_zero_checks_is_not_independently_verified
+FAILED test_ar9_races_and_truth.py::test_AR13b_safe_launch_never_writes_the_server_checkout_unannounced

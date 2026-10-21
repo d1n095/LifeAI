@@ -1,0 +1,10 @@
+  ✘  1 [chromium] › examiner-ui/founder_status.spec.ts:16:5 › UI-1 (D4) founder-ops never keeps 'Backend: nåbar' / 'Inte blockerad' after the snapshot becomes unreadable (1ms)
+  ✘  2 [chromium] › examiner-ui/founder_status.spec.ts:28:5 › UI-2 (D4) dashboard health line does not stay 'Backend nåbar' after the backend is lost (1ms)
+  ✘  3 [chromium] › examiner-ui/founder_status.spec.ts:37:5 › UI-3 (D5) readiness BLOCKED is never shown next to 'BLOCKERINGAR (0)' (1ms)
+    Error: browserType.launch: Executable doesn't exist at <tmp>
+    Error: browserType.launch: Executable doesn't exist at <tmp>
+    Error: browserType.launch: Executable doesn't exist at <tmp>
+  3 failed
+FAILED ui::UI-1
+FAILED ui::UI-2
+FAILED ui::UI-3
