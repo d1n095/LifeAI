@@ -10,9 +10,11 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta
 
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.mainai_founder_ops.assignment_guard import DuplicateWorkError, assert_no_duplicate_task_assignment
+from app.models.mainai_execution import MainAITask
 from app.models.workforce import WorkforceAssignment, WorkforceDelegationRequest, WorkforceTeam
 from app.workforce.authority import TaskScopedAuthority, revoke_assignment_authority
 from app.workforce.context import create_context_package
@@ -31,6 +33,29 @@ class VerificationError(DelegationBrokerError):
     pass
 
 
+def _lock_delegation_slot(
+    db: Session,
+    *,
+    owner_id: uuid.UUID,
+    task_id: uuid.UUID | None,
+    goal_text: str,
+    required_capability: str,
+) -> None:
+    """Serialize concurrent duplicate delegations without a new unique-index migration (D3)."""
+    key = f"workforce-delegation:{owner_id}:{task_id or ''}:{goal_text}:{required_capability}"
+    db.execute(
+        text("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(:key, 5))"),
+        {"key": key},
+    )
+    if task_id is not None:
+        db.execute(
+            select(MainAITask)
+            .where(MainAITask.id == task_id, MainAITask.owner_id == owner_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+
+
 def submit_delegation_request(
     db: Session,
     *,
@@ -46,6 +71,13 @@ def submit_delegation_request(
     verification_requirement: str = "independent_verifier",
     provenance: dict | None = None,
 ) -> WorkforceDelegationRequest:
+    _lock_delegation_slot(
+        db,
+        owner_id=owner_id,
+        task_id=task_id,
+        goal_text=goal_text,
+        required_capability=required_capability,
+    )
     try:
         assert_no_duplicate_task_assignment(db, owner_id=owner_id, task_id=task_id)
     except DuplicateWorkError as exc:

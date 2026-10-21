@@ -1,9 +1,30 @@
 # Founder-interface and autonomous-workflow readiness
 
-Isolated successor of frozen `#292` @ `5e3cd01ac3a2cded69ef19bfa074d15196d3afaa`.
-Does **not** amend `#292`, compose Codex transport/grants, enable Recall, merge, or claim first-cycle GO.
+Isolated P1 successor of frozen `#293` @ `ee132bb8e87fcc99f2f3607cfc2b46a5364d23c7`.
+Frozen exam SHA: `27e945db8ee414c813248bbeb9e7462b93903cee`.
+Does **not** amend `#293`/`#292`/`#291`, compose Codex transport/grants, enable Recall, merge, or claim first-cycle GO.
 
 Machine-readable flags: `GET /api/mainai/founder-ops/snapshot` (`first_cycle_go: false`).
+
+## P1 remediations (this successor)
+
+1. FO-6: `WorktreePushRejected` maps to typed `PushRejectedError`. Stored evidence
+   suppresses paid replan. Worker crashes finalize `task_execution` instead of leaving
+   the task silently running.
+2. D1: `independently_verified` requires a durable independent exact-SHA PASS receipt
+   (`examiner ≠ builder`). Checkpoint CI/tests and builder `verification_passed` events
+   stay `completed`.
+3. D2/D3: Agent dispatch takes `FOR UPDATE` and moves to `dispatched` before the paid
+   call. Delegation uses `pg_advisory_xact_lock` plus a task row lock.
+4. D4/D5: Snapshot counts do not double-count a task and its job. STOP/readiness
+   unknown fail closed in HTTP and the dashboard.
+5. Communication uses the live snapshot. Recall disagreement is Recall-specific.
+   Assignment is never treated as execution.
+6. Same-origin proxy rejects encoded traversal and strips client forwarding headers.
+7. Safe mode writes code-agent proposals to an isolated workspace unless
+   `mainai_allow_live_checkout_writes` is Founder-authorized.
+8. Founder Authority on the existing snapshot: transparent restrictions, Founder-approved
+   sensitive settings, independent enforcement, truthful operational status.
 
 ## What this workstream closed
 

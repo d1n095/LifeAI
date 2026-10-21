@@ -79,3 +79,13 @@ def test_github_write_claim_is_rejected_when_disabled():
     )
     assert "GitHub-skrivning" in text
     assert text.startswith("Nej.")
+
+
+def test_recall_claim_uses_recall_notice_not_github_write():
+    text = apply_communication_policy(
+        "Recall är avstängd.",
+        founder_message="Recall är monterad.",
+        evidence={"recall_http_mounted": False, "first_cycle_go": False},
+    )
+    assert "Personal Recall" in text
+    assert "GitHub-skrivning" not in text

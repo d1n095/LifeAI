@@ -29,9 +29,11 @@ what "close the stub gap" means in V0.1: the capability is real and independentl
 (tests/backend/test_github_client.py, tests/backend/test_mainai_execution_executor.py), not
 that it defaults to pushing to a live repo."""
 
+import json
 import logging
 import subprocess
 import sys
+import tempfile
 import unicodedata
 import uuid
 from datetime import datetime, timedelta
@@ -106,6 +108,7 @@ from app.mainai_execution.envelope_scope import (
 from app.mainai_execution.verification_feedback import latest_verification_failure_text
 from app.mainai_execution.worktree import (
     WorktreeError,
+    WorktreePushRejected,
     WorktreeTimeoutError,
     commit_worktree_changes,
     create_task_worktree,
@@ -171,6 +174,11 @@ def _check_cancel_requested(db: Session, job_id: uuid.UUID, *, task: MainAITask 
             raise TaskCancelledCooperatively()
 
 
+def _live_server_checkout() -> Path:
+    """The checkout this backend process is running from. Never infer a fixture path is live."""
+    return Path(__file__).resolve().parents[3]
+
+
 def _repo_root() -> Path:
     """This file lives at <repo>/backend/app/mainai_execution/execution_job.py -- three
     parents up is the repo root, the same directory GitHub paths in a task's
@@ -180,6 +188,33 @@ def _repo_root() -> Path:
 
 def _backend_root() -> Path:
     return _repo_root() / "backend"
+
+
+def _ensure_isolated_proposal_workspace(task: MainAITask, *, source: Path) -> Path:
+    dest = Path(tempfile.gettempdir()) / "mainai-proposal-workspaces" / str(task.id)
+    dest.mkdir(parents=True, exist_ok=True)
+    marker = dest / ".mainai_isolated_workspace.json"
+    if not marker.exists():
+        marker.write_text(
+            json.dumps(
+                {
+                    "task_id": str(task.id),
+                    "source": str(source),
+                    "authorized_live_checkout": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+    return dest.resolve()
+
+
+def _proposal_write_root(task: MainAITask) -> Path:
+    """Write proposals to an isolated workspace unless the Founder authorized live checkout."""
+    settings = get_settings()
+    root = _repo_root().resolve()
+    if root == _live_server_checkout() and not bool(getattr(settings, "mainai_allow_live_checkout_writes", False)):
+        return _ensure_isolated_proposal_workspace(task, source=root)
+    return root
 
 
 class TaskExecutionError(Exception):
@@ -346,6 +381,8 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
     behavior (test_run_task_execution_job_repo_edit_with_an_absolute_ai_proposed_path_..., et
     al.) keep exercising the identical code, unchanged."""
     repo_root = _repo_root().resolve()
+    write_root = _proposal_write_root(task)
+    live_checkout_mutated = write_root == _live_server_checkout()
     envelope = _envelope_for_path_a_task(db, task)
     failure_context = latest_verification_failure_text(db, task.id)
     declared = _explicit_edit_targets(db, task)
@@ -375,17 +412,17 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
         task_id=task.id,
     )
     parsed = _parse_code_agent_response(result.content)
-    _assert_repo_edit_writes_allowed(repo_root, parsed["files"], prompt, envelope=envelope)
+    _assert_repo_edit_writes_allowed(write_root, parsed["files"], prompt, envelope=envelope)
     previous_contents: dict[str, str | None] = {}
     for file in parsed["files"]:
         # Defense in depth beyond _validate_repo_edit_file_path()'s absolute/'..' rejection --
         # resolves symlinks too, so a pre-existing symlink inside the repo tree pointing outside
         # it (a separate, lower-likelihood attack surface -- would require a malicious symlink
         # already merged into the repo, not just a malicious AI response) still can't be used to
-        # escape repo_root via a syntactically clean relative path.
-        abs_path = (repo_root / file["path"]).resolve()
-        if abs_path != repo_root and repo_root not in abs_path.parents:
-            raise TaskExecutionError(f"Refusing to write outside the repo root: {file['path']!r} resolved to {abs_path}.")
+        # escape write_root via a syntactically clean relative path.
+        abs_path = (write_root / file["path"]).resolve()
+        if abs_path != write_root and write_root not in abs_path.parents:
+            raise TaskExecutionError(f"Refusing to write outside the proposal workspace: {file['path']!r} resolved to {abs_path}.")
         previous_contents[file["path"]] = abs_path.read_text() if abs_path.exists() else None
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         abs_path.write_text(file["content"])
@@ -400,6 +437,9 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
         "previous_contents": previous_contents,
         "provider": result.provider,
         "model": result.model,
+        "workspace_root": str(write_root),
+        "live_checkout_mutated": live_checkout_mutated,
+        "isolated_workspace": write_root != _live_server_checkout(),
     }
 
 
@@ -1040,7 +1080,7 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
         # is still `running`, correctly reclaimable and resumable from its existing
         # checkpoints); a crash after it has nothing left to lose.
         boundary = exc if isinstance(exc, ExternalBoundaryError) else None
-        if boundary is None and isinstance(exc, WorktreeTimeoutError):
+        if boundary is None and isinstance(exc, (WorktreeTimeoutError, WorktreePushRejected)):
             boundary = map_publication_boundary_error(exc)
         evidence = {"error": type(exc).__name__}
         if boundary is not None:

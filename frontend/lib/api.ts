@@ -612,6 +612,15 @@ export type FounderOpsSnapshot = {
   evidence_basis: string;
   fabricated_progress: boolean;
   first_cycle_go: boolean;
+  authority?: {
+    policy_transparent: boolean;
+    sensitive_changes_require_founder_approval: boolean;
+    independent_security_enforcement: boolean;
+    operational_status_source: string;
+    first_cycle_go: boolean;
+    live_checkout_writes_authorized: boolean;
+    restrictions: { code: string; explain: string }[];
+  };
   health: {
     status: string;
     worker: string;

@@ -152,15 +152,18 @@ export default function DashboardPage() {
   );
 }
 
-function statusLine(snapshot: FounderOpsSnapshot | null, error: string | null, loaded: boolean): string {
+export function statusLine(snapshot: FounderOpsSnapshot | null, error: string | null, loaded: boolean): string {
   if (!loaded) return "Hämtar systemstatus…";
   if (error && !snapshot) return "Backend otillgänglig — ingen driftsstatus påstås.";
   if (error) return "Backend delvis otillgänglig — ingen samlad driftsstatus påstås.";
   if (!snapshot) return "Founder-status inte inläst.";
+  const backendReachable = snapshot.health.backend_reachable && snapshot.health.status === "ok";
+  const stopUnknown = Boolean(snapshot.stop.observability_failed);
+  const readinessUnknown = Boolean(snapshot.startup_readiness.unknown_fail_closed);
   const parts = [
-    snapshot.health.backend_reachable ? "Backend nåbar" : "Backend otillgänglig",
-    `beredskap ${snapshot.startup_readiness.level}`,
-    snapshot.stop.blocked ? "STOP blockerar" : "STOP inaktiv",
+    backendReachable ? "Backend nåbar" : "Backend otillgänglig",
+    readinessUnknown ? "beredskap okänd (fail-closed)" : `beredskap ${snapshot.startup_readiness.level}`,
+    stopUnknown ? "STOP-status okänd (fail-closed)" : snapshot.stop.blocked ? "STOP blockerar" : "STOP inaktiv",
     snapshot.safe_launch.privileged_remote_effects_enabled ? "fjärrskrivning på" : "fjärrskrivning av",
     snapshot.safe_launch.recall_http_mounted ? "Recall monterad" : "Recall av",
   ];

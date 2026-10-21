@@ -51,4 +51,27 @@ test.describe("same-origin proxy", () => {
     await page.waitForURL(/\/login/, { timeout: 5000 });
     expect(page.url()).toContain("/login");
   });
+
+  test("encoded path traversal is rejected by the same-origin proxy", async ({ request }) => {
+    const encoded = await request.get(`${PROXY_FRONTEND_URL}/api/%2e%2e/secret`);
+    expect([400, 404]).toContain(encoded.status());
+    if (encoded.status() === 400) {
+      const body = await encoded.json();
+      expect(body.proxy_error).toBeTruthy();
+    }
+    const dotted = await request.get(`${PROXY_FRONTEND_URL}/api/../secret`);
+    expect([400, 404]).toContain(dotted.status());
+  });
+
+  test("client X-Forwarded-For is not a rate-limit identity", async ({ request }) => {
+    const statuses: number[] = [];
+    for (let i = 0; i < 12; i++) {
+      const res = await request.post(`${PROXY_FRONTEND_URL}/api/auth/login`, {
+        data: { email: "brute-force-target@example.com", password: "wrong-guess" },
+        headers: { "X-Forwarded-For": `203.0.113.${i + 1}` },
+      });
+      statuses.push(res.status());
+    }
+    expect(statuses).toContain(429);
+  });
 });

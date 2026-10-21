@@ -17,6 +17,7 @@ from app.mainai_founder_ops.status import (
     classify_mainai_job,
     classify_mainai_task,
     classify_workforce_assignment,
+    is_independent_exact_sha_receipt,
 )
 from app.mainai_founder_ops.workflow import (
     build_next_actions,
@@ -34,6 +35,7 @@ from app.models.mainai_execution import MainAICheckpoint, MainAIGoal, MainAIGoal
 from app.models.mainai_job import MainAIJob
 from app.models.provider_spend import ProviderSpendAuthorization, ProviderSpendAuthorizationStatus
 from app.models.usage import UsageLog
+from app.models.mainai_verification import MainAIVerificationRecord
 from app.models.work_candidate import WorkCandidate
 from app.models.workforce import WorkforceAgentProfile, WorkforceAssignment, WorkforceDelegationRequest
 from app.workforce.kill_switch import query_stop_status
@@ -163,6 +165,103 @@ def _task_events(db: Session, task_id: uuid.UUID) -> list[MainAITaskEvent]:
             .order_by(MainAITaskEvent.created_at.asc())
         ).scalars()
     )
+
+
+def _independent_receipts_by_task(
+    db: Session, tasks: list[MainAITask]
+) -> dict[uuid.UUID, dict[str, Any]]:
+    """Durable independent PASS receipts bound to these tasks. Builder self-certs never match."""
+    if not tasks:
+        return {}
+    rows = list(
+        db.execute(
+            select(MainAIVerificationRecord).where(
+                MainAIVerificationRecord.review_result == "PASS",
+                MainAIVerificationRecord.examiner_identity != MainAIVerificationRecord.builder_identity,
+            )
+        ).scalars()
+    )
+    found: dict[uuid.UUID, dict[str, Any]] = {}
+    for row in rows:
+        scope = row.verification_scope if isinstance(row.verification_scope, dict) else {}
+        keys = {
+            row.component_id,
+            row.candidate_id,
+            str(scope.get("task_id") or ""),
+            f"mainai_task:{scope.get('task_id')}" if scope.get("task_id") else "",
+        }
+        match = next((task for task in tasks if str(task.id) in keys or f"mainai_task:{task.id}" in keys), None)
+        if match is None:
+            continue
+        receipt = {
+            "candidate_sha": row.candidate_sha,
+            "builder_identity": row.builder_identity,
+            "examiner_identity": row.examiner_identity,
+            "review_result": row.review_result,
+            "verification_id": str(row.id),
+        }
+        if is_independent_exact_sha_receipt(receipt):
+            found[match.id] = receipt
+    return found
+
+
+def _founder_authority(*, recall_http_mounted: bool) -> dict[str, Any]:
+    """Explainable restrictions from existing settings — not a new authority subsystem."""
+    settings = get_settings()
+    restrictions: list[dict[str, str]] = []
+    if not settings.github_write_enabled:
+        restrictions.append(
+            {
+                "code": "github_write_disabled",
+                "explain": "GitHub-skrivning är avstängd tills grundaren godkänner den här profilen.",
+            }
+        )
+    if not settings.github_auto_merge_enabled:
+        restrictions.append(
+            {
+                "code": "auto_merge_disabled",
+                "explain": "Automatisk merge är avstängd. Merge kräver separat Founder-beslut.",
+            }
+        )
+    if not settings.mainai_activation_mode:
+        restrictions.append(
+            {
+                "code": "activation_mode_off",
+                "explain": "Aktiveringsläge är av. First-cycle GO förblir false.",
+            }
+        )
+    if not settings.mainai_legacy_prepare_pr_writes_enabled:
+        restrictions.append(
+            {
+                "code": "legacy_prepare_pr_writes_disabled",
+                "explain": "Legacy Contents-API PR-skrivning är avstängd.",
+            }
+        )
+    if not getattr(settings, "mainai_allow_live_checkout_writes", False):
+        restrictions.append(
+            {
+                "code": "live_checkout_writes_disabled",
+                "explain": "Kodagenten får inte ändra den körande serverns checkout utan explicit Founder-auktorisation.",
+            }
+        )
+    if not recall_http_mounted:
+        restrictions.append(
+            {
+                "code": "recall_http_unmounted",
+                "explain": "Personal Recall HTTP är inte monterad och inte aktiverad.",
+            }
+        )
+    return {
+        "policy_transparent": True,
+        "sensitive_changes_require_founder_approval": True,
+        "independent_security_enforcement": True,
+        "operational_status_source": "durable_rows_only",
+        "first_cycle_go": False,
+        "live_checkout_writes_authorized": bool(getattr(settings, "mainai_allow_live_checkout_writes", False)),
+        "github_write_enabled": bool(settings.github_write_enabled),
+        "recall_http_mounted": bool(recall_http_mounted),
+        "restrictions": restrictions,
+    }
 
 
 def _jobs_by_id(db: Session, job_ids: list[uuid.UUID]) -> dict[uuid.UUID, MainAIJob]:
@@ -306,6 +405,8 @@ def build_founder_ops_snapshot(
     job_map = _jobs_by_id(db, [t.mainai_job_id for t in tasks if t.mainai_job_id])
     events_by_task = {task.id: _task_events(db, task.id) for task in tasks}
     tasks_by_id = {task.id: task for task in tasks}
+    receipts = _independent_receipts_by_task(db, tasks)
+    linked_job_ids = {task.mainai_job_id for task in tasks if task.mainai_job_id}
 
     work_items: list[dict[str, Any]] = []
     for task in tasks:
@@ -317,9 +418,11 @@ def build_founder_ops_snapshot(
                 events=events_by_task[task.id],
                 checkpoint_test_status=checkpoint.test_status if checkpoint else None,
                 checkpoint_ci_status=checkpoint.ci_status if checkpoint else None,
+                independent_receipt=receipts.get(task.id),
             )
         )
-    work_items.extend(classify_mainai_job(job) for job in jobs)
+    # D5: a task and its leased job are the same work — do not count both.
+    work_items.extend(classify_mainai_job(job) for job in jobs if job.id not in linked_job_ids)
     work_items.extend(classify_workforce_assignment(a) for a in assignments)
     work_items.extend(classify_agent_task(t) for t in agent_tasks)
 
@@ -330,10 +433,24 @@ def build_founder_ops_snapshot(
     dependencies = dependency_records(db, owner_id=owner_id, tasks_by_id=tasks_by_id)
 
     blockers: list[dict[str, Any]] = []
+    seen_blockers: set[tuple[Any, ...]] = set()
+
+    def _add_blocker(blocker: dict[str, Any]) -> None:
+        key = (
+            blocker.get("kind"),
+            blocker.get("task_id") or blocker.get("id") or blocker.get("goal_id"),
+            tuple(blocker.get("task_ids") or ()),
+            blocker.get("detail") if blocker.get("kind") == "task_blocker" else None,
+        )
+        if key in seen_blockers:
+            return
+        seen_blockers.add(key)
+        blockers.append(blocker)
+
     if stop.get("blocked"):
-        blockers.append({"kind": "stop", "code": stop.get("code"), "detail": stop})
+        _add_blocker({"kind": "stop", "code": stop.get("code"), "detail": stop})
     for cycle in cycles:
-        blockers.append(
+        _add_blocker(
             {
                 "kind": "circular_dependency",
                 "task_ids": cycle,
@@ -342,7 +459,7 @@ def build_founder_ops_snapshot(
         )
     for item in work_items:
         if item.get("blocker_reason"):
-            blockers.append(
+            _add_blocker(
                 {
                     "kind": "task_blocker",
                     "task_id": item.get("task_id"),
@@ -350,7 +467,7 @@ def build_founder_ops_snapshot(
                 }
             )
         if item.get("founder_status") == "failed":
-            blockers.append(
+            _add_blocker(
                 {
                     "kind": "failed_work",
                     "source": item.get("source"),
@@ -360,7 +477,7 @@ def build_founder_ops_snapshot(
                 }
             )
         if item.get("task_id") in cyclic_ids:
-            blockers.append(
+            _add_blocker(
                 {
                     "kind": "task_in_cycle",
                     "task_id": item.get("task_id"),
@@ -369,7 +486,7 @@ def build_founder_ops_snapshot(
             )
     for goal in goals:
         if goal.status == MainAIGoalStatus.blocked:
-            blockers.append(
+            _add_blocker(
                 {
                     "kind": "goal_blocked",
                     "goal_id": str(goal.id),
@@ -483,6 +600,7 @@ def build_founder_ops_snapshot(
         "review_results": review_results,
         "first_cycle_go": False,
         "first_cycle": first_cycle,
+        "authority": _founder_authority(recall_http_mounted=recall_http_mounted),
         "invariant": "NEVER_COLLAPSE_TO_ONE_BOOLEAN",
         "communication_policy": "factual_accuracy_over_agreement",
     }
