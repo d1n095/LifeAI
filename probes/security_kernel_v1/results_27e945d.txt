@@ -1,0 +1,40 @@
+-> indexed, or failed at any step) can be modeled and surfaced without losing the received
+Also adds `next_attempt_at` (worker backoff for `failed` tasks — see this migration's second
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+FA4|{'execution_authorization_envelopes': 'allowed(INSERT privilege, no guard trigger)', 'provider_spend_authorizations': 'allowed(INSERT privilege, no guard trigger)', 'mainai_verification_records': 'guarded(insert trigger present)'}
+FFA7|{'authorized_paths': 'allowed(rows=1)', 'authorized_capabilities': 'allowed(rows=1)', 'authorized_risk': 'allowed(rows=1)'}
+FFA8|{'max_cost_usd': 'allowed(rows=1)', 'max_requests': 'allowed(rows=1)', 'allowed_providers': 'allowed(rows=1)'}
+FFA5|allowed: forged approval_granted event satisfies the approval gate
+FFA6|{'approval_required_false': 'allowed(rows=1)', 'goal_approval_policy_change': 'allowed(rows=1)'}
+FFA9|direct_update=allowed(rows=1) clear_api=allowed: fabricated founder_ack string cleared STOP stop_active_after_rollback=True
+FFA10|{'deactivate': 'allowed(rows=1)', 'invalidate_sessions': 'allowed(rows=1)', 'replace_password': 'allowed(rows=1)', 'self_promote_role': 'allowed(rows=1)'}
+FFA11|codes=[403, 403]
+.FA12|{'update': 'allowed(rows=1)', 'delete': 'allowed(rows=1)'}
+FFA13|denied
+.FA3|reauth_routes=[] step_up_aware_modules=[]
+FFA2|policy_write_routes=[]
+FFA1|base_codes=['github_write_disabled', 'auto_merge_disabled', 'activation_mode_off', 'legacy_prepare_pr_writes_disabled', 'live_checkout_writes_disabled', 'recall_http_unmounted'] loose_codes=[] unconditional_claims=['policy_transparent', 'sensitive_changes_require_founder_approval', 'independent
+FFA1b|restriction_and_blocker_codes=['github_write_disabled', 'auto_merge_disabled', 'activation_mode_off', 'legacy_prepare_pr_writes_disabled', 'live_checkout_writes_disabled', 'recall_http_unmounted', 'stop']
+.FA16|{'policy_denial:approval': 'ApprovalRequiredError', 'policy_denial:envelope': 'PathAEnvelopeError', 'stop': 'KillSwitchError', 'unavailable/technical:provider': 'ProviderError', 'external': 'ExternalBoundaryError'} security_incident=None
+FFA14|spend_revoke_route=True envelope_revoke_route=False
+FFA15|audit_rows_added=0 recent=['login_success']
+PASSED test_fa_kernel.py::test_FA11_role_self_promotion_grants_nothing
+PASSED test_fa_kernel.py::test_FA13_approval_is_not_replayable_across_tasks
+PASSED test_fa_kernel.py::test_FA1b_active_stop_is_explained_as_the_enforcing_rule
+FAILED test_fa_kernel.py::test_FA4_runtime_cannot_self_grant_authority_rows
+FAILED test_fa_kernel.py::test_FA7_runtime_cannot_widen_an_authorized_envelope
+FAILED test_fa_kernel.py::test_FA8_runtime_cannot_raise_a_spend_ceiling - Ass...
+FAILED test_fa_kernel.py::test_FA5_runtime_cannot_forge_a_founder_approval - ...
+FAILED test_fa_kernel.py::test_FA6_runtime_cannot_silently_drop_an_approval_requirement
+FAILED test_fa_kernel.py::test_FA9_stop_cannot_be_cleared_without_an_authenticated_founder
+FAILED test_fa_kernel.py::test_FA10_runtime_cannot_lock_out_or_impersonate_the_founder
+FAILED test_fa_kernel.py::test_FA12_audit_trail_is_append_only_for_the_runtime
+FAILED test_fa_kernel.py::test_FA3_sensitive_founder_changes_require_step_up
+FAILED test_fa_kernel.py::test_FA2_founder_can_inspect_and_modify_permissions_and_ai_behavior
+FAILED test_fa_kernel.py::test_FA1_restriction_explanations_are_derived_not_asserted
+FAILED test_fa_kernel.py::test_FA16_denial_classes_are_distinct_and_machine_readable
+FAILED test_fa_kernel.py::test_FA14_founder_can_revoke_granted_authority - Fa...
+FAILED test_fa_kernel.py::test_FA15_privileged_changes_leave_an_audit_receipt
+FAILED test_fa_privs.py::test_FA_PRIV_runtime_role_cannot_write_authority_identity_or_audit
+15 failed, 3 passed in 25.84s
+target worktree unchanged
