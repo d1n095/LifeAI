@@ -119,7 +119,6 @@ export default function FounderOpsPage() {
               <div>Fynd: {snapshot.security.finding_count}</div>
               <div>Bekräftade incidenter: {snapshot.security.confirmed_incident_count}</div>
               <Flag ok={!snapshot.security.blocks_first_cycle} label="Blockerar inte first-cycle" />
-              <Flag ok={!snapshot.security.first_cycle_go} label="Första cykelns GO = false" />
               <Link href="/admin/security" className="inline-block text-sm underline">
                 Öppna säkerhetsöversikt
               </Link>

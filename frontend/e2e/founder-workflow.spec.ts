@@ -18,7 +18,7 @@ test.describe("Founder workflow in safe local mode", () => {
 
     await page.getByRole("link", { name: "Founder-status" }).first().click();
     await expect(page.getByRole("heading", { name: "Founder-status" })).toBeVisible({ timeout: 8000 });
-    await expect(page.getByText("Första cykelns GO = false")).toBeVisible();
+    await expect(page.getByText("Första cykelns GO = false").first()).toBeVisible();
     await expect(page.getByText("Recall HTTP inte monterad")).toBeVisible();
     await expect(page.getByText("GitHub-skrivning av")).toBeVisible();
     await expect(page.getByTestId("work-status-counts")).toContainText("Tilldelad");

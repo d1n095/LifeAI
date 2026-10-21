@@ -149,7 +149,7 @@ test.describe("shell pages: empty states and mutation error handling", () => {
     await page.goto(`${FRONTEND_URL}/admin/founder-ops`, { waitUntil: "networkidle" });
     await expect(page.getByRole("heading", { name: "Founder-status" })).toBeVisible();
     await expect(page.getByTestId("readiness-level")).toBeVisible({ timeout: 8000 });
-    await expect(page.getByText("Första cykelns GO = false")).toBeVisible();
+    await expect(page.getByText("Första cykelns GO = false").first()).toBeVisible();
     await expect(page.getByText("Recall HTTP inte monterad")).toBeVisible();
     await expect(page.getByTestId("founder-authority")).toBeVisible();
     await expect(page.getByText("Policy är transparent")).toBeVisible();
