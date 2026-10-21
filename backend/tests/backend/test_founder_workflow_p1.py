@@ -10,6 +10,7 @@ import asyncio
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +22,7 @@ from app.bootstrap import bootstrap_founder_user
 from app.config import get_settings
 from app.db import SessionLocal
 from app.founder import FOUNDER_USER_ID
+from app.jobs.mainai_job_lease import claim_next_mainai_job
 from app.mainai_execution import executor
 from app.mainai_execution.execution_job import (
     _live_server_checkout,
@@ -42,7 +44,7 @@ from app.mainai_founder_ops.status import classify_mainai_task, is_independent_e
 from app.mainai_verification_registry.service import record_verification_attestation
 from app.models.agent_task import AgentTaskStatus
 from app.models.mainai_execution import MainAITask, MainAITaskEventType, MainAITaskStatus
-from app.models.mainai_job import MainAIJobStatus
+from app.models.mainai_job import MainAIJob, MainAIJobStatus
 from app.models.user import User
 from app.providers.base import ChatResult
 from app.providers.openai_provider import OpenAIProvider
@@ -94,7 +96,13 @@ def _goal_and_task(db, owner_id, *, task_type="repo_edit", description="edit one
         db,
         goal=goal,
         rationale="one",
-        tasks=[PlannedTaskSpec(description=description, task_type=task_type)],
+        tasks=[
+            PlannedTaskSpec(
+                description=description,
+                task_type=task_type,
+                target_files=["docs/p1.md"] if task_type == "repo_edit" else [],
+            )
+        ],
         created_by="test",
     )
     task = db.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
@@ -123,7 +131,7 @@ def test_stored_push_rejection_evidence_suppresses_paid_replan(db_session, owner
     assert evidence.get("origin") == "push"
     assert evidence.get("first_cycle_state") == STATE_EXTERNAL_PUSH_REJECTED
     assert should_suppress_paid_replan(task, evidence=evidence) is True
-    assert find_replan_trigger(db_session, goal) is None
+    assert find_replan_trigger(db_session, goal=goal) is None
 
 
 @pytest.mark.asyncio
@@ -145,16 +153,19 @@ async def test_governed_goal_recovery_does_not_replan_after_push_reject(db_sessi
     with pytest.raises(ReplanSuppressedError):
         await trigger_replan(db_session, goal=goal, failed_task=task, dispatched_by="test")
     assert paid == []
-    assert find_replan_trigger(db_session, goal) is None
+    assert find_replan_trigger(db_session, goal=goal) is None
 
 
 @pytest.mark.asyncio
-async def test_worker_crash_finalizes_running_task_execution(db_session, owner_id, monkeypatch):
+async def test_worker_crash_finalizes_running_task_execution(db_session, superuser_db, owner_id, monkeypatch):
     goal, task = _goal_and_task(db_session, owner_id, task_type="read_only_audit")
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
     db_session.refresh(task)
     assert task.status == MainAITaskStatus.running
+    job_id, claimed_owner, generation = claim_next_mainai_job(superuser_db, "worker-p1", 120)
+    assert job_id == job.id
+    assert claimed_owner == owner_id
 
     async def _boom(*args, **kwargs):
         raise RuntimeError("ambiguous push crash")
@@ -162,16 +173,19 @@ async def test_worker_crash_finalizes_running_task_execution(db_session, owner_i
     monkeypatch.setattr("app.worker.run_task_execution_job", _boom)
     await process_claimed_mainai_job(
         db_session,
-        job.id,
+        job_id,
         owner_id,
         worker_id="worker-p1",
-        lease_generation=job.lease_generation or 1,
+        lease_generation=generation,
         lease_seconds=120,
     )
-    db_session.refresh(task)
-    db_session.refresh(job)
-    assert task.status == MainAITaskStatus.failed
-    assert job.status == MainAIJobStatus.failed
+    db_session.expire_all()
+    superuser_db.expire_all()
+    _set_rls(db_session, owner_id)
+    task = db_session.get(MainAITask, task.id)
+    job = superuser_db.get(MainAIJob, job_id)
+    assert task is not None and task.status == MainAITaskStatus.failed
+    assert job is not None and job.status == MainAIJobStatus.failed
     evidence = latest_failure_evidence(db_session, task)
     assert evidence is not None
     assert evidence.get("error") == "unexpected_worker_crash"
@@ -200,11 +214,12 @@ def test_checkpoint_and_self_event_are_not_independent_verification():
     assert is_independent_exact_sha_receipt({"candidate_sha": "short", "builder_identity": "cursor", "examiner_identity": "claude", "review_result": "PASS"}) is False
 
 
-def test_independent_exact_sha_receipt_is_required(db_session):
+def test_independent_exact_sha_receipt_is_required(db_session, superuser_db):
     bootstrap_founder_user(db_session)
     _set_rls(db_session, FOUNDER_USER_ID)
-    goal, task = _goal_and_task(db_session, FOUNDER_USER_ID)
+    goal, task = _goal_and_task(db_session, FOUNDER_USER_ID, task_type="read_only_audit")
     task.status = MainAITaskStatus.completed
+    task.completed_at = datetime.utcnow()
     db_session.commit()
     snap = build_founder_ops_snapshot(db_session, owner_id=FOUNDER_USER_ID, health={"status": "ok", "worker": "unknown"})
     item = next(i for i in snap["work_items"] if i.get("task_id") == str(task.id))
@@ -212,7 +227,7 @@ def test_independent_exact_sha_receipt_is_required(db_session):
     assert item["independently_verified"] is False
 
     record_verification_attestation(
-        db_session,
+        superuser_db,
         component_id=f"mainai_task:{task.id}",
         candidate_sha=SHA,
         builder_identity="cursor-builder",
@@ -222,7 +237,7 @@ def test_independent_exact_sha_receipt_is_required(db_session):
         verification_scope={"task_id": str(task.id)},
         owner_id=FOUNDER_USER_ID,
     )
-    db_session.commit()
+    superuser_db.commit()
     snap = build_founder_ops_snapshot(db_session, owner_id=FOUNDER_USER_ID, health={"status": "ok", "worker": "unknown"})
     item = next(i for i in snap["work_items"] if i.get("task_id") == str(task.id))
     assert item["founder_status"] == "independently_verified"
@@ -237,10 +252,11 @@ def test_task_and_job_are_not_double_counted(db_session):
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
     snap = build_founder_ops_snapshot(db_session, owner_id=FOUNDER_USER_ID, health={"status": "ok", "worker": "unknown"})
-    running = [i for i in snap["work_items"] if i.get("founder_status") == "running"]
-    assert len(running) == 1
-    assert running[0]["source"] == "mainai_task"
-    assert snap["work_item_counts"].get("running") == 1
+    task_items = [i for i in snap["work_items"] if i.get("task_id") == str(task.id)]
+    job_items = [i for i in snap["work_items"] if i.get("job_id") == str(job.id)]
+    assert len(task_items) == 1
+    assert job_items == []
+    assert sum(snap["work_item_counts"].values()) == len(snap["work_items"])
     failed_blockers = [b for b in snap["blockers"] if b.get("kind") == "failed_work" and b.get("id") == str(job.id)]
     assert failed_blockers == []
 
@@ -310,6 +326,7 @@ async def test_concurrent_dispatch_makes_one_paid_call(db_session, monkeypatch):
     assert len(successes) == 1
     assert len(failures) == 1
     assert len(paid) == 1
+    db_session.expire_all()
     refreshed = get_task(db_session, task_id)
     assert refreshed.status in {AgentTaskStatus.result_recorded, AgentTaskStatus.dispatched}
 
@@ -469,10 +486,13 @@ async def test_propose_repo_edit_writes_isolated_workspace(db_session, owner_id,
     live_marker = live / marker_name
 
     async def _chat(*args, **kwargs):
-        return SimpleNamespace(
-            content='{"files": [{"path": "%s", "content": "unsafe"}], "commit_message": "x"}' % marker_name,
-            provider="openai",
-            model="test",
+        return (
+            SimpleNamespace(
+                content='{"files": [{"path": "%s", "content": "unsafe"}], "commit_message": "x"}' % marker_name,
+                provider="openai",
+                model="test",
+            ),
+            ["openai"],
         )
 
     monkeypatch.setattr("app.mainai_execution.execution_job.billed_execution_chat", _chat)
