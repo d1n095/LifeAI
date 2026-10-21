@@ -303,6 +303,10 @@ async def test_AR13c_safe_mode_verification_tests_the_proposal_it_reports(db_ses
     assert in_clone == PATHS or not any(e.event_type == MainAITaskEventType.verification_passed for e in ev), (
         "AR-13c verification_passed recorded although the verified tree does not contain the proposal")
     assert agent_calls <= 1, f"AR-13c safe-mode verification against the wrong tree caused {agent_calls} paid code-agent runs"
+    # Functional requirement (R6): a valid proposal must be verifiable in safe mode -- verification has to run on a tree
+    # that contains the proposal and record its outcome, instead of failing every safe-mode repo_edit by construction.
+    assert any(e.event_type == MainAITaskEventType.verification_passed for e in ev), (
+        f"AR-13c R6 a valid safe-mode proposal can never verify: verification ran on a tree without it ({[e.event_type.value for e in ev]})")
 
 
 def test_AR9f_failed_paid_dispatch_does_not_strand_task_as_running(monkeypatch, db_session):

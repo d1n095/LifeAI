@@ -194,3 +194,60 @@ def test_AR18b_receipt_must_bind_the_tasks_actual_commit(superuser_db):
     superuser_db.rollback()
     print(f"AR18b|produced={produced[:7]} receipt_sha=ddddddd label={label}")
     assert label != "independently_verified", "AR-18b a PASS for a different SHA verifies the task"
+
+
+def _worktree_with_commit(superuser_db, owner, task, sha):
+    from datetime import datetime
+
+    from app.models.mainai_job import MainAIJob, MainAIJobStatus
+    from app.models.mainai_recovery import MainAITaskWorktree, MainAITaskWorktreeStatus
+
+    now = datetime.utcnow()
+    job = MainAIJob(owner_id=owner.id, job_type="task_execution", status=MainAIJobStatus.completed, started_at=now, completed_at=now,
+                    idempotency_key=f"j:{uuid.uuid4()}", created_by="test")
+    superuser_db.add(job)
+    superuser_db.flush()
+    superuser_db.add(MainAITaskWorktree(task_id=task.id, owner_id=owner.id, job_id=job.id, lease_generation=1, executor_id="t", repo="r/r",
+                                        base_sha="c" * 40, branch=f"claude/mainai-task-{task.id}", path="/nonexistent", marker_token="m",
+                                        current_commit=sha, status=MainAITaskWorktreeStatus.active))
+    superuser_db.flush()
+
+
+def test_AR18c_superseding_fail_record_revokes_verification(superuser_db):
+    """A newer FAIL that supersedes the PASS (supersedes_verification_id) must revoke 'independently verified'."""
+    reg = pytest.importorskip("app.mainai_verification_registry.service")
+    from app.mainai_founder_ops import status as st
+
+    if not hasattr(st, "is_independent_exact_sha_receipt"):
+        pytest.skip("candidate has no receipt-based verification (pre-#294)")
+    owner, task = _receipt_setup(superuser_db)
+    sha = "e" * 40
+    _worktree_with_commit(superuser_db, owner, task, sha)
+    common = dict(component_id=f"mainai_task:{task.id}", candidate_sha=sha, builder_identity="cursor", examiner_identity="claude",
+                  owner_id=owner.id, verification_scope={"task_id": str(task.id)}, evidence_summary="examiner run")
+    passed = reg.record_verification_attestation(superuser_db, review_result="PASS", **common)
+    reg.record_verification_attestation(superuser_db, review_result="FAIL", supersedes_verification_id=passed.id, **common)
+    label = _label(superuser_db, owner, task)
+    superuser_db.rollback()
+    print(f"AR18c|after_superseding_fail={label}")
+    assert label != "independently_verified", "AR-18c a PASS superseded by a FAIL still shows 'Självständigt verifierad'"
+
+
+def test_AR18d_positive_control_matching_independent_pass_verifies(superuser_db):
+    """Control: an independent PASS for the task's own produced commit MUST show independently_verified. Without this a
+    candidate could pass AR-18a..c by never showing verification at all."""
+    reg = pytest.importorskip("app.mainai_verification_registry.service")
+    from app.mainai_founder_ops import status as st
+
+    if not hasattr(st, "is_independent_exact_sha_receipt"):
+        pytest.skip("candidate has no receipt-based verification (pre-#294)")
+    owner, task = _receipt_setup(superuser_db)
+    sha = "f" * 40
+    _worktree_with_commit(superuser_db, owner, task, sha)
+    reg.record_verification_attestation(superuser_db, component_id=f"mainai_task:{task.id}", candidate_sha=sha, builder_identity="cursor",
+                                        examiner_identity="claude", review_result="PASS", owner_id=owner.id,
+                                        verification_scope={"task_id": str(task.id)}, evidence_summary="examiner run")
+    label = _label(superuser_db, owner, task)
+    superuser_db.rollback()
+    print(f"AR18d|matching_pass={label}")
+    assert label == "independently_verified", f"AR-18d control: a matching independent PASS is not shown as verified ({label})"

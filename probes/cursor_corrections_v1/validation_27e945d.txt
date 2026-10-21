@@ -1,0 +1,16 @@
+candidate 27e945db8ee414c813248bbeb9e7462b93903cee
+FAIL R1 (P1)  failing=['PX-10_distinct_clients_keep_distinct_limits', 'PX-11_forged_forwarding_headers_cannot_exhaust_another_clients_limit']
+PASS P-1      
+FAIL R2       failing=['test_AR18a_invalidated_pass_receipt_no_longer_verifies', 'test_AR18b_receipt_must_bind_the_tasks_actual_commit', 'test_AR18c_superseding_fail_record_revokes_verification']
+PASS D1       
+PASS D2       
+FAIL R3       failing=['test_AR9f_failed_paid_dispatch_does_not_strand_task_as_running']
+FAIL R4       failing=['test_FC_founder_cancel_then_crash_is_not_taken_over']
+FAIL R5       failing=['test_FO6b_bare_runtime_error_at_push_is_contained_and_founder_visible']
+FAIL R6       failing=[AR13c] (re-run after the R6 functional assertion was applied; see addendum)
+FAIL D4       failing=['UI-1', 'UI-2']
+FAIL D5       failing=['UI-3', 'test_AR17_blocked_readiness_is_counted_as_a_blocker']
+FAIL N1       failing=['test_AR14a_question_about_go_is_not_contradicted']
+PASS N2/N3    
+FAIL N4       failing=['test_AR15_requeued_task_is_not_acknowledged']
+CORRECTION GATE: FAIL (10 defect gate(s) open after R6 re-run)

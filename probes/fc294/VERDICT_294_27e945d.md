@@ -64,3 +64,17 @@ probes/proxy_v1/identity_collapse.sh ../wtcert-27e945d <built-frontend>   # R1 a
 - **The CI row of the GO/NO-GO matrix is now GO.** Every other NO-GO row is unchanged.
 
 **Verdict: RETURN_TO_BUILDER at `27e945db8ee414c813248bbeb9e7462b93903cee`.** The release blocker is R1 (P1).
+
+## Addendum (2026-10-21, after verdict) — strengthened gates on the same frozen SHA
+
+These are confirmed at `27e945d`. The verdict is unchanged.
+
+- **R1 is also exploitable as targeted lockout.** In PX-11, client A sprays while forging client B's address in `X-Forwarded-For`, `X-Real-IP` and `Forwarded`. Client B then gets **429**.
+  - #293 also fails PX-11, because it trusts the forged header (it passes PX-10).
+  - #294 fails both PX-10 and PX-11.
+  - A correct fix must pass **PX-9, PX-10 and PX-11 together**.
+- **R2 also covers supersession.** In AR-18c, a FAIL that supersedes the PASS (`supersedes_verification_id`) still shows "Självständigt verifierad".
+  - AR-18d is the positive control: an independent PASS for the task's own commit **does** verify. It passes.
+- **R6 is now gated functionally.** In AR-13c, a valid safe-mode proposal can never reach `verification_passed`, because verification runs on a tree without the proposal.
+- **Freeze confirmed by the builder.** `7f8cba8` (docs only) records "Frozen exam SHA: `27e945d…`".
+- **Consolidated gate.** `probes/cursor_corrections_v1/` (`MANIFEST.md`, `run.sh`). On `27e945d`, 10 defect gates are open: R1–R6, D4, D5, N1 and N4. P-1, D1, D2, N2 and N3 pass.
