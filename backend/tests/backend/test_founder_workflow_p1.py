@@ -30,6 +30,7 @@ from app.mainai_execution.execution_job import (
     _propose_repo_edit,
 )
 from app.mainai_execution.first_cycle_stop import (
+    STATE_EXTERNAL_BOUNDARY_FAILED,
     STATE_EXTERNAL_PUSH_REJECTED,
     classify_publication_failure,
     latest_failure_evidence,
@@ -49,7 +50,7 @@ from app.models.user import User
 from app.providers.base import ChatResult
 from app.providers.openai_provider import OpenAIProvider
 from app.request_context import current_user_id as current_user_id_var
-from app.worker import process_claimed_mainai_job
+from app.worker import Worker, process_claimed_mainai_job
 from app.workforce.broker import DelegationBrokerError, submit_delegation_request
 from app.workforce.registry import register_workforce_agent
 
@@ -189,6 +190,34 @@ async def test_worker_crash_finalizes_running_task_execution(db_session, superus
     evidence = latest_failure_evidence(db_session, task)
     assert evidence is not None
     assert evidence.get("error") == "unexpected_worker_crash"
+    assert evidence.get("origin") == "unknown"
+    assert evidence.get("first_cycle_state") == STATE_EXTERNAL_BOUNDARY_FAILED
+    assert task.next_retry_at is None
+    assert should_suppress_paid_replan(task, evidence=evidence) is True
+    assert find_replan_trigger(db_session, goal=goal) is None
+
+    paid: list[int] = []
+
+    async def _forbidden(*args, **kwargs):
+        paid.append(1)
+        raise AssertionError("paid replan after ambiguous worker crash")
+
+    monkeypatch.setattr("app.mainai_execution.replan.propose_plan_via_ai", _forbidden)
+    with pytest.raises(ReplanSuppressedError):
+        await trigger_replan(db_session, goal=goal, failed_task=task, dispatched_by="test")
+    assert paid == []
+
+    worker = Worker()
+    await worker._advance_mainai_execution_replan(db_session)
+    worker._advance_mainai_execution_retries(db_session)
+    await worker._advance_mainai_execution_auto_recovery(db_session)
+    db_session.expire_all()
+    _set_rls(db_session, owner_id)
+    task = db_session.get(MainAITask, task.id)
+    assert task is not None and task.status == MainAITaskStatus.failed
+    assert task.next_retry_at is None
+    assert paid == []
+    assert find_replan_trigger(db_session, goal=goal) is None
 
 
 def test_checkpoint_and_self_event_are_not_independent_verification():
