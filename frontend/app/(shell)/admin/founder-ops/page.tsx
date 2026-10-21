@@ -63,12 +63,26 @@ export default function FounderOpsPage() {
         <>
           <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <InfoCard title="Hälsa">
-              <div>Backend: {snapshot.health.backend_reachable ? "nåbar" : "otillgänglig"}</div>
+              <div>
+                Backend:{" "}
+                {snapshot.health.backend_reachable && snapshot.health.status === "ok" ? "nåbar" : "otillgänglig"}
+              </div>
               <div>Worker: {snapshot.health.worker}</div>
-              <div data-testid="readiness-level">Beredskap: {snapshot.startup_readiness.level}</div>
+              <div data-testid="readiness-level">
+                Beredskap:{" "}
+                {snapshot.startup_readiness.unknown_fail_closed
+                  ? "okänd (fail-closed)"
+                  : snapshot.startup_readiness.level}
+              </div>
             </InfoCard>
             <InfoCard title="STOP">
-              <div data-testid="stop-state">{snapshot.stop.blocked ? "Blockerad" : "Inte blockerad"}</div>
+              <div data-testid="stop-state">
+                {snapshot.stop.observability_failed
+                  ? "Okänd (fail-closed)"
+                  : snapshot.stop.blocked
+                    ? "Blockerad"
+                    : "Inte blockerad"}
+              </div>
               {snapshot.stop.code && <div className="text-amber-200">{snapshot.stop.code}</div>}
               {snapshot.stop.observability_failed && (
                 <div role="alert">STOP-status okänd — behandlas som blockerad.</div>
@@ -97,6 +111,27 @@ export default function FounderOpsPage() {
             <Flag ok={!snapshot.safe_launch.mainai_activation_mode} label="Aktiveringsläge av" />
             <Flag ok={!snapshot.first_cycle_go} label="Första cykelns GO = false" />
           </section>
+
+          {snapshot.authority && (
+            <section className="rounded-xl border border-border bg-panel p-4 space-y-2 text-sm" data-testid="founder-authority">
+              <div className="text-xs uppercase tracking-wide text-white/40">Founder-auktoritet</div>
+              <Flag ok={snapshot.authority.policy_transparent} label="Policy är transparent" />
+              <Flag
+                ok={snapshot.authority.sensitive_changes_require_founder_approval}
+                label="Känsliga inställningar kräver Founder-godkännande"
+              />
+              <Flag
+                ok={snapshot.authority.independent_security_enforcement}
+                label="Säkerhetshandhavande är oberoende av byggaren"
+              />
+              <Flag ok={!snapshot.authority.live_checkout_writes_authorized} label="Live-checkout-skrivning av" />
+              <ul className="text-white/60 space-y-1">
+                {snapshot.authority.restrictions.map((restriction) => (
+                  <li key={restriction.code}>{restriction.explain}</li>
+                ))}
+              </ul>
+            </section>
+          )}
 
           <section className="rounded-xl border border-border bg-panel p-4 space-y-2">
             <div className="text-xs uppercase tracking-wide text-white/40">Aktivera STOP</div>

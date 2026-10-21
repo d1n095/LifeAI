@@ -217,6 +217,9 @@ class Settings(BaseSettings):
     # whenever GITHUB_WRITE_ENABLED=true. Keep that route proposal-only until an explicit
     # Founder decision — Path A draft PRs are the write path that may be enabled later.
     mainai_legacy_prepare_pr_writes_enabled: bool = False
+    # Safe mode: code-agent proposal writes stay in an isolated workspace unless the
+    # Founder explicitly authorizes mutating the running server checkout.
+    mainai_allow_live_checkout_writes: bool = False
 
     @property
     def frontend_origin_list(self) -> list[str]:

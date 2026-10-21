@@ -30,6 +30,9 @@ _GO_DISAGREEMENT_SV = (
 _WRITE_DISAGREEMENT_SV = (
     "Nej. GitHub-skrivning och privilegierade fjärreffekter är avstängda i den här profilen."
 )
+_RECALL_DISAGREEMENT_SV = (
+    "Nej. Personal Recall HTTP är inte monterad och inte aktiverad i den här profilen."
+)
 _VERIFIED_DISAGREEMENT_SV = (
     "Nej. Självständig verifiering kräver hållbar evidens från någon annan än den som byggde arbetet."
 )
@@ -80,7 +83,7 @@ def contradiction_notices(*, founder_message: str | None, evidence: dict[str, An
     if _WRITE_CLAIM_RE.search(founder_message) and evidence.get("github_write_enabled") is not True:
         notices.append(_WRITE_DISAGREEMENT_SV)
     if _RECALL_CLAIM_RE.search(founder_message) and evidence.get("recall_http_mounted") is not True:
-        notices.append(_WRITE_DISAGREEMENT_SV)
+        notices.append(_RECALL_DISAGREEMENT_SV)
     if _VERIFIED_CLAIM_RE.search(founder_message) and not evidence.get("independently_verified"):
         notices.append(_VERIFIED_DISAGREEMENT_SV)
     return notices

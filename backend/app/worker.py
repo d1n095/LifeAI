@@ -232,6 +232,27 @@ async def process_claimed_mainai_job(
                 mark_failed(db, job, worker_id=worker_id, lease_generation=lease_generation, error_category=MainAIJobErrorCategory.unexpected)
             except JobLeaseLostError:
                 logger.warning("Worker %s: lease already lost for mainai_job %s -- could not record the failure.", worker_id, job_id)
+                return
+            # Ambiguous worker crashes must not leave task_execution silently `running`
+            # (FO-6). Recovery may reclaim a terminal job, but a stuck running task is
+            # treated as live work and can trigger another paid attempt.
+            if job.job_type == "task_execution":
+                task = task_for_job(db, job)
+                if task is not None and task.status == MainAITaskStatus.running:
+                    _finalize_task_outcome(
+                        db,
+                        task,
+                        passed=False,
+                        evidence={
+                            "error": "unexpected_worker_crash",
+                            "failure_class": "unexpected",
+                            "job_type": job.job_type,
+                            "mainai_job_id": str(job.id),
+                            "origin": "unknown",
+                            "first_cycle_state": "external_boundary_failed",
+                        },
+                    )
+                    db.commit()
 
 
 class Worker:

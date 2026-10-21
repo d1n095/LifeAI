@@ -154,6 +154,7 @@ CONFIG_MATRIX: dict[str, dict] = {
     "mainai_execution_require_provider_spend": {"required_in_production": False, "secret": False, "default": True, "validates": "none — Path A AI calls fail closed without a live provider_spend grant; default true so fallback/unbilled calls cannot bypass the Founder grant"},
     "mainai_execution_goal_spend_cap_usd": {"required_in_production": False, "secret": False, "default": 5.0, "validates": "none — additional Path A hard ceiling on a live provider_spend grant's max_cost_usd"},
     "mainai_legacy_prepare_pr_writes_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "none — gates the legacy non-draft /prepare-pr Contents-API write; off until an explicit Founder decision, even if GITHUB_WRITE_ENABLED is true"},
+    "mainai_allow_live_checkout_writes": {"required_in_production": False, "secret": False, "default": False, "validates": "none — Founder-approved live-checkout mutation; default off so code-agent writes stay in isolated workspaces"},
 }
 
 

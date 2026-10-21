@@ -167,7 +167,7 @@ def map_publication_boundary_error(exc: BaseException) -> ExternalBoundaryError:
     )
 
     if isinstance(exc, WorktreePushRejected):
-        return exc
+        return PushRejectedError(type_name)
     if isinstance(exc, ActivationBaseConfigurationError):
         return exc
     if isinstance(exc, GitHubClientError):

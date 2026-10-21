@@ -10,6 +10,7 @@ one assistant `MessageModel` row (enforced by migration 0016's partial unique in
 import logging
 import uuid
 from datetime import datetime
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -107,7 +108,38 @@ def _record_candidate_signal_if_worth_noticing(
         logger.warning("failed to record candidate learning signal for message %s (non-fatal)", user_message.id, exc_info=True)
 
 
-async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, user_message: MessageModel, user: User) -> ChatMessageOut:
+def _live_communication_evidence(db: Session, user: User, app: Any | None) -> dict:
+    """Evidence for Founder communication must come from the live snapshot, never hard-coded."""
+    from app.mainai_founder_ops.snapshot import build_founder_ops_snapshot, recall_http_mounted
+
+    evidence = {
+        "first_cycle_go": False,
+        "github_write_enabled": bool(get_settings().github_write_enabled),
+        "recall_http_mounted": False,
+        "independently_verified": False,
+    }
+    try:
+        mounted = bool(app is not None and recall_http_mounted(app))
+        evidence["recall_http_mounted"] = mounted
+        snap = build_founder_ops_snapshot(db, owner_id=user.id, recall_http_mounted=mounted)
+        evidence["github_write_enabled"] = bool((snap.get("safe_launch") or {}).get("github_write_enabled"))
+        evidence["independently_verified"] = any(
+            bool(item.get("independently_verified")) for item in snap.get("work_items") or []
+        )
+        evidence["first_cycle_go"] = False
+    except Exception:  # noqa: BLE001 — communication must fail closed, not invent status
+        pass
+    return evidence
+
+
+async def _attempt_assistant_reply(
+    db: Session,
+    *,
+    conversation: Conversation,
+    user_message: MessageModel,
+    user: User,
+    app: Any | None = None,
+) -> ChatMessageOut:
     """Generates the assistant's reply for `user_message` (already committed). Used by both
     the initial send and the retry endpoint — a retry runs this exact same path, not a
     parallel one, so its behavior can never drift from the first attempt's."""
@@ -290,12 +322,7 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
         result.content,
         founder_message=user_message.content,
         prior_assistant=prior_assistant,
-        evidence={
-            "first_cycle_go": False,
-            "github_write_enabled": bool(settings.github_write_enabled),
-            "recall_http_mounted": False,
-            "independently_verified": False,
-        },
+        evidence=_live_communication_evidence(db, user, app),
     )
     build_answer_response(safe_content)  # raises on a contract violation; never actually can for mode=answer/job_id=None, but every call site goes through this the same way
 
@@ -379,7 +406,9 @@ async def chat(
     db.commit()
     db.refresh(user_message)
 
-    return await _attempt_assistant_reply(db, conversation=conversation, user_message=user_message, user=user)
+    return await _attempt_assistant_reply(
+        db, conversation=conversation, user_message=user_message, user=user, app=request.app
+    )
 
 
 @router.post("/messages/{message_id}/retry", response_model=ChatMessageOut)
@@ -414,4 +443,6 @@ async def retry_assistant_reply(
             model=existing.model,
         )
 
-    return await _attempt_assistant_reply(db, conversation=conversation, user_message=user_message, user=user)
+    return await _attempt_assistant_reply(
+        db, conversation=conversation, user_message=user_message, user=user, app=request.app
+    )
