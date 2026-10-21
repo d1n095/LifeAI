@@ -1,0 +1,74 @@
+(node:33329) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+
+Running 3 tests using 1 worker
+
+(node:33331) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+  ✘  1 [chromium] › examiner-ui/founder_status.spec.ts:16:5 › UI-1 (D4) founder-ops never keeps 'Backend: nåbar' / 'Inte blockerad' after the snapshot becomes unreadable (15.5s)
+(node:33374) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+  ✘  2 [chromium] › examiner-ui/founder_status.spec.ts:28:5 › UI-2 (D4) dashboard health line does not stay 'Backend nåbar' after the backend is lost (20.5s)
+(node:33409) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+  -  3 [chromium] › examiner-ui/founder_status.spec.ts:37:5 › UI-3 (D5) readiness BLOCKED is never shown next to 'BLOCKERINGAR (0)'
+
+
+  1) [chromium] › examiner-ui/founder_status.spec.ts:16:5 › UI-1 (D4) founder-ops never keeps 'Backend: nåbar' / 'Inte blockerad' after the snapshot becomes unreadable 
+
+    Error: expect(locator).toHaveCount(expected) failed
+
+    Locator:  getByText('Backend: nåbar')
+    Expected: 0
+    Received: 1
+    Timeout:  5000ms
+
+    Call log:
+      - Expect "toHaveCount" with timeout 5000ms
+      - waiting for getByText('Backend: nåbar')
+        9 × locator resolved to 1 element
+          - unexpected value "1"
+
+
+      22 |   await page.waitForTimeout(7000); // > one 5 s poll
+      23 |   await expect(page.getByRole("alert").first()).toBeVisible();
+    > 24 |   await expect(page.getByText("Backend: nåbar")).toHaveCount(0);
+         |                                                  ^
+      25 |   await expect(page.getByText("Inte blockerad", { exact: true })).toHaveCount(0);
+      26 | });
+      27 |
+        at <tmp>
+
+    Error Context: test-results/founder_status-UI-1-D4-fou-88671-snapshot-becomes-unreadable-chromium/error-context.md
+
+  2) [chromium] › examiner-ui/founder_status.spec.ts:28:5 › UI-2 (D4) dashboard health line does not stay 'Backend nåbar' after the backend is lost 
+
+    Error: expect(locator).not.toContainText(expected) failed
+
+    Locator: getByTestId('dashboard-health')
+    Expected substring: not "Backend nåbar"
+    Received string: "Backend nåbar · beredskap okänd (fail-closed) · STOP inaktiv · fjärrskrivning av · Recall av"
+    Timeout: 5000ms
+
+    Call log:
+      - Expect "not toContainText" with timeout 5000ms
+      - waiting for getByTestId('dashboard-health')
+        9 × locator resolved to <p data-testid="dashboard-health" class="text-white/50 text-sm mt-1">Backend nåbar · beredskap okänd (fail-closed) · S…</p>
+          - unexpected value "Backend nåbar · beredskap okänd (fail-closed) · STOP inaktiv · fjärrskrivning av · Recall av"
+
+
+      32 |   await page.route("**/api/**", (route) => route.abort("connectionrefused"));
+      33 |   await page.waitForTimeout(12000);
+    > 34 |   await expect(page.getByTestId("dashboard-health")).not.toContainText("Backend nåbar");
+         |                                                          ^
+      35 | });
+      36 |
+      37 | test("UI-3 (D5) readiness BLOCKED is never shown next to 'BLOCKERINGAR (0)'", async ({ page }) => {
+        at <tmp>
+
+    Error Context: test-results/founder_status-UI-2-D4-das-42201-r-after-the-backend-is-lost-chromium/error-context.md
+
+  2 failed
+    [chromium] › examiner-ui/founder_status.spec.ts:16:5 › UI-1 (D4) founder-ops never keeps 'Backend: nåbar' / 'Inte blockerad' after the snapshot becomes unreadable 
+    [chromium] › examiner-ui/founder_status.spec.ts:28:5 › UI-2 (D4) dashboard health line does not stay 'Backend nåbar' after the backend is lost 
+  1 skipped

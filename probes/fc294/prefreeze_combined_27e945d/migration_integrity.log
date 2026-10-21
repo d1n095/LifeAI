@@ -1,0 +1,5 @@
+MI|head=['0089_activation_branch_protect'] revisions=89
+PASSED migration::MI-1_single_head 
+PASSED migration::MI-2_unique_revision_ids 
+PASSED migration::MI-3_unique_numeric_prefix 
+PASSED migration::MI-4_linear_chain 

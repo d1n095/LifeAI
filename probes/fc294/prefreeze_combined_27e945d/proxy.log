@@ -1,0 +1,36 @@
+PX|PX-1|/api/%2e%2e/openapi.json|404|None
+PX|PX-1|/api/..%2fopenapi.json|400|None
+PX|PX-1|/api/a/%2e%2e/%2e%2e/docs|404|None
+PX|PX-1|/api/%2e%2e%2f%2e%2e%2fdocs|400|None
+PX|PX-1|/api/..%5c..%5cdocs|400|None
+PX|PX-1|/api/%252e%252e/docs|400|None
+PX|PX-1|/api/x/..%2F..%2Fhealth-internal|400|None
+PX|PX-1|/api/.%2e/docs|404|None
+PX|PX-2|xff|200|{'x-forwarded-for': None, 'x-real-ip': None, 'forwarded': None}
+PX|PX-3|host|200|{'host': '127.0.0.1:18071', 'x-forwarded-host': None}
+PX|PX-4|hop-by-hop|200|[]
+PX|PX-5|set-cookie|200|['a=1; Path=/; HttpOnly; Secure', 'b=2; Path=/; HttpOnly; Secure']
+PX|PX-6|see run.sh|None|None
+PX|PX-7|http://evil.example/api/health|308|None
+PX|PX-7|/api//evil.example/x|308|None
+PX|PX-7|/api/@evil.example/x|200|/api/@evil.example/x
+PX|PX-8|cookie|200|True
+PX_BAD|[]
+PASSED proxy::PX-1_traversal_stays_in_api
+PASSED proxy::PX-2_client_xff_not_trusted
+PASSED proxy::PX-3_host_not_forwarded
+PASSED proxy::PX-4_hop_by_hop_stripped
+PASSED proxy::PX-5_set_cookie_preserved
+<home>/Library/Application Support/Claude/scratch-workspaces/4fb67e2b-ac65-4918-9c9e-5fbeb75d6101/dfc6b53c-9ba6-42fb-8c53-defc561c946b/scratch-2026-09-25-fe2f96/examiner/wtpush/probes/proxy_v1/run.sh: line 11: 32905 Terminated: 15          python3 "$HERE/fake_backend.py" $BP
+PX6|{"detail":"Kunde inte nå backend-tjänsten.","proxy_error":true} 502
+PASSED proxy::PX-6_backend_down_structured_502
+PX9|same_ip: 401 401 401 401 401 401 401 401 401 401 429 429 429 429
+PX9|rotating_xff: 401 401 401 401 401 401 401 401 401 401 429 429 429 429 429 429 429 429 429 429 429 429 429 429 429 429 429 429 429 429
+PX9|fixed_spoofed_xff: 401 401 401 401 401 401 401 401 401 401 429 429 429 429
+PASSED proxy::PX-9a_login_ip_limit_control
+PASSED proxy::PX-9_rotating_xff_cannot_bypass_login_limit
+PX10|clientA(127.0.0.1)_spraying: 401 401 401 401 401 401 401 401 401 401 429 429
+PX10|clientB(::1)_founder_login:429
+<home>/Library/Application Support/Claude/scratch-workspaces/4fb67e2b-ac65-4918-9c9e-5fbeb75d6101/dfc6b53c-9ba6-42fb-8c53-defc561c946b/scratch-2026-09-25-fe2f96/examiner/wtpush/probes/proxy_v1/identity_collapse.sh: line 28: 33164 Terminated: 15          ( cd "$TARGET/backend" && exec "$VENV/uvicorn" app.main:app --host 127.0.0.1 --port $BP --proxy-headers --forwarded-allow-ips='*' --log-level warning > /dev/null 2>&1 )
+PASSED proxy::PX-10a_control_client_A_limited
+FAILED proxy::PX-10_distinct_clients_keep_distinct_limits (client B got 429 after client A exhausted the limit: identities collapsed)

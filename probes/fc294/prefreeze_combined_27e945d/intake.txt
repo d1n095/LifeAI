@@ -1,0 +1,21 @@
+sha=27e945db8ee414c813248bbeb9e7462b93903cee
+source=public-fetch
+contains #293 (ee132bb8e87fcc99f2f3607cfc2b46a5364d23c7)
+contains #292 (5e3cd01ac3a2cded69ef19bfa074d15196d3afaa)
+contains #291 (0b1871bf63e4c9b6d0d32633af097b281e644679)
+does NOT contain #280 (37bca08)
+27e945db test(proxy): bind path-safety regressions to the production module
+6d051cac test(founder): drive retry and replan after ambiguous worker crash
+bae03f52 docs(registry): record draft PR #294 on the Founder-workflow P1 successor
+24d5096e test(founder): align P1 fixtures with governed recovery contracts
+da2f664d fix(founder): close FO-6 D1-D5 proxy and safe-mode P1 defects
+ee132bb8 docs(compose): record draft PR #293 on the Founder-workflow successor
+2b1e62f2 test(e2e): isolate Founder workflow locators and allow local port overrides
+549e0450 feat(founder): truthful work dashboard, status, deps, and communication policy
+5e3cd01a fix(ui): do not call the dashboard reachable when sibling APIs fail
+97194e54 docs(compose): record draft PR #292 on the application-readiness successor
+c5ea9f95 fix(app): resolve founder-ops STOP body annotation on import
+f9e895e7 feat(app): Founder-ops status, truthful dashboard, safe first-launch UI
+0b1871bf docs(compose): record draft PR #291 on the execution-completion successor
+dd152711 fix(execution): fail-closed worktree base-fetch and preserve local salvage
+6c988148 docs(compose): record draft PR #290 on the execution-hardening successor

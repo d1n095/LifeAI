@@ -48,7 +48,7 @@ fi
 REDIS_URL="${REDIS_URL%/*}/3" "$PROBES/app_readiness_v1/run.sh" "$TARGET" -rA --tb=line > "$OUT/app_readiness.log" 2>&1
 # 11 same-origin proxy: traversal, header trust, XFF rate-limit bypass end to end (real backend with Dockerfile flags)
 if [ -n "${FE_BUILT:-}" ] && [ -d "$FE_BUILT/.next" ]; then
-  { "$PROBES/proxy_v1/run.sh" "$FE_BUILT"; "$PROBES/proxy_v1/xff_ratelimit.sh" "$TARGET" "$FE_BUILT"; } > "$OUT/proxy.log" 2>&1
+  { "$PROBES/proxy_v1/run.sh" "$FE_BUILT"; "$PROBES/proxy_v1/xff_ratelimit.sh" "$TARGET" "$FE_BUILT"; "$PROBES/proxy_v1/identity_collapse.sh" "$TARGET" "$FE_BUILT"; } > "$OUT/proxy.log" 2>&1
 else
   echo "FAILED proxy::FRONTEND_NOT_BUILT (set FE_BUILT from proxy_v1/build_frontend.sh)" > "$OUT/proxy.log"
 fi

@@ -231,6 +231,8 @@ async def _safe_mode_cycle(db_session, superuser_db, owner_id, monkeypatch, gith
     clone = tmp_path / "server-checkout"
     subprocess.run(["git", "clone", "-q", str(github.bare), str(clone)], check=True)
     monkeypatch.setattr(execution_job, "_repo_root", lambda: clone)
+    if hasattr(execution_job, "_live_server_checkout"):  # #294+: the clone IS the live server for this test
+        monkeypatch.setattr(execution_job, "_live_server_checkout", lambda: clone.resolve())
     monkeypatch.setattr(get_settings(), "github_write_enabled", False)
     install_provider(monkeypatch, plan=plan_payload((PATHS, True)), edit_for=lambda u: edit_payload(PATHS))
     goal = await planned_goal(db_session, owner_id, paths=PATHS)
@@ -268,3 +270,70 @@ async def test_AR13b_safe_launch_never_writes_the_server_checkout_unannounced(db
     announced = any("local" in k and v is True for k, v in snap["safe_launch"].items())
     print(f"AR13b|server_checkout_writes={local} announced_in_safe_launch={announced}")
     assert not local or announced, f"P-3 safe mode wrote {local} into the server checkout; safe_launch={snap['safe_launch']}"
+
+
+@pytest.mark.asyncio
+async def test_AR13c_safe_mode_verification_tests_the_proposal_it_reports(db_session, superuser_db, owner_id, monkeypatch, github, tmp_path):
+    """#294 moves safe-mode proposal writes to an isolated workspace. Verification must then run against a tree
+    that CONTAINS the proposal; otherwise 'verification_passed' certifies code that was never tested, or a
+    vacuous failure triggers paid retries. A clone stands in for the live server checkout (never the frozen tree)."""
+    import subprocess
+
+    from app.config import get_settings
+    from app.mainai_execution import execution_job
+    from app.models.mainai_execution import MainAITaskEvent, MainAITaskEventType
+    from _harness import PATHS, drive, edit_payload, install_provider, plan_payload, planned_goal, tasks_by_type
+
+    if not hasattr(execution_job, "_live_server_checkout"):
+        pytest.skip("candidate has no isolated proposal workspace (pre-#294)")
+    clone = tmp_path / "server-checkout"
+    subprocess.run(["git", "clone", "-q", str(github.bare), str(clone)], check=True)
+    monkeypatch.setattr(execution_job, "_repo_root", lambda: clone)
+    monkeypatch.setattr(execution_job, "_live_server_checkout", lambda: clone.resolve())
+    monkeypatch.setattr(get_settings(), "github_write_enabled", False)
+    paid = install_provider(monkeypatch, plan=plan_payload((PATHS, True)), edit_for=lambda u: edit_payload(PATHS))
+    goal = await planned_goal(db_session, owner_id, paths=PATHS)
+    await drive(superuser_db, goal.id, rounds=3)
+    edit = tasks_by_type(superuser_db, goal.id)["repo_edit"][0]
+    ev = superuser_db.query(MainAITaskEvent).filter(MainAITaskEvent.task_id == edit.id, MainAITaskEvent.event_type.in_(
+        [MainAITaskEventType.verification_passed, MainAITaskEventType.verification_failed])).all()
+    in_clone = [p for p in PATHS if (clone / p).exists()]
+    agent_calls = sum(1 for c in paid.calls if c[0] == "code_agent")
+    print(f"AR13c|edit_status={edit.status.value} verification={[e.event_type.value for e in ev]} proposal_files_in_verified_tree={in_clone} code_agent_calls={agent_calls}")
+    assert in_clone == PATHS or not any(e.event_type == MainAITaskEventType.verification_passed for e in ev), (
+        "AR-13c verification_passed recorded although the verified tree does not contain the proposal")
+    assert agent_calls <= 1, f"AR-13c safe-mode verification against the wrong tree caused {agent_calls} paid code-agent runs"
+
+
+def test_AR9f_failed_paid_dispatch_does_not_strand_task_as_running(monkeypatch, db_session):
+    """#294 commits `dispatched` BEFORE the paid call (D2 fix). If that call fails, the task must not be left
+    `dispatched` forever: the Founder must be able to retry, and the status must not claim it is running."""
+    from fastapi.testclient import TestClient
+
+    from app.agent_orchestration import create_agent_task, get_task
+    from app.limiter import limiter
+    from app.main import app
+    from app.mainai_founder_ops.status import classify_agent_task
+    from app.providers.base import ProviderError
+    from app.providers.openai_provider import OpenAIProvider
+
+    monkeypatch.setattr(limiter, "enabled", False)
+
+    async def down(self, messages, model, **kwargs):
+        raise ProviderError("examiner: provider unavailable")
+
+    monkeypatch.setattr(OpenAIProvider, "chat", down)
+    task = create_agent_task(db_session, title="fail-dispatch", description="d", acceptance_criteria="a", created_by="test")
+    db_session.commit()
+    url = f"/api/admin/agents/tasks/{task.id}/dispatch"
+    with TestClient(app, base_url="https://testserver") as c:
+        csrf = c.post("/api/auth/login", json={"email": FOUNDER_EMAIL, "password": FOUNDER_PASSWORD}).json()["csrf_token"]
+        first = c.post(url, headers={"X-CSRF-Token": csrf}).status_code
+        db_session.expire_all()
+        after = get_task(db_session, task.id)
+        label = classify_agent_task(after)["founder_status"]
+        second = c.post(url, headers={"X-CSRF-Token": csrf}).status_code
+    print(f"AR9f|first={first} status_after_failure={after.status.value} founder_label={label} retry={second}")
+    assert not (after.status.value == "dispatched" and second == 409), (
+        f"AR-9f provider failure left the task `dispatched`: retry refused ({second}) and Founder sees '{label}'")
+    assert label != "running", f"AR-9f failed dispatch shown as running"

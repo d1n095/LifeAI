@@ -1,0 +1,51 @@
+F..FFAR16|refused=[True, True, True] kinds=['break_circular_dependency', 'circular_dependency', 'task_in_cycle']
+.AR18a|after_pass=independently_verified after_invalidating_fail=independently_verified
+FAR18b|produced=bbbbbbb receipt_sha=ddddddd label=independently_verified
+FAR1|routes=131 violations=0 provider_calls=0 egress=[]
+..AR3|limit=120/min codes_tail=[200, 200, 429, 429]
+.........AR17|readiness=BLOCKED blockers=[]
+FAR9|results=['ok', 'refused'] paid_calls=1
+.AR9h|url=/api/admin/agents/tasks/{task_id}/dispatch codes=[200, 409] paid_calls=1
+.AR10|races=20 duplicated=0 counts=[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+.AR11|verification_events=1 dispatch_jobs=1 founder_status=completed independently_verified=False
+.AR12|chat_status=200 provider_attempts=[('OpenAIProvider', 'embed'), ('OpenAIProvider', 'chat')] egress=[]
+SAFE|remote_task_branches=[] prs=0 local_server_checkout_writes=[] labels=[('Docstring + test for', 'failed', 'failed'), ('Open a draft PR.', 'blocked', 'waiting_on_dependency')] trail_tail=[('open_pr', 'blocked', '{"merged": false, "reason": "external publication failure", "was_ready": false, "parked_sibling": true, "first_cycle_state": "external_boundary_failed"}')]
+SAFE|remote_task_branches=[] prs=0 local_server_checkout_writes=[] labels=[('Docstring + test for', 'failed', 'failed'), ('Open a draft PR.', 'blocked', 'waiting_on_dependency')] trail_tail=[('open_pr', 'blocked', '{"merged": false, "reason": "external publication failure", "was_ready": false, "parked_sibling": true, "first_cycle_state": "external_boundary_failed"}')]
+SAFE|remote_task_branches=[] prs=0 local_server_checkout_writes=[] labels=[('Docstring + test for', 'failed', 'failed'), ('Open a draft PR.', 'blocked', 'waiting_on_dependency')] trail_tail=[('open_pr', 'blocked', '{"merged": false, "reason": "external publication failure", "was_ready": false, "parked_sibling": true, "first_cycle_state": "external_boundary_failed"}')]
+AR13b|server_checkout_writes=[] announced_in_safe_launch=False
+AR13c|edit_status=failed verification=['verification_failed'] proposal_files_in_verified_tree=[] code_agent_calls=1
+.AR9f|first=503 status_after_failure=dispatched founder_label=running retry=409
+ERROR    mainai.worker:worker.py:227 Worker <host> unexpected error processing mainai_job c215e79e-f6f7-4dd4-906c-8dac69318d50.
+ERROR    mainai.worker:worker.py:227 Worker <host> unexpected error processing mainai_job 02a3e7ca-7a74-4476-802e-e5e4948d8b86.
+ERROR    mainai.worker:worker.py:227 Worker <host> unexpected error processing mainai_job 8c626aa8-63b7-4914-a56f-1cab65370366.
+ERROR    mainai.worker:worker.py:227 Worker <host> unexpected error processing mainai_job 67d4e903-b499-4aa7-b65b-e61a65d4905d.
+PASSED test_ar14_founder_workflow.py::test_AR14b_recall_claim_gets_a_recall_disagreement
+PASSED test_ar14_founder_workflow.py::test_AR14c_known_cost_not_rewritten_as_unknown
+PASSED test_ar14_founder_workflow.py::test_AR16_cycle_refuses_assignment_and_is_reported
+PASSED test_ar1_route_authz_matrix.py::test_AR1_every_api_route
+PASSED test_ar2_founder_ops.py::test_AR2_stop_post_denied_without_founder_or_csrf
+PASSED test_ar2_founder_ops.py::test_AR3_stop_post_is_rate_limited
+PASSED test_ar2_founder_ops.py::test_AR4_stop_and_readiness_read_failures_fail_closed
+PASSED test_ar2_founder_ops.py::test_AR5_dependency_failure_is_not_reported_reachable[redis]
+PASSED test_ar2_founder_ops.py::test_AR5_dependency_failure_is_not_reported_reachable[database]
+PASSED test_ar2_founder_ops.py::test_AR5b_stale_worker_heartbeat_not_alive
+PASSED test_ar2_founder_ops.py::test_AR6_snapshot_and_conversations_are_account_isolated
+PASSED test_ar2_founder_ops.py::test_AR7_recall_unmounted_and_flags_truthful
+PASSED test_ar2_founder_ops.py::test_AR7b_recall_detector_detects_a_real_mount
+PASSED test_ar2_founder_ops.py::test_AR8_reading_status_is_free_and_offline
+PASSED test_ar9_races_and_truth.py::test_AR9_concurrent_dispatch_single_paid_call
+PASSED test_ar9_races_and_truth.py::test_AR9h_concurrent_dispatch_over_http
+PASSED test_ar9_races_and_truth.py::test_AR10_concurrent_delegation_single_request
+PASSED test_ar9_races_and_truth.py::test_AR11_builder_self_verification_is_not_independent
+PASSED test_ar9_races_and_truth.py::test_AR12_chat_safe_mode_no_paid_egress_and_failed_turn_visible
+PASSED test_ar9_races_and_truth.py::test_AR13_safe_launch_default_never_pushes_or_opens_pr
+PASSED test_ar9_races_and_truth.py::test_AR11b_unopened_pr_with_zero_checks_is_not_independently_verified
+PASSED test_ar9_races_and_truth.py::test_AR13b_safe_launch_never_writes_the_server_checkout_unannounced
+PASSED test_ar9_races_and_truth.py::test_AR13c_safe_mode_verification_tests_the_proposal_it_reports
+FAILED test_ar14_founder_workflow.py::test_AR14a_question_about_go_is_not_contradicted
+FAILED test_ar14_founder_workflow.py::test_AR14d_chat_route_does_not_hardcode_policy_evidence
+FAILED test_ar14_founder_workflow.py::test_AR15_requeued_task_is_not_acknowledged
+FAILED test_ar14_founder_workflow.py::test_AR18a_invalidated_pass_receipt_no_longer_verifies
+FAILED test_ar14_founder_workflow.py::test_AR18b_receipt_must_bind_the_tasks_actual_commit
+FAILED test_ar2_founder_ops.py::test_AR17_blocked_readiness_is_counted_as_a_blocker
+FAILED test_ar9_races_and_truth.py::test_AR9f_failed_paid_dispatch_does_not_strand_task_as_running
