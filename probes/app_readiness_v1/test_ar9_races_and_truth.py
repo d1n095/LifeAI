@@ -300,13 +300,14 @@ async def test_AR13c_safe_mode_verification_tests_the_proposal_it_reports(db_ses
     in_clone = [p for p in PATHS if (clone / p).exists()]
     agent_calls = sum(1 for c in paid.calls if c[0] == "code_agent")
     print(f"AR13c|edit_status={edit.status.value} verification={[e.event_type.value for e in ev]} proposal_files_in_verified_tree={in_clone} code_agent_calls={agent_calls}")
-    assert in_clone == PATHS or not any(e.event_type == MainAITaskEventType.verification_passed for e in ev), (
-        "AR-13c verification_passed recorded although the verified tree does not contain the proposal")
-    assert agent_calls <= 1, f"AR-13c safe-mode verification against the wrong tree caused {agent_calls} paid code-agent runs"
-    # Functional requirement (R6): a valid proposal must be verifiable in safe mode -- verification has to run on a tree
-    # that contains the proposal and record its outcome, instead of failing every safe-mode repo_edit by construction.
-    assert any(e.event_type == MainAITaskEventType.verification_passed for e in ev), (
-        f"AR-13c R6 a valid safe-mode proposal can never verify: verification ran on a tree without it ({[e.event_type.value for e in ev]})")
+    # R6 functional requirement: a VALID safe-mode proposal (edit_payload writes a passing test next to a docstring edit)
+    # must be verifiable -- verification runs on a tree that actually contains the proposal (an empty tree would error,
+    # not pass), with no extra paid re-run. On #294 verification could never pass (ran on a tree without the proposal);
+    # the fix must make verification_passed reachable without touching the live/server checkout (AR-13b) or pushing (AR-13).
+    passed_ev = [e for e in ev if e.event_type == MainAITaskEventType.verification_passed]
+    assert passed_ev, (f"AR-13c R6 a valid safe-mode proposal can never verify: events={[e.event_type.value for e in ev]} "
+                       "(safe-mode verification runs on a tree without the proposal)")
+    assert agent_calls <= 1, f"AR-13c safe-mode verification caused {agent_calls} paid code-agent runs"
 
 
 def test_AR9f_failed_paid_dispatch_does_not_strand_task_as_running(monkeypatch, db_session):

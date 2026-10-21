@@ -130,10 +130,21 @@ def _receipt_setup(superuser_db):
     task = superuser_db.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
     from datetime import datetime
 
+    from app.models.mainai_execution import MainAITaskEvent, MainAITaskEventType
+
     task.status = MainAITaskStatus.completed
     task.completed_at = datetime.utcnow()
     superuser_db.flush()
     return owner, task
+
+
+def _bind_commit(superuser_db, owner, task, sha):
+    """Make `sha` the task's actual produced commit via a durable event (what #294+ binds the receipt to)."""
+    from app.models.mainai_execution import MainAITaskEvent, MainAITaskEventType
+
+    superuser_db.add(MainAITaskEvent(task_id=task.id, owner_id=owner.id, event_type=MainAITaskEventType.verification_passed,
+                                     detail={"work_result": {"commit_sha": sha}, "commit_sha": sha}))
+    superuser_db.flush()
 
 
 def _label(superuser_db, owner, task):
@@ -153,6 +164,7 @@ def test_AR18a_invalidated_pass_receipt_no_longer_verifies(superuser_db):
         pytest.skip("candidate has no receipt-based verification (pre-#294)")
     owner, task = _receipt_setup(superuser_db)
     sha = "a" * 40
+    _bind_commit(superuser_db, owner, task, sha)
     common = dict(component_id=f"mainai_task:{task.id}", candidate_sha=sha, builder_identity="cursor", examiner_identity="claude",
                   owner_id=owner.id, verification_scope={"task_id": str(task.id)}, evidence_summary="examiner run")
     passed = reg.record_verification_attestation(superuser_db, review_result="PASS", **common)
@@ -210,6 +222,7 @@ def _worktree_with_commit(superuser_db, owner, task, sha):
     superuser_db.add(MainAITaskWorktree(task_id=task.id, owner_id=owner.id, job_id=job.id, lease_generation=1, executor_id="t", repo="r/r",
                                         base_sha="c" * 40, branch=f"claude/mainai-task-{task.id}", path="/nonexistent", marker_token="m",
                                         current_commit=sha, status=MainAITaskWorktreeStatus.active))
+    _bind_commit(superuser_db, owner, task, sha)
     superuser_db.flush()
 
 

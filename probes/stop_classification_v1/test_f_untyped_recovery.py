@@ -37,4 +37,11 @@ async def test_FO6b_bare_runtime_error_at_push_is_contained_and_founder_visible(
         {"t": str(edit.id)}).all()
     print(f"\nFO6b|task={edit.status.value}|jobs={jobs_for_task(superuser_db, edit.id)}|paid={paid.calls}|recovery={[tuple(r) for r in records]}|trail={trail(superuser_db, goal.id)[-3:]}")
     assert len(paid.kinds("code_agent")) == 1 and len(paid.kinds("planner")) == 1 and jobs_for_task(superuser_db, edit.id) == 1, "FO-6b paid or re-executed"
-    assert records, "FO-6c no Founder-visible recovery record for the stranded running task"
+    # FO-6c: an ambiguous publication-boundary failure must leave a Founder-visible observation of the ambiguity
+    # (R5) -- either a mainai_recovery_records row, or a durable task event flagged reconcilable / needing
+    # remote-ref observation. A bare `failed` with no such marker (the #294 behaviour) does not qualify.
+    reconcilable_event = superuser_db.execute(text(
+        "SELECT count(*) FROM mainai_task_events WHERE task_id=:t AND (detail->>'reconcilable')::text='true'"),
+        {"t": str(edit.id)}).scalar_one()
+    assert records or reconcilable_event, ("FO-6c no Founder-visible observation (recovery record or reconcilable event) "
+                                           "for the stranded/ambiguous push")

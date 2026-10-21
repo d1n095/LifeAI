@@ -1,0 +1,16 @@
+PX|PX-2|xff|200|{'x-forwarded-for': 'unknown', 'x-real-ip': None, 'forwarded': None}
+PASSED proxy::PX-1_traversal_stays_in_api
+PASSED proxy::PX-2_client_xff_not_trusted
+PASSED proxy::PX-3_host_not_forwarded
+PASSED proxy::PX-4_hop_by_hop_stripped
+PASSED proxy::PX-5_set_cookie_preserved
+PASSED proxy::PX-6_backend_down_structured_502
+PASSED proxy::PX-9a_login_ip_limit_control
+PASSED proxy::PX-9_rotating_xff_cannot_bypass_login_limit
+PX10|clientA(127.0.0.1)_spraying: 401 401 401 401 401 401 401 401 401 401 429 429
+PX10|clientB(::1)_founder_login:429
+PX11|clientA_forging_B: 401 401 401 401 401 401 401 401 401 401 429 429
+PX11|clientB_founder_login:429
+PASSED proxy::PX-10a_control_client_A_limited
+FAILED proxy::PX-10_distinct_clients_keep_distinct_limits (client B got 429 after client A exhausted the limit: identities collapsed)
+FAILED proxy::PX-11_forged_forwarding_headers_cannot_exhaust_another_clients_limit (client B got 429 after A forged B's address)
