@@ -155,4 +155,12 @@ test.describe("shell pages: empty states and mutation error handling", () => {
     await expect(page.getByText("Policy är transparent")).toBeVisible();
     await expect(page.getByText("Känsliga inställningar kräver Founder-godkännande")).toBeVisible();
   });
+
+  test("security page shows diagnostics without a fabricated first-cycle GO", async ({ page }) => {
+    await page.goto(`${FRONTEND_URL}/admin/security`, { waitUntil: "networkidle" });
+    await expect(page.getByRole("heading", { name: "Säkerhetsöversikt" })).toBeVisible();
+    await expect(page.getByTestId("security-first-cycle")).toContainText("Första cykelns GO = false");
+    await expect(page.getByTestId("security-restrictions")).toBeVisible();
+    await expect(page.getByTestId("security-findings")).toBeVisible();
+  });
 });

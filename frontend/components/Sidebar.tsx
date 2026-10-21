@@ -14,6 +14,7 @@ const NAV = [
   { href: "/projects", label: "Projekt" },
   { href: "/admin", label: "Admin", founderOnly: true },
   { href: "/admin/founder-ops", label: "Founder-status", founderOnly: true },
+  { href: "/admin/security", label: "Säkerhet", founderOnly: true },
   { href: "/admin/memory", label: "Projektminne", founderOnly: true },
   { href: "/admin/agents", label: "Agentuppdrag", founderOnly: true },
   { href: "/admin/jobs", label: "Jobb & Aktivitet", founderOnly: true },
