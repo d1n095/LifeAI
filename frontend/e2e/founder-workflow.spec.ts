@@ -18,7 +18,7 @@ test.describe("Founder workflow in safe local mode", () => {
 
     await page.getByRole("link", { name: "Founder-status" }).first().click();
     await expect(page.getByRole("heading", { name: "Founder-status" })).toBeVisible({ timeout: 8000 });
-    await expect(page.getByText("Första cykelns GO = false")).toBeVisible();
+    await expect(page.getByText("Första cykelns GO = false").first()).toBeVisible();
     await expect(page.getByText("Recall HTTP inte monterad")).toBeVisible();
     await expect(page.getByText("GitHub-skrivning av")).toBeVisible();
     await expect(page.getByTestId("work-status-counts")).toContainText("Tilldelad");
@@ -70,5 +70,24 @@ test.describe("Founder workflow in safe local mode", () => {
         expect(item.founder_status).not.toBe("running");
       }
     }
+  });
+
+  test("security dashboard shows findings without inventing GO or applying remediations", async ({ page }) => {
+    await page.getByRole("link", { name: "Säkerhet", exact: true }).first().click();
+    await expect(page.getByRole("heading", { name: "Säkerhetsöversikt" })).toBeVisible({ timeout: 8000 });
+    await expect(page.getByTestId("security-first-cycle")).toContainText("Första cykelns GO = false");
+    await expect(page.getByTestId("security-restrictions")).toBeVisible();
+    await expect(page.getByTestId("security-findings")).toBeVisible();
+    await expect(page.getByTestId("security-limitations")).toContainText("Does not apply remediations");
+
+    const dashboard = await page.evaluate(async () => {
+      const res = await fetch("/api/mainai/security/dashboard", { credentials: "include" });
+      return { status: res.status, body: await res.json() };
+    });
+    expect(dashboard.status).toBe(200);
+    expect(dashboard.body.first_cycle_go).toBe(false);
+    expect(dashboard.body.blocks_first_cycle).toBe(false);
+    expect(dashboard.body.invented_policy).toBe(false);
+    expect(dashboard.body.autonomous_privilege_escalation).toBe(false);
   });
 });

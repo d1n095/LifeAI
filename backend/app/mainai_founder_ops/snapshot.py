@@ -690,9 +690,27 @@ def build_founder_ops_snapshot(
         "first_cycle_go": False,
         "first_cycle": first_cycle,
         "authority": _founder_authority(recall_http_mounted=recall_http_mounted),
+        "security": _security_summary(db, owner_id=owner_id, recall_http_mounted=recall_http_mounted),
         "invariant": "NEVER_COLLAPSE_TO_ONE_BOOLEAN",
         "communication_policy": "factual_accuracy_over_agreement",
     }
+
+
+def _security_summary(db: Session, *, owner_id: uuid.UUID, recall_http_mounted: bool) -> dict[str, Any]:
+    """Supplementary diagnostics. Never a first-cycle blocker or fabricated GO input."""
+    try:
+        from app.mainai_security.dashboard import security_summary_for_ops
+
+        return security_summary_for_ops(db, owner_id=owner_id, recall_http_mounted=recall_http_mounted)
+    except Exception:  # noqa: BLE001 — diagnostics must not hide Founder-ops evidence
+        return {
+            "available": False,
+            "finding_count": 0,
+            "confirmed_incident_count": 0,
+            "first_cycle_go": False,
+            "blocks_first_cycle": False,
+            "dashboard_path": "/admin/security",
+        }
 
 
 def recall_http_mounted(app: Any) -> bool:

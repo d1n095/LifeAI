@@ -673,6 +673,51 @@ export type FounderOpsSnapshot = {
   blockers: Record<string, unknown>[];
   authorization_requests: Record<string, unknown>[];
   review_results: FounderWorkItem[];
+  security?: {
+    available: boolean;
+    finding_count: number;
+    confirmed_incident_count: number;
+    first_cycle_go: boolean;
+    blocks_first_cycle: boolean;
+    dashboard_path: string;
+  };
+};
+
+export type SecurityFinding = {
+  id: string;
+  kind: string;
+  category?: string;
+  severity: string;
+  confidence: string;
+  source: string;
+  component: string;
+  evidence: Record<string, unknown>;
+  recommended_action: string;
+  status: string;
+};
+
+export type SecurityRestriction = {
+  code: string;
+  setting?: string;
+  source: string | null;
+  value?: unknown;
+  explain: string;
+  invented: boolean;
+};
+
+export type SecurityDashboard = {
+  first_cycle_go: boolean;
+  blocks_first_cycle: boolean;
+  invented_policy: boolean;
+  customer_isolation: string;
+  findings: SecurityFinding[];
+  incidents: Record<string, unknown>[];
+  preserved_incidents: Record<string, unknown>[];
+  restrictions: SecurityRestriction[];
+  remediation: Record<string, unknown>[];
+  severity_counts: Record<string, number>;
+  confidence_counts: Record<string, number>;
+  limitations: string[];
 };
 
 export type MainAIJob = {
@@ -1067,4 +1112,20 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ reason }),
     }),
+  securityDashboard: () => request<SecurityDashboard>("/api/mainai/security/dashboard"),
+  securityRestrictions: (capability?: string) =>
+    request<{ invented: boolean; first_cycle_go: boolean; restrictions: SecurityRestriction[] }>(
+      `/api/mainai/security/restrictions${capability ? `?capability=${encodeURIComponent(capability)}` : ""}`,
+    ),
+  securityPropose: (payload: {
+    finding_id: string;
+    change_class: string;
+    title: string;
+    summary: string;
+    isolated_test_plan?: string;
+  }) => request<Record<string, unknown>>("/api/mainai/security/remediation/propose", { method: "POST", body: JSON.stringify(payload) }),
+  securityApprove: (proposalId: string) =>
+    request<Record<string, unknown>>(`/api/mainai/security/remediation/${proposalId}/approve`, { method: "POST" }),
+  securityPreserveIncident: (payload: { kind: string; confidence: string; severity: string; evidence?: Record<string, unknown> }) =>
+    request<Record<string, unknown>>("/api/mainai/security/incidents/preserve", { method: "POST", body: JSON.stringify(payload) }),
 };

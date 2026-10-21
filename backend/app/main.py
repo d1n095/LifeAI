@@ -28,6 +28,7 @@ from app.routers import (
     mainai_execution,
     mainai_founder_ops,
     mainai_jobs,
+    mainai_security,
     memory,
     project_entities,
     projects,
@@ -79,6 +80,7 @@ app.include_router(agents.router)
 app.include_router(mainai_jobs.router)
 app.include_router(mainai_execution.router)
 app.include_router(mainai_founder_ops.router)
+app.include_router(mainai_security.router)
 app.include_router(project_entities.router)
 app.include_router(inspectable_memory.router)
 app.include_router(execution_envelopes.router)

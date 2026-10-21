@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { api, FounderAgent, FounderNextAction, FounderOpsSnapshot, FounderWorkItem } from "@/lib/api";
 import { FOUNDER_STATUS_COLORS, FOUNDER_STATUS_LABELS } from "@/lib/founderStatus";
 
@@ -111,6 +112,18 @@ export default function FounderOpsPage() {
             <Flag ok={!snapshot.safe_launch.mainai_activation_mode} label="Aktiveringsläge av" />
             <Flag ok={!snapshot.first_cycle_go} label="Första cykelns GO = false" />
           </section>
+
+          {snapshot.security && (
+            <section className="rounded-xl border border-border bg-panel p-4 space-y-2 text-sm" data-testid="founder-security-summary">
+              <div className="text-xs uppercase tracking-wide text-white/40">Säkerhetsdiagnostik</div>
+              <div>Fynd: {snapshot.security.finding_count}</div>
+              <div>Bekräftade incidenter: {snapshot.security.confirmed_incident_count}</div>
+              <Flag ok={!snapshot.security.blocks_first_cycle} label="Blockerar inte first-cycle" />
+              <Link href="/admin/security" className="inline-block text-sm underline">
+                Öppna säkerhetsöversikt
+              </Link>
+            </section>
+          )}
 
           {snapshot.authority && (
             <section className="rounded-xl border border-border bg-panel p-4 space-y-2 text-sm" data-testid="founder-authority">
