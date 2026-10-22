@@ -94,6 +94,58 @@ test.describe("shell pages: empty states and mutation error handling", () => {
     await expect(page.getByTestId("dashboard-health")).not.toContainText("GO");
   });
 
+  test("dashboard does not claim reachable or STOP inactive when evidence is missing", async ({ page }) => {
+    await page.route("**/api/mainai/founder-ops/snapshot", (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          generated_at: "2026-10-21T00:00:00Z",
+          evidence_basis: "durable_rows_only",
+          fabricated_progress: false,
+          first_cycle_go: false,
+          health: { status: "unknown", worker: "unknown", backend_reachable: false, evidence_available: false },
+          startup_readiness: { level: "BLOCKED", blocking: [], unknown_fail_closed: true },
+          stop: { blocked: false, code: null },
+          spend: {
+            spend_live: true,
+            usage_request_count: 0,
+            usage_cost_usd: 0,
+            usage_cost_unknown_count: 0,
+            active_grant_count: 0,
+            active_grant_spent_usd: 0,
+            active_grant_reserved_usd: 0,
+          },
+          safe_launch: {
+            github_write_enabled: false,
+            github_auto_merge_enabled: false,
+            mainai_activation_mode: false,
+            recall_http_mounted: false,
+            privileged_remote_effects_enabled: false,
+          },
+          conversation_count_today: 0,
+          goals: [],
+          agents: [],
+          dependencies: [],
+          circular_dependencies: [],
+          independent_ready_work: [],
+          next_actions: [],
+          work_items: [],
+          work_item_counts: {},
+          blockers: [],
+          authorization_requests: [],
+          review_results: [],
+        }),
+      });
+    });
+    await page.goto(`${FRONTEND_URL}/`, { waitUntil: "networkidle" });
+    await expect(page.getByTestId("dashboard-health")).not.toContainText("Backend nåbar");
+    await expect(page.getByTestId("dashboard-health")).not.toContainText("STOP inaktiv");
+    await expect(page.getByTestId("dashboard-health")).toContainText("STOP-status okänd");
+    await expect(page.getByTestId("dashboard-health")).toContainText("beredskap okänd");
+    await expect(page.getByTestId("dashboard-health")).not.toContainText("GO");
+  });
+
   test("dashboard does not claim STOP inactive when observability failed", async ({ page }) => {
     await page.route("**/api/mainai/founder-ops/snapshot", (route) => {
       route.fulfill({

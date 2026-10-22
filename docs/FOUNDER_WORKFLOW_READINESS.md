@@ -1,12 +1,34 @@
 # Founder-interface and autonomous-workflow readiness
 
-Isolated P2 successor of frozen `#294` @ `27e945db8ee414c813248bbeb9e7462b93903cee`
-(parent `#293` @ `ee132bb8e87fcc99f2f3607cfc2b46a5364d23c7`).
-Does **not** amend `#294`/`#293`/`#292`/`#291`, compose Codex transport/grants, enable Recall, merge, or claim first-cycle GO.
+Isolated P3 successor of frozen `#296` @ `2aeaa00efe4ffe4c5264b725d28e2e97b3bfa7f0`
+(parent `#295` @ `97e2b04c9babf3c30e3067fb9e8282a82b071be4`).
+Does **not** amend `#296`/`#295`/`#294`, compose Codex transport/grants, enable Recall, merge, or claim first-cycle GO.
 
 Machine-readable flags: `GET /api/mainai/founder-ops/snapshot` (`first_cycle_go: false`).
 
-## P2 remediations (this successor)
+## P3 remediations (this successor)
+
+Claude's `#295` exam returned RETURN_TO_BUILDER. This batch closes the five
+remaining independently confirmed defects without a new feature module.
+
+1. R1 / P1: self-hosted `next start` does not populate `request.ip`. The proxy
+   captures the Node TCP peer and forwards that identity. PX-9/10/11 run against
+   the real standalone stack: forged XFF cannot split a peer; distinct peers and
+   surfaces keep distinct keys. Falling back to `unknown` is a failure, not a fix.
+2. D4: dashboard and Founder-status never claim backend reachable or STOP
+   inactive unless current evidence says so. Missing `observability_failed` is
+   unknown, not inactive. A failed snapshot poll clears stale reachable copy.
+3. D5: `BLOCKED` always carries at least one named blocker. Empty BLOCKED is
+   rewritten to `blocked_without_named_cause` and cannot be shown as BLOCKED (0).
+4. N1: Founder questions are not claims. Mentioning first-cycle GO does not
+   fabricate disagreement; assertive false GO/write/recall/verified claims still do.
+5. N4: a historical `dispatched` event is not current acknowledgment. Only a live
+   queued/claimed job is `acknowledged`. Agent `dispatched` status stays current.
+
+Preserved: R2–R6, FO-6 paid-retry suppression, FO-7, Founder-only authorization,
+and the frozen `#296` security diagnostics module.
+
+## P2 remediations (frozen `#295`)
 
 Claude's correction gate against `#294` `27e945d` (evidence `27c91b4e`). Equivalent
 executable cases live in `test_founder_workflow_p2.py` and the proxy identity tests.

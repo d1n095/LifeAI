@@ -1,5 +1,7 @@
 import { NextRequest } from "next/server";
-import { applyTrustedForwardingHeaders, isClientForgedForwardHeader, trustedClientIp } from "@/lib/proxyRequestIdentity";
+import { applyTrustedForwardingHeaders, installTrustedPeerCapture, isClientForgedForwardHeader, trustedClientIp } from "@/lib/proxyRequestIdentity";
+
+installTrustedPeerCapture();
 import { assertSafeProxyPath } from "@/lib/proxyPathSafety";
 
 // Same-origin API proxy. Every browser request under /api/* lands here and is forwarded to

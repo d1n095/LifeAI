@@ -1,3 +1,4 @@
+import http from "node:http";
 import { expect, test } from "@playwright/test";
 import { PROXY_FRONTEND_URL } from "../playwright.proxy.config";
 
@@ -73,5 +74,59 @@ test.describe("same-origin proxy", () => {
       statuses.push(res.status());
     }
     expect(statuses).toContain(429);
+  });
+
+  test("PX-9/10/11 real next start peers stay distinct and forged XFF cannot hide that", async () => {
+    const target = new URL(`${PROXY_FRONTEND_URL}/api/auth/login`);
+    const post = (localAddress: string, path: string, body: Record<string, string>, xff: string) =>
+      new Promise<number>((resolve, reject) => {
+        const payload = JSON.stringify(body);
+        const req = http.request(
+          {
+            hostname: target.hostname,
+            port: Number(target.port),
+            path,
+            method: "POST",
+            localAddress,
+            headers: {
+              "content-type": "application/json",
+              "content-length": Buffer.byteLength(payload),
+              "x-forwarded-for": xff,
+            },
+          },
+          (res) => {
+            res.resume();
+            res.on("end", () => resolve(res.statusCode || 0));
+          },
+        );
+        req.on("error", reject);
+        req.write(payload);
+        req.end();
+      });
+
+    const peerA: number[] = [];
+    for (let i = 0; i < 12; i++) {
+      peerA.push(
+        await post("127.0.0.1", "/api/auth/login", { email: "px9-a@example.com", password: "wrong-guess" }, `198.51.100.${i + 1}`),
+      );
+    }
+    expect(peerA, "PX-9 same TCP peer must still 429 despite rotating XFF").toContain(429);
+
+    const peerB = await post(
+      "127.0.0.2",
+      "/api/auth/login",
+      { email: "px11-b@example.com", password: "wrong-guess" },
+      "198.51.100.9",
+    );
+    expect(peerB, "PX-11 a distinct TCP peer must not share the exhausted key").not.toBe(429);
+    expect([400, 401, 403, 422]).toContain(peerB);
+
+    const otherSurface = await post(
+      "127.0.0.1",
+      "/api/auth/register",
+      { email: "px10-surface@example.com", password: "TestSurfacePassword123!", website: "" },
+      "198.51.100.9",
+    );
+    expect(otherSurface, "PX-10 exhausting login must not lock register").not.toBe(429);
   });
 });

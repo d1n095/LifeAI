@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { api, AuthError, DocumentItem, FounderOpsSnapshot, NetworkError, ProjectItem, TaskItem } from "@/lib/api";
+import { statusLine as formatStatusLine } from "@/lib/founderHealth";
 
 function errorMessage(reason: unknown, fallback: string): string {
   if (reason instanceof Error && reason.message) return reason.message;
@@ -155,23 +156,7 @@ export default function DashboardPage() {
 }
 
 export function statusLine(snapshot: FounderOpsSnapshot | null, error: string | null, loaded: boolean): string {
-  if (!loaded) return "Hämtar systemstatus…";
-  if (!snapshot) {
-    if (error) return "Backend otillgänglig — ingen driftsstatus påstås.";
-    return "Founder-status inte inläst.";
-  }
-  const backendReachable = snapshot.health.backend_reachable && snapshot.health.status === "ok";
-  const stopUnknown = Boolean(snapshot.stop.observability_failed);
-  const readinessUnknown = Boolean(snapshot.startup_readiness.unknown_fail_closed);
-  const parts = [
-    backendReachable ? "Backend nåbar" : "Backend otillgänglig",
-    readinessUnknown ? "beredskap okänd (fail-closed)" : `beredskap ${snapshot.startup_readiness.level}`,
-    stopUnknown ? "STOP-status okänd (fail-closed)" : snapshot.stop.blocked ? "STOP blockerar" : "STOP inaktiv",
-    snapshot.safe_launch.privileged_remote_effects_enabled ? "fjärrskrivning på" : "fjärrskrivning av",
-    snapshot.safe_launch.recall_http_mounted ? "Recall monterad" : "Recall av",
-  ];
-  if (snapshot.first_cycle_go) parts.push("GO (oväntat)");
-  return parts.join(" · ");
+  return formatStatusLine(snapshot, error, loaded);
 }
 
 function StatCard({

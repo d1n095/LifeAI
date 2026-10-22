@@ -47,8 +47,13 @@ _FILLER_RE = re.compile(
 )
 _SIMPLE_QUESTION_RE = re.compile(r"^\s*[^?]{0,80}\?\s*$", re.UNICODE)
 _GO_CLAIM_RE = re.compile(
-    r"\b(go\s*(är|=)?\s*true|first[-\s]?cycle[-\s]?go|allt är (klart|redo|operationellt)|"
-    r"systemet är (klart|redo|igång|operationellt)|we are good to go)\b",
+    r"("
+    r"\bgo\s*(är|=|is)\s*true\b|"
+    r"\bfirst[-\s]?cycle[-\s]?go\s*(är|=|is)\s*true\b|"
+    r"\ballt är (klart|redo|operationellt)\b|"
+    r"\bsystemet är (klart|redo|igång|operationellt)\b|"
+    r"\bwe are good to go\b"
+    r")",
     re.IGNORECASE,
 )
 _WRITE_CLAIM_RE = re.compile(
@@ -59,6 +64,23 @@ _WRITE_CLAIM_RE = re.compile(
 _RECALL_CLAIM_RE = re.compile(r"\b(recall är (på|aktiv|monterad)|recall is (on|mounted|active))\b", re.IGNORECASE)
 _VERIFIED_CLAIM_RE = re.compile(
     r"\b(självständigt verifierad|independently verified|all work is verified)\b",
+    re.IGNORECASE,
+)
+_ASSERTION_RE = re.compile(
+    r"("
+    r"\b(är|=|is)\s*true\b|"
+    r"\ballt är (klart|redo|operationellt)\b|"
+    r"\bsystemet är (klart|redo|igång|operationellt)\b|"
+    r"\bwe are good to go\b|"
+    r"\bgithub[- ]skrivning är (på|aktiv)\b|"
+    r"\bprivileged remote effects (are )?on\b|"
+    r"\bvi skriver till github\b|"
+    r"\brecall är (på|aktiv|monterad)\b|"
+    r"\brecall is (on|mounted|active)\b|"
+    r"\bsjälvständigt verifierad\b|"
+    r"\bindependently verified\b|"
+    r"\ball work is verified\b"
+    r")",
     re.IGNORECASE,
 )
 _UNCERTAINTY_RE = re.compile(r"\b(osäker|vet inte|okänd|unknown|uncertain)\b", re.IGNORECASE)
@@ -75,12 +97,24 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip()).lower()
 
 
+def _is_state_assertion(text: str) -> bool:
+    """Questions are not claims. A simple question without an assertive clause is ignored."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    if is_simple_question(stripped) and not _ASSERTION_RE.search(stripped):
+        return False
+    return True
+
+
 def contradiction_notices(*, founder_message: str | None, evidence: dict[str, Any] | None) -> list[str]:
     """When the Founder's wording contradicts durable evidence, disagree explicitly."""
     if not founder_message:
         return []
     evidence = evidence or {}
     if evidence.get("evidence_unavailable"):
+        return []
+    if not _is_state_assertion(founder_message):
         return []
     notices: list[str] = []
     if _GO_CLAIM_RE.search(founder_message) and evidence.get("first_cycle_go") is not True:

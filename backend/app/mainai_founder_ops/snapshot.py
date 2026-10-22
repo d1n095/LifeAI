@@ -70,16 +70,26 @@ def _kill_switch_status(db: Session, owner_id: uuid.UUID) -> dict[str, Any]:
         }
 
 
+def _normalize_readiness(payload: dict[str, Any]) -> dict[str, Any]:
+    """BLOCKED without a named blocker is not a legal report (D5)."""
+    level = str(payload.get("level") or "")
+    blocking = list(payload.get("blocking") or [])
+    if level.upper() == "BLOCKED" and not blocking:
+        payload = {**payload, "blocking": ["blocked_without_named_cause"]}
+    return payload
+
+
 def _startup_readiness(db: Session) -> dict[str, Any]:
     try:
         report = evaluate_startup_readiness(claude_reviews_satisfied=None, db=db)
-        return report.as_dict()
+        return _normalize_readiness(report.as_dict())
     except Exception as exc:  # noqa: BLE001
         return {
             "level": "UNKNOWN",
             "blocking": ["startup_readiness_unavailable"],
             "error": type(exc).__name__,
             "unknown_fail_closed": True,
+            "evidence_unavailable": True,
             "invariant": "NEVER_COLLAPSE_TO_ONE_BOOLEAN",
         }
 
@@ -423,7 +433,9 @@ def build_founder_ops_snapshot(
     stop = _kill_switch_status(db, owner_id)
     readiness = _startup_readiness(db)
     spend = _live_spend(db, owner_id)
-    health = health or {"status": "unknown", "worker": "unknown"}
+    health = dict(health or {"status": "unknown", "worker": "unknown"})
+    if "status" not in health or health.get("status") in {None, ""}:
+        health["status"] = "unknown"
 
     goals = list(
         db.execute(
@@ -640,7 +652,9 @@ def build_founder_ops_snapshot(
         counts[key] = counts.get(key, 0) + 1
 
     worker = "alive" if worker_process_alive() is True else (health.get("worker") or "unknown")
-    backend_reachable = health.get("status") == "ok"
+    health_status = str(health.get("status") or "unknown")
+    health_evidence_available = health_status in {"ok", "unavailable", "error", "degraded"}
+    backend_reachable = health_evidence_available and health_status == "ok"
 
     first_cycle = []
     try:
@@ -655,7 +669,13 @@ def build_founder_ops_snapshot(
         "evidence_basis": "durable_rows_only",
         "chain_of_thought_exposed": False,
         "fabricated_progress": False,
-        "health": {**health, "worker": worker, "backend_reachable": backend_reachable},
+        "health": {
+            **health,
+            "status": health_status,
+            "worker": worker,
+            "backend_reachable": backend_reachable,
+            "evidence_available": health_evidence_available,
+        },
         "startup_readiness": readiness,
         "stop": stop,
         "spend": spend,
