@@ -234,14 +234,37 @@ def test_AR17_blocked_readiness_is_counted_as_a_blocker(client, no_limits, monke
     import app.mainai_founder_ops.snapshot as snap_mod
 
     class _Blocked:
+        # Readiness BLOCKED but with NO named cause -- the #296 D5 symptom (dashboard showed "BLOCKED" next to 0 blockers).
         def as_dict(self):
-            return {"level": "BLOCKED", "blocking": ["examiner_pinned_reason"], "invariant": "NEVER_COLLAPSE_TO_ONE_BOOLEAN"}
+            return {"level": "BLOCKED", "blocking": [], "invariant": "NEVER_COLLAPSE_TO_ONE_BOOLEAN"}
 
     monkeypatch.setattr(snap_mod, "evaluate_startup_readiness", lambda *a, **k: _Blocked())
     _login(client)
     body = client.get(SNAP).json()
+    r = body["startup_readiness"]
     blockers = body.get("blockers") or []
-    print(f"AR17|readiness={body['startup_readiness'].get('level')} blockers={[b.get('kind') for b in blockers]}")
-    assert any("readiness" in str(b.get("kind", "")) or "examiner_pinned_reason" in str(b) for b in blockers), (
-        f"AR-17 readiness BLOCKED but blockers={[b.get('kind') for b in blockers]} (page shows BLOCKERINGAR (0))")
+    named_in_readiness = list(r.get("blocking") or [])
+    named_in_blockers = [b for b in blockers if "readiness" in str(b.get("kind", "")) or "examiner_pinned_reason" in str(b)]
+    print(f"AR17|readiness={r.get('level')} readiness.blocking={named_in_readiness} blockers={[b.get('kind') for b in blockers]}")
+    # D5 requirement: BLOCKED readiness must NAME a genuine blocker the Founder can see (readiness.blocking, surfaced on
+    # the dashboard as "beredskap BLOCKED (n)"), not show BLOCKED with no identified cause. It must not be empty, and
+    # must not be a fabricated specific blocker when the real reason we pinned ('examiner_pinned_reason') is present.
+    # D5: BLOCKED readiness must NAME a blocker the Founder sees, never present BLOCKED with no identified cause.
+    assert named_in_readiness, (
+        "AR-17 readiness BLOCKED with an empty cause list (dashboard would show 'beredskap BLOCKED' next to 0 blockers)")
+
+
+def test_AR17b_blocked_readiness_preserves_a_genuine_named_blocker(client, no_limits, monkeypatch):
+    """Positive control: a real blocker must be passed through, not replaced by a synthetic placeholder."""
+    import app.mainai_founder_ops.snapshot as snap_mod
+
+    class _R:
+        def as_dict(self):
+            return {"level": "BLOCKED", "blocking": ["spend_controls:unknown"], "invariant": "x"}
+
+    monkeypatch.setattr(snap_mod, "evaluate_startup_readiness", lambda *a, **k: _R())
+    _login(client)
+    r = client.get(SNAP).json()["startup_readiness"]
+    print(f"AR17b|blocking={r.get('blocking')}")
+    assert "spend_controls:unknown" in (r.get("blocking") or []), f"AR-17b genuine blocker dropped: {r.get('blocking')}"
 

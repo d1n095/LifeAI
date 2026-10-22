@@ -1,0 +1,8 @@
+  ✓  1 [chromium] › examiner-ui/founder_status.spec.ts:16:5 › UI-1 (D4) founder-ops never keeps 'Backend: nåbar' / 'Inte blockerad' after the snapshot becomes unreadable (9.9s)
+  ✘  2 [chromium] › examiner-ui/founder_status.spec.ts:30:5 › UI-2 (D4) dashboard health line does not stay 'Backend nåbar' after the backend is lost (19.8s)
+  ✓  3 [chromium] › examiner-ui/founder_status.spec.ts:39:5 › UI-3 (D5) readiness BLOCKED is never shown next to 'BLOCKERINGAR (0)' (1.8s)
+  1) [chromium] › examiner-ui/founder_status.spec.ts:30:5 › UI-2 (D4) dashboard health line does not stay 'Backend nåbar' after the backend is lost 
+    Received string: "Backend nåbar · beredskap BLOCKED (1) · STOP inaktiv · fjärrskrivning av · Recall av"
+      39 | test("UI-3 (D5) readiness BLOCKED is never shown next to 'BLOCKERINGAR (0)'", async ({ page }) => {
+    Error Context: test-results/founder_status-UI-2-D4-das-42201-r-after-the-backend-is-lost-chromium/error-context.md
+    [chromium] › examiner-ui/founder_status.spec.ts:30:5 › UI-2 (D4) dashboard health line does not stay 'Backend nåbar' after the backend is lost 

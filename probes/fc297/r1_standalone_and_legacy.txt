@@ -1,0 +1,7 @@
+R1 under standalone node .next/standalone/server.js (identity_collapse_standalone.sh):
+  PX-10a control: client A limited (429)
+  PX-10: client B (::1) -> 200 after A sprays (distinct clients keep distinct limits)  PASS
+  PX-11: client B (::1) -> 200 after A forges B's address  PASS
+UI-2 (home dashboard) FAIL after backend loss: "Backend nåbar · beredskap BLOCKED (1) · STOP inaktiv · ..."
+CO-10 / FA-9 (STOP-ack) still FAILS on 50a1437 (Codex-owned; not closed by #297).
+security_diag_v1: 10/10 pass (no regression).

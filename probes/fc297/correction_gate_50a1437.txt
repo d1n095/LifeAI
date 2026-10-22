@@ -1,0 +1,16 @@
+candidate 50a1437391d5b43582d52ea19f9b5cf7d1e8e33f
+PASS R1 (P1)  
+PASS P-1      
+PASS R2       
+PASS D1       
+PASS D2       
+PASS R3       
+PASS R4       
+PASS R5       
+PASS R6       
+FAIL D4       failing=['UI-1', 'UI-2']
+FAIL D5       failing=['test_AR17_blocked_readiness_is_counted_as_a_blocker']
+PASS N1       
+PASS N2/N3    
+PASS N4       
+CORRECTION GATE: FAIL (2 defect gate(s) open)

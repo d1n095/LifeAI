@@ -1,0 +1,6 @@
+PX|PX-2|xff|200|{'x-forwarded-for': '127.0.0.1', 'x-real-ip': None, 'forwarded': None}
+PASSED proxy::PX-9a_login_ip_limit_control
+PASSED proxy::PX-9_rotating_xff_cannot_bypass_login_limit
+PASSED proxy::PX-10a_control_client_A_limited
+PASSED proxy::PX-10_distinct_clients_keep_distinct_limits
+PASSED proxy::PX-11_forged_forwarding_headers_cannot_exhaust_another_clients_limit
