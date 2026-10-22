@@ -171,7 +171,7 @@ def test_CO4_cross_agent_receipts_track_distinct_builder_and_examiner(superuser_
 def test_CO4b_cross_agent_current_obligation_ledger_is_present():
     """MISSING check: a mechanism that tracks, per independent agent (Cursor/Codex/examiner), its CURRENT obligation
     and dependency timeline — distinct from per-SHA receipts and per-owner task rows."""
-    candidates = ["app.mainai_coordination", "app.agent_coordination.obligations", "app.mainai_execution.obligations"]
+    candidates = ["app.agent_coordination.durable", "app.mainai_coordination", "app.agent_coordination.obligations"]
     import importlib
 
     found = []
@@ -182,10 +182,14 @@ def test_CO4b_cross_agent_current_obligation_ledger_is_present():
         except ImportError:
             pass
     print(f"CO4b|obligation_ledger_modules={found}")
-    if not found:
-        pytest.fail("MISSING: no cross-agent current-obligation / ownership-timeline ledger. Coordination relies on "
-                    "per-owner task rows + per-SHA verification receipts; separate agent timelines (inv 4) and "
-                    "current-vs-historical obligation (inv 1) are not modeled as first-class state.")
+    if found:
+        mod = importlib.import_module(found[0])
+        svc = getattr(mod, "DurableCoordinationService", None)
+        assert svc and all(hasattr(svc, m) for m in ("assign", "supersede", "claim_queue_empty", "founder_view")), \
+            f"CO-4b obligation module {found[0]} lacks the ledger API (assign/supersede/claim_queue_empty/founder_view)"
+        return
+    pytest.fail("MISSING: no cross-agent current-obligation / ownership-timeline ledger. (#298 adds "
+                "app.agent_coordination.durable; absent on #296/#297.)")
 
 
 # ---- Inv 5: a missing artifact is a truthful BLOCKED; authorized auto-transfer is MISSING (the courier gap)
@@ -195,14 +199,18 @@ def test_CO5_authorized_artifact_transfer_exists():
     import importlib
 
     found = []
-    for m in ("app.mainai_coordination.transfer", "app.artifact_transfer", "app.mainai_execution.artifact_intake"):
+    for m in ("app.agent_coordination.durable", "app.mainai_coordination.transfer", "app.artifact_transfer"):
         try:
             importlib.import_module(m)
             found.append(m)
         except ImportError:
             pass
     print(f"CO5|artifact_transfer_modules={found}")
-    if not found:
-        pytest.fail("MISSING: no authorized automatic artifact-transfer mechanism. A missing artifact today requires "
-                    "a manual Founder hand-off (observed directly: the Codex bundle). Architectural gap, not a "
-                    "first-cycle blocker; see remediation contract.")
+    if found:
+        mod = importlib.import_module(found[0])
+        svc = getattr(mod, "DurableCoordinationService", None)
+        assert svc and all(hasattr(svc, m) for m in ("register_artifact", "transfer_artifact", "receive_artifact")), \
+            f"CO-5 transfer module {found[0]} lacks register/transfer/receive_artifact"
+        return
+    pytest.fail("MISSING: no authorized automatic artifact-transfer mechanism (checksum+provenance, BLOCKED for "
+                "unavailable channels). (#298 adds it in app.agent_coordination.durable; absent on #296/#297.)")

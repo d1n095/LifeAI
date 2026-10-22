@@ -1,0 +1,24 @@
+HO1|agents={'cursor', 'claude', 'codex'} obligations=3
+.HO2|queue_empty_accepted=False reason=queue-empty claim contradicts active obligations
+.HO2b|late_completion_accepted=False outcome=stale_rejected
+.HO3|first=True dup_accepted=True dup_outcome=idempotent same_id=True
+.HO4|replay_outcome=replay_ignored accepted=True
+.HO5|obligations=1 stalled=True
+.HO6|plan_as_execution_accepted=False reason=invalid_evidence
+.HO7|builder_self_verify=False independent=True
+.HO8|transfer_ok=True receive_ok=True tampered_rejected=True blocked={t: v.as_dict().get('outcome') for t, v in blocked.items()}
+.HO9|keys=['active', 'blocked', 'blocks_first_cycle', 'capability', 'fabricated_progress', 'finished', 'first_cycle_go', 'handoffs'] obligations=2
+.HO10|all privilege-escalation attempts rejected (owner=codex_founder_authority)
+.HO10b|impersonated_completion_accepted=False outcome=forged_rejected
+PASSED test_ho.py::test_HO1_three_agents_distinct_obligations
+PASSED test_ho.py::test_HO2_stale_queue_empty_rejected_when_active
+PASSED test_ho.py::test_HO2b_superseded_old_completion_cannot_revive
+PASSED test_ho.py::test_HO3_active_obligation_blocks_duplicate_assignment
+PASSED test_ho.py::test_HO4_replayed_event_is_idempotent
+PASSED test_ho.py::test_HO5_repeated_planning_detected_as_stalled
+PASSED test_ho.py::test_HO6_planning_is_not_execution
+PASSED test_ho.py::test_HO7_independent_review_cannot_be_builder
+PASSED test_ho.py::test_HO8_checksum_and_blocked_channels
+PASSED test_ho.py::test_HO9_founder_view_consolidated
+PASSED test_ho.py::test_HO10_coordination_cannot_escalate_privilege
+PASSED test_ho.py::test_HO10b_cross_agent_impersonation_rejected

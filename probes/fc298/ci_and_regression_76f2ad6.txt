@@ -1,0 +1,5 @@
+npm-audit: frontend/package-lock.json byte-identical to #297 (no dep change); #297 npm-audit passed -> #298 push failure is a registry 503, not a vuln.
+Candidate own tests: 16 passed (one run).
+coord_accept CO-4b/CO-5 now PASS on #298 (MISSING on #297); CO-10/FA-9 still BLOCKED (Codex).
+security_diag_v1: 10/10 pass.
+Exact-SHA required checks: 11/12 green both suites; npm audit failure on push only.
