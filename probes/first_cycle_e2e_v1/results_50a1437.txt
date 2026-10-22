@@ -1,0 +1,10 @@
+vocabulary (NOW/NEAR/LATER/OPTIONAL/BLOCKED).
+FCE|stages=['goal', 'clear_state', 'proposed_task', 'approval_required', 'founder_approval', 'dispatch', 'local_verification', 'STOP'] stopped=True merged=False go=False sha_len=40 paid=False
+.FCE1|go=False readiness=READY_FOR_SAFE_INTERNAL_RUN restrictions=['github_write_disabled', 'auto_merge_disabled', 'activation_mode_off', 'legacy_prepare_pr_writes_disabled']
+.FCE9|typed_denials=['ApprovalRequiredError', 'PathAEnvelopeError', 'KillSwitchError', 'ProviderError']
+..FCE10|stop_ack_binds_authenticated_identity=False
+PASSED test_fce.py::test_FCE_supervised_dry_run_full_sequence
+PASSED test_fce.py::test_FCE_founder_sees_truthful_readiness_and_restrictions
+PASSED test_fce.py::test_FCE_denials_are_typed_and_explained
+PASSED test_fce.py::test_FCE_independent_verification_requires_non_builder_receipt
+FAILED test_fce.py::test_FCE_stop_clear_requires_authenticated_founder - Fail...
