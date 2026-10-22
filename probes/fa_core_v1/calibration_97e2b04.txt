@@ -1,0 +1,17 @@
+FFFFAC4|account_erasure_reauth_receipts: forbidden_held=['UPDATE', 'DELETE'] guard_triggers=2
+FAC4|audit_log: forbidden_held=['UPDATE', 'DELETE'] guard_triggers=0
+FAC4|mainai_supervision_receipts: forbidden_held=['UPDATE', 'DELETE'] guard_triggers=0
+FFAC5|users: held=['SELECT', 'INSERT', 'UPDATE', 'DELETE'] rls=(False, False) FORBIDDEN_HELD=['DELETE', 'UPDATE']
+FAC5|audit_log: held=['SELECT', 'INSERT', 'UPDATE', 'DELETE'] rls=(False, False) FORBIDDEN_HELD=['DELETE', 'UPDATE']
+FAC5|workforce_authority_epoch: held=['SELECT', 'INSERT', 'UPDATE', 'DELETE'] rls=(False, False) FORBIDDEN_HELD=['DELETE', 'UPDATE']
+FAC5|execution_authorization_envelopes: held=['SELECT', 'INSERT', 'UPDATE'] rls=(True, True) FORBIDDEN_HELD=['UPDATE']
+FAC5|provider_spend_authorizations: held=['SELECT', 'INSERT', 'UPDATE'] rls=(True, True) FORBIDDEN_HELD=['UPDATE']
+FAC5|mainai_goals: held=['SELECT', 'INSERT', 'UPDATE', 'DELETE'] rls=(True, True) FORBIDDEN_HELD=['DELETE']
+FsFAC7|recall_routes=[] activation_mode=False
+PASSED test_fac_core.py::test_FAC7_recall_identity_unchanged_and_inactive
+SKIPPED [1] test_fac_core.py:134: set TARGET_BACKEND=<candidate>/backend to check the migration head
+FAILED test_fac_core.py::test_FAC1_signing_keys_not_readable_or_writable_by_runtime
+FAILED test_fac_core.py::test_FAC2_new_authority_tables_are_not_runtime_writable
+FAILED test_fac_core.py::test_FAC3_immutable_autonomy_ceiling_cannot_be_raised
+FAILED test_fac_core.py::test_FAC4_audit_receipts_append_only_for_runtime - A...
+FAILED test_fac_core.py::test_FAC5_legacy_authority_tables_also_hardened - As...
