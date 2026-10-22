@@ -39,6 +39,43 @@ def _health_payload(db: Session) -> dict:
     return {"status": "ok", "worker": worker}
 
 
+class GitHubIntakeRefreshIn(BaseModel):
+    pr_numbers: list[int] = Field(default_factory=list, max_length=20)
+
+
+@router.post("/github-intake/refresh")
+@limiter.limit(f"{settings.rate_limit_default_per_minute}/minute")
+def refresh_github_intake(
+    request: Request,
+    payload: GitHubIntakeRefreshIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Read-only GitHub intake. Never writes to GitHub or claims agent delivery."""
+    from app.agent_coordination.durable import load_owner_ledger, persist_to_assignment
+    from app.agent_coordination.github_intake import DEFAULT_PUBLIC_REPO, GitHubDevelopmentIntake, GitHubReadClient
+    from app.models.agent_coordination import AgentWorkAssignment
+    from sqlalchemy import select
+
+    settings_now = get_settings()
+    repo = settings_now.github_repo or DEFAULT_PUBLIC_REPO
+    client = GitHubReadClient(repo=repo, token=None)
+    service = load_owner_ledger(db, owner_id=user.id)
+    intake = GitHubDevelopmentIntake(service, owner_id=str(user.id), repo=repo)
+    result = intake.refresh(client, numbers=payload.pr_numbers or None)
+    assignment = db.execute(
+        select(AgentWorkAssignment).where(AgentWorkAssignment.owner_id == user.id)
+    ).scalars().first()
+    if assignment is not None:
+        obligation_id = next(iter(service._obligations), None)
+        if obligation_id:
+            persist_to_assignment(db, assignment=assignment, service=service, obligation_id=obligation_id)
+            db.commit()
+    result["write_attempted"] = False
+    result["github_write"] = False
+    return result
+
+
 @router.get("/snapshot")
 def founder_ops_snapshot(
     request: Request,

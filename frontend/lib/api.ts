@@ -702,6 +702,17 @@ export type FounderOpsSnapshot = {
       idle_agents: string[];
       founder_must_forward_reports: boolean;
     };
+    github_intake?: {
+      access?: string;
+      missing_capability?: string | null;
+      repo?: string | null;
+      write_attempted?: boolean;
+      delivery_claimed?: boolean;
+      first_cycle_go?: boolean;
+      candidates?: Record<string, unknown>[];
+      stale_rejected?: Record<string, unknown>[];
+      needed_review?: Record<string, unknown>[];
+    };
   };
 };
 

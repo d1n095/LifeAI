@@ -252,3 +252,63 @@ def test_three_agent_needed_work_survives_snapshot_reload(db_session, owner_id):
     assert snap["durable_coordination"]["queue_empty"] is False
     audits = db_session.query(AuditLog).filter_by(action="durable_coordination.persist").all()
     assert audits
+
+
+def test_github_intake_persists_into_founder_snapshot(db_session, owner_id):
+    from app.agent_coordination.github_intake import GitHubDevelopmentIntake, passing_required_runs
+
+    _set_rls_user(db_session, owner_id)
+    goal, task = _goal_task(db_session, owner_id)
+    agent = register_agent(
+        db_session,
+        agent_key=f"cursor-{uuid.uuid4().hex[:8]}",
+        display_name="Cursor",
+        adapter_kind="cli",
+    )
+    assignment = create_work_assignment(
+        db_session,
+        owner_id=owner_id,
+        goal_id=goal.id,
+        task_id=task.id,
+        agent_id=agent.id,
+        role="builder",
+        read_write_mode="read_write",
+        repository_identity="lifeai",
+        allowed_paths=["docs/**"],
+        requested_by="founder",
+    )
+    sha = "1105e331a444c47d80d10265c4947eb1b48aeb72"
+    checks, workflows = passing_required_runs(sha)
+    intake = GitHubDevelopmentIntake(owner_id=str(owner_id))
+    applied = intake.ingest_pull_request(
+        {
+            "number": 299,
+            "title": "intake",
+            "draft": False,
+            "merged": False,
+            "state": "open",
+            "html_url": "https://github.com/d1n095/LifeAI/pull/299",
+            "head_sha": sha,
+            "base_sha": "76f2ad6818f3faab0603ceff03a06bd4c3842d43",
+            "head_branch": "cursor/durable-coordination-acceptance-91c1",
+            "base_branch": "cursor/durable-agent-coordination-91c1",
+            "ancestry": [sha],
+            "reviews": [],
+            "check_runs": checks,
+            "workflow_runs": workflows,
+        }
+    )
+    persist_to_assignment(
+        db_session,
+        assignment=assignment,
+        service=intake.service,
+        obligation_id=applied["builder_assignment_id"],
+    )
+    db_session.commit()
+    snap = build_founder_ops_snapshot(db_session, owner_id=owner_id, health={"status": "ok"})
+    github = snap["durable_coordination"]["github_intake"]
+    assert snap["first_cycle_go"] is False
+    assert github["delivery_claimed"] is False
+    assert github["candidates"][0]["head_sha"] == sha
+    assert github["candidates"][0]["ci"]["freeze_allowed"] is True
+    assert github["needed_review"][0]["need"] == "independent_review"

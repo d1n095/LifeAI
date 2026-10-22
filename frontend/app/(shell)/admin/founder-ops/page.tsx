@@ -307,6 +307,33 @@ function DurableCoordination({
           </li>
         ))}
       </ul>
+      {view.github_intake && (
+        <div data-testid="github-intake">
+          <div className="text-xs uppercase tracking-wide text-white/40">GitHub-utveckling (endast läsning)</div>
+          <div>
+            Åtkomst: {String(view.github_intake.access || "okänd")}
+            {view.github_intake.missing_capability
+              ? ` · BLOCKED (${String(view.github_intake.missing_capability)})`
+              : ""}
+          </div>
+          <Flag ok={!view.github_intake.write_attempted} label="Ingen GitHub-skrivning från intaget" />
+          <Flag ok={!view.github_intake.delivery_claimed} label="Ingen agentleverans påstås" />
+          {(view.github_intake.candidates || []).length === 0 && (
+            <p className="text-white/30">Ingen publicerad GitHub-kandidat inläst.</p>
+          )}
+          <ul className="space-y-1 text-xs text-white/60">
+            {(view.github_intake.candidates || []).map((row) => (
+              <li key={String(row.pr)}>
+                PR {String(row.pr)} @ {String(row.head_sha).slice(0, 12)}… freeze{" "}
+                {row.ci && typeof row.ci === "object" && (row.ci as { freeze_allowed?: boolean }).freeze_allowed
+                  ? "tillåten"
+                  : "blockerad"}
+                {row.reviewable ? " · examineringsåtagande" : ""}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {view.handoffs.length > 0 && (
         <ul className="space-y-1 text-xs text-white/60">
           {view.handoffs.map((handoff) => (
