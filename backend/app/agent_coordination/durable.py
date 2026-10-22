@@ -1091,6 +1091,68 @@ class DurableCoordinationService:
             "handoffs": handoffs,
             "owners": {row["assignment_id"]: row["agent_identity"] for row in obligations},
             "queue_empty": len(active) == 0,
+            "needed_work": self.needed_work(),
+        }
+
+    def needed_work(self) -> dict[str, Any]:
+        """Which agent needs what. Founder is not required to forward routine reports."""
+        items: list[dict[str, Any]] = []
+        busy: set[str] = set()
+        for record in self._obligations.values():
+            agent = record["agent_identity"]
+            if record["status"] in {s.value for s in ACTIVE_OBLIGATION_STATUSES}:
+                busy.add(agent)
+            if record.get("stalled"):
+                items.append(
+                    {
+                        "agent_identity": agent,
+                        "assignment_id": record["assignment_id"],
+                        "need": "execution_progress_not_another_plan",
+                        "status": record["status"],
+                    }
+                )
+            elif record["status"] == ObligationStatus.assigned.value:
+                items.append(
+                    {
+                        "agent_identity": agent,
+                        "assignment_id": record["assignment_id"],
+                        "need": "acknowledge",
+                        "status": record["status"],
+                    }
+                )
+            elif record["status"] == ObligationStatus.acknowledged.value:
+                items.append(
+                    {
+                        "agent_identity": agent,
+                        "assignment_id": record["assignment_id"],
+                        "need": "execution_progress",
+                        "status": record["status"],
+                    }
+                )
+            elif record["status"] == ObligationStatus.executing.value:
+                items.append(
+                    {
+                        "agent_identity": agent,
+                        "assignment_id": record["assignment_id"],
+                        "need": "continue_or_complete",
+                        "status": record["status"],
+                    }
+                )
+            elif record["status"] == ObligationStatus.blocked.value:
+                items.append(
+                    {
+                        "agent_identity": agent,
+                        "assignment_id": record["assignment_id"],
+                        "need": "unblock",
+                        "status": record["status"],
+                        "missing_capability": record.get("missing_capability"),
+                    }
+                )
+        idle = sorted(identity for identity in ("cursor", "claude", "codex") if identity not in busy)
+        return {
+            "items": items,
+            "idle_agents": idle,
+            "founder_must_forward_reports": False,
         }
 
     def restore(self, payload: dict[str, Any]) -> None:
@@ -1356,4 +1418,5 @@ def founder_coordination_snapshot(db: Session, *, owner_id: uuid.UUID) -> dict[s
             "handoffs": [],
             "owners": {},
             "queue_empty": True,
+            "needed_work": {"items": [], "idle_agents": ["cursor", "claude", "codex"], "founder_must_forward_reports": False},
         }

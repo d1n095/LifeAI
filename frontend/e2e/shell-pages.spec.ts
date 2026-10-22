@@ -83,6 +83,63 @@ test.describe("shell pages: empty states and mutation error handling", () => {
     await expect(page.getByTestId("dashboard-health")).not.toContainText("delvis otillgänglig");
   });
 
+  test("dashboard drops stale reachable status after a later failed snapshot poll", async ({ page }) => {
+    let calls = 0;
+    await page.route("**/api/mainai/founder-ops/snapshot", (route) => {
+      calls += 1;
+      if (calls === 1) {
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            generated_at: "2026-10-22T00:00:00Z",
+            evidence_basis: "durable_rows_only",
+            fabricated_progress: false,
+            first_cycle_go: false,
+            health: { status: "ok", worker: "alive", backend_reachable: true, evidence_available: true },
+            startup_readiness: { level: "READY_FOR_SAFE_INTERNAL_RUN", blocking: [] },
+            stop: { blocked: false, code: null, observability_failed: false },
+            spend: {
+              spend_live: true,
+              usage_request_count: 0,
+              usage_cost_usd: 0,
+              usage_cost_unknown_count: 0,
+              active_grant_count: 0,
+              active_grant_spent_usd: 0,
+              active_grant_reserved_usd: 0,
+            },
+            safe_launch: {
+              github_write_enabled: false,
+              github_auto_merge_enabled: false,
+              mainai_activation_mode: false,
+              recall_http_mounted: false,
+              privileged_remote_effects_enabled: false,
+            },
+            conversation_count_today: 0,
+            goals: [],
+            agents: [],
+            dependencies: [],
+            circular_dependencies: [],
+            independent_ready_work: [],
+            next_actions: [],
+            work_items: [],
+            work_item_counts: {},
+            blockers: [],
+            authorization_requests: [],
+            review_results: [],
+          }),
+        });
+        return;
+      }
+      route.fulfill({ status: 500, contentType: "application/json", body: '{"detail":"Simulerat serverfel"}' });
+    });
+    await page.goto(`${FRONTEND_URL}/`, { waitUntil: "networkidle" });
+    await expect(page.getByTestId("dashboard-health")).toContainText("Backend nåbar");
+    await expect(page.getByTestId("dashboard-health")).not.toContainText("Backend nåbar", { timeout: 8000 });
+    await expect(page.getByTestId("dashboard-health")).toContainText("otillgänglig");
+    await expect(page.getByRole("alert").filter({ hasText: "Simulerat serverfel" })).toBeVisible();
+  });
+
   test("dashboard does not treat a failed Founder-ops snapshot as operational", async ({ page }) => {
     await page.route("**/api/mainai/founder-ops/snapshot", (route) => {
       route.fulfill({ status: 500, contentType: "application/json", body: '{"detail":"Simulerat serverfel"}' });

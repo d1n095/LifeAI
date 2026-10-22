@@ -10,22 +10,21 @@ function errorMessage(reason: unknown, fallback: string): string {
   return fallback;
 }
 
+const SNAPSHOT_POLL_MS = 5000;
+
 export default function DashboardPage() {
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [projects, setProjects] = useState<ProjectItem[]>([]);
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [snapshot, setSnapshot] = useState<FounderOpsSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    Promise.allSettled([
-      api.listDocuments(),
-      api.listProjects(),
-      api.listTasks(),
-      api.founderOpsSnapshot(),
-    ]).then((results) => {
+
+    Promise.allSettled([api.listDocuments(), api.listProjects(), api.listTasks()]).then((results) => {
       if (cancelled) return;
       const messages: string[] = [];
       if (results[0].status === "fulfilled") setDocuments(results[0].value);
@@ -34,18 +33,32 @@ export default function DashboardPage() {
       else messages.push(errorMessage(results[1].reason, "projekt"));
       if (results[2].status === "fulfilled") setTasks(results[2].value);
       else messages.push(errorMessage(results[2].reason, "uppgifter"));
-      if (results[3].status === "fulfilled") setSnapshot(results[3].value);
-      else {
-        const reason = results[3].reason;
-        if (!(reason instanceof AuthError)) {
-          messages.push(reason instanceof NetworkError ? reason.message : errorMessage(reason, "Founder-status"));
-        }
-      }
       if (messages.length) setError(messages.join(" · "));
-      setLoaded(true);
     });
+
+    async function refreshSnapshot() {
+      try {
+        const next = await api.founderOpsSnapshot();
+        if (cancelled) return;
+        setSnapshot(next);
+        setSnapshotError(null);
+      } catch (reason: unknown) {
+        if (cancelled) return;
+        // D4: a failed poll must drop the previous reachable copy. Stale "Backend nåbar" is a defect.
+        setSnapshot(null);
+        if (!(reason instanceof AuthError)) {
+          setSnapshotError(reason instanceof NetworkError ? reason.message : errorMessage(reason, "Founder-status"));
+        }
+      } finally {
+        if (!cancelled) setLoaded(true);
+      }
+    }
+
+    refreshSnapshot();
+    const interval = setInterval(refreshSnapshot, SNAPSHOT_POLL_MS);
     return () => {
       cancelled = true;
+      clearInterval(interval);
     };
   }, []);
 
@@ -54,7 +67,7 @@ export default function DashboardPage() {
   const activeProjects = projects.filter((p) => p.status === "active").length;
   const conversationsToday = snapshot ? snapshot.conversation_count_today : null;
 
-  const healthLine = statusLine(snapshot, error, loaded);
+  const healthLine = statusLine(snapshot, snapshotError, loaded);
 
   return (
     <div className="space-y-8">
@@ -65,12 +78,13 @@ export default function DashboardPage() {
         </p>
       </div>
 
-      {error && (
+      {(error || snapshotError) && (
         <div
           role="alert"
           className="rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300"
         >
-          Kunde inte nå backend: {error}. Kontrollera att API:et körs (se README).
+          Kunde inte nå backend: {[error, snapshotError].filter(Boolean).join(" · ")}. Kontrollera att API:et körs
+          (se README).
         </div>
       )}
 

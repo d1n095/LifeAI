@@ -17,7 +17,9 @@ remaining independently confirmed defects without a new feature module.
    surfaces keep distinct keys. Falling back to `unknown` is a failure, not a fix.
 2. D4: dashboard and Founder-status never claim backend reachable or STOP
    inactive unless current evidence says so. Missing `observability_failed` is
-   unknown, not inactive. A failed snapshot poll clears stale reachable copy.
+   unknown, not inactive. The home dashboard polls Founder-ops and a failed
+   snapshot poll **clears** any previous reachable copy (stale "Backend nåbar"
+   is a defect).
 3. D5: `BLOCKED` always carries at least one named blocker. Empty BLOCKED is
    rewritten to `blocked_without_named_cause` and cannot be shown as BLOCKED (0).
 4. N1: Founder questions are not claims. Mentioning first-cycle GO does not

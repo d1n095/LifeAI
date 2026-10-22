@@ -199,3 +199,56 @@ def test_blocked_handoff_survives_reload(db_session, owner_id):
         commit=False,
     )
     db_session.commit()
+
+
+def test_three_agent_needed_work_survives_snapshot_reload(db_session, owner_id):
+    _set_rls_user(db_session, owner_id)
+    goal, task = _goal_task(db_session, owner_id)
+    agent = register_agent(
+        db_session,
+        agent_key=f"cursor-{uuid.uuid4().hex[:8]}",
+        display_name="Cursor",
+        adapter_kind="cli",
+    )
+    assignment = create_work_assignment(
+        db_session,
+        owner_id=owner_id,
+        goal_id=goal.id,
+        task_id=task.id,
+        agent_id=agent.id,
+        role="builder",
+        read_write_mode="read_write",
+        repository_identity="lifeai",
+        allowed_paths=["docs/**"],
+        requested_by="founder",
+    )
+    service = DurableCoordinationService()
+    cursor = service.assign(
+        agent_identity="cursor",
+        workstream="acceptance",
+        owner_id=str(owner_id),
+        instruction_id="cursor-a",
+        backing_assignment_id=str(assignment.id),
+        actor="founder",
+    )
+    claude = service.assign(
+        agent_identity="claude",
+        workstream="acceptance",
+        owner_id=str(owner_id),
+        instruction_id="claude-a",
+        actor="founder",
+    )
+    service.acknowledge(assignment_id=claude.assignment_id, agent_identity="claude")
+    persist_to_assignment(
+        db_session, assignment=assignment, service=service, obligation_id=cursor.assignment_id
+    )
+    db_session.commit()
+    snap = build_founder_ops_snapshot(db_session, owner_id=owner_id, health={"status": "ok"})
+    assert snap["first_cycle_go"] is False
+    needed = snap["durable_coordination"]["needed_work"]
+    assert needed["founder_must_forward_reports"] is False
+    agents = {item["agent_identity"] for item in needed["items"]}
+    assert "cursor" in agents
+    assert snap["durable_coordination"]["queue_empty"] is False
+    audits = db_session.query(AuditLog).filter_by(action="durable_coordination.persist").all()
+    assert audits

@@ -269,6 +269,23 @@ function DurableCoordination({
       <div className="text-white/50">
         Kö tom: {view.queue_empty ? "ja (inga aktiva åtaganden)" : "nej — aktiv ägare finns"}
       </div>
+      {view.needed_work && (
+        <div data-testid="needed-work">
+          <div className="text-xs uppercase tracking-wide text-white/40">Vem behöver arbete</div>
+          <Flag ok={!view.needed_work.founder_must_forward_reports} label="Founder behöver inte vidarebefordra rutinrapporter" />
+          {(view.needed_work.items || []).length === 0 && (
+            <p className="text-white/30">Ingen agent väntar på nästa steg.</p>
+          )}
+          <ul className="space-y-1 text-xs text-white/60">
+            {(view.needed_work.items || []).map((item) => (
+              <li key={String(item.assignment_id)}>
+                {String(item.agent_identity)}: {String(item.need)}
+                {item.missing_capability ? ` (saknas ${String(item.missing_capability)})` : ""}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {view.obligations.length === 0 && (
         <p className="text-white/30">Inga registrerade åtaganden i ledgern.</p>
       )}

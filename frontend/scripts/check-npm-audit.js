@@ -273,12 +273,46 @@ function parseAuditStdout(stdout, stderr, status) {
   return parsed;
 }
 
-function runAudit(extraArgs = []) {
-  const result = spawnSync("npm", ["audit", ...extraArgs, "--json"], {
+const AUDIT_ATTEMPTS = 3;
+const AUDIT_TIMEOUT_MS = 45000;
+const RETRYABLE_AUDIT = /503|429|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|Service Unavailable|registry timeout|registry\.npmjs\.org/i;
+
+function isRetryableAuditFailure(error) {
+  return RETRYABLE_AUDIT.test(String((error && error.message) || error || ""));
+}
+
+function spawnNpmAudit(extraArgs, timeoutMs) {
+  return spawnSync("npm", ["audit", ...extraArgs, "--json"], {
     encoding: "utf8",
     maxBuffer: 10 * 1024 * 1024,
+    timeout: timeoutMs,
   });
-  return parseAuditStdout(result.stdout, result.stderr, result.status);
+}
+
+function attemptAudit(extraArgs = [], options = {}) {
+  const timeoutMs = options.timeoutMs || AUDIT_TIMEOUT_MS;
+  const spawn = options.spawn || spawnNpmAudit;
+  const result = spawn(extraArgs, timeoutMs);
+  if (result && result.error && (result.error.code === "ETIMEDOUT" || result.error.code === "ERR_SPAWN_TIMEOUT")) {
+    throw new Error("npm audit failed: registry timeout contacting npm audit API");
+  }
+  return parseAuditStdout(result && result.stdout, result && result.stderr, result && result.status);
+}
+
+function runAudit(extraArgs = [], options = {}) {
+  const attempts = options.attempts || AUDIT_ATTEMPTS;
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return attemptAudit(extraArgs, options);
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableAuditFailure(error) || attempt === attempts) {
+        throw error;
+      }
+    }
+  }
+  throw lastError;
 }
 
 function main() {
@@ -297,15 +331,20 @@ function main() {
 }
 
 module.exports = {
+  AUDIT_ATTEMPTS,
+  AUDIT_TIMEOUT_MS,
   EXCEPTION_REVIEW_DEADLINE,
   TEMPORARY_DEV_EXCEPTIONS,
   advisoryMatchesException,
+  attemptAudit,
   classifyFix,
   compatibleFixAvailable,
   evaluateAudits,
+  isRetryableAuditFailure,
   parseAuditStdout,
   parseDateOnlyUtc,
   rootAdvisories,
+  runAudit,
 };
 
 if (require.main === module) main();

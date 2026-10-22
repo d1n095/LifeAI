@@ -3,11 +3,14 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
+  AUDIT_ATTEMPTS,
   EXCEPTION_REVIEW_DEADLINE,
   TEMPORARY_DEV_EXCEPTIONS,
   evaluateAudits,
+  isRetryableAuditFailure,
   parseAuditStdout,
   parseDateOnlyUtc,
+  runAudit,
 } = require("./check-npm-audit.js");
 
 const bracesAdvisory = Object.freeze({
@@ -553,4 +556,76 @@ test("sweep: via that is neither string nor object is ignored and high stays una
     odd: { name: "odd", severity: "high", via: [12, null, true], fixAvailable: false },
   }));
   assert.ok(errors.some((error) => /unattributed high dev vulnerability: odd/.test(error)));
+});
+
+test("parseAuditStdout throws a retryable 503 and does not look like a clean report", () => {
+  assert.throws(
+    () => parseAuditStdout(
+      JSON.stringify({
+        error: {
+          summary: "503 Service Unavailable - POST https://registry.npmjs.org/-/npm/v1/security/audits/quick - Service Unavailable",
+        },
+      }),
+      "",
+      1,
+    ),
+    (error) => {
+      assert.match(error.message, /503 Service Unavailable/);
+      assert.equal(isRetryableAuditFailure(error), true);
+      assert.doesNotMatch(error.message, /policy: production clean/);
+      return true;
+    },
+  );
+  assert.equal(
+    isRetryableAuditFailure(new Error("production vulnerability: left-pad (high)")),
+    false,
+  );
+});
+
+test("runAudit retries registry 503 then returns a real report; exhausted 503 still fails", () => {
+  const clean = JSON.stringify({ vulnerabilities: {} });
+  const unavailable = JSON.stringify({
+    error: {
+      summary: "503 Service Unavailable - POST https://registry.npmjs.org/-/npm/v1/security/audits/quick - Service Unavailable",
+    },
+  });
+  let calls = 0;
+  const recovered = runAudit([], {
+    attempts: AUDIT_ATTEMPTS,
+    spawn: () => {
+      calls += 1;
+      if (calls < 3) return { stdout: unavailable, stderr: "", status: 1 };
+      return { stdout: clean, stderr: "", status: 0 };
+    },
+  });
+  assert.equal(calls, 3);
+  assert.deepEqual(recovered.vulnerabilities, {});
+
+  let failedCalls = 0;
+  assert.throws(
+    () => runAudit([], {
+      attempts: AUDIT_ATTEMPTS,
+      spawn: () => {
+        failedCalls += 1;
+        return { stdout: unavailable, stderr: "", status: 1 };
+      },
+    }),
+    /503 Service Unavailable/,
+  );
+  assert.equal(failedCalls, AUDIT_ATTEMPTS);
+});
+
+test("runAudit does not retry a parsed production vulnerability report", () => {
+  let calls = 0;
+  const prod = JSON.stringify({
+    vulnerabilities: { prod: { name: "prod", severity: "high", via: [] } },
+  });
+  const parsed = runAudit(["--omit=dev"], {
+    spawn: () => {
+      calls += 1;
+      return { stdout: prod, stderr: "", status: 1 };
+    },
+  });
+  assert.equal(calls, 1);
+  assert.match(evaluateAudits(parsed, report())[0], /production vulnerability/);
 });

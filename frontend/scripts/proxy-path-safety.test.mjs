@@ -90,6 +90,22 @@ test("D4 missing health or STOP evidence is unknown, not reachable or inactive",
   assert.doesNotMatch(missing, /STOP inaktiv/);
 });
 
+test("D4 a failed snapshot poll cannot keep a stale reachable backend status", () => {
+  const reachable = {
+    health: { status: "ok", worker: "alive", backend_reachable: true, evidence_available: true },
+    startup_readiness: { level: "READY_FOR_SAFE_INTERNAL_RUN", blocking: [] },
+    stop: { blocked: false, observability_failed: false },
+    safe_launch: { privileged_remote_effects_enabled: false, recall_http_mounted: false },
+    first_cycle_go: false,
+  };
+  const before = statusLine(reachable, null, true);
+  assert.match(before, /Backend nåbar/);
+  const afterFailedPoll = statusLine(null, "Simulerat serverfel", true);
+  assert.doesNotMatch(afterFailedPoll, /Backend nåbar/);
+  assert.doesNotMatch(afterFailedPoll, /STOP inaktiv/);
+  assert.match(afterFailedPoll, /otillgänglig/);
+});
+
 test("D5 BLOCKED without named blockers cannot be presented as BLOCKED", () => {
   assert.equal(describeReadiness({ level: "BLOCKED", blocking: [] }), "beredskap okänd (fail-closed)");
   assert.equal(describeReadiness({ level: "BLOCKED", blocking: ["provider_disabled"] }), "beredskap BLOCKED (1)");
