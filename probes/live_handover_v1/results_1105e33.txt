@@ -1,0 +1,12 @@
+LRH1|app ASGI stack + worker module boot OK (isolated, credential-free)
+.LRH2|ingestion_surface=None
+FLRH4|restart_obligations=1 has_ours=True status=acknowledged
+PASSED test_lrh.py::test_LRH1_app_and_worker_stack_boot
+PASSED test_lrh.py::test_LRH4_persisted_obligation_survives_restart_and_dashboard
+FAILED test_lrh.py::test_LRH2_production_ingestion_boundary_exists - Failed: ...
+FAILED test_lrh.py::test_LRH_ingestion_dependent_scenarios[LRH5_three_agents_concurrent_delayed_out_of_order]
+FAILED test_lrh.py::test_LRH_ingestion_dependent_scenarios[LRH6_historical_queue_empty_cannot_erase_newer_assignment]
+FAILED test_lrh.py::test_LRH_ingestion_dependent_scenarios[LRH7_only_genuinely_completed_agent_becomes_eligible]
+FAILED test_lrh.py::test_LRH_ingestion_dependent_scenarios[LRH8_completed_candidate_generates_exactly_one_review_obligation]
+FAILED test_lrh.py::test_LRH_ingestion_dependent_scenarios[LRH9_artifact_receipts_survive_restart_vendor_transport_blocked]
+FAILED test_lrh.py::test_LRH_ingestion_dependent_scenarios[LRH10_forged_events_cannot_create_work_or_bypass_stop]
