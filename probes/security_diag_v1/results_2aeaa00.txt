@@ -1,0 +1,24 @@
+-> indexed, or failed at any step) can be modeled and surfaced without losing the received
+Also adds `next_attempt_at` (worker backoff for `failed` tasks — see this migration's second
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+SD1|violations=[]
+.SD2|applied=False settings_before==after=True
+.SD2b|apply_status=409
+.SD3|incidents_from_50_forged_unknown=0
+.SD3b|incidents=[('repeated_failed_login', 'uncertain')]
+.SD4|leaked=[]
+.SD4b|red='the deployment finished at 12:00 and the build id is 12345' cats=[]
+.SD5|keys=['autonomous_privilege_escalation', 'blocks_first_cycle', 'confidence_counts', 'customer_isolation', 'fabricated_progress', 'findings', 'first_cycle_go', 'generated_from', 'incidents', 'inve
+..SD6|status=200 body_has_raw=False
+PASSED test_sd.py::test_SD1_security_endpoints_are_founder_only
+PASSED test_sd.py::test_SD2_remediation_apply_is_always_refused
+PASSED test_sd.py::test_SD2b_apply_endpoint_refuses_sensitive_payload
+PASSED test_sd.py::test_SD3_forged_unknown_audit_actions_are_not_incidents
+PASSED test_sd.py::test_SD3b_fabricated_known_rows_stay_uncertain_or_evidence_only
+PASSED test_sd.py::test_SD4_redaction_never_echoes_raw_secret
+PASSED test_sd.py::test_SD4b_redaction_positive_control_preserves_nonsecret
+PASSED test_sd.py::test_SD5_dashboard_truthful_and_never_go
+PASSED test_sd.py::test_SD5b_findings_report_confidence_and_evidence
+PASSED test_sd.py::test_SD6_incident_preserve_redacts_and_does_not_escalate
+10 passed in 12.37s
+target worktree unchanged
