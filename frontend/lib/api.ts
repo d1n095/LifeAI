@@ -697,6 +697,11 @@ export type FounderOpsSnapshot = {
     stalled: Record<string, unknown>[];
     handoffs: Record<string, unknown>[];
     owners: Record<string, string>;
+    needed_work?: {
+      items: Record<string, unknown>[];
+      idle_agents: string[];
+      founder_must_forward_reports: boolean;
+    };
   };
 };
 

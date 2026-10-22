@@ -741,6 +741,7 @@ def _durable_coordination(db: Session, *, owner_id: uuid.UUID) -> dict[str, Any]
             "handoffs": [],
             "owners": {},
             "queue_empty": True,
+            "needed_work": {"items": [], "idle_agents": [], "founder_must_forward_reports": False},
         }
 
 

@@ -60,9 +60,15 @@ chronology as `evidence_recorded` events, and security-relevant writes in `Audit
 ## Founder visibility
 
 `build_founder_ops_snapshot()` includes `durable_coordination`: who owns each obligation,
-what is active / finished / independently certified, and why something is blocked.
+what is active / finished / independently certified, why something is blocked, and
+`needed_work` (which agent must acknowledge, execute, or unblock). MainAI reads that
+list instead of asking the Founder to forward routine reports.
+
 The Founder-ops page renders the same section. `first_cycle_go` stays false;
 `blocks_first_cycle` stays false.
+
+The home dashboard polls the same snapshot. A later failed poll drops the previous
+reachable copy (D4).
 
 ## Out of scope
 
