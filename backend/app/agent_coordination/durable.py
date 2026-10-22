@@ -224,6 +224,15 @@ class DurableCoordinationService:
             "seen_deliveries": [],
             "stale_rejected": [],
         }
+        self._lifecycle: dict[str, Any] = {
+            "watermark": None,
+            "processed_event_ids": [],
+            "decisions": [],
+            "builder_eligible": [],
+            "delivery_claimed": False,
+            "first_cycle_go": FIRST_CYCLE_GO,
+            "adapters": [],
+        }
 
     # ------------------------------------------------------------------ assign
 
@@ -1104,7 +1113,13 @@ class DurableCoordinationService:
             "queue_empty": len(active) == 0,
             "needed_work": self.needed_work(),
             "github_intake": self.github_intake_view(),
+            "lifecycle": self.lifecycle_public_view(),
         }
+
+    def lifecycle_public_view(self) -> dict[str, Any]:
+        from app.agent_coordination.lifecycle import lifecycle_view
+
+        return lifecycle_view(self)
 
     def github_intake_view(self) -> dict[str, Any]:
         from app.agent_coordination.github_intake import GitHubDevelopmentIntake
@@ -1186,6 +1201,14 @@ class DurableCoordinationService:
                 self._handoffs[handoff["handoff_id"]] = handoff
         for event_id in payload.get("seen_event_ids") or []:
             self._seen_event_ids.add(str(event_id))
+        for row in payload.get("obligations") or []:
+            if isinstance(row, dict) and row.get("assignment_id"):
+                self._obligations[row["assignment_id"]] = row
+                if row.get("canonical_work_key"):
+                    self._by_canonical[row["canonical_work_key"]] = row["assignment_id"]
+                for event in row.get("events") or []:
+                    if event.get("event_id"):
+                        self._seen_event_ids.add(event["event_id"])
         intake = payload.get("github_intake")
         if isinstance(intake, dict):
             merged = dict(self._github_intake)
@@ -1193,6 +1216,17 @@ class DurableCoordinationService:
             if isinstance(intake.get("candidates"), dict):
                 merged["candidates"] = {**self._github_intake.get("candidates", {}), **intake["candidates"]}
             self._github_intake = merged
+        lifecycle = payload.get("lifecycle")
+        if isinstance(lifecycle, dict):
+            merged_life = dict(self._lifecycle)
+            merged_life.update(lifecycle)
+            if isinstance(lifecycle.get("processed_event_ids"), list):
+                merged_life["processed_event_ids"] = sorted(
+                    set(self._lifecycle.get("processed_event_ids") or []) | set(lifecycle["processed_event_ids"])
+                )
+            if isinstance(lifecycle.get("decisions"), list):
+                merged_life["decisions"] = list(lifecycle["decisions"])
+            self._lifecycle = merged_life
 
     def dump_for(self, assignment_id: str) -> dict[str, Any]:
         record = self._obligations.get(assignment_id)
@@ -1203,9 +1237,11 @@ class DurableCoordinationService:
         ]
         return {
             "obligation": None if record is None else json.loads(json.dumps(record)),
+            "obligations": json.loads(json.dumps(list(self._obligations.values()))),
             "handoffs": related,
             "seen_event_ids": sorted(self._seen_event_ids),
             "github_intake": json.loads(json.dumps(self._github_intake)),
+            "lifecycle": json.loads(json.dumps(self._lifecycle)),
         }
 
     # -------------------------------------------------------------- internals

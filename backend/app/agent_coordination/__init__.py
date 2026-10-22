@@ -7,6 +7,11 @@ from app.agent_coordination.adapter_config import (
     resolve_adapter_env,
 )
 from app.agent_coordination.bootstrap import KNOWN_AGENT_DEFAULTS, bootstrap_known_agents
+from app.agent_coordination.lifecycle import (
+    ingest_lifecycle_event,
+    reconcile_owner,
+    reconcile_pending_owners,
+)
 from app.agent_coordination.github_intake import (
     DEFAULT_PUBLIC_REPO,
     GitHubDevelopmentIntake,
@@ -174,6 +179,7 @@ __all__ = [
     "expire_stale_active_leases",
     "founder_coordination_snapshot",
     "idle_agents_with_next_assignment",
+    "ingest_lifecycle_event",
     "load_owner_ledger",
     "mark_execution_cancelled",
     "mark_execution_exited",
@@ -188,6 +194,8 @@ __all__ = [
     "persist_to_assignment",
     "real_adapter_config",
     "reconcile_execution_state",
+    "reconcile_owner",
+    "reconcile_pending_owners",
     "record_assignment_execution",
     "record_assignment_outcome",
     "record_execution_event",

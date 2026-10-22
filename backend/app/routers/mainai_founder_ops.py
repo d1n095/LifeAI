@@ -43,6 +43,17 @@ class GitHubIntakeRefreshIn(BaseModel):
     pr_numbers: list[int] = Field(default_factory=list, max_length=20)
 
 
+class CoordinationEventIn(BaseModel):
+    kind: str = Field(min_length=1, max_length=64)
+    event_id: str = Field(min_length=1, max_length=128)
+    agent_identity: str | None = None
+    assignment_id: str | None = None
+    observation: dict | None = None
+    evidence: dict | None = None
+    to: str | None = None
+    from_github_ci: bool = False
+
+
 @router.post("/github-intake/refresh")
 @limiter.limit(f"{settings.rate_limit_default_per_minute}/minute")
 def refresh_github_intake(
@@ -72,6 +83,26 @@ def refresh_github_intake(
             persist_to_assignment(db, assignment=assignment, service=service, obligation_id=obligation_id)
             db.commit()
     result["write_attempted"] = False
+    result["github_write"] = False
+    return result
+
+
+@router.post("/coordination/events")
+@limiter.limit(f"{settings.rate_limit_default_per_minute}/minute")
+def ingest_coordination_event(
+    request: Request,
+    payload: CoordinationEventIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Authenticated lifecycle ingestion. Never writes to GitHub or claims vendor delivery."""
+    from app.agent_coordination.lifecycle import ingest_lifecycle_event
+
+    body = payload.model_dump()
+    result = ingest_lifecycle_event(db, owner_id=user.id, payload=body, actor="founder")
+    db.commit()
+    result["first_cycle_go"] = False
+    result["delivery_claimed"] = False
     result["github_write"] = False
     return result
 

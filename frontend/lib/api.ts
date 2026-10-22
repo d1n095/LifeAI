@@ -713,6 +713,16 @@ export type FounderOpsSnapshot = {
       stale_rejected?: Record<string, unknown>[];
       needed_review?: Record<string, unknown>[];
     };
+    lifecycle?: {
+      delivery_claimed?: boolean;
+      first_cycle_go?: boolean;
+      builder_eligible?: Record<string, unknown>[];
+      decisions?: Record<string, unknown>[];
+      founder_approval_required?: Record<string, unknown>[];
+      github_green_is_independent_certification?: boolean;
+      adapters?: Record<string, unknown>[];
+      needed_work?: Record<string, unknown>;
+    };
   };
 };
 

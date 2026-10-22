@@ -87,6 +87,22 @@ commit ancestry and reviews, then records them on the existing durable ledger.
   GitHub status between agents. `POST /api/mainai/founder-ops/github-intake/refresh`
   is Founder-only and read-only.
 
+## Production lifecycle ingestion
+
+`app.agent_coordination.lifecycle` is the production boundary that feeds assignment
+status changes, execution observations and GitHub read-only intake into the same durable
+ledger. The worker poll loop (`Worker._reconcile_durable_coordination`) replays persisted
+events so the Founder does not trigger every refresh.
+
+- Authenticated `POST /api/mainai/founder-ops/coordination/events` rejects spoofed identities,
+  forged completions and GitHub-CI-as-certification.
+- A completed builder becomes eligible for further work; a published candidate creates exactly
+  one examiner obligation. Blocked work keeps its dependency.
+- GitHub-green CI is never independent certification.
+- Local CLI adapters may execute only when Founder-enabled. Cursor/Claude/Codex messaging stays
+  BLOCKED. A prepared instruction is not a delivered message.
+- `first_cycle_go` stays false.
+
 ## Out of scope
 
 Codex Founder Authority, security grants, GitHub publication, Recall activation,
