@@ -1,0 +1,21 @@
+CO3|{'ready->queued': 'queued', 'pending->waiting': 'waiting_on_dependency', 'running(live)->running': 'running', 'running(dead)->failed': 'failed', 'completed->completed': 'completed', 'failed->faile
+.CO1|founder_status=acknowledged (task is ready now, had a stale dispatch 2d ago)
+.CO2|already-progressed agent task refuses re-dispatch for every non-redispatchable status
+.CO2b|dedup guards present: assignment, dispatch, cycle
+.CO7|stalled=TaskLiveness.stalled dead=TaskLiveness.dead retryable=TaskLiveness.done
+.CO6|mode=ExecutionResponseMode.answer job_id=None
+.CO6b|builder==examiner receipt rejected; builder!=examiner accepted
+.FCO4|verification registry rejects builder==examiner (self-certification)
+.CO4b|obligation_ledger_modules=[]
+FCO5|artifact_transfer_modules=[]
+PASSED test_co.py::test_CO3_status_states_are_distinct_and_evidence_grounded
+PASSED test_co.py::test_CO1_stale_completion_event_does_not_mark_active_task_done
+PASSED test_co.py::test_CO2_completed_task_is_not_redispatchable
+PASSED test_co.py::test_CO2b_duplicate_delegation_and_dispatch_guards_exist
+PASSED test_co.py::test_CO7_stalled_and_dead_execution_are_detected
+PASSED test_co.py::test_CO6_runtime_contract_forbids_fabricated_background_progress
+PASSED test_co.py::test_CO6b_independently_verified_requires_a_non_builder_receipt
+PASSED test_co.py::test_CO4_cross_agent_receipts_track_distinct_builder_and_examiner
+FAILED test_co.py::test_CO10_coordination_cannot_clear_stop_or_grant_authority
+FAILED test_co.py::test_CO4b_cross_agent_current_obligation_ledger_is_present
+FAILED test_co.py::test_CO5_authorized_artifact_transfer_exists - Failed: MIS...
