@@ -7,6 +7,17 @@ from app.agent_coordination.adapter_config import (
     resolve_adapter_env,
 )
 from app.agent_coordination.bootstrap import KNOWN_AGENT_DEFAULTS, bootstrap_known_agents
+from app.agent_coordination.durable import (
+    BLOCKS_FIRST_CYCLE,
+    FIRST_CYCLE_GO,
+    DurableCoordinationService,
+    HandoffStatus,
+    ObligationStatus,
+    TransferTransport,
+    founder_coordination_snapshot,
+    load_owner_ledger,
+    persist_to_assignment,
+)
 from app.agent_coordination.dispatch import (
     DISPATCH_LIFECYCLE,
     DispatchDecision,
@@ -93,7 +104,9 @@ from app.agent_coordination.service import (
 
 __all__ = [
     "ALL_EVENT_KINDS",
+    "BLOCKS_FIRST_CYCLE",
     "DISPATCH_LIFECYCLE",
+    "FIRST_CYCLE_GO",
     "DURABLE_EVENT_KINDS",
     "EPHEMERAL_EVENT_KINDS",
     "OUTCOME_OK",
@@ -115,6 +128,8 @@ __all__ = [
     "DispatchDecision",
     "DispatchResult",
     "DuplicateWorkError",
+    "DurableCoordinationService",
+    "HandoffStatus",
     "ExecutionEvent",
     "IdleAgentNextWork",
     "KNOWN_AGENT_DEFAULTS",
@@ -122,10 +137,12 @@ __all__ = [
     "LeaseFencingError",
     "LeaseStillLiveError",
     "NextAssignmentDecision",
+    "ObligationStatus",
     "ReconciliationDecision",
     "RoutingDecision",
     "RuntimeStatus",
     "ScopeExpansionError",
+    "TransferTransport",
     "acquire_lease",
     "adapter_availability",
     "agent_runtime_snapshot",
@@ -145,7 +162,9 @@ __all__ = [
     "evaluate_assignment_readiness",
     "evaluate_dispatch_readiness",
     "expire_stale_active_leases",
+    "founder_coordination_snapshot",
     "idle_agents_with_next_assignment",
+    "load_owner_ledger",
     "mark_execution_cancelled",
     "mark_execution_exited",
     "mark_execution_lost",
@@ -156,6 +175,7 @@ __all__ = [
     "next_feasible_assignment_for_agent",
     "paths_conflict",
     "paths_conflict_any",
+    "persist_to_assignment",
     "real_adapter_config",
     "reconcile_execution_state",
     "record_assignment_execution",

@@ -101,6 +101,10 @@ export default function FounderOpsPage() {
             <Flag ok={!snapshot.first_cycle_go} label="Första cykelns GO = false" />
           </section>
 
+          {snapshot.durable_coordination && (
+            <DurableCoordination view={snapshot.durable_coordination} />
+          )}
+
           {snapshot.security && (
             <section className="rounded-xl border border-border bg-panel p-4 space-y-2 text-sm" data-testid="founder-security-summary">
               <div className="text-xs uppercase tracking-wide text-white/40">Säkerhetsdiagnostik</div>
@@ -232,6 +236,72 @@ function Flag({ ok, label }: { ok: boolean; label: string }) {
     <div className={ok ? "text-emerald-300 text-sm" : "text-red-300 text-sm"}>
       {ok ? "✓" : "✗"} {label}
     </div>
+  );
+}
+
+const COORDINATION_STATUS_LABELS: Record<string, string> = {
+  assigned: "Tilldelad",
+  acknowledged: "Kvitterad",
+  executing: "Utför",
+  blocked: "Blockerad",
+  completed: "Klar",
+  failed: "Misslyckades",
+  superseded: "Ersatt",
+  independently_verified: "Självständigt certifierad",
+};
+
+function DurableCoordination({
+  view,
+}: {
+  view: NonNullable<FounderOpsSnapshot["durable_coordination"]>;
+}) {
+  return (
+    <section className="rounded-xl border border-border bg-panel p-4 space-y-3 text-sm" data-testid="durable-coordination">
+      <div className="text-xs uppercase tracking-wide text-white/40">
+        Agentkoordination och artefaktöverlämning
+      </div>
+      <Flag ok={!view.first_cycle_go && !view.blocks_first_cycle} label="CO-4b/CO-5 är inte first-cycle GO" />
+      <div>
+        Aktiva: {view.active.length} · Klara: {view.finished.length} · Certifierade:{" "}
+        {view.independently_certified.length} · Blockerade: {view.blocked.length} · Fastnade:{" "}
+        {view.stalled.length}
+      </div>
+      <div className="text-white/50">
+        Kö tom: {view.queue_empty ? "ja (inga aktiva åtaganden)" : "nej — aktiv ägare finns"}
+      </div>
+      {view.obligations.length === 0 && (
+        <p className="text-white/30">Inga registrerade åtaganden i ledgern.</p>
+      )}
+      <ul className="space-y-2">
+        {view.obligations.map((row) => (
+          <li key={String(row.assignment_id)} className="rounded-lg border border-border/60 px-3 py-2">
+            <div className="flex justify-between gap-2">
+              <span>{String(row.agent_identity)} · {String(row.workstream)}</span>
+              <span className="text-white/60">
+                {COORDINATION_STATUS_LABELS[String(row.status)] || String(row.status)}
+              </span>
+            </div>
+            <div className="text-white/40 text-xs mt-1">
+              Ägare: {String(row.owner_label || row.agent_identity)}
+              {row.stalled ? " · fastnad i planering utan utförande" : ""}
+              {row.blocked_reason ? ` · ${String(row.blocked_reason)}` : ""}
+              {row.missing_capability ? ` · saknad förmåga: ${String(row.missing_capability)}` : ""}
+            </div>
+          </li>
+        ))}
+      </ul>
+      {view.handoffs.length > 0 && (
+        <ul className="space-y-1 text-xs text-white/60">
+          {view.handoffs.map((handoff) => (
+            <li key={String(handoff.handoff_id)}>
+              Artefakt {String(handoff.sha256).slice(0, 12)}… {String(handoff.producer_identity)} →{" "}
+              {String(handoff.consumer_identity)} ({String(handoff.status)}
+              {handoff.missing_capability ? `; saknas ${String(handoff.missing_capability)}` : ""})
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 

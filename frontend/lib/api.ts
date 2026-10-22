@@ -683,6 +683,21 @@ export type FounderOpsSnapshot = {
     blocks_first_cycle: boolean;
     dashboard_path: string;
   };
+  durable_coordination?: {
+    available?: boolean;
+    capability: string;
+    first_cycle_go: boolean;
+    blocks_first_cycle: boolean;
+    queue_empty?: boolean;
+    obligations: Record<string, unknown>[];
+    active: Record<string, unknown>[];
+    finished: Record<string, unknown>[];
+    independently_certified: Record<string, unknown>[];
+    blocked: Record<string, unknown>[];
+    stalled: Record<string, unknown>[];
+    handoffs: Record<string, unknown>[];
+    owners: Record<string, string>;
+  };
 };
 
 export type SecurityFinding = {
