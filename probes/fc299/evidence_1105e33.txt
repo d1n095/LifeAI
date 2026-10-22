@@ -1,0 +1,7 @@
+Exact-SHA CI: 12/12 required checks green on BOTH push + pull_request (npm-audit hygiene resolved).
+npm-audit check.js: RETRYABLE_AUDIT regex (503/429/timeout) retries, then throws (fail-closed) -> never passes on error.
+handover_v1: 12/12 pass. candidate 3-agent acceptance: 1 pass; candidate coordination: 16 pass.
+D4: UI-1, UI-2, UI-3 all pass (home dashboard polls + setSnapshot(null) on failed poll). D4 CLOSED.
+coord_accept: CO-4b/CO-5 pass; CO-10/FA-9 still BLOCKED (Codex). security_diag: 10/10 (no regression).
+Step 6 wiring: persist_to_assignment has NO production caller; no HTTP route for obligations/handoff; ledger is
+in-process, populated only by tests + the demo -> coordination LOGIC complete, live RUNTIME not wired.

@@ -1,0 +1,16 @@
+-> indexed, or failed at any step) can be modeled and surfaced without losing the received
+Also adds `next_attempt_at` (worker backoff for `failed` tasks — see this migration's second
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+PASSED test_ho.py::test_HO1_three_agents_distinct_obligations
+PASSED test_ho.py::test_HO2_stale_queue_empty_rejected_when_active
+PASSED test_ho.py::test_HO2b_superseded_old_completion_cannot_revive
+PASSED test_ho.py::test_HO3_active_obligation_blocks_duplicate_assignment
+PASSED test_ho.py::test_HO4_replayed_event_is_idempotent
+PASSED test_ho.py::test_HO5_repeated_planning_detected_as_stalled
+PASSED test_ho.py::test_HO6_planning_is_not_execution
+PASSED test_ho.py::test_HO7_independent_review_cannot_be_builder
+PASSED test_ho.py::test_HO8_checksum_and_blocked_channels
+PASSED test_ho.py::test_HO9_founder_view_consolidated
+PASSED test_ho.py::test_HO10_coordination_cannot_escalate_privilege
+PASSED test_ho.py::test_HO10b_cross_agent_impersonation_rejected
+12 passed in 9.28s
