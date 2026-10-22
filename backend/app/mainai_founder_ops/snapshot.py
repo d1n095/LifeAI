@@ -711,9 +711,37 @@ def build_founder_ops_snapshot(
         "first_cycle": first_cycle,
         "authority": _founder_authority(recall_http_mounted=recall_http_mounted),
         "security": _security_summary(db, owner_id=owner_id, recall_http_mounted=recall_http_mounted),
+        "durable_coordination": _durable_coordination(db, owner_id=owner_id),
         "invariant": "NEVER_COLLAPSE_TO_ONE_BOOLEAN",
         "communication_policy": "factual_accuracy_over_agreement",
     }
+
+
+def _durable_coordination(db: Session, *, owner_id: uuid.UUID) -> dict[str, Any]:
+    """CO-4b/CO-5 visibility. Coordination maturity only — never a first-cycle GO input."""
+    try:
+        from app.agent_coordination.durable import founder_coordination_snapshot
+
+        view = founder_coordination_snapshot(db, owner_id=owner_id)
+        view["available"] = True
+        return view
+    except Exception as exc:  # noqa: BLE001 — diagnostics must not hide Founder-ops evidence
+        return {
+            "available": False,
+            "capability": "CO-4b/CO-5",
+            "first_cycle_go": False,
+            "blocks_first_cycle": False,
+            "error": type(exc).__name__,
+            "obligations": [],
+            "active": [],
+            "finished": [],
+            "independently_certified": [],
+            "blocked": [],
+            "stalled": [],
+            "handoffs": [],
+            "owners": {},
+            "queue_empty": True,
+        }
 
 
 def _security_summary(db: Session, *, owner_id: uuid.UUID, recall_http_mounted: bool) -> dict[str, Any]:
