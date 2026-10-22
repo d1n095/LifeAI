@@ -749,6 +749,14 @@ def _durable_coordination(db: Session, *, owner_id: uuid.UUID) -> dict[str, Any]
                 "delivery_claimed": False,
                 "first_cycle_go": False,
             },
+            "lifecycle": {
+                "delivery_claimed": False,
+                "first_cycle_go": False,
+                "builder_eligible": [],
+                "decisions": [],
+                "founder_approval_required": [],
+                "github_green_is_independent_certification": False,
+            },
         }
 
 

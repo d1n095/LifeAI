@@ -307,6 +307,36 @@ function DurableCoordination({
           </li>
         ))}
       </ul>
+      {view.lifecycle && (
+        <div data-testid="lifecycle-coordination">
+          <div className="text-xs uppercase tracking-wide text-white/40">Automatisk livscykel</div>
+          <Flag ok={!view.lifecycle.delivery_claimed} label="Ingen Cursor/Claude/Codex-leverans påstås" />
+          <Flag
+            ok={!view.lifecycle.github_green_is_independent_certification}
+            label="GitHub-grön CI är inte oberoende certifiering"
+          />
+          {(view.lifecycle.builder_eligible || []).length > 0 && (
+            <div>
+              Byggare redo för mer arbete:{" "}
+              {(view.lifecycle.builder_eligible || [])
+                .map((row) => String(row.agent_identity))
+                .join(", ")}
+            </div>
+          )}
+          {(view.lifecycle.founder_approval_required || []).length === 0 ? (
+            <p className="text-white/30">Inget som kräver Founder-godkännande just nu.</p>
+          ) : (
+            <ul className="text-xs text-white/60">
+              {(view.lifecycle.founder_approval_required || []).map((row) => (
+                <li key={String(row.assignment_id)}>
+                  {String(row.agent_identity)}: {String(row.need)}
+                  {row.missing_capability ? ` (saknas ${String(row.missing_capability)})` : ""}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
       {view.github_intake && (
         <div data-testid="github-intake">
           <div className="text-xs uppercase tracking-wide text-white/40">GitHub-utveckling (endast läsning)</div>

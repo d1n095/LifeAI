@@ -12,7 +12,7 @@
     "proxy:safety:test": "node --experimental-strip-types --test scripts/proxy-path-safety.test.mjs"
   },
   "dependencies": {
-    "next": "16.3.8",
+    "next": "16.4.2",
     "react": "19.2.7",
     "react-dom": "19.2.7"
   },
@@ -23,7 +23,7 @@
     "@types/react-dom": "19.2.3",
     "autoprefixer": "10.4.19",
     "eslint": "9.39.5",
-    "eslint-config-next": "16.3.8",
+    "eslint-config-next": "16.4.2",
     "postcss": "8.5.29",
     "tailwindcss": "3.4.4",
     "typescript": "5.5.3"

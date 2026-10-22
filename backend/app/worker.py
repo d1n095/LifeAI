@@ -922,6 +922,23 @@ class Worker:
             db.rollback()
             logger.exception("Worker %s: failed to expire stale agent scope leases.", self.worker_id)
 
+    def _reconcile_durable_coordination(self, db: Session) -> None:
+        """Replay persisted assignment/GitHub observations into the durable ledger.
+
+        Founder does not have to trigger every refresh. Never writes to GitHub, never
+        claims Cursor/Claude/Codex delivery, never sets first-cycle GO.
+        """
+        try:
+            from app.agent_coordination.lifecycle import reconcile_pending_owners
+
+            n = reconcile_pending_owners(db, limit=20)
+            db.commit()
+            if n:
+                logger.info("Worker %s: reconciled durable coordination for %d owner(s).", self.worker_id, n)
+        except Exception:
+            db.rollback()
+            logger.exception("Worker %s: failed durable coordination reconcile.", self.worker_id)
+
     # Bounded per-tick fan-out: how many eligible authorized goals this worker attempts a
     # Supervisor call for per poll cycle -- matches the same small, deliberately conservative
     # batch-size precedent as _MAX_CI_WAITS_PER_TICK above, not an unbounded scan.
@@ -977,6 +994,7 @@ class Worker:
             self._finalize_mainai_execution_goals(claim_db)
             await self._resolve_engineering_lesson_conflicts(claim_db)
             self._expire_stale_agent_scope_leases(claim_db)
+            self._reconcile_durable_coordination(claim_db)
             await self._advance_authorized_supervisor_goals(claim_db)
             # Reconcile again after Supervisor/Driver may have completed the last task in
             # this same tick. Primary rollup is now inside `_finalize_task_outcome`; this
