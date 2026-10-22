@@ -2101,8 +2101,12 @@ def test_section20_thousand_message_backfill_completes_without_n_squared_blowup(
 
 
 def test_section20_source_import_batches_owner_query_uses_the_owner_index():
-    """`ix_sib_owner` (migration 0037) must actually be the plan Postgres picks for the exact
-    query pattern the batch-list UI would run -- confirms the index isn't dead weight."""
+    """`ix_sib_owner` (migration 0037) must be usable for the batch-list owner_id filter.
+
+    Tiny tables can make a seq scan cheaper than the index (push CI on `20bfd1d` chose
+    Seq Scan at cost 1.41 / rows=1). Disable seqscan for the EXPLAIN so a missing index
+    cannot hide behind the planner; the assertion still requires an index plan.
+    """
     session = SessionLocal()
     try:
         owner = _make_user(session, "section20-index@example.com")
@@ -2110,6 +2114,8 @@ def test_section20_source_import_batches_owner_query_uses_the_owner_index():
         for i in range(5):
             create_batch(session, owner.id, label=f"batch {i}")
         session.commit()
+        session.execute(sa_text("ANALYZE source_import_batches"))
+        session.execute(sa_text("SET LOCAL enable_seqscan = off"))
 
         plan_rows = session.execute(
             sa_text("EXPLAIN SELECT * FROM source_import_batches WHERE owner_id = :oid"), {"oid": str(owner.id)}
