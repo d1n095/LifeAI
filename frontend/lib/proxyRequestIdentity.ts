@@ -4,7 +4,7 @@ import {
   isPlausiblePeerIp,
   normalizePeerIp,
   peerCaptureInstalled,
-} from "./trustedPeerAddress";
+} from "./trustedPeerAddress.ts";
 
 const CLIENT_FORGED_FORWARD_HEADERS = new Set([
   "x-forwarded-for",
