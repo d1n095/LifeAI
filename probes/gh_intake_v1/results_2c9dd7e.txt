@@ -1,0 +1,16 @@
+GH1|anon/member/role-only-founder all refused
+.GH2|outcome=applied write_attempted=False github_write=False delivery=False
+.GH3|restart_obligations=1
+.GH4|run1=['5916be8d-127c-4248-ac95-4c8698258da3', '87d65188-7d99-46fb-af5d-7fcfd053782a'] run2=['3e0af941-f000-42da-a742-9e258a917031', 'c9f01554-f321-4cac-87a2-1225fc366e6f'] idempotent=False
+FGH4b|created=2 survived_restart=1 missing={'31977ef6-dc55-40fd-b16f-66c82133a868'}
+FGH5|good_results=[{'outcome': 'applied', 'pr': 300, 'head_sha': 'cccccccccccccccccccccccccccccccccccccccc', 'reviewable': True, 'freeze_allowed': False, 'freeze_blockers': ['required_checks_incomplete'], 'builder_assignment_id': 'a737b419-78ec-42cb-9701-23bd86de2c19', 'examiner_assignment_id': '583f68cd-13ca-4e97-9bd5-58040e9f9415', 'duplicate_examiner': False, 'delivery_claimed': False, 'first_cycle_go': False}] stale_results=[{'outcome': 'applied', 'pr': 300, 'head_sha': 'dddddddddddddddddddddddddddddddddddddddd', 'reviewable': True, 'freeze_allowed': False, 'freeze_blockers': ['required_checks_incomplete'], 'builder_assignment_id': 'ea05cc26-b8a3-4c2d-be5d-e96f70fc9d27', 'examiner_assignment_id': '4017535f-7e7e-4188-a939-4654eed7a68b', 'duplicate_examiner': False, 'delivery_claimed': False, 'first_cycle_go': False}]
+.GH6|delivery_claimed_in_body=False needs_review=False
+.GH7|outcome=blocked missing_capability=github_read_rate_limit
+PASSED test_gh.py::test_GH1_refresh_is_founder_only
+PASSED test_gh.py::test_GH2_refresh_discovers_and_is_read_only
+PASSED test_gh.py::test_GH3_persists_and_survives_restart
+PASSED test_gh.py::test_GH5_stale_failed_does_not_override_newer_success
+PASSED test_gh.py::test_GH6_examiner_obligation_without_delivery_and_without_false_certification
+PASSED test_gh.py::test_GH7_api_failure_is_blocked
+FAILED test_gh.py::test_GH4_repeated_refresh_is_idempotent - AssertionError: ...
+FAILED test_gh.py::test_GH4b_endpoint_persists_only_one_of_two_obligations - ...
