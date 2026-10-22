@@ -213,6 +213,17 @@ class DurableCoordinationService:
         self._handoffs: dict[str, dict[str, Any]] = {}
         self._seen_event_ids: set[str] = set()
         self._buffered: list[dict[str, Any]] = []
+        self._github_intake: dict[str, Any] = {
+            "repo": None,
+            "access": "unknown",
+            "missing_capability": None,
+            "write_attempted": False,
+            "delivery_claimed": False,
+            "first_cycle_go": FIRST_CYCLE_GO,
+            "candidates": {},
+            "seen_deliveries": [],
+            "stale_rejected": [],
+        }
 
     # ------------------------------------------------------------------ assign
 
@@ -1092,7 +1103,14 @@ class DurableCoordinationService:
             "owners": {row["assignment_id"]: row["agent_identity"] for row in obligations},
             "queue_empty": len(active) == 0,
             "needed_work": self.needed_work(),
+            "github_intake": self.github_intake_view(),
         }
+
+    def github_intake_view(self) -> dict[str, Any]:
+        from app.agent_coordination.github_intake import GitHubDevelopmentIntake
+
+        repo = str(self._github_intake.get("repo") or "")
+        return GitHubDevelopmentIntake(self, owner_id="unknown", repo=repo).view()
 
     def needed_work(self) -> dict[str, Any]:
         """Which agent needs what. Founder is not required to forward routine reports."""
@@ -1168,6 +1186,13 @@ class DurableCoordinationService:
                 self._handoffs[handoff["handoff_id"]] = handoff
         for event_id in payload.get("seen_event_ids") or []:
             self._seen_event_ids.add(str(event_id))
+        intake = payload.get("github_intake")
+        if isinstance(intake, dict):
+            merged = dict(self._github_intake)
+            merged.update(intake)
+            if isinstance(intake.get("candidates"), dict):
+                merged["candidates"] = {**self._github_intake.get("candidates", {}), **intake["candidates"]}
+            self._github_intake = merged
 
     def dump_for(self, assignment_id: str) -> dict[str, Any]:
         record = self._obligations.get(assignment_id)
@@ -1180,6 +1205,7 @@ class DurableCoordinationService:
             "obligation": None if record is None else json.loads(json.dumps(record)),
             "handoffs": related,
             "seen_event_ids": sorted(self._seen_event_ids),
+            "github_intake": json.loads(json.dumps(self._github_intake)),
         }
 
     # -------------------------------------------------------------- internals
@@ -1419,4 +1445,11 @@ def founder_coordination_snapshot(db: Session, *, owner_id: uuid.UUID) -> dict[s
             "owners": {},
             "queue_empty": True,
             "needed_work": {"items": [], "idle_agents": ["cursor", "claude", "codex"], "founder_must_forward_reports": False},
+            "github_intake": {
+                "access": "unknown",
+                "candidates": {},
+                "stale_rejected": [],
+                "delivery_claimed": False,
+                "first_cycle_go": FIRST_CYCLE_GO,
+            },
         }

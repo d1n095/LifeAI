@@ -742,6 +742,13 @@ def _durable_coordination(db: Session, *, owner_id: uuid.UUID) -> dict[str, Any]
             "owners": {},
             "queue_empty": True,
             "needed_work": {"items": [], "idle_agents": [], "founder_must_forward_reports": False},
+            "github_intake": {
+                "access": "unknown",
+                "candidates": {},
+                "stale_rejected": [],
+                "delivery_claimed": False,
+                "first_cycle_go": False,
+            },
         }
 
 

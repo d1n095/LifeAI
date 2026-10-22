@@ -70,6 +70,23 @@ The Founder-ops page renders the same section. `first_cycle_go` stays false;
 The home dashboard polls the same snapshot. A later failed poll drops the previous
 reachable copy (D4).
 
+## GitHub read-only development intake
+
+`app.agent_coordination.github_intake.GitHubDevelopmentIntake` observes public GitHub
+PRs, exact head SHAs, required CI (the same 12-check contract as `required_checks.py`),
+commit ancestry and reviews, then records them on the existing durable ledger.
+
+- Credential-free public GET is the default. Token, if present, is still GET-only.
+- Rate limits, 401/403 and 5xx are BLOCKED with a named missing capability.
+- A published (non-draft) PR creates one builder obligation and one examiner obligation
+  per PR. Duplicate ingest is idempotent.
+- Failed or running required checks on the current SHA block freeze. A failure on an
+  ancestor SHA is stale and cannot invalidate a newer green SHA.
+- The intake never writes to GitHub and never claims Cursor/Claude/Codex delivery.
+- Founder-ops shows `durable_coordination.github_intake` so the Founder does not copy
+  GitHub status between agents. `POST /api/mainai/founder-ops/github-intake/refresh`
+  is Founder-only and read-only.
+
 ## Out of scope
 
 Codex Founder Authority, security grants, GitHub publication, Recall activation,

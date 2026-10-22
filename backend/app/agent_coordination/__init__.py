@@ -7,6 +7,12 @@ from app.agent_coordination.adapter_config import (
     resolve_adapter_env,
 )
 from app.agent_coordination.bootstrap import KNOWN_AGENT_DEFAULTS, bootstrap_known_agents
+from app.agent_coordination.github_intake import (
+    DEFAULT_PUBLIC_REPO,
+    GitHubDevelopmentIntake,
+    GitHubReadClient,
+    GitHubReadError,
+)
 from app.agent_coordination.durable import (
     BLOCKS_FIRST_CYCLE,
     FIRST_CYCLE_GO,
@@ -128,7 +134,11 @@ __all__ = [
     "DispatchDecision",
     "DispatchResult",
     "DuplicateWorkError",
+    "DEFAULT_PUBLIC_REPO",
     "DurableCoordinationService",
+    "GitHubDevelopmentIntake",
+    "GitHubReadClient",
+    "GitHubReadError",
     "HandoffStatus",
     "ExecutionEvent",
     "IdleAgentNextWork",
