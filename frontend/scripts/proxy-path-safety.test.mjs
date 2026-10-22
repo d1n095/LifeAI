@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyTrustedForwardingHeaders, isClientForgedForwardHeader, trustedClientIp } from "../lib/proxyRequestIdentity.ts";
-import { runWithTrustedPeer } from "../lib/trustedPeerAddress.ts";
+import { applyTrustedForwardingHeaders, isClientForgedForwardHeader, runWithTrustedPeer, trustedClientIp } from "../lib/proxyRequestIdentity.ts";
 import { assertSafeProxyPath, isUnsafeProxyPathSegment } from "../lib/proxyPathSafety.ts";
 import { describeHealth, describeReadiness, describeStop, statusLine } from "../lib/founderHealth.ts";
 
