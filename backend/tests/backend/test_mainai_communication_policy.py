@@ -12,6 +12,20 @@ def test_simple_question_is_detected():
     assert not is_simple_question("Det här är inget frågetecken")
 
 
+def test_founder_question_does_not_fabricate_disagreement():
+    for question in (
+        "Vad är first-cycle GO?",
+        "Är first-cycle GO false?",
+        "Är GO true?",
+        "What is first-cycle GO?",
+    ):
+        notices = contradiction_notices(
+            founder_message=question,
+            evidence={"first_cycle_go": False},
+        )
+        assert notices == [], question
+
+
 def test_false_go_claim_is_contradicted():
     notices = contradiction_notices(
         founder_message="First-cycle GO är true och systemet är redo.",

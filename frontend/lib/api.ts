@@ -626,12 +626,14 @@ export type FounderOpsSnapshot = {
     status: string;
     worker: string;
     backend_reachable: boolean;
+    evidence_available?: boolean;
   };
   startup_readiness: {
     level: string;
     blocking?: string[];
     notes?: string;
     unknown_fail_closed?: boolean;
+    evidence_unavailable?: boolean;
   };
   stop: {
     blocked: boolean;

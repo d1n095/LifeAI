@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { api, FounderAgent, FounderNextAction, FounderOpsSnapshot, FounderWorkItem } from "@/lib/api";
+import { describeHealth, describeReadiness, describeStop } from "@/lib/founderHealth";
 import { FOUNDER_STATUS_COLORS, FOUNDER_STATUS_LABELS } from "@/lib/founderStatus";
 
 const POLL_INTERVAL_MS = 5000;
@@ -18,6 +19,7 @@ export default function FounderOpsPage() {
       setSnapshot(await api.founderOpsSnapshot());
       setError(null);
     } catch (e: unknown) {
+      setSnapshot(null);
       setError(e instanceof Error ? e.message : "Kunde inte läsa Founder-status.");
     }
   }
@@ -64,26 +66,12 @@ export default function FounderOpsPage() {
         <>
           <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <InfoCard title="Hälsa">
-              <div>
-                Backend:{" "}
-                {snapshot.health.backend_reachable && snapshot.health.status === "ok" ? "nåbar" : "otillgänglig"}
-              </div>
+              <div data-testid="founder-health">{describeHealth(snapshot.health)}</div>
               <div>Worker: {snapshot.health.worker}</div>
-              <div data-testid="readiness-level">
-                Beredskap:{" "}
-                {snapshot.startup_readiness.unknown_fail_closed
-                  ? "okänd (fail-closed)"
-                  : snapshot.startup_readiness.level}
-              </div>
+              <div data-testid="readiness-level">{describeReadiness(snapshot.startup_readiness)}</div>
             </InfoCard>
             <InfoCard title="STOP">
-              <div data-testid="stop-state">
-                {snapshot.stop.observability_failed
-                  ? "Okänd (fail-closed)"
-                  : snapshot.stop.blocked
-                    ? "Blockerad"
-                    : "Inte blockerad"}
-              </div>
+              <div data-testid="stop-state">{describeStop(snapshot.stop)}</div>
               {snapshot.stop.code && <div className="text-amber-200">{snapshot.stop.code}</div>}
               {snapshot.stop.observability_failed && (
                 <div role="alert">STOP-status okänd — behandlas som blockerad.</div>

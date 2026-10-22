@@ -97,6 +97,7 @@ def classify_mainai_task(
         "approval_required": bool(getattr(task, "approval_required", False)),
         "approval_granted": _has_event(event_list, MainAITaskEventType.approval_granted),
         "dispatched": _has_event(event_list, MainAITaskEventType.dispatched),
+        "current_acknowledgment": _current_acknowledgment(job),
         "checkpoint_test_status": checkpoint_test_status,
         "checkpoint_ci_status": checkpoint_ci_status,
         "builder_self_verification": _has_event(event_list, MainAITaskEventType.verification_passed)
@@ -128,8 +129,9 @@ def classify_mainai_task(
         MainAITaskStatus.waiting_ci,
     }:
         status = FounderWorkStatus.waiting_on_dependency
-    elif _job_acknowledged(job) or evidence["dispatched"]:
-        # Claimed or dispatched without a live running lease — accepted, not executing.
+    elif evidence["current_acknowledgment"]:
+        # A live queued/claimed job is current acknowledgment. Historical dispatched
+        # events are evidence of a past attempt, not a live worker ack (N4).
         status = FounderWorkStatus.acknowledged
     elif task.status == MainAITaskStatus.ready:
         status = FounderWorkStatus.queued
@@ -249,6 +251,16 @@ def _job_acknowledged(job: MainAIJob | None) -> bool:
     if job.status != MainAIJobStatus.queued:
         return False
     return bool(getattr(job, "locked_by", None))
+
+
+def _current_acknowledgment(job: MainAIJob | None) -> bool:
+    """True only for a live job on this attempt — not any historical dispatched event."""
+    if job is None:
+        return False
+    status = job.status.value if isinstance(job.status, enum.Enum) else str(job.status)
+    if status == MainAIJobStatus.queued.value:
+        return True
+    return _job_acknowledged(job)
 
 
 def _has_event(events: Iterable[MainAITaskEvent], event_type: MainAITaskEventType) -> bool:

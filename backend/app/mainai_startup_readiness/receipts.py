@@ -55,14 +55,18 @@ class StartupReadinessReport:
     receipts: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
+        blocking = list(self.blocking)
+        if self.level == ReadinessLevel.BLOCKED and not blocking:
+            blocking = ["blocked_without_named_cause"]
         return {
             "level": self.level.value,
             "checks": [c.as_dict() for c in self.checks],
-            "blocking": list(self.blocking),
+            "blocking": blocking,
             "notes": self.notes,
             "receipts": self.receipts,
             "importable_is_not_healthy": True,
             "unknown_fail_closed": True,
+            "evidence_unavailable": False,
             "invariant": "NEVER_COLLAPSE_TO_ONE_BOOLEAN",
         }
 

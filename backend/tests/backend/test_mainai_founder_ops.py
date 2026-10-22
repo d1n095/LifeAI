@@ -188,10 +188,32 @@ def test_completed_with_verification_passed_is_not_independently_verified():
 
 def test_dispatched_event_without_running_lease_is_acknowledged_not_running():
     event = SimpleNamespace(event_type=MainAITaskEventType.dispatched)
-    item = classify_mainai_task(_task(status=MainAITaskStatus.ready), events=[event])
+    current_job = SimpleNamespace(
+        id=uuid.uuid4(),
+        status=MainAIJobStatus.queued,
+        locked_by=None,
+        job_type="task_execution",
+        public_message=None,
+        error_category=None,
+    )
+    item = classify_mainai_task(
+        _task(status=MainAITaskStatus.ready, job_id=current_job.id),
+        current_job,
+        events=[event],
+    )
     assert item["founder_status"] == "acknowledged"
     assert item["founder_status"] != "running"
+    assert item["current_acknowledgment"] is True
     assert item["description"] == "keep this context"
+
+
+def test_historical_dispatch_without_live_job_is_not_current_acknowledgment():
+    event = SimpleNamespace(event_type=MainAITaskEventType.dispatched)
+    item = classify_mainai_task(_task(status=MainAITaskStatus.ready), events=[event])
+    assert item["founder_status"] == "queued"
+    assert item["dispatched"] is True
+    assert item["current_acknowledgment"] is False
+    assert item["founder_status"] != "acknowledged"
 
 
 def test_agent_self_review_is_completed_not_independently_verified():
