@@ -337,6 +337,41 @@ function DurableCoordination({
           )}
         </div>
       )}
+      {view.delivery && (
+        <div data-testid="delivery-gateway">
+          <div className="text-xs uppercase tracking-wide text-white/40">Leveransgateway</div>
+          <Flag ok={!view.delivery.vendor_delivery_claimed} label="Ingen Cursor/Claude/Codex-vendorleverans påstås" />
+          <Flag
+            ok={Boolean(view.delivery.inbox_created_is_not_delivered)}
+            label="Inboxrad är inte leverans"
+          />
+          {(view.delivery.bridges || []).length === 0 && (
+            <p className="text-white/30">Ingen Founder-utfärdad lokal brygga är aktiv.</p>
+          )}
+          <ul className="space-y-1 text-xs text-white/60">
+            {(view.delivery.bridges || []).map((row) => (
+              <li key={String(row.recipient)}>
+                {String(row.recipient)}: {row.live ? "brygga utfärdad" : "utgången/återkallad"}
+                {row.connected ? " · ansluten" : " · inte ansluten"}
+              </li>
+            ))}
+          </ul>
+          {(view.delivery.messages || []).length === 0 ? (
+            <p className="text-white/30">Inga inboxmeddelanden.</p>
+          ) : (
+            <ul className="space-y-1 text-xs text-white/60">
+              {(view.delivery.messages || []).map((row) => (
+                <li key={String(row.message_id)}>
+                  {String(row.recipient)} · {String(row.status)}
+                  {row.missing_capability ? ` · BLOCKED (${String(row.missing_capability)})` : ""}
+                  {row.delivered_at ? " · mottaget av brygga" : ""}
+                  {row.acknowledged_at ? " · kvitterat" : ""}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
       {view.github_intake && (
         <div data-testid="github-intake">
           <div className="text-xs uppercase tracking-wide text-white/40">GitHub-utveckling (endast läsning)</div>

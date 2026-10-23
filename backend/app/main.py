@@ -26,6 +26,7 @@ from app.routers import (
     knowledge,
     library,
     mainai_execution,
+    agent_gateway,
     mainai_founder_ops,
     mainai_jobs,
     mainai_security,
@@ -61,7 +62,7 @@ app.add_middleware(
     allow_origins=settings.frontend_origin_list,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "X-CSRF-Token"],
+    allow_headers=["Content-Type", "X-CSRF-Token", "Authorization"],
 )
 
 app.include_router(health.router)
@@ -80,6 +81,7 @@ app.include_router(agents.router)
 app.include_router(mainai_jobs.router)
 app.include_router(mainai_execution.router)
 app.include_router(mainai_founder_ops.router)
+app.include_router(agent_gateway.router)
 app.include_router(mainai_security.router)
 app.include_router(project_entities.router)
 app.include_router(inspectable_memory.router)

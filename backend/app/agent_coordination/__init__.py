@@ -12,6 +12,14 @@ from app.agent_coordination.lifecycle import (
     reconcile_owner,
     reconcile_pending_owners,
 )
+from app.agent_coordination.delivery import (
+    claim_message,
+    issue_bridge_credential,
+    reconcile_owner_delivery,
+    reconcile_pending_deliveries,
+    submit_receipt,
+)
+from app.agent_coordination.local_bridge import LocalAuthorizedBridge
 from app.agent_coordination.github_intake import (
     DEFAULT_PUBLIC_REPO,
     GitHubDevelopmentIntake,
@@ -179,7 +187,10 @@ __all__ = [
     "expire_stale_active_leases",
     "founder_coordination_snapshot",
     "idle_agents_with_next_assignment",
+    "LocalAuthorizedBridge",
+    "claim_message",
     "ingest_lifecycle_event",
+    "issue_bridge_credential",
     "load_owner_ledger",
     "mark_execution_cancelled",
     "mark_execution_exited",
@@ -195,7 +206,10 @@ __all__ = [
     "real_adapter_config",
     "reconcile_execution_state",
     "reconcile_owner",
+    "reconcile_owner_delivery",
+    "reconcile_pending_deliveries",
     "reconcile_pending_owners",
+    "submit_receipt",
     "record_assignment_execution",
     "record_assignment_outcome",
     "record_execution_event",
