@@ -54,6 +54,11 @@ class CoordinationEventIn(BaseModel):
     from_github_ci: bool = False
 
 
+class IssueBridgeIn(BaseModel):
+    recipient: str = Field(min_length=1, max_length=32)
+    ttl_seconds: int = Field(default=3600, ge=60, le=86400)
+
+
 @router.post("/github-intake/refresh")
 @limiter.limit(f"{settings.rate_limit_default_per_minute}/minute")
 def refresh_github_intake(
@@ -104,6 +109,32 @@ def ingest_coordination_event(
     result["first_cycle_go"] = False
     result["delivery_claimed"] = False
     result["github_write"] = False
+    return result
+
+
+@router.post("/agent-gateway/bridges")
+@limiter.limit(f"{settings.rate_limit_default_per_minute}/minute")
+def issue_agent_bridge(
+    request: Request,
+    payload: IssueBridgeIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Issue a scoped local-bridge token. Not a Cursor/Claude/Codex vendor credential."""
+    from app.agent_coordination.delivery import issue_bridge_credential
+
+    result = issue_bridge_credential(
+        db,
+        owner_id=user.id,
+        recipient=payload.recipient,
+        actor="founder",
+        ttl_seconds=payload.ttl_seconds,
+    )
+    if result.get("outcome") != "issued":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.get("reason"))
+    db.commit()
+    result["github_write"] = False
+    result["first_cycle_go"] = False
     return result
 
 

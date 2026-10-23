@@ -926,15 +926,24 @@ class Worker:
         """Replay persisted assignment/GitHub observations into the durable ledger.
 
         Founder does not have to trigger every refresh. Never writes to GitHub, never
-        claims Cursor/Claude/Codex delivery, never sets first-cycle GO.
+        claims Cursor/Claude/Codex vendor delivery, never sets first-cycle GO. Local
+        authorized bridge transmission is attempted only when a Founder-issued credential exists.
         """
         try:
             from app.agent_coordination.lifecycle import reconcile_pending_owners
 
             n = reconcile_pending_owners(db, limit=20)
+            from app.agent_coordination.delivery import reconcile_pending_deliveries
+
+            delivered = reconcile_pending_deliveries(db, limit=20)
             db.commit()
-            if n:
-                logger.info("Worker %s: reconciled durable coordination for %d owner(s).", self.worker_id, n)
+            if n or delivered:
+                logger.info(
+                    "Worker %s: reconciled durable coordination for %d owner(s), delivery for %d.",
+                    self.worker_id,
+                    n,
+                    delivered,
+                )
         except Exception:
             db.rollback()
             logger.exception("Worker %s: failed durable coordination reconcile.", self.worker_id)

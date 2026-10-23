@@ -723,6 +723,15 @@ export type FounderOpsSnapshot = {
       adapters?: Record<string, unknown>[];
       needed_work?: Record<string, unknown>;
     };
+    delivery?: {
+      vendor_delivery_claimed?: boolean;
+      first_cycle_go?: boolean;
+      inbox_created_is_not_delivered?: boolean;
+      messages?: Record<string, unknown>[];
+      bridges?: Record<string, unknown>[];
+      blockers?: Record<string, unknown>[];
+      adapters?: Record<string, unknown>[];
+    };
   };
 };
 

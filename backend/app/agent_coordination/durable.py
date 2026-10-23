@@ -233,6 +233,14 @@ class DurableCoordinationService:
             "first_cycle_go": FIRST_CYCLE_GO,
             "adapters": [],
         }
+        self._delivery: dict[str, Any] = {
+            "messages": {},
+            "bridges": {},
+            "processed_ids": [],
+            "decisions": [],
+            "first_cycle_go": FIRST_CYCLE_GO,
+            "vendor_delivery_claimed": False,
+        }
 
     # ------------------------------------------------------------------ assign
 
@@ -1114,7 +1122,13 @@ class DurableCoordinationService:
             "needed_work": self.needed_work(),
             "github_intake": self.github_intake_view(),
             "lifecycle": self.lifecycle_public_view(),
+            "delivery": self.delivery_public_view(),
         }
+
+    def delivery_public_view(self) -> dict[str, Any]:
+        from app.agent_coordination.delivery import delivery_public_view
+
+        return delivery_public_view(self)
 
     def lifecycle_public_view(self) -> dict[str, Any]:
         from app.agent_coordination.lifecycle import lifecycle_view
@@ -1227,6 +1241,29 @@ class DurableCoordinationService:
             if isinstance(lifecycle.get("decisions"), list):
                 merged_life["decisions"] = list(lifecycle["decisions"])
             self._lifecycle = merged_life
+        delivery = payload.get("delivery")
+        if isinstance(delivery, dict):
+            merged_delivery = dict(self._delivery)
+            merged_delivery.update(delivery)
+            if isinstance(delivery.get("messages"), dict):
+                combined = dict(self._delivery.get("messages") or {})
+                for message_id, incoming in delivery["messages"].items():
+                    current = combined.get(message_id)
+                    if current is None:
+                        combined[message_id] = incoming
+                        continue
+                    incoming_ts = str(incoming.get("updated_at") or incoming.get("delivered_at") or incoming.get("created_at") or "")
+                    current_ts = str(current.get("updated_at") or current.get("delivered_at") or current.get("created_at") or "")
+                    if incoming_ts >= current_ts:
+                        combined[message_id] = incoming
+                merged_delivery["messages"] = combined
+            if isinstance(delivery.get("bridges"), dict):
+                merged_delivery["bridges"] = {**self._delivery.get("bridges", {}), **delivery["bridges"]}
+            if isinstance(delivery.get("processed_ids"), list):
+                merged_delivery["processed_ids"] = sorted(
+                    set(self._delivery.get("processed_ids") or []) | set(delivery["processed_ids"])
+                )
+            self._delivery = merged_delivery
 
     def dump_for(self, assignment_id: str) -> dict[str, Any]:
         record = self._obligations.get(assignment_id)
@@ -1242,6 +1279,7 @@ class DurableCoordinationService:
             "seen_event_ids": sorted(self._seen_event_ids),
             "github_intake": json.loads(json.dumps(self._github_intake)),
             "lifecycle": json.loads(json.dumps(self._lifecycle)),
+            "delivery": json.loads(json.dumps(self._delivery)),
         }
 
     # -------------------------------------------------------------- internals
@@ -1487,5 +1525,12 @@ def founder_coordination_snapshot(db: Session, *, owner_id: uuid.UUID) -> dict[s
                 "stale_rejected": [],
                 "delivery_claimed": False,
                 "first_cycle_go": FIRST_CYCLE_GO,
+            },
+            "delivery": {
+                "vendor_delivery_claimed": False,
+                "first_cycle_go": FIRST_CYCLE_GO,
+                "messages": [],
+                "bridges": [],
+                "blockers": [],
             },
         }

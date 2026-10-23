@@ -103,6 +103,25 @@ events so the Founder does not trigger every refresh.
   BLOCKED. A prepared instruction is not a delivered message.
 - `first_cycle_go` stays false.
 
+## Agent Messaging & Delivery Gateway
+
+`app.agent_coordination.delivery` is the production inbox + receipt layer on the same
+ledger. `Worker._reconcile_durable_coordination` also prepares and transmits inbox
+messages after lifecycle reconcile.
+
+States: `prepared` → `available` → `claimed` → `delivered` → `acknowledged` →
+`executing` → `completed`, or `blocked` / `failed`. Creating an inbox row is not
+delivery. A Founder-issued `local_authorized_bridge` that successfully claims a
+payload is delivered. Recipient confirmation is acknowledged. Execution requires
+evidence. Cursor/Claude/Codex vendor transports stay BLOCKED (`agent_messaging_adapter`).
+
+Recipient API: `GET /api/mainai/agent-gateway/inbox` and
+`POST /inbox/{id}/claim` / `POST /receipts` with a scoped Bearer token. The token
+cannot override STOP, write to GitHub, or mint independent certification.
+
+Founder issues tokens at `POST /api/mainai/founder-ops/agent-gateway/bridges`.
+Founder-ops shows per-agent delivery status so routine reports are not copied by hand.
+
 ## Out of scope
 
 Codex Founder Authority, security grants, GitHub publication, Recall activation,
