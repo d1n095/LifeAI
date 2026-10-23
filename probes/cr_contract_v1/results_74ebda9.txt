@@ -1,0 +1,23 @@
+a provider failure meant real, silent data loss (see docs/BRANCH_REGISTRY.md's LLM Coupling
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+founder explicitly directed be built correctly rather than skipped: "conversation/source event
+CRC01|PASS claude=ASSIGNMENT_FOUND/True cursor=NO_FEASIBLE_ASSIGNMENT
+.CRC02|PASS first=applied repeat=replay_ignored
+.CRC03|PASS queue_empty=stale_rejected
+.CRC04|PASS done=False freeze_allowed=False blockers=['required_checks_incomplete']
+.CRC05|PASS preview_only_freeze=False full_required_freeze=True
+.CRC06|PARTIAL(deterministic) dispatch=APPROVAL_REQUIRED (NL interpretation of 'let's go' is model-side, ungated)
+.CRC07|PASS claude=True codex=True distinct=True
+.CRC08|PASS github_publication_usable=False missing=codex_github_publication_authority
+.CRC09|PASS outcome=prepared status=prepared
+.CRC10|PASS claimed=delivered ack=applied status=acknowledged ack_at=True
+.CRC11|PASS outcome=stale_rejected independently_verified=False
+.CRC12|PASS first=applied replay_after_restart=replay_ignored
+.CRC13|PASS queue_empty=stale_rejected obligation_statuses=['executing']
+.sCRC15|PARTIAL publishing_blocked=True paid_default(env)=False stop_event=stale_rejected (paid=verified in #268-271; authenticated-reauth STOP-clear = Codex CO-10 BLOCKED)
+.CRC16|PASS completion=applied independently_verified=None
+.CRC17|PARTIAL structured_override=forged_rejected (LLM prompt-injection resistance of free-text content is model-side, BLOCKED)
+.CRC18|PASS freeze_allowed=False blockers=['required_checks_incomplete']
+.sCRC20|PASS local_only_ready=False local_scope_only=True missing=26
+.REG|existing_is_backing=False backing_is_existing=True
+19 passed, 2 skipped in 11.40s

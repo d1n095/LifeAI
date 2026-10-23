@@ -37,7 +37,8 @@ run_mustpass "lifecycle"                 lifecycle_v1
 run_mustpass "handover"                  handover_v1
 run_mustpass "live_handover"             live_handover_v1
 run_mustpass "security_diag"             security_diag_v1
-run_mustpass "cognitive_reliability (CR-01..20)" cognitive_v1
+run_mustpass "substrate invariants (SUB-01..20)" substrate_v1
+run_mustpass "CR acceptance contract (CR-01..20 + REG)" cr_contract_v1
 
 echo "== Scope B — UNATTENDED autonomy (requires both Codex blockers CLOSED) =="
 expect_blocker_open "FA-9/CO-10 (STOP-clear)" coord_accept_v1 "CO10"
