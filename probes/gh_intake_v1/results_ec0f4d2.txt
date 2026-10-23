@@ -1,0 +1,7 @@
+-> indexed, or failed at any step) can be modeled and surfaced without losing the received
+Also adds `next_attempt_at` (worker backoff for `failed` tasks — see this migration's second
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+"the autonomous trigger must be durable and idempotent" and must be attacked with two-workers-
+.GH4|run1=['034196c0-5c43-4175-b255-233868d914fa', '5562a803-2149-424a-ab78-4b223c4ca764'] run2=['034196c0-5c43-4175-b255-233868d914fa', '5562a803-2149-424a-ab78-4b223c4ca764'] idempotent=True
+.GH4b|created=2 survived_restart=2 missing=set()
+8 passed in 9.70s

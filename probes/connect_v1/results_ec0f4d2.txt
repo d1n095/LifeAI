@@ -1,0 +1,10 @@
+-> indexed, or failed at any step) can be modeled and surfaced without losing the received
+Also adds `next_attempt_at` (worker backoff for `failed` tasks — see this migration's second
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+CONN1|b1_owner=1f45242b-c9b7-4b09-8c35-3d101cd70bab b2_owner=3ec1a0cd-8aca-4b8a-81d9-890d37b0e690 b1_rw=WorkAssignmentReadWriteMode.read_only status={'backing_present': True, 'assignment_count': 1, 'created_without_manual_assignment': True}
+.CONN2|off=False/founder_adapter_enablement enabled_found=True/True noargs_ran=False/founder_adapter_enablement
+.CONN3|delivered=1 cli_ran=[False] completes=['completed'] vendor_claimed=False
+.CONN4|restart_status=completed dup_completion=replay_ignored
+.CONN5|external_usable=False founder_must_forward=True vendor_claimed=False perms=['cursor', 'claude', 'codex', 'github_publication']
+5 passed in 6.75s
+target worktree unchanged
