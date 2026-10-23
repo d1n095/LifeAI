@@ -1,0 +1,11 @@
+-> indexed, or failed at any step) can be modeled and surfaced without losing the received
+Also adds `next_attempt_at` (worker backoff for `failed` tasks — see this migration's second
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+LC1|anon/member/role-only-founder all refused
+.LC2|bad_kind=forged_rejected bad_identity=forged_rejected
+.LC3|first=applied replay_after_restart=replay_ignored
+.LC4|delivery_claimed=False vendor_messaging_usable={'cursor_vendor_messaging': False, 'claude_vendor_messaging': False, 'codex_vendor_messaging': False}
+.LC5|obligations_after_worker_reconcile=1 statuses=['completed']
+.LC7|queue_empty_outcome=stale_rejected reason=queue-empty claim contradicts active obligations
+LC7|obligations_after_restart=1 queue_empty_flag=False
+7 passed in 9.51s
