@@ -764,6 +764,12 @@ def _durable_coordination(db: Session, *, owner_id: uuid.UUID) -> dict[str, Any]
                 "bridges": [],
                 "blockers": [],
             },
+            "operational_handover": {
+                "external_vendor_operations": {"usable": False},
+                "founder_must_forward_messages": True,
+                "vendor_delivery_claimed": False,
+                "first_cycle_go": False,
+            },
         }
 
 
