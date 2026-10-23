@@ -1,0 +1,25 @@
+-> indexed, or failed at any step) can be modeled and surfaced without losing the received
+Also adds `next_attempt_at` (worker backoff for `failed` tasks — see this migration's second
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+CR01|early=stale_rejected good=applied
+.CR02|statuses_after_reload=['completed']
+.CR03|first=applied dup=replay_ignored
+.CR04|all_complete=complete one_partial=partial dedup_prov=('src-A', 'src-B') reconstructable=True
+.CR05|unknown_assignment=stale_rejected
+.CR06|cross_agent=forged_rejected
+.CR07|mapping={'claude-code-1': 'claude', 'cursor-agent-x': 'cursor', 'codex-z': 'codex', 'the-examiner': 'examiner', '': 'cursor'}
+.CR08|examiner_count=0
+.CR09|first=prepared second=replay_ignored
+.CR10|c1=delivered c2=replay_ignored
+.CR11|cross_claim=forged_rejected
+.CR12|outcome=blocked missing=local_authorized_bridge claimed=False
+.CR13|base=APPROVAL_REQUIRED stale_sha=STALE_BASE adapter=ADAPTER_DISABLED
+.CR14|outcome=applied independently_verified=False
+.CR15|outcome=stale_rejected independently_verified=False
+.CR16|outcome=applied iv=None
+.CR17|empty_evidence=rejected
+.CR18|{'independently_verified': 'forged_rejected', 'github_write': 'forged_rejected', 'override_stop': 'forged_rejected', 'stop': 'forged_rejected'}
+.CR19|outcome=stale_rejected (override_stop ignored/rejected)
+.CR20|unknown_actor=forged_rejected vendor_usable=[False, False, False]
+20 passed in 11.44s
+target worktree unchanged
