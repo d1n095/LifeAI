@@ -154,7 +154,11 @@ def test_gh4b_existing_backing_row_stays_idempotent(db_session, make_verified_us
     db_session.commit()
     assert first["builder_assignment_id"] == second["builder_assignment_id"]
     assert first["examiner_assignment_id"] == second["examiner_assignment_id"]
-    assert db_session.execute(select(AgentWorkAssignment).where(AgentWorkAssignment.owner_id == owner_id)).scalars().first() is not None
+    existing = list(
+        db_session.execute(select(AgentWorkAssignment).where(AgentWorkAssignment.owner_id == owner_id)).scalars()
+    )
+    assert existing
+    assert not any((row.provenance or {}).get("created_without_manual_assignment") for row in existing)
 
 
 def test_authorized_local_cli_uses_existing_gateway(db_session, make_verified_user, client, tmp_path, monkeypatch):

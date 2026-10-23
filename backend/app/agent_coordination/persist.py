@@ -33,21 +33,18 @@ def find_owner_assignments(db: Session, *, owner_id: uuid.UUID) -> list[AgentWor
 
 
 def ensure_owner_ledger_backing(db: Session, *, owner_id: uuid.UUID) -> AgentWorkAssignment:
-    """Return a durable assignment that can hold the ledger. Create one if discovery starts cold."""
+    """Return a durable assignment that can hold the ledger. Create one if discovery starts cold.
+
+    Existing work assignments are reused as-is. They are never retagged as ledger
+    backing — that flag is reserved for the synthetic storage row so worker
+    reconcile can skip only that row's bookkeeping events.
+    """
     rows = find_owner_assignments(db, owner_id=owner_id)
     for row in rows:
         if _is_backing(row):
             return row
     if rows:
-        first = rows[0]
-        provenance = dict(first.provenance or {})
-        provenance[LEDGER_BACKING_KEY] = True
-        first.provenance = provenance
-        from sqlalchemy.orm.attributes import flag_modified
-
-        flag_modified(first, "provenance")
-        db.flush()
-        return first
+        return rows[0]
     return _create_backing_assignment(db, owner_id=owner_id)
 
 

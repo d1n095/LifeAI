@@ -315,7 +315,7 @@ def reconcile_owner(db: Session, *, owner_id: uuid.UUID) -> dict[str, Any]:
         if assignment is None or assignment.owner_id != owner_id:
             processed.add(token)
             continue
-        if (assignment.provenance or {}).get("ledger_backing"):
+        if (assignment.provenance or {}).get("created_without_manual_assignment"):
             processed.add(token)
             continue
         kind = _kind_from_assignment_event(event)
