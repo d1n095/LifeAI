@@ -1,0 +1,9 @@
+-> indexed, or failed at any step) can be modeled and surfaced without losing the received
+Also adds `next_attempt_at` (worker backoff for `failed` tasks — see this migration's second
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+SEC1|placeholder_guard=[('secret_key', True), ('founder_password', True), ('founder_email', True)] cookie_secure_guard=True
+.SEC2|impostor_id=6580b09c-3bdd-4087-900d-4a00c6dc29ed founder_id=00000000-0000-0000-0000-000000000001 snapshot=403 issue_bridge=403 role=founder
+.SEC3|mutation_without_csrf=403 header_token_only=401
+.SEC4|dependency_floor={'python-multipart': {'pinned': '0.0.9', 'fixed_floor': '0.0.18', 'below_floor': True}, 'pypdf': {'pinned': '4.3.1', 'fixed_floor': '6.0.0', 'below_floor': True}, 'pyjwt': {'pinned': '2.9.0', 'note': 'safe-usage: symmetric HS256, explicit alg list, jti revocation'}}
+4 passed in 5.37s
+target worktree unchanged
