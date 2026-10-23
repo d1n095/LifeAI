@@ -1,0 +1,10 @@
+-> indexed, or failed at any step) can be modeled and surfaced without losing the received
+Also adds `next_attempt_at` (worker backoff for `failed` tasks — see this migration's second
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+DLV1|messages_for_obligation=1 recipient=cursor status=available idem=acddb6ed-9971-4109-8c32-79d77f63d57a:inbox expires=True
+.DLV2|inbox_recipients={'cursor'} cross_agent_claim_status=403
+.DLV3|anon=401 forged=401 tampered=401 claim1=delivered claim2=replay_ignored fabrication=403
+.DLV4|restart_status=completed obligation_status=completed dup_completion=replay_ignored
+.DLV5|disconnected_status=blocked disconnected_missing=local_authorized_bridge oversized=rejected expired=failed bad_kind=rejected
+.DLV6|bridge_usable_before=False bridge_usable_after=True live=['cursor'] vendor={'cursor_vendor_messaging': False, 'claude_vendor_messaging': False, 'codex_vendor_messaging': False}
+6 passed in 7.32s
