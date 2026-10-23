@@ -68,10 +68,10 @@ def refresh_github_intake(
     user: User = Depends(require_founder),
 ):
     """Read-only GitHub intake. Never writes to GitHub or claims agent delivery."""
-    from app.agent_coordination.durable import load_owner_ledger, persist_to_assignment
+    from app.agent_coordination.durable import load_owner_ledger
     from app.agent_coordination.github_intake import DEFAULT_PUBLIC_REPO, GitHubDevelopmentIntake, GitHubReadClient
-    from app.models.agent_coordination import AgentWorkAssignment
-    from sqlalchemy import select
+
+    from app.agent_coordination.persist import persist_owner_ledger
 
     settings_now = get_settings()
     repo = settings_now.github_repo or DEFAULT_PUBLIC_REPO
@@ -79,16 +79,11 @@ def refresh_github_intake(
     service = load_owner_ledger(db, owner_id=user.id)
     intake = GitHubDevelopmentIntake(service, owner_id=str(user.id), repo=repo)
     result = intake.refresh(client, numbers=payload.pr_numbers or None)
-    assignment = db.execute(
-        select(AgentWorkAssignment).where(AgentWorkAssignment.owner_id == user.id)
-    ).scalars().first()
-    if assignment is not None:
-        obligation_id = next(iter(service._obligations), None)
-        if obligation_id:
-            persist_to_assignment(db, assignment=assignment, service=service, obligation_id=obligation_id)
-            db.commit()
+    persist_owner_ledger(db, owner_id=user.id, service=service, actor="founder")
+    db.commit()
     result["write_attempted"] = False
     result["github_write"] = False
+    result["persisted_without_manual_assignment"] = True
     return result
 
 
@@ -136,6 +131,19 @@ def issue_agent_bridge(
     result["github_write"] = False
     result["first_cycle_go"] = False
     return result
+
+
+@router.get("/agent-gateway/setup")
+def agent_gateway_setup(user: User = Depends(require_founder)):
+    """Named missing capabilities and Founder setup only. Never a vendor credential."""
+    from app.agent_coordination.connect import founder_setup_requirements
+
+    return {
+        "requirements": founder_setup_requirements(),
+        "vendor_delivery_claimed": False,
+        "first_cycle_go": False,
+        "github_write": False,
+    }
 
 
 @router.get("/snapshot")

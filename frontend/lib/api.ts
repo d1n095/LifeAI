@@ -732,6 +732,17 @@ export type FounderOpsSnapshot = {
       blockers?: Record<string, unknown>[];
       adapters?: Record<string, unknown>[];
     };
+    operational_handover?: {
+      question?: string;
+      answer?: string;
+      founder_must_forward_messages?: boolean;
+      vendor_delivery_claimed?: boolean;
+      first_cycle_go?: boolean;
+      internal_coordination?: Record<string, unknown>;
+      local_authorized_bridge?: Record<string, unknown>;
+      external_vendor_operations?: Record<string, unknown>;
+      remaining_permissions?: Record<string, unknown>[];
+    };
   };
 };
 

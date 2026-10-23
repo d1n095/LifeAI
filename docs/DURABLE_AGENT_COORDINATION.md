@@ -122,6 +122,21 @@ cannot override STOP, write to GitHub, or mint independent certification.
 Founder issues tokens at `POST /api/mainai/founder-ops/agent-gateway/bridges`.
 Founder-ops shows per-agent delivery status so routine reports are not copied by hand.
 
+## Durable backing without a prior assignment (DEF-1 / GH-4)
+
+`persist_owner_ledger` creates one owner-scoped `AgentWorkAssignment` backing row when
+GitHub discovery or lifecycle ingest starts with no previous manual assignment. Every
+builder and examiner obligation is written into that dump. Repeated HTTP refreshes,
+worker restarts and fresh sessions restore the same obligation IDs.
+
+## Connecting available transports
+
+The existing gateway is the only messaging surface. The Founder-issued
+`local_authorized_bridge` remains the one executable message path. Local CLI providers
+may execute only after explicit Founder enablement and credential confirmation. Cursor,
+Claude and Codex vendor messaging stay BLOCKED (`agent_messaging_adapter`) with a named
+Founder setup list at `GET /api/mainai/founder-ops/agent-gateway/setup`.
+
 ## Out of scope
 
 Codex Founder Authority, security grants, GitHub publication, Recall activation,

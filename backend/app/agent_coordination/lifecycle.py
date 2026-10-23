@@ -315,6 +315,9 @@ def reconcile_owner(db: Session, *, owner_id: uuid.UUID) -> dict[str, Any]:
         if assignment is None or assignment.owner_id != owner_id:
             processed.add(token)
             continue
+        if (assignment.provenance or {}).get("created_without_manual_assignment"):
+            processed.add(token)
+            continue
         kind = _kind_from_assignment_event(event)
         if kind is None:
             service._lifecycle["processed_event_ids"].append(token)
@@ -599,32 +602,6 @@ def _agent_key(db: Session, assignment: AgentWorkAssignment) -> str | None:
 
 
 def _persist_ledger(db: Session, *, owner_id: uuid.UUID, service: DurableCoordinationService) -> None:
-    assignments = list(
-        db.execute(select(AgentWorkAssignment).where(AgentWorkAssignment.owner_id == owner_id)).scalars()
-    )
-    if not assignments:
-        return
-    by_id = {str(row.id): row for row in assignments}
-    persisted = set()
-    for obligation_id, record in service._obligations.items():
-        backing = record.get("backing_assignment_id") or obligation_id
-        assignment = by_id.get(str(backing)) or by_id.get(obligation_id)
-        if assignment is None:
-            continue
-        persist_to_assignment(db, assignment=assignment, service=service, obligation_id=obligation_id)
-        persisted.add(assignment.id)
-    if not persisted:
-        persist_to_assignment(
-            db,
-            assignment=assignments[0],
-            service=service,
-            obligation_id=next(iter(service._obligations), str(assignments[0].id)),
-        )
-    elif service._obligations:
-        persist_to_assignment(
-            db,
-            assignment=assignments[0],
-            service=service,
-            obligation_id=next(iter(service._obligations)),
-        )
-    db.flush()
+    from app.agent_coordination.persist import persist_owner_ledger
+
+    persist_owner_ledger(db, owner_id=owner_id, service=service, actor="lifecycle")

@@ -19,6 +19,15 @@ from app.agent_coordination.delivery import (
     reconcile_pending_deliveries,
     submit_receipt,
 )
+from app.agent_coordination.persist import (
+    ensure_owner_ledger_backing,
+    persist_owner_ledger,
+)
+from app.agent_coordination.connect import (
+    founder_setup_requirements,
+    operational_handover_view,
+    run_authorized_receiver,
+)
 from app.agent_coordination.local_bridge import LocalAuthorizedBridge
 from app.agent_coordination.github_intake import (
     DEFAULT_PUBLIC_REPO,
@@ -188,6 +197,8 @@ __all__ = [
     "founder_coordination_snapshot",
     "idle_agents_with_next_assignment",
     "LocalAuthorizedBridge",
+    "ensure_owner_ledger_backing",
+    "founder_setup_requirements",
     "claim_message",
     "ingest_lifecycle_event",
     "issue_bridge_credential",
@@ -202,7 +213,10 @@ __all__ = [
     "next_feasible_assignment_for_agent",
     "paths_conflict",
     "paths_conflict_any",
+    "operational_handover_view",
+    "persist_owner_ledger",
     "persist_to_assignment",
+    "run_authorized_receiver",
     "real_adapter_config",
     "reconcile_execution_state",
     "reconcile_owner",

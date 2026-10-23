@@ -337,6 +337,28 @@ function DurableCoordination({
           )}
         </div>
       )}
+      {view.operational_handover && (
+        <div data-testid="operational-handover">
+          <div className="text-xs uppercase tracking-wide text-white/40">Operativ överlämning</div>
+          <Flag
+            ok={!view.operational_handover.founder_must_forward_messages}
+            label={
+              view.operational_handover.founder_must_forward_messages
+                ? "Founder måste fortfarande kopiera rutinmeddelanden"
+                : "Intern koordination + lokal brygga kan bära rutinmeddelanden"
+            }
+          />
+          <Flag ok={!view.operational_handover.vendor_delivery_claimed} label="Ingen vendorleverans påstås" />
+          <p className="text-xs text-white/60">{String(view.operational_handover.answer || "")}</p>
+          <ul className="space-y-1 text-xs text-white/50">
+            {(view.operational_handover.remaining_permissions || []).map((row) => (
+              <li key={String(row.recipient || row.missing_capability)}>
+                {String(row.recipient)} · BLOCKED ({String(row.missing_capability)})
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {view.delivery && (
         <div data-testid="delivery-gateway">
           <div className="text-xs uppercase tracking-wide text-white/40">Leveransgateway</div>

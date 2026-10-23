@@ -100,6 +100,16 @@ _STATUS_RANK = {
 }
 
 
+def _obligation_rank(row: dict[str, Any]) -> int:
+    status = row.get("status")
+    if isinstance(status, ObligationStatus):
+        return _STATUS_RANK.get(status, 0)
+    try:
+        return _STATUS_RANK.get(ObligationStatus(str(status)), 0)
+    except ValueError:
+        return 0
+
+
 class HandoffStatus(str, Enum):
     registered = "registered"
     transferring = "transferring"
@@ -1123,7 +1133,13 @@ class DurableCoordinationService:
             "github_intake": self.github_intake_view(),
             "lifecycle": self.lifecycle_public_view(),
             "delivery": self.delivery_public_view(),
+            "operational_handover": self.operational_handover_view(),
         }
+
+    def operational_handover_view(self) -> dict[str, Any]:
+        from app.agent_coordination.connect import operational_handover_view
+
+        return operational_handover_view(self)
 
     def delivery_public_view(self) -> dict[str, Any]:
         from app.agent_coordination.delivery import delivery_public_view
@@ -1217,6 +1233,9 @@ class DurableCoordinationService:
             self._seen_event_ids.add(str(event_id))
         for row in payload.get("obligations") or []:
             if isinstance(row, dict) and row.get("assignment_id"):
+                current = self._obligations.get(row["assignment_id"])
+                if current is not None and _obligation_rank(current) > _obligation_rank(row):
+                    continue
                 self._obligations[row["assignment_id"]] = row
                 if row.get("canonical_work_key"):
                     self._by_canonical[row["canonical_work_key"]] = row["assignment_id"]
@@ -1532,5 +1551,11 @@ def founder_coordination_snapshot(db: Session, *, owner_id: uuid.UUID) -> dict[s
                 "messages": [],
                 "bridges": [],
                 "blockers": [],
+            },
+            "operational_handover": {
+                "external_vendor_operations": {"usable": False},
+                "founder_must_forward_messages": True,
+                "vendor_delivery_claimed": False,
+                "first_cycle_go": FIRST_CYCLE_GO,
             },
         }
