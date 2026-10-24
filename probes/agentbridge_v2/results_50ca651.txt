@@ -1,0 +1,21 @@
+-> indexed, or failed at any step) can be modeled and surfaced without losing the received
+Also adds `next_attempt_at` (worker backoff for `failed` tasks — see this migration's second
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+founder explicitly directed be built correctly rather than skipped: "conversation/source event
+CS1|issued=issued resolve_cold_after_restart=True
+.CS2|coldstart_inbox_http=200
+.CS3|FINDING CF-2(P3) real_assignment_reclassified_backing=True real_obligation_present=True status=executing
+.CS4|resolves_before=True revoked=True tampered_rejected=True forged_rejected=True
+.CS5|total_rows=1 backing_rows=1 all_resolve={'cursor': True, 'claude': True, 'codex': True}
+.CS6|owner2_status=200 owner1_msg_leaked_to_owner2=0
+.ADV1|runner1=delivered runner2=empty
+.ADV2|status_after_interruption=acknowledged acknowledged_at=True completed=False
+.ADV3|before_revoke=200 after_revoke=403
+.ADV4|duplicate_completion_after_restart=replay_ignored
+.ADV5|executor_write_scope=none ran=True interpolated=False
+.ADV6|override_stop_event=stale_rejected (authenticated STOP-clear = Codex CO-10 BLOCKED)
+.ADV7|wrong_message_correlation=forged_rejected
+.sCS7|obl1_status=completed wa1_backing(CF-2)=False wa2_sibling_misclassified=True backing_rows=1 total_obl=2
+        print(f"CS7|obl1_status={obl1.get('status') if obl1 else None} wa1_backing(CF-2)={wa1_backing} "
+1 failed, 13 passed, 1 skipped in 10.16s
+target worktree unchanged

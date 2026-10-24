@@ -267,3 +267,43 @@ def test_ADV8_network_interruption_real_agent_blocked():
     pytest.skip("BLOCKED (needs real agent-side env): true network interruption/recovery against a REAL external agent "
                 "has no production transport. In-process substitutes (no-live-bridge -> blocked; restart resume in ADV-2) "
                 "are covered; real-agent reconnection without duplicate execution is deferred to a real integration.")
+
+
+# ===================== Priority 5 — safe handling of an already-misclassified real assignment =====================
+def test_CS7_misclassified_assignment_safe_across_reload_restart_reconcile(superuser_db, make_verified_user):
+    """Given CF-2 (a real assignment flagged ledger_backing), verify the error is CONTAINED, not compounded: across a
+    fresh session + lifecycle reconcile the obligation stays coherent (reaches completed), no duplicate obligations are
+    minted, and a SECOND real assignment for the same owner is never retroactively misclassified. This both documents
+    CF-2's blast radius and is a ready regression for Cursor's next correction candidate."""
+    from sqlalchemy.orm import sessionmaker
+    from app.agent_coordination.delivery import issue_bridge_credential
+    from app.agent_coordination.durable import load_owner_ledger
+    from app.agent_coordination.lifecycle import reconcile_owner
+    from app.agent_coordination.persist import _is_backing, find_owner_assignments
+    from app.agent_coordination.service import transition_status
+    from app.db import migration_engine
+    u, _ = make_verified_user(); owner = u.id
+    wa1 = _seed(superuser_db, owner, key="cursor")          # real assignment #1 (rows[0])
+    wa2 = _seed(superuser_db, owner, key="claude", role="reviewer")  # real assignment #2 (distinct work)
+    issue_bridge_credential(superuser_db, owner_id=owner, recipient="cursor", actor="founder"); superuser_db.commit()  # triggers CF-2 on rows[0]
+    for s in ("ready", "running", "completed"):
+        transition_status(superuser_db, assignment=wa1, new_status=s)
+    superuser_db.commit()
+    wa1_id, wa2_id = str(wa1.id), str(wa2.id)
+    # RESTART: fresh session + reconcile. Re-query assignments by id FROM the fresh session (no cross-session objects).
+    with sessionmaker(bind=migration_engine)() as fr:
+        _rls(fr, owner)
+        reconcile_owner(fr, owner_id=owner); fr.commit()
+        svc = load_owner_ledger(fr, owner_id=owner)
+        rows = {str(r.id): r for r in find_owner_assignments(fr, owner_id=owner)}
+        obl1 = svc._obligations.get(wa1_id)
+        wa1_backing = _is_backing(rows[wa1_id]); wa2_backing = _is_backing(rows[wa2_id])
+        backing_count = sum(1 for r in rows.values() if _is_backing(r))
+    print(f"CS7|obl1_status={obl1.get('status') if obl1 else None} wa1_backing(CF-2)={wa1_backing} "
+          f"wa2_sibling_misclassified={wa2_backing} backing_rows={backing_count} total_obl={len(svc._obligations)}")
+    # Containment of CF-2: the obligation survives reload/reconcile (no data loss), and the error does NOT spread to
+    # the sibling real assignment, nor mint duplicate backing rows.
+    assert obl1 is not None and obl1.get("status") in ("completed", "executing", "running", "acknowledged"), \
+        "CS-7 the misclassified assignment's obligation was lost across reload/reconcile — CF-2 would then be P2"
+    assert wa2_backing is False, "CS-7 CF-2 spread: a SECOND real sibling assignment was retroactively misclassified"
+    assert backing_count == 1, f"CS-7 CF-2 compounded: {backing_count} rows flagged backing (expected exactly 1 = rows[0])"
