@@ -1,0 +1,14 @@
+-> indexed, or failed at any step) can be modeled and surfaced without losing the received
+Also adds `next_attempt_at` (worker backoff for `failed` tasks — see this migration's second
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+CS1|FINDING issued_cold=issued resolve_cold_after_restart=False resolve_warm_after_restart=True
+.CS2|FINDING coldstart_inbox_http_status=403 (401/403 => credential did not persist)
+.AT1|{'provider_model_api': ('blocked', 'blocked', 'blocked', False), 'remote_background_agent': ('blocked', 'blocked', 'blocked', False), 'vendor_session_claude': ('blocked', 'blocked', 'blocked', False), 'vendor_session_codex': ('blocked', 'blocked', 'blocked', False), 'vendor_session_cursor': ('blocked', 'blocked', 'blocked', False)}
+.AT2|vendor_usable={'provider_model_api': False, 'remote_background_agent': False, 'vendor_session_cursor': False, 'vendor_session_claude': False, 'vendor_session_codex': False} runner_surface=agent_side_runner runner_note_has_not_vendor=True
+.AT3|no_token=blocked missing=founder_agent_side_authorization
+.AT4|ran=True mode=record interpolated=False write_scope=none
+.AT5|allowlisted_unconfigured=blocked/founder_adapter_enablement unknown_mode=blocked
+.AT6|delivered=1 first_exec=True dup_exec=replay_ignored vendor_claimed=False
+.AT7|cross_agent_claim=forged_rejected owner2_status=403 owner1_msg_leaked=0
+9 passed in 9.70s
+target worktree unchanged
