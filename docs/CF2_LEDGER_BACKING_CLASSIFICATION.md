@@ -1,6 +1,6 @@
 # CF-2 ledger backing classification
 
-Isolated correction child of `#305` @ `50ca651de9648afaea31273521bba01d82aeace7`.
+Isolated correction child (`#306`) of `#305` @ `50ca651de9648afaea31273521bba01d82aeace7`.
 Do **not** amend frozen `#303`, unfrozen `#304`, or documented `#305`.
 
 ## Cause
