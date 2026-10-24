@@ -22,6 +22,7 @@ from app.agent_coordination.delivery import (
 from app.agent_coordination.persist import (
     ensure_owner_ledger_backing,
     persist_owner_ledger,
+    repair_misclassified_backing,
 )
 from app.agent_coordination.connect import (
     founder_setup_requirements,
@@ -217,6 +218,7 @@ __all__ = [
     "paths_conflict_any",
     "operational_handover_view",
     "persist_owner_ledger",
+    "repair_misclassified_backing",
     "persist_to_assignment",
     "run_agent_side",
     "run_authorized_receiver",

@@ -23,13 +23,52 @@ LEDGER_AGENT_KEY = "mainai-ledger"
 LEDGER_GOAL_TITLE = "MainAI durable coordination ledger"
 
 
+def _created_without_manual_assignment(row: AgentWorkAssignment) -> bool:
+    return bool((row.provenance or {}).get("created_without_manual_assignment"))
+
+
 def _is_backing(row: AgentWorkAssignment) -> bool:
-    provenance = row.provenance or {}
-    return bool(provenance.get(LEDGER_BACKING_KEY) or (provenance.get("durable_coordination") or {}).get(LEDGER_BACKING_KEY))
+    """Synthetic ledger storage only. A real work assignment is never backing (CF-2)."""
+    return _created_without_manual_assignment(row)
+
+
+def _strip_misclassified_backing(row: AgentWorkAssignment) -> bool:
+    """Remove ledger_backing from a Founder/agent work row. Returns True if changed."""
+    if _created_without_manual_assignment(row):
+        return False
+    provenance = dict(row.provenance or {})
+    dump = provenance.get("durable_coordination")
+    changed = False
+    if LEDGER_BACKING_KEY in provenance:
+        provenance.pop(LEDGER_BACKING_KEY, None)
+        changed = True
+    if isinstance(dump, dict) and LEDGER_BACKING_KEY in dump:
+        dump = dict(dump)
+        dump.pop(LEDGER_BACKING_KEY, None)
+        provenance["durable_coordination"] = dump
+        changed = True
+    if not changed:
+        return False
+    row.provenance = provenance
+    from sqlalchemy.orm.attributes import flag_modified
+
+    flag_modified(row, "provenance")
+    return True
 
 
 def find_owner_assignments(db: Session, *, owner_id: uuid.UUID) -> list[AgentWorkAssignment]:
     return list(db.execute(select(AgentWorkAssignment).where(AgentWorkAssignment.owner_id == owner_id)).scalars())
+
+
+def repair_misclassified_backing(db: Session, *, owner_id: uuid.UUID) -> int:
+    """Demote real assignments that were incorrectly stamped ledger_backing (CF-2)."""
+    repaired = 0
+    for row in find_owner_assignments(db, owner_id=owner_id):
+        if _strip_misclassified_backing(row):
+            repaired += 1
+    if repaired:
+        db.flush()
+    return repaired
 
 
 def ensure_owner_ledger_backing(db: Session, *, owner_id: uuid.UUID) -> AgentWorkAssignment:
@@ -39,6 +78,7 @@ def ensure_owner_ledger_backing(db: Session, *, owner_id: uuid.UUID) -> AgentWor
     backing — that flag is reserved for the synthetic storage row so worker
     reconcile can skip only that row's bookkeeping events.
     """
+    repair_misclassified_backing(db, owner_id=owner_id)
     rows = find_owner_assignments(db, owner_id=owner_id)
     for row in rows:
         if _is_backing(row):
@@ -126,9 +166,13 @@ def persist_owner_ledger(
         actor=actor,
     )
     dump = service.dump_for(obligation_id)
-    dump[LEDGER_BACKING_KEY] = True
     provenance = dict(backing.provenance or {})
-    provenance[LEDGER_BACKING_KEY] = True
+    if _is_backing(backing):
+        dump[LEDGER_BACKING_KEY] = True
+        provenance[LEDGER_BACKING_KEY] = True
+    else:
+        dump.pop(LEDGER_BACKING_KEY, None)
+        provenance.pop(LEDGER_BACKING_KEY, None)
     provenance["durable_coordination"] = dump
     backing.provenance = provenance
     from sqlalchemy.orm.attributes import flag_modified
