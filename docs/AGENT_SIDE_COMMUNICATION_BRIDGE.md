@@ -28,6 +28,13 @@ inside isolated adapters and the inventory.
 - `local_cli_execution` — Founder-gated subprocess, no message interpolation
 - `vendor_session_{identity}` / `provider_model_api` / `remote_background_agent` — fail closed
 
+## Cold-start credentials (CF-1)
+
+`persist_delivery` now uses `persist_owner_ledger`. A Founder-issued bridge for an
+owner with no prior manual assignment is written onto a synthetic backing row
+and survives a fresh session. Existing work assignments are not retagged as
+ledger backing.
+
 ## Founder activation
 
 1. `POST /api/mainai/founder-ops/agent-gateway/bridges` with a recipient

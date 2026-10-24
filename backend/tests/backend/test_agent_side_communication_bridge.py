@@ -8,7 +8,13 @@ import pytest
 from sqlalchemy import text as sa_text
 
 from app.agent_coordination.agent_side import run_agent_side
-from app.agent_coordination.delivery import issue_bridge_credential, revoke_bridge_credential, submit_receipt
+from app.agent_coordination.delivery import (
+    issue_bridge_credential,
+    resolve_bridge,
+    revoke_bridge_credential,
+    submit_receipt,
+)
+from app.agent_coordination.persist import find_owner_assignments
 from app.agent_coordination.durable import load_owner_ledger
 from app.agent_coordination.github_intake import passing_required_runs
 from app.agent_coordination.lifecycle import ingest_lifecycle_event
@@ -194,3 +200,30 @@ def test_vendor_and_disconnected_fail_closed():
 
 def test_http_transport_inventory_requires_founder(client):
     assert client.get("/api/mainai/founder-ops/agent-gateway/transports").status_code in {401, 403}
+
+
+def test_cs1_issued_bridge_survives_fresh_session_without_prior_assignment(db_session, make_verified_user, client):
+    owner_id = _owner(db_session, make_verified_user)
+    assert find_owner_assignments(db_session, owner_id=owner_id) == []
+    issued = issue_bridge_credential(db_session, owner_id=owner_id, recipient="cursor", actor="founder")
+    db_session.commit()
+    assert issued["outcome"] == "issued"
+    assert find_owner_assignments(db_session, owner_id=owner_id)
+    db_session.expire_all()
+    _set_rls(db_session, owner_id)
+    resolved = resolve_bridge(db_session, token=issued["token"])
+    assert resolved is not None
+    assert resolved["recipient"] == "cursor"
+    inbox = client.get("/api/mainai/agent-gateway/inbox", headers={"Authorization": f"Bearer {issued['token']}"})
+    assert inbox.status_code == 200
+    assert inbox.json()["vendor_delivery_claimed"] is False
+
+
+def test_cs2_warm_existing_assignment_still_resolves(db_session, make_verified_user, client):
+    owner_id = _owner(db_session, make_verified_user)
+    issued = _prepare(db_session, owner_id)
+    db_session.expire_all()
+    _set_rls(db_session, owner_id)
+    assert resolve_bridge(db_session, token=issued["token"]) is not None
+    inbox = client.get("/api/mainai/agent-gateway/inbox", headers={"Authorization": f"Bearer {issued['token']}"})
+    assert inbox.status_code == 200
