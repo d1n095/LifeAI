@@ -1,0 +1,30 @@
+-> indexed, or failed at any step) can be modeled and surfaced without losing the received
+Also adds `next_attempt_at` (worker backoff for `failed` tasks — see this migration's second
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+founder explicitly directed be built correctly rather than skipped: "conversation/source event
+sRAI02|PASS local_claim=delivered vendor_delivery_claimed=False vendor_usable={'cursor_vendor_messaging': False, 'claude_vendor_messaging': False, 'codex_vendor_messaging': False} local_bridge_usable=True
+.RAI03|PARTIAL empty_evidence=rejected (independent verifiability of external execution = BLOCKED)
+.RAI04|PASS spoofed_ack=forged_rejected delivery_claim_claimed=False
+.RAI05|PASS mismatched_identity=forged_rejected
+.RAI06|PASS resolves_before=True resolves_after_revoke=False nonfounder_issue=forged_rejected
+.RAI07|PASS cross_agent=forged_rejected cross_owner_leak=0
+.RAI08|PASS {'independently_verified': 'forged_rejected', 'github_write': 'forged_rejected', 'override_stop': 'forged_rejected', 'stop': 'forged_rejected'}
+.RAI09|PASS unauth_bridge_issue_http=401
+.RAI10|PASS restart_status=completed
+.RAI11|PASS duplicate_completion=replay_ignored
+.RAI12|PASS delayed_unknown=stale_rejected first=applied dup=replay_ignored
+.sRAI14|PARTIAL expired=failed (real external cancel/timeout = BLOCKED)
+.RAI15|PASS statuses=['completed']
+.RAI16|PARTIAL structured_injection=forged_rejected (free-text LLM injection = BLOCKED)
+.RAI17|PASS off_ran=False enabled_noargs_ran=False
+.RAI18|PASS forwarded_keys=['PATH'] canary_present=False
+.RAI19|PARTIAL rw_without_scope=LEASE_REQUIRED (real external-agent FS access = BLOCKED)
+.RAI20|PARTIAL publish_usable=False stop=stale_rejected (authenticated-reauth STOP-clear = Codex CO-10 BLOCKED)
+.sRAI22|PARTIAL examiner_obligations=0 (external receive/execute legs = BLOCKED)
+.RAI23|PASS duplicate_blocked=True
+.RAI24|PASS completion=applied independently_verified=None
+.RAI25|PASS cross_agent_ownership=forged_rejected
+.RAI26|PASS unavailable=blocked missing=local_authorized_bridge claimed=False
+.RAI27|PARTIAL foreign_message_receipt=forged_rejected (semantic request/response correspondence = NOT_IMPLEMENTED)
+24 passed, 3 skipped in 16.97s
+target worktree unchanged
