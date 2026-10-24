@@ -1,6 +1,6 @@
 # Frontend zod advisory GHSA-mrhx-c7xc-m3w5
 
-Isolated dependency-security child of unfrozen `#304` @
+Isolated dependency-security child (`#305`) of unfrozen `#304` @
 `859f5ec5bf0eea4662b43caa061ff67967bba3aa`. Do **not** amend frozen `#303`
 (`74ebda974ff6952c7c7ca15f837430a73c594b43`) or the `#304` transport commits.
 
