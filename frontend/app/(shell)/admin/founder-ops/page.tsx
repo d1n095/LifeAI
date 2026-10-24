@@ -349,6 +349,25 @@ function DurableCoordination({
             }
           />
           <Flag ok={!view.operational_handover.vendor_delivery_claimed} label="Ingen vendorleverans påstås" />
+          {view.operational_handover.agent_side_bridge && (
+            <ul className="space-y-1 text-xs text-white/60" data-testid="agent-side-bridge">
+              {(
+                [
+                  ["adapter_installed", "Adapter installerad"],
+                  ["adapter_configured", "Adapter konfigurerad"],
+                  ["founder_authorized", "Founder-auktoriserad"],
+                  ["agent_reachable", "Agent nåbar"],
+                  ["assignment_claimed", "Uppdrag claimat"],
+                  ["execution_confirmed", "Körning bekräftad"],
+                  ["completion_verified", "Slutförande verifierat"],
+                ] as const
+              ).map(([key, label]) => (
+                <li key={key}>
+                  <Flag ok={Boolean(view.operational_handover?.agent_side_bridge?.[key])} label={label} />
+                </li>
+              ))}
+            </ul>
+          )}
           <p className="text-xs text-white/60">{String(view.operational_handover.answer || "")}</p>
           <ul className="space-y-1 text-xs text-white/50">
             {(view.operational_handover.remaining_permissions || []).map((row) => (

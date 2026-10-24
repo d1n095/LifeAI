@@ -29,6 +29,8 @@ from app.agent_coordination.connect import (
     run_authorized_receiver,
 )
 from app.agent_coordination.local_bridge import LocalAuthorizedBridge
+from app.agent_coordination.agent_side import run_agent_side
+from app.agent_coordination.transport import capability_matrix
 from app.agent_coordination.github_intake import (
     DEFAULT_PUBLIC_REPO,
     GitHubDevelopmentIntake,
@@ -216,7 +218,9 @@ __all__ = [
     "operational_handover_view",
     "persist_owner_ledger",
     "persist_to_assignment",
+    "run_agent_side",
     "run_authorized_receiver",
+    "capability_matrix",
     "real_adapter_config",
     "reconcile_execution_state",
     "reconcile_owner",

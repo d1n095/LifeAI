@@ -129,6 +129,12 @@ GitHub discovery or lifecycle ingest starts with no previous manual assignment. 
 builder and examiner obligation is written into that dump. Repeated HTTP refreshes,
 worker restarts and fresh sessions restore the same obligation IDs.
 
+## Agent-side runner (`#304`)
+
+See `docs/AGENT_SIDE_COMMUNICATION_BRIDGE.md`. The first verified receive path is
+`python -m app.agent_coordination.agent_side` with a Founder-issued gateway token.
+Vendor private sessions, model APIs and remote coding agents stay BLOCKED.
+
 ## Connecting available transports
 
 The existing gateway is the only messaging surface. The Founder-issued

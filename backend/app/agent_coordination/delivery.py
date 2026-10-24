@@ -263,15 +263,10 @@ def _transition(row: dict[str, Any], new_status: str) -> bool:
 
 
 def persist_delivery(db: Session, *, owner_id: uuid.UUID, service: DurableCoordinationService) -> None:
-    assignments = list(
-        db.execute(select(AgentWorkAssignment).where(AgentWorkAssignment.owner_id == owner_id)).scalars()
-    )
-    if not assignments:
-        return
-    obligation_id = next(iter(service._obligations), str(assignments[0].id))
-    for assignment in assignments:
-        persist_to_assignment(db, assignment=assignment, service=service, obligation_id=obligation_id, actor="delivery")
-    db.flush()
+    """Write delivery state even when the owner has no prior manual assignment (CF-1)."""
+    from app.agent_coordination.persist import persist_owner_ledger
+
+    persist_owner_ledger(db, owner_id=owner_id, service=service, actor="delivery")
 
 
 def issue_bridge_credential(

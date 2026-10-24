@@ -741,6 +741,8 @@ export type FounderOpsSnapshot = {
       internal_coordination?: Record<string, unknown>;
       local_authorized_bridge?: Record<string, unknown>;
       external_vendor_operations?: Record<string, unknown>;
+      agent_side_bridge?: Record<string, unknown>;
+      capability_matrix?: Record<string, unknown>[];
       remaining_permissions?: Record<string, unknown>[];
     };
   };
