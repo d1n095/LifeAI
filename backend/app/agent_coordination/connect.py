@@ -19,6 +19,7 @@ from app.agent_coordination.adapter_config import (
     resolve_adapter_env,
 )
 from app.agent_coordination.delivery import FIRST_CYCLE_GO, delivery_public_view, ensure_delivery
+from app.agent_coordination.transport import capability_matrix
 from app.agent_coordination.durable import DurableCoordinationService
 from app.agent_coordination.lifecycle import MISSING_MESSAGING, MISSING_PUBLICATION
 from app.agent_coordination.local_bridge import LocalAuthorizedBridge
@@ -211,6 +212,8 @@ def operational_handover_view(service: DurableCoordinationService) -> dict[str, 
             "codex": False,
             "missing_capability": MISSING_MESSAGING,
         },
+        "agent_side_bridge": agent_side_handover_flags(delivery),
+        "capability_matrix": capability_matrix_public(),
         "founder_must_forward_messages": founder_must_forward,
         "answer": (
             "Internal coordination and the Founder-issued local authorized bridge can receive "
@@ -223,6 +226,31 @@ def operational_handover_view(service: DurableCoordinationService) -> dict[str, 
         "vendor_delivery_claimed": False,
         "first_cycle_go": FIRST_CYCLE_GO,
         "adapters": delivery.get("adapters") or [],
+    }
+
+
+def capability_matrix_public() -> list[dict[str, Any]]:
+    return capability_matrix()
+
+
+def agent_side_handover_flags(delivery: dict[str, Any]) -> dict[str, Any]:
+    messages = delivery.get("messages") or []
+    bridges = delivery.get("bridges") or []
+    claimed = [row for row in messages if row.get("status") in {"delivered", "acknowledged", "executing", "completed"}]
+    executing = [row for row in messages if row.get("status") in {"executing", "completed"}]
+    completed = [row for row in messages if row.get("status") == "completed"]
+    live = any(row.get("live") for row in bridges)
+    connected = any(row.get("connected") for row in bridges)
+    return {
+        "adapter_installed": True,
+        "adapter_configured": live,
+        "founder_authorized": live,
+        "agent_reachable": connected or bool(claimed),
+        "assignment_claimed": bool(claimed),
+        "execution_confirmed": bool(executing),
+        "completion_verified": bool(completed),
+        "vendor_delivery_claimed": False,
+        "first_cycle_go": FIRST_CYCLE_GO,
     }
 
 

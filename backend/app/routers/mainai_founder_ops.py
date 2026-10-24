@@ -137,9 +137,24 @@ def issue_agent_bridge(
 def agent_gateway_setup(user: User = Depends(require_founder)):
     """Named missing capabilities and Founder setup only. Never a vendor credential."""
     from app.agent_coordination.connect import founder_setup_requirements
+    from app.agent_coordination.transport import capability_matrix
 
     return {
         "requirements": founder_setup_requirements(),
+        "capability_matrix": capability_matrix(),
+        "vendor_delivery_claimed": False,
+        "first_cycle_go": False,
+        "github_write": False,
+    }
+
+
+@router.get("/agent-gateway/transports")
+def agent_gateway_transports(user: User = Depends(require_founder)):
+    """Inspected integration surfaces. One surface is never reported as another."""
+    from app.agent_coordination.transport import capability_matrix
+
+    return {
+        "transports": capability_matrix(),
         "vendor_delivery_claimed": False,
         "first_cycle_go": False,
         "github_write": False,
