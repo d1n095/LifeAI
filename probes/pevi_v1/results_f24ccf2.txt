@@ -1,0 +1,14 @@
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+1 passed, 6 deselected in 27.35s
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+founder explicitly directed be built correctly rather than skipped: "conversation/source event
+PEVI1|PASS bad_hmac=rejected proposed=False persisted=False
+.PEVI2|NOT_IMPLEMENTED ingest_provider_event_present=False
+.PEVI3|PASS same_event_id=True persisted=False
+.ssPEVI6|PASS hmac_accepted=accepted provider_authenticated=False persisted=False
+.sPEVI8|NOT_IMPLEMENTED persisted=False reuse_persist_fn=app.agent_coordination.persist.persist_o
+.PEVI9|PASS proposed_delivery=completed independently_verified=False external_connected=False
+6 passed, 3 skipped in 17.22s
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+founder explicitly directed be built correctly rather than skipped: "conversation/source event
+11 passed, 1 skipped in 14.50s

@@ -125,25 +125,33 @@ def _preflight() -> list[dict]:
         ("11 independent certification of composed release", "NOT_TESTED", "requires the composed frozen release SHA (agent-side #304-306 + provider adapter #307) + an examiner verdict; #307 is a separate #303-based branch", "Founder (freeze) + examiner"),
         ("12 Founder notification / intervention", "PASS", "Founder-ops snapshot reports local state (handover view); external-cycle exceptions N/A until the cycle runs", "present (local)"),
     ]
-    # composition gap surfaced by evidence: the agent-side runner from #304-306 is ABSENT on this #303-based branch
-    out = [{"prereq": p, "status": s, "evidence": e, "owner": o} for (p, s, e, o) in rows]
+    # The 12 numbered rows are the Gate-B PREREQUISITES. The rows below are AUXILIARY findings (a composition failure
+    # and the product verdict summary) — they are NOT prerequisites and are tallied separately (Priority-3 correction).
+    out = [{"prereq": p, "status": s, "evidence": e, "owner": o, "kind": "prereq"} for (p, s, e, o) in rows]
     out.append({"prereq": "COMPOSITION agent_side_runner_present_on_this_branch", "status": "FAIL" if not has_agent_side else "PASS",
-                "evidence": f"app.agent_coordination.agent_side.run_agent_side present={has_agent_side} (#307 is #303-based, lacks #304-306 transport)", "owner": "Founder/MainAI (compose #304-306 + #307)"})
-    out.append({"prereq": "verdict.ready", "status": "BLOCKED" if v["ready"] is False else "PASS", "evidence": v["verdict"][:80], "owner": "n/a"})
+                "evidence": f"app.agent_coordination.agent_side.run_agent_side present={has_agent_side} (#307 is #303-based, lacks #304-306 transport)", "owner": "Founder/MainAI (compose #304-306 + #307)", "kind": "aux_composition"})
+    out.append({"prereq": "verdict.ready", "status": "BLOCKED" if v["ready"] is False else "PASS", "evidence": v["verdict"][:80], "owner": "n/a", "kind": "aux_summary"})
     return out
 
 
 def test_GBP_preflight_matrix(db_session, owner_id):
     rows = _preflight()
     from collections import Counter
-    tally = Counter(r["status"] for r in rows)
-    for r in rows:
+    prereqs = [r for r in rows if r["kind"] == "prereq"]
+    aux = [r for r in rows if r["kind"] != "prereq"]
+    ptally = Counter(r["status"] for r in prereqs)
+    for r in prereqs:
         print(f"GBP|{r['status']:14s} {r['prereq']}  [{r['owner']}]")
-    print(f"GBP|TALLY={dict(tally)}")
-    # Gate-B is NOT ready: no prerequisite that requires a live provider is PASS, and ingestion/correlation are not wired.
-    assert tally.get("PASS", 0) <= 5, "GBP sanity: too many PASS — a live-provider prerequisite may be falsely satisfied"
-    live_rows = [r for r in rows if r["prereq"].startswith(("1 ", "2 ", "3 ", "4 ", "5 ", "6 ", "10 "))]
-    assert all(r["status"] in ("BLOCKED", "NOT_IMPLEMENTED", "NOT_TESTED", "FAIL") for r in live_rows), \
+    for r in aux:
+        print(f"GBP|AUX {r['status']:10s} {r['prereq']}  [{r['owner']}]")
+    print(f"GBP|PREREQ_COUNT={len(prereqs)} PREREQ_TALLY={dict(ptally)} AUX={[(r['prereq'].split()[0], r['status']) for r in aux]}")
+    # Priority-3 reconciliation: EXACTLY 12 prerequisites, and their tally sums to 12 (no auxiliary row inflates it).
+    assert len(prereqs) == 12, f"GBP expected exactly 12 prerequisites, found {len(prereqs)}"
+    assert sum(ptally.values()) == 12, "GBP prerequisite tally does not sum to 12"
+    # Gate-B NOT ready: every live-provider / Codex-authority prerequisite is not PASS.
+    live_rows = [r for r in prereqs if r["prereq"].startswith(("1 ", "2 ", "3 ", "4 ", "5 ", "6 ", "10 "))]
+    assert all(r["status"] in ("BLOCKED", "NOT_IMPLEMENTED", "NOT_TESTED") for r in live_rows), \
         "GBP a live-provider / Codex-authority prerequisite is marked PASS without live evidence"
-    # the real external operating cycle must NOT be ready
-    assert any(r["prereq"] == "verdict.ready" and r["status"] == "BLOCKED" for r in rows)
+    # composition is a separate FAIL (not a prerequisite), and the product verdict is not ready
+    assert any(r["kind"] == "aux_composition" for r in aux)
+    assert any(r["kind"] == "aux_summary" and r["status"] == "BLOCKED" for r in aux)

@@ -1,0 +1,19 @@
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+1 passed, 6 deselected in 27.35s
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+founder explicitly directed be built correctly rather than skipped: "conversation/source event
+6 passed, 3 skipped in 17.22s
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+founder explicitly directed be built correctly rather than skipped: "conversation/source event
+LT1|PASS outcome=blocked missing=founder_cursor_cloud_agents_authorization reason_present=True
+.LT2|PASS documented={'transport_id': 'cursor_cloud_agents_api_v1', 'missing_capability': 'founder_cursor_cloud_agents_authorization', 'reason': 'Founder has not enabled LIFE_CURSOR_CLOUD_AGENTS_ENABLED.', 'live_http_attempted': False, 'vendor_delivery_claimed': False}
+.LT3|PARTIAL bypass_executed=False outcome=blocked (alternative-investigation orchestrator NOT_IMPLEMENTED)
+.LT5|PASS escalate=privilege_rejected
+.LT6|PASS forbidden_keys=forged_rejected
+.LT7|PASS outcome=stale_rejected
+.LT8|PARTIAL ledger_present=True inspectable=True tamper=trigger_blocked
+.LT9|PASS truth_states=('said', 'stored', 'planned', 'implemented', 'verified')
+.LT10|PASS resolves_before=True resolves_after_revoke=False
+.LT-NEG|PASS impostor_role=founder id_matches_founder=False snapshot=403
+.LT-NEG2|PASS secret_in_output=False outcome=authorized_candidate
+11 passed, 1 skipped in 14.50s

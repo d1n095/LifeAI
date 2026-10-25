@@ -16,7 +16,7 @@
 **Observation (not a defect):** the verdict is a *static* honest declaration, not an *evidence evaluator* — it asserts `False` rather than computing each requirement from live state. That is correct and safe for #307's NOT-READY purpose (it cannot be wrong in the False direction). A real readiness gate must eventually COMPUTE each requirement from evidence while staying fail-closed — which is exactly what my independent preflight does (below), and what the composition work must wire. No executable classification boundary was left uncovered: GBV-1..6 lock every boundary the Founder named.
 
 ## Priority 2 — independent evidence-driven Gate-B preflight (`gateb_v1` GBP, read-only, provider-neutral)
-My examiner-owned preflight classifies the 12 prerequisites from real evidence on this branch — never manufacturing live evidence, never requiring a credential. Result tally: **PASS 4 · BLOCKED 7 · NOT_IMPLEMENTED 1 · NOT_TESTED 1 · (+ composition FAIL)**.
+My examiner-owned preflight classifies the 12 prerequisites from real evidence on this branch — never manufacturing live evidence, never requiring a credential. **Corrected tally (Priority-3 reconciliation): exactly 12 prerequisites summing to 12 — PASS 4 · BLOCKED 6 · NOT_IMPLEMENTED 1 · NOT_TESTED 1.** Two AUXILIARY findings are reported separately and are NOT prerequisites: a composition FAIL (agent-side runner absent on this #303-based branch) and the product `verdict.ready` summary (BLOCKED). (The earlier draft folded those 2 aux rows into the tally, yielding a misleading 13/14; corrected here and enforced by `gateb_v1` which asserts `PREREQ_COUNT==12` and the tally sums to 12.)
 
 | # | Prerequisite | Status | Owner |
 |---|---|---|---|
