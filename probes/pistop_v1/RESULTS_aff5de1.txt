@@ -1,0 +1,11 @@
+target: /Users/dennistorildson/Library/Application Support/Claude/scratch-workspaces/4fb67e2b-ac65-4918-9c9e-5fbeb75d6101/dfc6b53c-9ba6-42fb-8c53-defc561c946b/scratch-2026-09-25-fe2f96/examiner/wtcert-aff5de1 @ aff5de1a6e2a33266bf2fd00e2a3ce554daeafab
+XFAIL test_pistop.py::test_PIS_B1_stop_before_ingestion_blocks_completion - PI-STOP-1: ingestion not gated on Founder STOP before completion
+XFAIL test_pistop.py::test_PIS_B2_stop_prevents_examiner_promotion - PI-STOP-1: no examiner promotion may occur under STOP
+XFAIL test_pistop.py::test_PIS_B3_stop_after_receipt_before_transition - PI-STOP-2: STOP arriving between receipt and durable transition is not observed
+XFAIL test_pistop.py::test_PIS_B4_replay_after_stop - PI-STOP-5: replayed completion after STOP must stay rejected on authority, not only dedup
+XFAIL test_pistop.py::test_PIS_B5_stop_survives_restart_but_ingestion_ignores_it - PI-STOP-6: STOP is durable (DB) but ingestion ignores it across a fresh service
+SKIPPED [1] test_pistop.py:218: BLOCKED (Codex CO-10): STOP-clear is gated only by a founder_ack STRING (_validate_founder_ack format + small denylist), not an authenticated authority interface. Cannot test that a clear was genuinely Founder-authorized until Codex ships the authenticated STOP-clear interface.
+SKIPPED [1] test_pistop.py:226: BLOCKED (Codex): no queryable AUTHORITY-STATE interface with an UNKNOWN value. assert_not_killed is binary (stopped/not) and has no 'authority unknown / kernel unavailable -> fail closed' semantic for the ingestion path to consult. Required: authority_state() in {GRANTED,STOPPED,UNKNOWN} that ingestion treats UNKNOWN as refuse.
+SKIPPED [1] test_pistop.py:235: BLOCKED (Cursor+Codex): provider_ingestion does not take a db session, so a STOP-rejected event cannot yet be persisted as durable audit evidence. Required: a rejected-on-authority event is recorded (owner, agent, event_id, reason=authority_rejected) for Founder audit. Testable once ingestion is wired to the authority oracle AND persists rejections.
+=================== 6 passed, 3 skipped, 5 xfailed in 30.20s ===================
+target worktree unchanged
