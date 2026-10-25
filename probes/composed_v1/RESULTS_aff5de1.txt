@@ -1,0 +1,251 @@
+target: /Users/dennistorildson/Library/Application Support/Claude/scratch-workspaces/4fb67e2b-ac65-4918-9c9e-5fbeb75d6101/dfc6b53c-9ba6-42fb-8c53-defc561c946b/scratch-2026-09-25-fe2f96/examiner/wtcert-aff5de1 @ aff5de1a6e2a33266bf2fd00e2a3ce554daeafab
+/Users/dennistorildson/Library/Application Support/Claude/scratch-workspaces/4fb67e2b-ac65-4918-9c9e-5fbeb75d6101/dfc6b53c-9ba6-42fb-8c53-defc561c946b/scratch-2026-09-25-fe2f96/examiner/venv312/lib/python3.12/site-packages/pytest_asyncio/plugin.py:208: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> 0001, Baseline schema — MainAI 0.1 M1-M3 (auth/RLS, provider/usage, chat/projects/documents).
+INFO  [alembic.runtime.migration] Running upgrade 0001 -> 0002, Cookie-based session milestone: refresh_tokens (rotation + reuse detection) and
+revoked_access_tokens (immediate access-token revocation on logout). See
+docs/AUTH_THREAT_MODEL.md.
+INFO  [alembic.runtime.migration] Running upgrade 0002 -> 0003, Account lifecycle milestone: self-service registration + email verification +
+password reset + bulk session revocation. See docs/AUTH_THREAT_MODEL.md ("Tillägg
+2026-07-18: fullständigt kontoflöde").
+INFO  [alembic.runtime.migration] Running upgrade 0003 -> 0004, pgvector migration: replaces the Qdrant-backed knowledge index with a Postgres-native
+document_chunks table (app/models/document_chunk.py, app/rag/vector_store.py). Chunks are
+strictly per-owner and RLS-protected (app/rls.py's document_chunks_isolation) — a deliberate
+narrowing from Document's own shared-company-knowledge model, not a preexisting property of
+the old Qdrant search. See docs/RENDER_DEPLOY.md and app/models/document_chunk.py's
+docstring for why.
+INFO  [alembic.runtime.migration] Running upgrade 0004 -> 0005, Founder-only launch: adds 'founder' to the userrole enum (backend/app/models/user.py).
+INFO  [alembic.runtime.migration] Running upgrade 0005 -> 0006, Founder Knowledge Studio v1: extends documents with checksum/media_type/classification/
+active_truth_status/project_id/soft-delete, enables RLS on documents (previously
+intentionally shared, see app/rls.py's old docstring — now owner-scoped, since Founder
+Knowledge Studio's per-document access model is meant to survive into the future UserAI
+phase where "shared" would be wrong by default), and adds three new tables: knowledge_versions,
+knowledge_import_jobs, source_relationships. See docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md.
+INFO  [alembic.runtime.migration] Running upgrade 0006 -> 0007, STEG 10 (claim-level trust): adds knowledge_claims (a testable factual claim extracted
+from a source, bound to the exact source/version/chunk it came from) and claim_relationships
+(supports/contradicts/supersedes/duplicates edges between claims — the claim-level analogue
+of migration 0006's source_relationships). See docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md's DEL 8
+section and app/rag/claims.py.
+INFO  [alembic.runtime.migration] Running upgrade 0007 -> 0008, STEG 11: retry/coordination bookkeeping on knowledge_import_jobs — attempt_count and
+max_attempts (exponential-backoff retry, app/jobs/retry.py) and last_failure_transient (so
+the Library UI can distinguish "will retry automatically" from "needs a manual re-import",
+see app/rag/library_import.py). No new tables — this app already has exactly one Redis
+instance and the JobLock coordination primitive (app/jobs/lock.py) needs no schema of its
+own, it's entirely Redis-side (a lease key with a TTL).
+INFO  [alembic.runtime.migration] Running upgrade 0008 -> 0009, STEG 12 (audio/video import v1): extends document_chunks with a timestamp range
+(start_seconds/end_seconds, both nullable — NULL for ordinary text chunks, set for chunks
+built from a timed transcript segment) so a citation can open the exact moment in an
+audio/video source instead of just the source itself. Extends documents with
+media_duration_seconds and transcript_provider (which TranscriptionProvider produced the
+transcript — see app/providers/transcription.py — surfaced for UI/debug transparency, not a
+functional requirement).
+INFO  [alembic.runtime.migration] Running upgrade 0009 -> 0010, STEG 13 (multimedia in UI): stores the raw uploaded bytes for an audio/video source so a
+real <audio>/<video> player can actually play it back — Founder Knowledge Studio never
+stored raw file bytes anywhere before this (text/document imports only ever kept the
+extracted text and embeddings, see app/rag/library_import.py), which was fine when nothing
+in the UI needed to play the original file back.
+INFO  [alembic.runtime.migration] Running upgrade 0010 -> 0011, Life Library upload consolidation package: adds granular IndexStatus values so a
+document's pipeline progress (original file stored -> extracting -> extracted -> embedding
+-> indexed, or failed at any step) can be modeled and surfaced without losing the received
+material when a later step fails. Purely additive to the existing `indexstatus` enum type —
+`pending`/`indexing` are left in place (no rows are migrated to the new values; only newly
+created/updated rows use them) so nothing already relying on those values breaks. See
+app/models/document.py's IndexStatus docstring and docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md.
+INFO  [alembic.runtime.migration] Running upgrade 0011 -> 0012, Life Library durable-worker package: persistent original-file storage + restart-safe
+worker support.
+INFO  [alembic.runtime.migration] Running upgrade 0012 -> 0013, P1 (provider pre-flight verification) package.
+INFO  [alembic.runtime.migration] Running upgrade 0013 -> 0014, MainAI Project Memory & Coordination Loop — first working slice.
+INFO  [alembic.runtime.migration] Running upgrade 0014 -> 0015, MainAI Project Memory & Coordination Loop — Fas 2 (source ingestion + branch/PR status).
+INFO  [alembic.runtime.migration] Running upgrade 0015 -> 0016, Chat message persistence/failure-boundary fix — the audit-confirmed bug where a founder's
+own chat message was only ever committed in the same transaction as a successful AI reply, so
+a provider failure meant real, silent data loss (see docs/BRANCH_REGISTRY.md's LLM Coupling
+audit). Additive only:
+INFO  [alembic.runtime.migration] Running upgrade 0016 -> 0017, MainAI Core: agent orchestration — the first vertical chain from a project note through a
+dispatched code/review agent to a proposed (or, gated, real) GitHub PR (see CLAUDE.md's
+2026-07-26 "MainAI Core" direction). Two additive tables, no new architecture:
+INFO  [alembic.runtime.migration] Running upgrade 0017 -> 0018, P3 (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.1, §8 build order): the first slice of
+the shared MainAI Memory Core — classifies WHAT a claim already extracted by STEG 10 actually
+is (idea/decision/task_reference/vision/technical/historical/uncategorized), extracted in the
+SAME AI call as the claim text itself (see app/rag/claims.py). This is the input P4's later
+interpretation queue will read to decide whether a claim becomes a project_entities row — no
+project_entities/interpretation_proposals/founder_memory_notes tables yet, this migration is
+additive-only and touches nothing else.
+INFO  [alembic.runtime.migration] Running upgrade 0018 -> 0019, S1A (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8): the universal provenance core —
+`memory_source_units` (the atomic, immutable source unit every KnowledgeClaim will eventually
+point to via memory_source_id, replacing the plan to keep adding a new nullable source_X_id
+column per future source type), its document-only subtype `document_source_units`, and an
+append-only `memory_source_lifecycle_events` audit trail. Additive only: `KnowledgeClaim.
+memory_source_id` is nullable, the old source_id/version_id/chunk_id columns are untouched
+(see §4.8's six-phase cutover plan — this migration is only phase 1).
+INFO  [alembic.runtime.migration] Running upgrade 0019 -> 0020, Pass 23 (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md's Life Library storage layer, PR #31's
+blob-reference hardening): a single, narrow, database-owned `storage_key_still_referenced_
+global(text) RETURNS boolean` function — the fix for a real cross-owner gap a founder review
+caught in `app/rag/blob_references.py::storage_key_still_referenced()`.
+INFO  [alembic.runtime.migration] Running upgrade 0020 -> 0021, Account export/erasure integration (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8, PR
+#31's Pass 26): `storage_deletion_tasks` — a durable, retryable record of every physical blob
+a completed account erasure still needs to (attempt to) delete from disk.
+INFO  [alembic.runtime.migration] Running upgrade 0021 -> 0022, Pass 28 (PR #31, second founder review round of the account-erasure slice): a narrow
+SECURITY DEFINER function, `enqueue_account_erasure_storage_task()`, replacing the ordinary
+ORM `INSERT` into `storage_deletion_tasks` that Pass 27 still left `mainai_app` doing directly.
+Also adds `next_attempt_at` (worker backoff for `failed` tasks — see this migration's second
+half and app/rag/account_erasure.py's `attempt_storage_deletion_task()`).
+INFO  [alembic.runtime.migration] Running upgrade 0022 -> 0023, Pass 29 (PR #31, third founder review round of the account-erasure slice): extends
+`public.storage_key_still_referenced_global(text)` (migration 0020) to also see
+`project_sources.storage_key` and `project_checkpoints.brief_storage_key` — closing a real
+cross-domain orphan-blob gap a founder review found.
+INFO  [alembic.runtime.migration] Running upgrade 0023 -> 0024, Pass 31 (PR #31, a sixth founder review round of the account-erasure/blob-integrity slice):
+widens `storage_deletion_tasks.reason` to also allow `'rejected_upload_cleanup'`, alongside
+the existing `'account_erasure'`.
+INFO  [alembic.runtime.migration] Running upgrade 0024 -> 0025, Durable production backfill-run reporting (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8,
+PR #31's own module docstring for `app/rag/memory_source_backfill.py`): the last blocker that
+docstring names before `backfill_memory_source_units()` may ever be run against production —
+"a durable run record with (at minimum): a run id, owner_id, started_at/completed_at, status,
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+resumable cursor ..., and a claim-level failure log". This migration adds exactly that.
+INFO  [alembic.runtime.migration] Running upgrade 0025 -> 0026, MainAI Runtime Truthfulness and Durable Job Foundation.
+INFO  [alembic.runtime.migration] Running upgrade 0026 -> 0027, MainAI Runtime Truthfulness and Durable Job Foundation — correction round: close gaps an
+independent founder review found in `0026_mainai_jobs.py`, PLUS a second review round that
+found this migration's own first draft had a critical cross-owner deletion bug and a
+portability bug. Both rounds are folded into this single migration's final shape (no separate
+follow-up migration for what is really still "make this migration correct before anything
+depends on it" — this branch had not been opened as a PR yet at the time, so there was no
+reviewed history to preserve by leaving the bug in place and patching it in a later revision).
+INFO  [alembic.runtime.migration] Running upgrade 0027 -> 0028, MainAI Runtime Truthfulness and Durable Job Foundation — founder re-review round (PR #36):
+lease fencing token + DB-level state invariants.
+INFO  [alembic.runtime.migration] Running upgrade 0028 -> 0029, MainAI Runtime Truthfulness and Durable Job Foundation — founder re-review round (PR #36),
+fourth pass: `progress_current` can go backwards with no DB-level defense.
+INFO  [alembic.runtime.migration] Running upgrade 0029 -> 0030, S1B, EXPAND phase — `messages.sequence_number` (docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md
+§4.9 "Meddelandeordning — riktig ordinal, inte bara `created_at`" and §8's S1B line).
+INFO  [alembic.runtime.migration] Running upgrade 0030 -> 0031, Owner-scoped Row-Level Security for `messages` (docs/AUTH_THREAT_MODEL.md, app/rls.py).
+INFO  [alembic.runtime.migration] Running upgrade 0031 -> 0032, MainAI Execution Loop V0.1 — durable Goal/Plan/Task/Checkpoint schema, plus the engineering
+lesson (safety memory) foundation.
+INFO  [alembic.runtime.migration] Running upgrade 0032 -> 0033, MainAI V0.2 — Dead Agent Recovery: durable worktree ownership, recovery inspection/
+classification, and append-only recovery event history.
+INFO  [alembic.runtime.migration] Running upgrade 0033 -> 0034, MainAI V0.2 — `superseded` terminal status for `mainai_jobs` + `superseded_by_job_id`.
+INFO  [alembic.runtime.migration] Running upgrade 0034 -> 0035, MainAI V0.2 -- approval gate for recovery/takeover, mirroring V0.1's task-level approval
+gate (app/mainai_execution/approval.py) but for a genuinely different decision: not "is this
+task's CONTENT allowed to run" but "is it safe to let an autonomous recovery pass take over a
+DEAD job's attempt without a founder looking at it first".
+INFO  [alembic.runtime.migration] Running upgrade 0035 -> 0036, MainAI V0.3 — Long-Running Orchestration: durable external-wait tracking (CI-wait first),
+retry-with-backoff scheduling, and new append-only event vocabulary for wait/cancel/auto-
+recovery/lesson-conflict lifecycles.
+INFO  [alembic.runtime.migration] Running upgrade 0036 -> 0037, Life Source Foundation Bootstrap — corpus manifest, S1C (messages as memory sources).
+INFO  [alembic.runtime.migration] Running upgrade 0037 -> 0038, Life Intelligence Governance & Meta-Learning — observation-first foundation.
+INFO  [alembic.runtime.migration] Running upgrade 0038 -> 0039, Life Active Context Intelligence — deterministic selected-reference foundation.
+INFO  [alembic.runtime.migration] Running upgrade 0039 -> 0040, Life Memory Threads — cross-conversation continuity foundation.
+INFO  [alembic.runtime.migration] Running upgrade 0040 -> 0041, Life goals, dreams, dependencies and feasibility foundation.
+INFO  [alembic.runtime.migration] Running upgrade 0041 -> 0042, Life problem/solution/decision/lesson intelligence foundation.
+INFO  [alembic.runtime.migration] Running upgrade 0042 -> 0043, Deterministic work-strategy, trace, quality-guardrail and efficiency evidence.
+INFO  [alembic.runtime.migration] Running upgrade 0043 -> 0044, Deterministic strategy comparison, experimentation and governed promotion.
+INFO  [alembic.runtime.migration] Running upgrade 0044 -> 0045, Deterministic strategy synthesis recipes, lineage, conflicts, and materialization.
+INFO  [alembic.runtime.migration] Running upgrade 0045 -> 0046, Multi-Agent Work Coordination foundation.
+INFO  [alembic.runtime.migration] Running upgrade 0046 -> 0047, Interactive Agent Execution Control Foundation.
+INFO  [alembic.runtime.migration] Running upgrade 0047 -> 0048, Life Capability Reality / Self-Model foundation.
+INFO  [alembic.runtime.migration] Running upgrade 0048 -> 0049, Life Founder/User Memory foundation.
+INFO  [alembic.runtime.migration] Running upgrade 0049 -> 0050, Life Causal Diagnosis Interface.
+INFO  [alembic.runtime.migration] Running upgrade 0050 -> 0051, Wire `capability_record` into `app.active_context.service`'s central object-reference
+registry.
+INFO  [alembic.runtime.migration] Running upgrade 0051 -> 0052, Life Corpus Trial Run History.
+INFO  [alembic.runtime.migration] Running upgrade 0052 -> 0053, Life Candidate Learning Signals -- the missing stage in the founder-learning pipeline the
+founder explicitly directed be built correctly rather than skipped: "conversation/source event
+-> preserved source reference -> candidate learning signal -> evidence/classification stage ->
+derived founder knowledge only when justified." See docs/LIFE_FOUNDER_MEMORY.md's own
+"Candidate learning signals" section for the full architecture.
+INFO  [alembic.runtime.migration] Running upgrade 0053 -> 0054, Life Project Entities / Interpretation Queue -- the P4 layer
+docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md's own §4.2/§6.4 describes and this codebase never
+built: extends the already-live P3 claim extraction (`app/rag/claims.py`'s
+`extract_claims_for_document()`, called from `app/rag/library_import.py` after every
+successful import) with the next stage -- turning a typed `KnowledgeClaim` into structured
+project understanding, WITHOUT silently promoting extraction output into founder-trusted fact.
+INFO  [alembic.runtime.migration] Running upgrade 0054 -> 0055, Life Work Candidates -- the second half of the P4 closing bridge migration 0054 built the
+first half of: `project_entities` (structured project understanding) is now connected to
+`app.mainai_execution.planner.create_goal()` (the already-existing, already-governed entry
+point for a real `MainAIGoal`), WITHOUT collapsing "a good inference exists" into "execution
+is authorized" -- exactly the distinction the founder's own closing-phase directive named
+explicitly: DERIVED WORK CANDIDATE != AUTHORIZED WORK != EXECUTABLE WORK.
+INFO  [alembic.runtime.migration] Running upgrade 0055 -> 0056, Fixes an owner-anchoring gap in migrations 0054/0055 a founder adversarial review found:
+`interpretation_proposals.source_claim_id`, `project_entities.derived_from_claim_id`,
+`project_entity_relationships.from_entity_id`/`to_entity_id`, and (found via the SAME check
+applied to the rest of this mission's own follow-up work, migration 0055's `work_candidates.
+source_entity_id`) used BARE foreign keys, the same defect class `app/models/knowledge_claim.
+py`'s own module docstring already explicitly documents and fixes for `memory_source_id` (see
+that model's `fk_knowledge_claims_memory_source_owner` composite FK, migration 0019): a bare
+FK only proves the referenced row exists, it does NOT prove it belongs to the same owner -- FK
+constraint checks run independently of RLS, so a caller (buggy, compromised, or simply future
+code that does not re-derive the reference the way the current single call site does) could
+otherwise construct `owner_id=A, source_claim_id=<B's claim>` and have the database accept it.
+INFO  [alembic.runtime.migration] Running upgrade 0056 -> 0057, Life Execution Authorization Envelope -- the founder-decided architecture for the missing
+piece Cursor's own handoff identified: `app.development_supervisor.service.run_supervisor()`
+requires a `SupervisorScope` with `allowed_paths`/`allowed_capabilities` -- genuinely
+per-task security-scope fields with NO safe generic default (confirmed by direct inspection:
+zero non-test construction sites for `SupervisorScope` anywhere in the codebase; the one
+existing test hand-picks `allowed_paths=("calculator.py", "test_calculator.py")` for that
+specific task). Deriving these from `task_type` alone, or requiring the founder to hand-type
+every path from scratch for every goal, were both explicitly rejected as the wrong shape.
+INFO  [alembic.runtime.migration] Running upgrade 0057 -> 0058, Record what happened to an applied EngineeringLesson's own regression guard.
+INFO  [alembic.runtime.migration] Running upgrade 0058 -> 0059, Supervisor Goal Lease -- the durable mutual-exclusion primitive that makes the production
+Supervisor entry point (app/development_supervisor/production_entry.py) safe under real
+worker concurrency and crashes. Founder decision (execution authority model, section 10):
+"the autonomous trigger must be durable and idempotent" and must be attacked with two-workers-
+same-goal, crash-before/during-Supervisor-start, and stale-lease/takeover scenarios.
+INFO  [alembic.runtime.migration] Running upgrade 0059 -> 0060, Provider-spend authorization -- distinct founder-granted budget for billed planning calls.
+INFO  [alembic.runtime.migration] Running upgrade 0060 -> 0061, V0.2 recovery pipeline -- one new `mainai_recovery_events.event_type` value:
+`takeover_declined_governed`.
+INFO  [alembic.runtime.migration] Running upgrade 0061 -> 0062, Life Vault / External-AI Egress Control -- provider disclosure ledger.
+INFO  [alembic.runtime.migration] Running upgrade 0062 -> 0063, Stage A — Canonical Inspectable Memory Foundation (Cursor memory-frontier lane).
+INFO  [alembic.runtime.migration] Running upgrade 0063 -> 0064, Stage B — Concept / idea reconciliation.
+INFO  [alembic.runtime.migration] Running upgrade 0064 -> 0065, Widen work_candidates.priority to also accept the horizon-based executive-priority
+vocabulary (NOW/NEAR/LATER/OPTIONAL/BLOCKED).
+INFO  [alembic.runtime.migration] Running upgrade 0065 -> 0066, Add entity-resolution columns to candidate_learning_signals -- the personal-language
+resolution layer for the founder-defined "Personal Intent & Executive Reasoning" workstream
+(docs/MAINAI_PERSONAL_INTENT_EXECUTIVE_REASONING.md §1).
+INFO  [alembic.runtime.migration] Running upgrade 0066 -> 0067, MainAI Internal Workforce Foundation (Stage T1–T7 schema + contracts).
+INFO  [alembic.runtime.migration] Running upgrade 0067 -> 0068, Workforce ops tables (T8–T16/T19/T20) — migration 0068.
+INFO  [alembic.runtime.migration] Running upgrade 0068 -> 0069, Durable workforce authority-epoch table — closes the grant/kill-switch race (migration 0069).
+INFO  [alembic.runtime.migration] Running upgrade 0069 -> 0070_personal_recall_outbox, Atomic, owner-scoped change feed for Personal Recall.
+INFO  [alembic.runtime.migration] Running upgrade 0070_personal_recall_outbox -> 0071_recall_delivery_ops, Persistent retry leases and dead-letter state for Recall delivery.
+INFO  [alembic.runtime.migration] Running upgrade 0071_recall_delivery_ops -> 0072_mainai_exec_events, Canonical owner-scoped execution event outbox.
+INFO  [alembic.runtime.migration] Running upgrade 0072_mainai_exec_events -> 0073_mainai_level2_programs, Canonical Level-2 program contracts and append-only recovery journal.
+INFO  [alembic.runtime.migration] Running upgrade 0073_mainai_level2_programs -> 0074_resource_intel, Resource Intelligence telemetry table integrated into the Level-2 composition branch.
+INFO  [alembic.runtime.migration] Running upgrade 0074_resource_intel -> 0075_supervision_base, Canonical PostgreSQL persistence for continuous agent supervision.
+INFO  [alembic.runtime.migration] Running upgrade 0075_supervision_base -> 0076_supervision_fences, Bind supervision to canonical jobs, workforce grants and immutable evidence.
+INFO  [alembic.runtime.migration] Running upgrade 0076_supervision_fences -> 0077_supervision_telemetry, Add owner-scoped resource observations for future scheduling decisions.
+INFO  [alembic.runtime.migration] Running upgrade 0077_supervision_telemetry -> 0078_founder_boot, Founder-only MainAI boot state, covenant and status stream.
+INFO  [alembic.runtime.migration] Running upgrade 0078_founder_boot -> 0079_mainai_workforce_mastery, MainAI Dynamic Workforce Orchestration + Capability Learning -- durable Capability Mastery
+Ledger. See docs/mainai_v2/MAINAI_COVERAGE_WORKFORCE_CAPABILITY_RECONCILIATION.md; rebased after 0078_founder_boot for founder-boot integration.
+INFO  [alembic.runtime.migration] Running upgrade 0079_mainai_workforce_mastery -> 0080_verification_registry, MainAI independent verification registry.
+INFO  [alembic.runtime.migration] Running upgrade 0080_verification_registry -> 0081_recall_prod_activation, Personal Recall production activation foundation.
+INFO  [alembic.runtime.migration] Running upgrade 0081_recall_prod_activation -> 0082_high_risk_evidence_claim, High-risk workforce verification evidence claim fence.
+INFO  [alembic.runtime.migration] Running upgrade 0082_high_risk_evidence_claim -> 0083_recall_auth_boundary, Tighten Personal Recall founder authority trigger boundary.
+INFO  [alembic.runtime.migration] Running upgrade 0083_recall_auth_boundary -> 0084_recall_erasure_lifecycle, Governed Personal Recall account erasure lifecycle.
+INFO  [alembic.runtime.migration] Running upgrade 0084_recall_erasure_lifecycle -> 0085_account_erasure_authority, Bind Personal Recall erasure to canonical account-erasure operation state.
+INFO  [alembic.runtime.migration] Running upgrade 0085_account_erasure_authority -> 0086_account_erasure_reauth, Bind account erasure operations to recent password reauthentication.
+INFO  [alembic.runtime.migration] Running upgrade 0086_account_erasure_reauth -> 0087_relationship_vocabulary, Restore the union of Concept Reconciliation and Vision relationship types.
+INFO  [alembic.runtime.migration] Running upgrade 0087_relationship_vocabulary -> 0088_erasure_completion_phase, Require ordered erasure phases before operation completion.
+INFO  [alembic.runtime.migration] Running upgrade 0088_erasure_completion_phase -> 0089_activation_branch_protect, Protect the activation integration branch (and every `mainai/` branch) from task worktrees.
+CMP1|cross_owner=forged_rejected recipient_mismatch=rejected ok=bound
+.CMP2|forged_hmac=forged_rejected unbound=rejected
+.CMP3|first=applied replay=replay_ignored reordered=reordered_rejected
+.CMP4|stale=expired_rejected future=expired_rejected
+.CMP5|cross_owner_event=forged_rejected
+.CMP6|outcome=applied transition=completed obl_status=completed iv=False examiners=1
+.CMP7|unknown_transition=blocked note=UNKNOWN/BLOCKED is not verified completion
+.CMP8|result_iv=False stored_iv=False vendor_claimed=False obl_status=completed
+.CMP9|first=completed restart_status=completed dup_after_restart=replay_ignored
+.CMP10|transition=completed fixture=True provider_authenticated=False iv=False
+.CMP11|no_timestamp first=applied duplicate=applied (P3: receive-time fallback weakens dedup)
+CMP11|RESIDUAL PI-DEDUP confirmed: timestamp-less duplicate was re-applied (event_id used receive-time)
+.RST1|supported=continue_authorized_troubleshooting prohibited=paused_pending_founder none=paused_pending_founder
+.RST2|outcome=paused_provider_cannot_authorize paused=True
+.RST3|records=1 searchable=True versioned=True plaintext_secrets=False
+.RST4|keyed=[redacted] keyworded_redacted=True bare_redacted=False
+RST4|RESIDUAL bare_credential_without_keyword_redacted=False
+.RST5|same_fingerprint=True grouped=2
+.RST6|matches=1 authorization_still_valid=False requires_reconfirmation=True
+.
+17 passed in 109.27s (0:01:49)
+target worktree unchanged

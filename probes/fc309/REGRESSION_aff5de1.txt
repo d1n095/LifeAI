@@ -1,0 +1,13 @@
+=== #309 aff5de1a regression + preservation ===
+unattended_v1:   10 passed, 1 skipped
+gh_intake_v1:    8 passed
+rai_v1:          24 passed, 3 skipped
+cr_contract_v1:  19 passed, 2 skipped
+agentbridge_v2:  14 passed, 1 skipped
+delivery_v1:     6 passed
+lifecycle_v1:    7 passed
+substrate_v1:    20 passed
+connect_v1:      5 passed
+coord CO-10:    1 failed, 10 passed
+fa_core FA-PRIV:5 failed, 1 passed, 1 skipped
+clean:[]
