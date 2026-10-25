@@ -1,0 +1,26 @@
+-> indexed, or failed at any step) can be modeled and surfaced without losing the received
+Also adds `next_attempt_at` (worker backoff for `failed` tasks — see this migration's second
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+founder explicitly directed be built correctly rather than skipped: "conversation/source event
+GBV1|ready=False cycle_ready=False autonomy=False external_connected=False
+.GBV2|local_gateway_sufficient=False green_ci_sufficient=False prototype_sufficient=False
+.GBV3|blocking_gates=['fa9_co10_privilege_and_publication', 'first_cycle_go_false', 'founder_cursor_cloud_live_mutate_authorization', 'independent_certification', 'no_provider_authenticated_external_agent']
+.GBV4|one_event_persisted=False independently_verified=False cycle_ready=False
+.GBV5|iv=False vendor_claimed=False agent_prov_auth=False
+.GBV6|params=[] stable=True
+.GBP|BLOCKED        1 authenticated external agent identity  [Founder (live key) + Cursor]
+GBP|BLOCKED        2 actual assignment receipt  [Founder (live-mutate) + Cursor]
+GBP|BLOCKED        3 authorized execution  [Founder + Cursor]
+GBP|NOT_IMPLEMENTED 4 durable provider-event ingestion  [Cursor/MainAI]
+GBP|BLOCKED        5 evidence-to-assignment correlation  [Cursor/MainAI]
+GBP|BLOCKED        6 independent completion verification  [Cursor/MainAI + examiner]
+GBP|PASS           7 automatic examiner handoff  [present]
+GBP|PASS           8 findings-to-correction routing  [present]
+GBP|PASS           9 restart/interruption recovery  [present (local) / Cursor (provider-side)]
+GBP|BLOCKED        10 STOP/spending/publication authority  [Codex (STOP/publication) + Founder (spend)]
+GBP|NOT_TESTED     11 independent certification of composed release  [Founder (freeze) + examiner]
+GBP|PASS           12 Founder notification / intervention  [present (local)]
+GBP|FAIL           COMPOSITION agent_side_runner_present_on_this_branch  [Founder/MainAI (compose #304-306 + #307)]
+GBP|BLOCKED        verdict.ready  [n/a]
+GBP|TALLY={'BLOCKED': 7, 'NOT_IMPLEMENTED': 1, 'PASS': 4, 'NOT_TESTED': 1, 'FAIL': 1}
+7 passed in 211.16s (0:03:31)
