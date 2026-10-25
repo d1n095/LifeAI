@@ -251,6 +251,10 @@ class DurableCoordinationService:
             "first_cycle_go": FIRST_CYCLE_GO,
             "vendor_delivery_claimed": False,
         }
+        self._operational_handover: dict[str, Any] = {
+            "self_improve": {"cycles": [], "lessons": []},
+            "absence": {},
+        }
 
     # ------------------------------------------------------------------ assign
 
@@ -1283,6 +1287,28 @@ class DurableCoordinationService:
                     set(self._delivery.get("processed_ids") or []) | set(delivery["processed_ids"])
                 )
             self._delivery = merged_delivery
+        operational = payload.get("operational_handover")
+        if isinstance(operational, dict):
+            merged_ops = dict(self._operational_handover)
+            if isinstance(operational.get("self_improve"), dict):
+                incoming = operational["self_improve"]
+                current = dict(self._operational_handover.get("self_improve") or {})
+                cycles = list(current.get("cycles") or [])
+                known = {row.get("cycle_id") for row in cycles}
+                for row in incoming.get("cycles") or []:
+                    if isinstance(row, dict) and row.get("cycle_id") not in known:
+                        cycles.append(row)
+                        known.add(row.get("cycle_id"))
+                lessons = list(current.get("lessons") or [])
+                known_l = {row.get("lesson_id") for row in lessons}
+                for row in incoming.get("lessons") or []:
+                    if isinstance(row, dict) and row.get("lesson_id") not in known_l:
+                        lessons.append(row)
+                        known_l.add(row.get("lesson_id"))
+                merged_ops["self_improve"] = {"cycles": cycles, "lessons": lessons}
+            if isinstance(operational.get("absence"), dict):
+                merged_ops["absence"] = operational["absence"]
+            self._operational_handover = merged_ops
 
     def dump_for(self, assignment_id: str) -> dict[str, Any]:
         record = self._obligations.get(assignment_id)
@@ -1299,6 +1325,7 @@ class DurableCoordinationService:
             "github_intake": json.loads(json.dumps(self._github_intake)),
             "lifecycle": json.loads(json.dumps(self._lifecycle)),
             "delivery": json.loads(json.dumps(self._delivery)),
+            "operational_handover": json.loads(json.dumps(self._operational_handover)),
         }
 
     # -------------------------------------------------------------- internals
