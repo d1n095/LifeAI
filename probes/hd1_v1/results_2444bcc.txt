@@ -1,0 +1,13 @@
+-> indexed, or failed at any step) can be modeled and surfaced without losing the received
+Also adds `next_attempt_at` (worker backoff for `failed` tasks — see this migration's second
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+HD1-1|HYPOTHETICAL(needs direct provenance write=FA-PRIV) is_backing=True agent_key=cursor-f709cc04 supports_write=True -> a REAL builder would be treated as synthetic ledger storage and its events skipped by reconcile
+.HD1-2|REACHABILITY import/recovery_writes_assignment_provenance=False
+.HD1-3|HYPOTHETICAL is_backing=True agent_key=codex-d857a5c9 canonical=mainai-ledger inconsistent=True -> classification does NOT cross-check agent identity
+.HD1-4|HYPOTHETICAL is_backing=True supports_write=True read_write_mode=read_write (genuine synthetic is supports_write=False/read_only) -> classification ignores write capability
+.HD1-5|n_synthetic_rows=2 picked_stable=True backing_present=True total=2
+.HD1-6|REACHABLE(benign) reload_ok=True backing_rows=0 obligations=0
+.HD1-7|REACHABILITY app_path_set_synthetic_marker=False rows_with_marker=0
+.HD1-8|repaired=1 real_is_backing=False synthetic_is_backing=True
+8 passed in 8.16s
+target worktree unchanged
