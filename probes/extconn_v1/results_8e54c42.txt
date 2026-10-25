@@ -1,0 +1,18 @@
+-> indexed, or failed at any step) can be modeled and surfaced without losing the received
+Also adds `next_attempt_at` (worker backoff for `failed` tasks — see this migration's second
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+founder explicitly directed be built correctly rather than skipped: "conversation/source event
+EXT1|outcome=authorized_candidate provider_authenticated=True note=True
+.EXT2|outcome=blocked missing=provider_identity_required identity=local_bridge_token
+.EXT3|outcome=rejected provider_authenticated=False
+.EXT4|both_verify=accepted/accepted deterministic_event_id=True persisted=False
+.sEXT6|proposed=True persisted=False independently_verified=False bind=POST /v1/agents response agent
+.sEXT8|malformed_outcome=accepted inj_independently_verified=False inj_vendor_claimed=False
+.EXT9|get_blocked=blocked live_http_attempted=False
+.EXT10|create=blocked follow_up=blocked live_http_attempted=False hard_block=True
+.EXT11|mutation=blocked (no provider mutation can occur -> STOP-gating of mutations is moot on #307; authenticated STOP-clear stays Codex CO-10)
+.EXT12|rejected_proposed=False fixture_provider_auth=False fixture_persisted=False
+.EXT13|provider_status=RUNNING proposed_delivery=None event_status=blocked
+.EXT14|authorize_leaks_key=False webhook_leaks_secret=False classify_returns_enum=IdentityClass
+12 passed, 2 skipped in 9.06s
+target worktree unchanged
