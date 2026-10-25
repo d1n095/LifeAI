@@ -251,6 +251,16 @@ class DurableCoordinationService:
             "first_cycle_go": FIRST_CYCLE_GO,
             "vendor_delivery_claimed": False,
         }
+        self._provider_ingestion: dict[str, Any] = {
+            "bindings": {},
+            "processed_event_ids": [],
+            "events": [],
+            "last_timestamp": {},
+        }
+        self._restrictions: dict[str, Any] = {
+            "records": [],
+            "by_fingerprint": {},
+        }
 
     # ------------------------------------------------------------------ assign
 
@@ -1134,6 +1144,18 @@ class DurableCoordinationService:
             "lifecycle": self.lifecycle_public_view(),
             "delivery": self.delivery_public_view(),
             "operational_handover": self.operational_handover_view(),
+            "provider_ingestion": {
+                "binding_count": len(self._provider_ingestion.get("bindings") or {}),
+                "processed_event_count": len(self._provider_ingestion.get("processed_event_ids") or []),
+                "vendor_delivery_claimed": False,
+                "independently_verified": False,
+                "first_cycle_go": FIRST_CYCLE_GO,
+            },
+            "restrictions": {
+                "record_count": len(self._restrictions.get("records") or []),
+                "open_count": len([row for row in (self._restrictions.get("records") or []) if row.get("status") == "paused"]),
+                "provider_cannot_suppress": True,
+            },
         }
 
     def operational_handover_view(self) -> dict[str, Any]:
@@ -1283,6 +1305,35 @@ class DurableCoordinationService:
                     set(self._delivery.get("processed_ids") or []) | set(delivery["processed_ids"])
                 )
             self._delivery = merged_delivery
+        provider_ingestion = payload.get("provider_ingestion")
+        if isinstance(provider_ingestion, dict):
+            merged_pi = dict(self._provider_ingestion)
+            merged_pi.update(provider_ingestion)
+            if isinstance(provider_ingestion.get("bindings"), dict):
+                merged_pi["bindings"] = {**self._provider_ingestion.get("bindings", {}), **provider_ingestion["bindings"]}
+            if isinstance(provider_ingestion.get("processed_event_ids"), list):
+                merged_pi["processed_event_ids"] = sorted(
+                    set(self._provider_ingestion.get("processed_event_ids") or []) | set(provider_ingestion["processed_event_ids"])
+                )
+            if isinstance(provider_ingestion.get("events"), list):
+                merged_pi["events"] = list(provider_ingestion["events"])
+            if isinstance(provider_ingestion.get("last_timestamp"), dict):
+                merged_pi["last_timestamp"] = {**self._provider_ingestion.get("last_timestamp", {}), **provider_ingestion["last_timestamp"]}
+            self._provider_ingestion = merged_pi
+        restrictions = payload.get("restrictions")
+        if isinstance(restrictions, dict):
+            merged_r = dict(self._restrictions)
+            if isinstance(restrictions.get("records"), list):
+                known = {row.get("record_id") for row in (self._restrictions.get("records") or [])}
+                combined = list(self._restrictions.get("records") or [])
+                for row in restrictions["records"]:
+                    if isinstance(row, dict) and row.get("record_id") not in known:
+                        combined.append(row)
+                        known.add(row.get("record_id"))
+                merged_r["records"] = combined
+            if isinstance(restrictions.get("by_fingerprint"), dict):
+                merged_r["by_fingerprint"] = {**self._restrictions.get("by_fingerprint", {}), **restrictions["by_fingerprint"]}
+            self._restrictions = merged_r
 
     def dump_for(self, assignment_id: str) -> dict[str, Any]:
         record = self._obligations.get(assignment_id)
@@ -1299,6 +1350,8 @@ class DurableCoordinationService:
             "github_intake": json.loads(json.dumps(self._github_intake)),
             "lifecycle": json.loads(json.dumps(self._lifecycle)),
             "delivery": json.loads(json.dumps(self._delivery)),
+            "provider_ingestion": json.loads(json.dumps(self._provider_ingestion)),
+            "restrictions": json.loads(json.dumps(self._restrictions)),
         }
 
     # -------------------------------------------------------------- internals
