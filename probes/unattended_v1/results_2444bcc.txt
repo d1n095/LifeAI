@@ -1,0 +1,16 @@
+-> indexed, or failed at any step) can be modeled and surfaced without losing the received
+Also adds `next_attempt_at` (worker backoff for `failed` tasks — see this migration's second
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+founder explicitly directed be built correctly rather than skipped: "conversation/source event
+UA1|delivered=1 completed=True ownership=cursor vendor_claimed=False
+.UA2|empty_evidence=rejected
+.UA4|examiner_obligations=1 statuses=['assigned']
+.UA5|final_status=ready
+.UA6|next=ASSIGNMENT_FOUND picked_own=True
+.UA7|duplicate_assignment_blocked=True duplicate_event=replay_ignored
+.UA8|stale_detected=True expired_count=1 stale_renew_rejected=True
+.UA9|restart_status=completed
+.UA10|escalate_privilege=privilege_rejected
+.UA-PI|identity_map={'cursor-x': 'cursor', 'claude-y': 'claude', 'codex-z': 'codex'} per_provider={'cursor': ('applied', None), 'claude': ('applied', None), 'codex': ('applied', None)}
+10 passed, 1 skipped in 13.67s
+target worktree unchanged
