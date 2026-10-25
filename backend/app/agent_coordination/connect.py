@@ -216,12 +216,15 @@ def operational_handover_view(service: DurableCoordinationService) -> dict[str, 
         },
         "external_agent_connectivity": inspect_external_connectivity(probe_network=False),
         "founder_must_forward_messages": founder_must_forward,
+        "local_gateway_is_not_unattended_independence": True,
+        "unattended_operating_cycle_ready": False,
+        "unattended_autonomy_ready": False,
         "answer": (
-            "Internal coordination and the Founder-issued local authorized bridge can receive "
-            "updates, deliver one instruction, ingest a completion and prepare independent "
-            "review. Cursor/Claude/Codex vendor messaging remains disconnected."
-            if internal
-            else "Internal coordination is not yet persisted; vendor messaging is disconnected."
+            "Local #302/#303 coordination can persist obligations and carry Founder-issued "
+            "bridge messages. That is not operational independence: no provider-authenticated "
+            "external coding agent is connected, so MainAI cannot complete a verified "
+            "assignment/result cycle without Founder babysitting. Unattended operating cycle "
+            "and first_cycle_go remain false."
         ),
         "remaining_permissions": founder_setup_requirements(),
         "vendor_delivery_claimed": False,

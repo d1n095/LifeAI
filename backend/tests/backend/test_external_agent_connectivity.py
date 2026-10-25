@@ -13,12 +13,15 @@ from app.agent_coordination.durable import DurableCoordinationService, FIRST_CYC
 from app.agent_coordination.external_connectivity import (
     CursorCloudAgentClient,
     IdentityClass,
+    capability_verdict,
     classify_credential,
     inspect_external_connectivity,
     official_interface_catalog,
     propose_ledger_event,
     selected_first_path,
+    unattended_trial_plan,
     verify_v0_webhook,
+    vertical_slice,
 )
 from app.agent_coordination.external_connectivity.cursor_cloud import WEBHOOK_USER_AGENT
 from app.agent_coordination.external_connectivity.identity import local_token_is_not_provider_identity
@@ -150,3 +153,50 @@ def test_inspect_and_handover_never_claim_vendor_delivery():
     assert handover["external_vendor_operations"]["usable"] is False
     assert handover["external_agent_connectivity"]["selected_first_path"]["path_id"] == "cursor_cloud_agents_api_v1"
     assert handover["first_cycle_go"] is False
+    assert handover["unattended_operating_cycle_ready"] is False
+    assert handover["unattended_autonomy_ready"] is False
+    assert handover["local_gateway_is_not_unattended_independence"] is True
+    assert "not operational independence" in handover["answer"]
+
+
+def test_capability_verdict_is_not_ready_and_does_not_overclaim():
+    verdict = capability_verdict()
+    assert verdict["ready"] is False
+    assert verdict["unattended_operating_cycle_ready"] is False
+    assert verdict["unattended_autonomy_ready"] is False
+    assert verdict["local_gateway_sufficient"] is False
+    assert verdict["green_ci_sufficient"] is False
+    assert verdict["disconnected_prototype_sufficient"] is False
+    assert verdict["vendor_delivery_claimed"] is False
+    assert verdict["independently_verified"] is False
+    assert verdict["first_cycle_go"] is False
+    assert verdict["external_agent_connected"] is False
+    assert verdict["single_vendor_mandatory"] is False
+    assert verdict["amends_303_through_306"] is False
+    assert "FA-9" in " ".join(verdict["unattended_trial"]["codex_owned_gates_remain_authoritative"])
+    assert "CO-10" in " ".join(verdict["unattended_trial"]["codex_owned_gates_remain_authoritative"])
+    assert all(row["satisfied"] is False for row in verdict["requirements"])
+    assert len(verdict["requirements"]) == 10
+    assert "NOT READY" in verdict["verdict"]
+
+
+def test_vertical_slice_is_one_provider_and_not_live():
+    slice_spec = vertical_slice()
+    assert slice_spec["provider"] == "cursor"
+    assert slice_spec["additional_providers"] == []
+    assert slice_spec["complete"] is False
+    assert slice_spec["vendor_delivery_claimed"] is False
+    assert all(step["live"] is False for step in slice_spec["steps"])
+
+
+def test_unattended_trial_cannot_start():
+    trial = unattended_trial_plan()
+    assert trial["duration_hours"] == 72
+    assert trial["start_authorized"] is False
+    assert trial["unattended_autonomy_ready"] is False
+    assert trial["zero_routine_founder_message_forwarding"] is True
+    assert "fa9_co10_privilege_and_publication_gates_unsatisfied" in trial["cannot_start_while"]
+    assert "independent_certification_blocked" in trial["cannot_start_while"]
+    inspect = inspect_external_connectivity(probe_network=False)
+    assert inspect["capability_verdict"]["unattended_trial"]["start_authorized"] is False
+    assert inspect["unattended_operating_cycle_ready"] is False

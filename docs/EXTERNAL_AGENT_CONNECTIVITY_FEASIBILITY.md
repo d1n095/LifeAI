@@ -5,6 +5,10 @@ This is **not** a successor of uncertified `#306` and does not amend `#303`–`#
 
 `first_cycle_go` stays false. No vendor delivery is claimed.
 
+**Capability verdict: NOT READY** for a verified unattended operating cycle.
+Local gateway function, green CI and this disconnected prototype are not
+completion. See `docs/UNATTENDED_OPERATING_CYCLE.md`.
+
 ## Reused acceptance requirements
 
 Claude's RAI / external-integration rules already govern this surface. This PR
@@ -140,11 +144,11 @@ Not done, and not claimed:
 
 ## Next engineering steps
 
-1. Do not freeze or amend `#306` while Claude examines `2444bcc`.
-2. After `#306` disposition, compose this client into the certified transport registry.
-3. Founder-supervised one-shot create + GET (throwaway repo) — only with authorized spend.
-4. Record provider ids on the existing ledger; keep vendor flags false until that evidence exists.
-5. Keep Claude Code and Codex BLOCKED.
+1. Treat `#307` as a completed **feasibility + NOT READY verdict**, not independence.
+2. Do not freeze or amend `#306` while Claude examines `2444bcc`.
+3. Do not add Claude Code or Codex adapters before the Cursor Cloud Agents vertical slice is live.
+4. After Founder live-mutate authorization, one throwaway assignment/result cycle only.
+5. Do not start the 72-hour trial or mark unattended autonomy ready while FA-9/CO-10, publication or independent certification remain blocked.
 
 Inspect: `python -m app.agent_coordination.external_connectivity`
 Optional surface probe: `python -m app.agent_coordination.external_connectivity --probe`

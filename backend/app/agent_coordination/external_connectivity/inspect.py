@@ -10,6 +10,7 @@ from app.agent_coordination.durable import FIRST_CYCLE_GO
 from app.agent_coordination.external_connectivity.catalog import official_interface_catalog, selected_first_path
 from app.agent_coordination.external_connectivity.cursor_cloud import CursorCloudAgentClient, probe_unauthenticated_surface
 from app.agent_coordination.external_connectivity.identity import runtime_identity_observations
+from app.agent_coordination.external_connectivity.verdict import capability_verdict
 from app.agent_coordination.lifecycle import MISSING_MESSAGING
 
 LOCAL_BINARIES = {
@@ -88,15 +89,18 @@ def inspect_external_connectivity(
             "Claude Code CLI + paid Anthropic auth remain BLOCKED.",
             "Codex CLI / GitHub coding-agent writes remain Codex-owned and BLOCKED here.",
         ],
+        "capability_verdict": capability_verdict(),
         "next_engineering_steps": [
+            "Treat this verdict as complete for #307 feasibility: NOT READY for unattended operation.",
+            "Do not add Claude Code or Codex adapters before the Cursor Cloud Agents vertical slice is live.",
             "Wait for Claude's independent disposition of #306. Do not stack this work on uncertified #306 code.",
-            "After #306 disposition, compose this client into the certified AgentTransport registry as cursor_cloud_agents_api_v1.",
-            "Founder provisions a scoped Cursor API key and webhook secret off-chat.",
-            "Run one Founder-supervised create + GET + HMAC (or GET-only) round trip against a throwaway repo.",
-            "Record provider agent.id/run.id on the existing durable ledger; keep vendor_delivery_claimed false until that evidence exists.",
+            "After Founder live-mutate authorization, run one throwaway assignment/result cycle and bind provider ids to the existing ledger.",
+            "Only then evaluate the 72-hour unattended trial contract. FA-9/CO-10, publication and independent certification remain blocking.",
         ],
         "vendor_delivery_claimed": False,
         "independently_verified": False,
+        "unattended_operating_cycle_ready": False,
+        "unattended_autonomy_ready": False,
         "first_cycle_go": FIRST_CYCLE_GO,
         "amends_303_through_306": False,
     }

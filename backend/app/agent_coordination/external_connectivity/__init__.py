@@ -17,10 +17,16 @@ from app.agent_coordination.external_connectivity.identity import (
 )
 from app.agent_coordination.external_connectivity.inspect import inspect_external_connectivity
 from app.agent_coordination.external_connectivity.ledger import propose_ledger_event
+from app.agent_coordination.external_connectivity.verdict import (
+    capability_verdict,
+    unattended_trial_plan,
+    vertical_slice,
+)
 
 __all__ = [
     "CursorCloudAgentClient",
     "IdentityClass",
+    "capability_verdict",
     "classify_credential",
     "inspect_external_connectivity",
     "official_interface_catalog",
@@ -28,5 +34,7 @@ __all__ = [
     "propose_ledger_event",
     "runtime_identity_observations",
     "selected_first_path",
+    "unattended_trial_plan",
     "verify_v0_webhook",
+    "vertical_slice",
 ]
