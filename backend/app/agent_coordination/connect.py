@@ -20,6 +20,7 @@ from app.agent_coordination.adapter_config import (
 )
 from app.agent_coordination.delivery import FIRST_CYCLE_GO, delivery_public_view, ensure_delivery
 from app.agent_coordination.durable import DurableCoordinationService
+from app.agent_coordination.external_connectivity import inspect_external_connectivity
 from app.agent_coordination.lifecycle import MISSING_MESSAGING, MISSING_PUBLICATION
 from app.agent_coordination.local_bridge import LocalAuthorizedBridge
 
@@ -38,7 +39,9 @@ VENDOR_SETUP = {
             "Optional local CLI execution (not vendor messaging): LIFE_AGENT_ADAPTER_ENABLED__CURSOR_AGENT=true",
             "LIFE_AGENT_ADAPTER_CREDENTIALS_CONFIRMED__CURSOR_AGENT=true",
             "LIFE_AGENT_ADAPTER_ARGS__CURSOR_AGENT=<founder argv template>",
-            "No Cursor vendor workspace/API is available in this runtime",
+            "No Cursor vendor workspace/API is live in this runtime",
+            "First genuine remote path (architecture only): Cursor Cloud Agents API v1 — Founder user or service-account API key, not LIFE_AGENT_BRIDGE_TOKEN",
+            "Optional v0 webhook HMAC ingress: LIFE_CURSOR_CLOUD_WEBHOOK_SECRET plus HTTPS endpoint",
         ],
     },
     "claude": {
@@ -211,6 +214,7 @@ def operational_handover_view(service: DurableCoordinationService) -> dict[str, 
             "codex": False,
             "missing_capability": MISSING_MESSAGING,
         },
+        "external_agent_connectivity": inspect_external_connectivity(probe_network=False),
         "founder_must_forward_messages": founder_must_forward,
         "answer": (
             "Internal coordination and the Founder-issued local authorized bridge can receive "
