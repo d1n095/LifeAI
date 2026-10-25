@@ -84,16 +84,14 @@ def test_CS3_real_assignment_not_reclassified_through_full_persist(superuser_db,
     from app.agent_coordination.durable import load_owner_ledger
     svc = load_owner_ledger(superuser_db, owner_id=warm.id)
     obl = svc._obligations.get(str(wa.id))
-    print(f"CS3|FINDING CF-2(P3) real_assignment_reclassified_backing={reclassified} real_obligation_present={obl is not None} status={obl.get('status') if obl else None}")
-    # FINDING CF-2 (P3): the CF-1 fix (persist_delivery -> persist_owner_ledger) sets LEDGER_BACKING_KEY on the row
-    # ensure_owner_ledger_backing returns; for a WARM owner that is rows[0], a REAL assignment — violating the invariant
-    # #303 74ebda9 established ("existing legitimate work assignments are never reclassified as synthetic backing").
-    # No data loss was demonstrated (the obligation still reconciles to its correct status via the persisted dump — see
-    # the severity probe), so it is P3, not P2. This test RECORDS the current defective state and flips to catch the fix:
-    assert reclassified is True, ("CS-3 CF-2 appears FIXED (real assignment no longer reclassified as backing) — "
-                                  "re-verify and close the finding; then invert this assertion to lock the fix")
+    print(f"CS3|CF-2 real_assignment_reclassified_backing={reclassified} real_obligation_present={obl is not None} status={obl.get('status') if obl else None}")
+    # CF-2 (confirmed present on #304 859f5ec / #305 50ca651, P3) — fixed on #306 2444bcc by redefining _is_backing to key
+    # solely on created_without_manual_assignment and never stamping ledger_backing on a real row. This assertion now
+    # LOCKS the fix: a real warm-owner assignment must NOT be reclassified as synthetic ledger backing.
+    assert reclassified is False, ("CS-3 CF-2 OPEN: a real work assignment is reclassified as synthetic ledger backing "
+                                   "(invariant #303 74ebda9). RETURN_TO_BUILDER — fix persist_owner_ledger/_is_backing.")
     assert obl is not None and obl.get("status") in ("completed", "executing", "running", "acknowledged"), \
-        "CS-3 escalation: the retag also dropped the real obligation — raise CF-2 to P2 (coordination data loss)"
+        "CS-3 the real obligation was dropped"
 
 
 def test_CS4_revoke_expiry_replay_still_enforced(superuser_db, make_verified_user):
@@ -304,6 +302,9 @@ def test_CS7_misclassified_assignment_safe_across_reload_restart_reconcile(super
     # Containment of CF-2: the obligation survives reload/reconcile (no data loss), and the error does NOT spread to
     # the sibling real assignment, nor mint duplicate backing rows.
     assert obl1 is not None and obl1.get("status") in ("completed", "executing", "running", "acknowledged"), \
-        "CS-7 the misclassified assignment's obligation was lost across reload/reconcile — CF-2 would then be P2"
-    assert wa2_backing is False, "CS-7 CF-2 spread: a SECOND real sibling assignment was retroactively misclassified"
-    assert backing_count == 1, f"CS-7 CF-2 compounded: {backing_count} rows flagged backing (expected exactly 1 = rows[0])"
+        "CS-7 the assignment's obligation was lost across reload/reconcile"
+    assert wa1_backing is False, "CS-7 CF-2 OPEN: the real rows[0] assignment is classified synthetic ledger backing"
+    assert wa2_backing is False, "CS-7 CF-2 spread: a SECOND real sibling assignment was misclassified"
+    # Post-#306 correct semantics: for a WARM owner the ledger is held on a real row WITHOUT the backing flag, so NO
+    # assignment classifies as synthetic backing. (Pre-fix on #304/#305 this was 1 = the retagged rows[0].)
+    assert backing_count == 0, f"CS-7 expected 0 synthetic backing rows for a warm owner, found {backing_count}"

@@ -1,0 +1,13 @@
+-> indexed, or failed at any step) can be modeled and surfaced without losing the received
+Also adds `next_attempt_at` (worker backoff for `failed` tasks — see this migration's second
+the per-source-kind/skipped/failed/already_done counters this module already computes, a
+RP1|repaired=1 before_is_backing=False after_top=False after_nested=False after_is_backing=False
+.RP2|repaired=0 synthetic_still_backing=True created_wo_manual=True
+.RP3|unrelated_key=real-work dump_obligations=1 dump_delivery=True
+.RP4|first=1 second=0 third=0
+.RP5|first=1 repeat=0 after_fresh_session=0 assignment_intact=True
+.RP6|repaired=0 empty_is_backing=False nondict_dump_storable=True
+.RP7|obligation_present=True status=completed total=1
+.RP8|HARDENING real_with_untrusted_marker_is_backing=True repair_fixed_it=False repaired_count=0
+8 passed in 8.98s
+target worktree unchanged
