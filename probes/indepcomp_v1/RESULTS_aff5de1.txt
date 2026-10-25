@@ -1,0 +1,6 @@
+target: /Users/dennistorildson/Library/Application Support/Claude/scratch-workspaces/4fb67e2b-ac65-4918-9c9e-5fbeb75d6101/dfc6b53c-9ba6-42fb-8c53-defc561c946b/scratch-2026-09-25-fe2f96/examiner/wtcert-aff5de1 @ aff5de1a6e2a33266bf2fd00e2a3ce554daeafab
+founder explicitly directed be built correctly rather than skipped: "conversation/source event
+XFAIL test_icv.py::test_ICV_E1_provider_cycle_consults_registry - ICV-WIRING: the provider cycle does not consult mainai_verification_registry.find_independent_pass before treating a completion as verified / eligible for continuation
+SKIPPED [1] test_icv.py:222: BLOCKED: independent verification of REAL authenticated provider evidence (non-fixture) recorded as a PASS that gates the real cycle needs a Founder-authorized live Cursor Cloud key + a real round trip + PI-STOP wiring. No fixture may be recorded as an independent/vendor PASS.
+10 passed, 1 skipped, 1 xfailed in 14.80s
+target worktree unchanged
