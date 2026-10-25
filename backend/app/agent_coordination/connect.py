@@ -21,8 +21,10 @@ from app.agent_coordination.adapter_config import (
 from app.agent_coordination.delivery import FIRST_CYCLE_GO, delivery_public_view, ensure_delivery
 from app.agent_coordination.transport import capability_matrix
 from app.agent_coordination.durable import DurableCoordinationService
+from app.agent_coordination.external_connectivity import inspect_external_connectivity
 from app.agent_coordination.lifecycle import MISSING_MESSAGING, MISSING_PUBLICATION
 from app.agent_coordination.local_bridge import LocalAuthorizedBridge
+from app.mainai_restrictions import restriction_public_view
 
 RECIPIENT_TO_PROVIDER = {
     "cursor": "cursor-agent",
@@ -39,7 +41,8 @@ VENDOR_SETUP = {
             "Optional local CLI execution (not vendor messaging): LIFE_AGENT_ADAPTER_ENABLED__CURSOR_AGENT=true",
             "LIFE_AGENT_ADAPTER_CREDENTIALS_CONFIRMED__CURSOR_AGENT=true",
             "LIFE_AGENT_ADAPTER_ARGS__CURSOR_AGENT=<founder argv template>",
-            "No Cursor vendor workspace/API is available in this runtime",
+            "No Cursor vendor workspace/API is live without Founder live-mutate authorization",
+            "First genuine remote path: Cursor Cloud Agents API v1 — provider key, not LIFE_AGENT_BRIDGE_TOKEN",
         ],
     },
     "claude": {
@@ -214,13 +217,18 @@ def operational_handover_view(service: DurableCoordinationService) -> dict[str, 
         },
         "agent_side_bridge": agent_side_handover_flags(delivery),
         "capability_matrix": capability_matrix_public(),
+        "external_agent_connectivity": inspect_external_connectivity(probe_network=False),
+        "restrictions": restriction_public_view(service),
         "founder_must_forward_messages": founder_must_forward,
+        "local_gateway_is_not_unattended_independence": True,
+        "unattended_autonomy_ready": False,
+        "unattended_operating_cycle_ready": False,
+        "composed_certified": False,
         "answer": (
-            "Internal coordination and the Founder-issued local authorized bridge can receive "
-            "updates, deliver one instruction, ingest a completion and prepare independent "
-            "review. Cursor/Claude/Codex vendor messaging remains disconnected."
-            if internal
-            else "Internal coordination is not yet persisted; vendor messaging is disconnected."
+            "Local #306 gateway and agent-side bridge can carry Founder-issued messages. "
+            "Composed provider-event ingestion accepts only verified fixtures or authorized "
+            "provider signatures. No live vendor agent is connected. This is not operational "
+            "independence and is not certified because #306 freeze certification is Claude-owned."
         ),
         "remaining_permissions": founder_setup_requirements(),
         "vendor_delivery_claimed": False,
