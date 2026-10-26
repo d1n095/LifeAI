@@ -1,0 +1,8 @@
+target: /Users/dennistorildson/Library/Application Support/Claude/scratch-workspaces/4fb67e2b-ac65-4918-9c9e-5fbeb75d6101/dfc6b53c-9ba6-42fb-8c53-defc561c946b/scratch-2026-09-25-fe2f96/examiner/wtcert-078312d7 @ 078312d7abce3f5c0f87c9e7b30161973e55d532
+PASSED test_fcchain.py::test_CH1_stop_fence_blocks_publication_on_composed_tip
+PASSED test_fcchain.py::test_CH3_runtime_cannot_write_any_authority_table
+PASSED test_fcchain.py::test_CH4_stop_clear_rejects_stale_epoch
+PASSED test_fcchain.py::test_CH5_epoch_is_monotonic_across_stop_cycles
+PASSED test_fcchain.py::test_CH2_review_stepup_cannot_authorize_stop_clear
+5 passed in 7.39s
+target worktree unchanged
