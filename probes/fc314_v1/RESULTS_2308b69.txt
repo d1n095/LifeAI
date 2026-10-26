@@ -1,0 +1,11 @@
+target: /Users/dennistorildson/Library/Application Support/Claude/scratch-workspaces/4fb67e2b-ac65-4918-9c9e-5fbeb75d6101/dfc6b53c-9ba6-42fb-8c53-defc561c946b/scratch-2026-09-25-fe2f96/examiner/wtcert-2308b69 @ 2308b697c6ffd4e792ffee5acccc4f4659d86389
+PASSED test_fc314.py::test_FC314_A1_tick_is_fixture_not_live_round_trip
+PASSED test_fc314.py::test_FC314_B1_stop_halts_cycle_no_assignment
+PASSED test_fc314.py::test_FC314_C1_no_spend_reservation_under_stop
+PASSED test_fc314.py::test_FC314_D1_FINDING_selector_namespace_breaks_assignment
+PASSED test_fc314.py::test_FC314_D2_cycle_only_completes_on_capability_default_fallback
+PASSED test_fc314.py::test_FC314_E1_completion_is_not_independently_verified_without_attestation
+PASSED test_fc314.py::test_FC314_F1_absence_defers_new_highrisk_without_grant
+PASSED test_fc314.py::test_FC314_G1_duplicate_fixture_event_replay_ignored_and_state_durable
+8 passed in 9.30s
+target worktree unchanged

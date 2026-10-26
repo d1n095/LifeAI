@@ -1,0 +1,15 @@
+target: /Users/dennistorildson/Library/Application Support/Claude/scratch-workspaces/4fb67e2b-ac65-4918-9c9e-5fbeb75d6101/dfc6b53c-9ba6-42fb-8c53-defc561c946b/scratch-2026-09-25-fe2f96/examiner/wtcert-292a091 @ 292a09110a2528871d2f537987c37050416f3707
+PASSED test_fc315.py::test_S1_owner_scoped_isolation
+PASSED test_fc315.py::test_S2_filename_and_session_id_validation
+PASSED test_fc315.py::test_S3_session_path_cannot_escape_owner_root
+PASSED test_fc315.py::test_S4_owner_quota_enforced
+PASSED test_fc315.py::test_S5_disk_headroom_enforced
+PASSED test_fc315.py::test_S6_part_bounds
+PASSED test_fc315.py::test_S7_restart_recovery_and_checksum
+PASSED test_fc315.py::test_S8_finalize_incomplete_then_idempotent
+PASSED test_fc315.py::test_S9_abort_and_cleanup
+PASSED test_fc315.py::test_S10_concurrent_writes_serialized
+PASSED test_fc315.py::test_S11_router_derives_owner_from_authenticated_founder
+PASSED test_fc315.py::test_S12_five_gb_not_claimed
+12 passed in 0.97s
+target worktree unchanged
