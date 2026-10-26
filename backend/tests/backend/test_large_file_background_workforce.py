@@ -53,6 +53,9 @@ def test_resume_from_checkpoint(tmp_path: Path):
     finished = resumed.process(path, checkpoint=mid)
     assert finished.bytes_seen == len(payload)
     assert finished.offset == len(payload)
+    import hashlib
+
+    assert finished.sha256 == hashlib.sha256(payload).hexdigest()
 
 
 def test_background_import_does_not_block_interactive():
