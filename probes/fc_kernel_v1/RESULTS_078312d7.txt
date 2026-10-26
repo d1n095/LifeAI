@@ -1,0 +1,10 @@
+target: /Users/dennistorildson/Library/Application Support/Claude/scratch-workspaces/4fb67e2b-ac65-4918-9c9e-5fbeb75d6101/dfc6b53c-9ba6-42fb-8c53-defc561c946b/scratch-2026-09-25-fe2f96/examiner/wtcert-078312d7 @ 078312d7abce3f5c0f87c9e7b30161973e55d532
+PASSED test_fckernel.py::test_K1_runtime_cannot_write_authority_epoch
+PASSED test_fckernel.py::test_K2_runtime_direct_clear_owner_stop_is_denied
+PASSED test_fckernel.py::test_K3_runtime_cannot_mint_founder_identity
+PASSED test_fckernel.py::test_K4_authority_unknown_fails_closed
+PASSED test_fckernel.py::test_K5_issue_requires_founder_identity
+PASSED test_fckernel.py::test_K6_issue_requires_password_and_live_session
+PASSED test_fckernel.py::test_K7_clear_with_fabricated_authorization_is_rejected
+7 passed in 6.70s
+target worktree unchanged

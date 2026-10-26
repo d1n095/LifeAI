@@ -12,15 +12,16 @@ release; it is an evidence-anchored map of what each examined SHA proves and wha
 | #309 | `aff5de1a6e2a33266bf2fd00e2a3ce554daeafab` | provider ingestion + limitation transparency | composed_v1, pistop_v1, indepcomp_v1, spend_authority_v1 | INTERIM, NOT CERTIFIED |
 | #310 | `beecf0e35cd27adffff6f95330e9514db8a6ea5d` | Founder-absence operational handover | absence_v1 | policy sound, NOT CERTIFIED |
 | #311 | `c3373f93cb6d3881ed6560cdd106ac1852c54a1e` | large-file streaming lane | large_file_v1 | 1 P2 defect, NOT CERTIFIED |
-| STOP-clear | `20d5a14301f574efe0ba3cc1d2d2f694b6cc1ef4` | kernel STOP-clear (Codex) | — | **NOT YET EXAMINED (not fetchable)** |
-| FA-PRIV | `078312d7abce3f5c0f87c9e7b30161973e55d532` | kernel DB-privilege isolation (Codex) | — | **NOT YET EXAMINED (not fetchable)** |
+| STOP-clear | `20d5a14301f574efe0ba3cc1d2d2f694b6cc1ef4` | kernel authenticated STOP-clear (Codex) | fc_kernel_v1 | **VERIFIED — CO-10 CLOSED** (archive+identity verified; 7 passed) |
+| FA-PRIV | `078312d7abce3f5c0f87c9e7b30161973e55d532` | kernel DB-privilege isolation (Codex) | fc_kernel_v1 | **VERIFIED — FA-PRIV CLOSED** (DB-level; authority UNKNOWN fail-closed) |
 
 ## Authority-enforcement contracts for the first unattended cycle
 Each row: is the *mechanism* present, and is it *wired* into the path that needs it, with examiner evidence.
 | Contract | Mechanism present? | Wired into the acting path? | Evidence | Owner of the gap |
 |---|---|---|---|---|
 | Founder **STOP** halts provider completion | yes (`kill_switch.assert_not_killed`, worker gates execution) | **NO at ingestion** (PI-STOP) | pistop_v1 B1–B5 xfail | Cursor (wire) + Codex (authority_state) |
-| Founder **STOP-clear** is authenticated | partial (string `founder_ack`, CO-10) | pending Codex `20d5a143` | pistop_v1 C1 skip | Codex (kernel) |
+| Founder **STOP-clear** is authenticated | **yes — CO-10 CLOSED** (authenticated one-shot proof, `20d5a143`) | verified | fc_kernel_v1 K2/K5/K6/K7 | — (closed) |
+| Authority state **UNKNOWN** fails closed | **yes** (`read_stop_authority_snapshot`, `078312d7`) | verified | fc_kernel_v1 K4 | — (closed; was PI-STOP C2) |
 | **Revoked/expired** execution grant blocks spend | yes (`provider_spend` revoke/expiry) | yes (reserve refuses) | spend_authority_v1 C1/C2 pass | — (holds) |
 | **Provider spend/reservation under STOP** fails closed | spend ledger sound; kill switch sound | **NO** (SPEND-STOP) — spend layer doesn't read kill switch | spend_authority_v1 G1 xfail | Cursor (wire) |
 | **Independent verification** before privileged continuation | yes (`mainai_verification_registry`, runtime cannot forge, append-only) | **NO** — provider cycle doesn't consult `find_independent_pass` (ICV-WIRING) | indepcomp_v1 B1..D1 pass, E1 xfail | Cursor (wire) |
