@@ -1,0 +1,6 @@
+target: /Users/dennistorildson/Library/Application Support/Claude/scratch-workspaces/4fb67e2b-ac65-4918-9c9e-5fbeb75d6101/dfc6b53c-9ba6-42fb-8c53-defc561c946b/scratch-2026-09-25-fe2f96/examiner/wtcert-2308b69 @ 2308b697c6ffd4e792ffee5acccc4f4659d86389
+XFAIL test_firstcycle.py::test_ACCEPT1_selector_to_valid_recipient_to_broker_assignment - ACCEPT-1: a real workforce-selected agent must yield a BROKER-ISSUED assignment to a valid coordination recipient. On #314 the selected agent_key is rejected by service.assign (SELECTOR-ASSIGN-NAMESPACE) and the broker is never used (DELEGATE-BROKER-BYPASS).
+SKIPPED [1] test_firstcycle.py:123: BLOCKED pending the corrected successor: durable recovery without DUPLICATE BROKER-ISSUED assignments and without duplicate external effects can only be evaluated once the cycle actually issues broker assignments (ACCEPT-1). On #314 no WorkforceAssignment is created by a tick, so there is nothing to recover.
+SKIPPED [1] test_firstcycle.py:131: BLOCKED pending the corrected successor + Founder live authority: spend reservation inside the live delegation leg (SPEND-STOP is closed at the spend layer; the cycle does not yet reserve spend because it never reaches a paid provider call). Re-enable when the corrected cycle performs an authorized provider reservation.
+4 passed, 2 skipped, 1 xfailed in 9.23s
+target worktree unchanged
