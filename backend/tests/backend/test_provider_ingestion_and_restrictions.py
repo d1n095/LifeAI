@@ -30,12 +30,12 @@ def _sign(payload: dict) -> tuple[bytes, str]:
     return raw, signature
 
 
-def _bound_service() -> DurableCoordinationService:
+def _bound_service(owner_id: str = OWNER) -> DurableCoordinationService:
     service = DurableCoordinationService()
     created = service.assign(
         agent_identity="cursor",
         workstream="provider_integration",
-        owner_id=OWNER,
+        owner_id=owner_id,
         instruction_id="first-slice",
         assignment_id=ASSIGNMENT,
         actor="founder",
@@ -43,7 +43,7 @@ def _bound_service() -> DurableCoordinationService:
     assert created.accepted
     assert bind_provider_assignment(
         service,
-        owner_id=OWNER,
+        owner_id=owner_id,
         assignment_id=ASSIGNMENT,
         provider="cursor",
         external_agent_id=AGENT,
@@ -56,17 +56,20 @@ def _finished(*, ts: str | None = None, agent: str = AGENT) -> dict:
     return {"event": "statusChange", "id": agent, "status": "FINISHED", "timestamp": when, "summary": "fixture"}
 
 
-def test_verified_fixture_finishes_and_prepares_examiner_without_certification():
-    service = _bound_service()
+def test_verified_fixture_finishes_and_prepares_examiner_without_certification(db_session, make_verified_user):
+    user, _password = make_verified_user()
+    _set_rls(db_session, user.id)
+    service = _bound_service(str(user.id))
     raw, signature = _sign(_finished())
     result = ingest_authenticated_provider_event(
         service,
-        owner_id=OWNER,
+        owner_id=str(user.id),
         secret=SECRET,
         raw_body=raw,
         signature=signature,
         user_agent=WEBHOOK_USER_AGENT,
         fixture=True,
+        db=db_session,
     )
     assert result["outcome"] == "applied"
     assert result["transition"] == "completed"
@@ -79,60 +82,55 @@ def test_verified_fixture_finishes_and_prepares_examiner_without_certification()
     assert not any(row["status"] == "independently_verified" for row in service._obligations.values())
 
 
-def test_rejects_forged_replay_reorder_expired_and_cross_owner():
-    service = _bound_service()
+def test_rejects_forged_replay_reorder_expired_and_cross_owner(db_session, make_verified_user):
+    user, _password = make_verified_user()
+    owner = str(user.id)
+    _set_rls(db_session, user.id)
+    service = _bound_service(owner)
     payload = _finished()
     raw, good = _sign(payload)
     now = datetime.fromisoformat(payload["timestamp"].replace("Z", "+00:00"))
     forged = ingest_authenticated_provider_event(
-        service, owner_id=OWNER, secret=SECRET, raw_body=raw, signature="sha256=" + ("00" * 32), fixture=True, now=now
+        service, owner_id=owner, secret=SECRET, raw_body=raw, signature="sha256=" + ("00" * 32), fixture=True, now=now
     )
     assert forged["outcome"] == "forged_rejected"
     first = ingest_authenticated_provider_event(
-        service, owner_id=OWNER, secret=SECRET, raw_body=raw, signature=good, user_agent=WEBHOOK_USER_AGENT, fixture=True, now=now
+        service, owner_id=owner, secret=SECRET, raw_body=raw, signature=good, user_agent=WEBHOOK_USER_AGENT, fixture=True, now=now, db=db_session
     )
     assert first["outcome"] == "applied"
     replay = ingest_authenticated_provider_event(
-        service, owner_id=OWNER, secret=SECRET, raw_body=raw, signature=good, user_agent=WEBHOOK_USER_AGENT, fixture=True, now=now
+        service, owner_id=owner, secret=SECRET, raw_body=raw, signature=good, user_agent=WEBHOOK_USER_AGENT, fixture=True, now=now, db=db_session
     )
     assert replay["outcome"] == "replay_ignored"
     older = _finished(ts=(now - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
     raw_old, sig_old = _sign(older)
     reordered = ingest_authenticated_provider_event(
-        service, owner_id=OWNER, secret=SECRET, raw_body=raw_old, signature=sig_old, user_agent=WEBHOOK_USER_AGENT, fixture=True, now=now
+        service, owner_id=owner, secret=SECRET, raw_body=raw_old, signature=sig_old, user_agent=WEBHOOK_USER_AGENT, fixture=True, now=now, db=db_session
     )
     assert reordered["outcome"] == "reordered_rejected"
     expired = _finished(ts=(now - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
     raw_exp, sig_exp = _sign(expired)
+    other = _bound_service(owner)
     stale = ingest_authenticated_provider_event(
-        DurableCoordinationService(),
-        owner_id=OWNER,
-        secret=SECRET,
-        raw_body=raw_exp,
-        signature=sig_exp,
-        fixture=True,
-        now=now,
-    )
-    # unbound because this is a fresh service; bind then expire
-    other = _bound_service()
-    stale = ingest_authenticated_provider_event(
-        other, owner_id=OWNER, secret=SECRET, raw_body=raw_exp, signature=sig_exp, user_agent=WEBHOOK_USER_AGENT, fixture=True, now=now
+        other, owner_id=owner, secret=SECRET, raw_body=raw_exp, signature=sig_exp, user_agent=WEBHOOK_USER_AGENT, fixture=True, now=now, db=db_session
     )
     assert stale["outcome"] == "expired_rejected"
     foreign = ingest_authenticated_provider_event(
-        service, owner_id=str(uuid.uuid4()), secret=SECRET, raw_body=raw, signature=good, user_agent=WEBHOOK_USER_AGENT, fixture=True, now=now
+        service, owner_id=str(uuid.uuid4()), secret=SECRET, raw_body=raw, signature=good, user_agent=WEBHOOK_USER_AGENT, fixture=True, now=now, db=db_session
     )
     assert foreign["outcome"] == "forged_rejected"
 
 
-def test_unknown_and_blocked_are_not_verified_completion():
+def test_unknown_and_blocked_are_not_verified_completion(db_session, make_verified_user):
+    user, _password = make_verified_user()
+    _set_rls(db_session, user.id)
     now = datetime.now(timezone.utc)
     for status in ("UNKNOWN", "BLOCKED"):
-        service = _bound_service()
+        service = _bound_service(str(user.id))
         payload = {"event": "statusChange", "id": AGENT, "status": status, "timestamp": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")}
         raw, signature = _sign(payload)
         result = ingest_authenticated_provider_event(
-            service, owner_id=OWNER, secret=SECRET, raw_body=raw, signature=signature, user_agent=WEBHOOK_USER_AGENT, fixture=True, now=now
+            service, owner_id=str(user.id), secret=SECRET, raw_body=raw, signature=signature, user_agent=WEBHOOK_USER_AGENT, fixture=True, now=now, db=db_session
         )
         assert result["transition"] == "blocked"
         assert result["independently_verified"] is False
@@ -192,6 +190,18 @@ def test_restriction_pauses_bypass_and_redacts_secrets():
     assert lessons["authorization_still_valid"] is False
     assert lessons["requires_reconfirmation"] is True
     assert redact_secrets({"authorization": "Bearer abc"})["authorization"] == "[redacted]"
+    bare = redact_secrets(
+        {
+            "note": "ghp_abcdefghijklmnopqrstuvwxyz123456",
+            "value": "sk-ant-api03-abcdefghijklmnopqrstuvwxyz",
+            "raw": "key_live_secret_value_bare",
+            "header": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.aaa.bbb",
+        }
+    )
+    assert bare["note"] == "[redacted]"
+    assert bare["value"] == "[redacted]"
+    assert bare["raw"] == "[redacted]"
+    assert bare["header"] == "[redacted]"
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -248,6 +258,7 @@ def test_ingestion_and_restriction_survive_restart(db_session, make_verified_use
         signature=signature,
         user_agent=WEBHOOK_USER_AGENT,
         fixture=True,
+        db=db_session,
     )
     assert applied["transition"] == "completed"
     persist_owner_ledger(db_session, owner_id=owner_id, service=service, actor="test")

@@ -6,6 +6,7 @@ is never independent certification. Live paid mutate stays fail-closed.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -14,6 +15,8 @@ from app.agent_coordination.delivery import FIRST_CYCLE_GO, ensure_delivery
 from app.agent_coordination.durable import DurableCoordinationService, ObligationStatus
 from app.agent_coordination.external_connectivity.cursor_cloud import verify_v0_webhook
 from app.agent_coordination.external_connectivity.identity import IdentityClass
+from app.mainai_verification_registry import find_independent_pass
+from app.workforce.kill_switch import KillSwitchError, assert_grant_allowed, assert_not_killed
 
 PROVIDER_CURSOR = "cursor"
 MAX_EVENT_AGE = timedelta(hours=24)
@@ -92,6 +95,46 @@ def _binding_for_agent(service: DurableCoordinationService, external_agent_id: s
     return None
 
 
+def _stable_event_id(*, provider: str, agent_id: str, status: str, payload: dict[str, Any], raw_body: bytes) -> str:
+    """Dedup must not depend on a synthesized wall-clock when the provider omitted timestamp."""
+    timestamp = str(payload.get("timestamp") or "").strip()
+    if timestamp:
+        stamp = timestamp
+    else:
+        stamp = f"body:{hashlib.sha256(raw_body).hexdigest()}"
+    return f"{provider}:{agent_id}:{status}:{stamp}"
+
+
+def assert_transition_authority(db, *, owner_id: str) -> dict[str, Any]:
+    """Authoritative STOP + assignment fence at the durable transition boundary.
+
+    Fail closed when no session exists or the epoch cannot be read. Reuses
+    workforce_authority_epoch locking; does not implement a second STOP.
+    """
+    if db is None:
+        return _result(outcome="authority_unestablished", reason="STOP/authority cannot be established without a durable session")
+    try:
+        owner_uuid = uuid.UUID(str(owner_id))
+    except ValueError:
+        return _result(outcome="authority_unestablished", reason="assignment owner is not a durable UUID")
+    try:
+        assert_not_killed(db, owner_uuid)
+        fence = assert_grant_allowed(db, owner_id=owner_uuid)
+    except KillSwitchError as exc:
+        return _result(
+            outcome="stop_rejected",
+            reason=str(exc),
+            extra={"code": getattr(exc, "code", "KILL_SWITCH_ACTIVE"), "stop_enforced": True},
+        )
+    except Exception as exc:  # noqa: BLE001 — refuse when authority cannot be established
+        return _result(
+            outcome="authority_unestablished",
+            reason="STOP/authority query failed fail-closed",
+            extra={"error": type(exc).__name__},
+        )
+    return {"outcome": "allowed", "fence": fence}
+
+
 def ingest_authenticated_provider_event(
     service: DurableCoordinationService,
     *,
@@ -102,6 +145,7 @@ def ingest_authenticated_provider_event(
     user_agent: str | None = None,
     fixture: bool = False,
     now: datetime | None = None,
+    db=None,
 ) -> dict[str, Any]:
     """Verify provider evidence, then apply one trusted lifecycle transition."""
     ensure_delivery(service)
@@ -121,8 +165,15 @@ def ingest_authenticated_provider_event(
     payload = verified.get("payload") or {}
     agent_id = str(verified.get("agent_id") or payload.get("id") or "")
     status = str(verified.get("status") or payload.get("status") or "UNKNOWN").upper()
-    occurred = _parse_iso(str(payload.get("timestamp") or "")) or now or datetime.now(timezone.utc)
-    event_id = f"{PROVIDER_CURSOR}:{agent_id}:{status}:{payload.get('timestamp') or _iso(occurred)}"
+    provided_timestamp = str(payload.get("timestamp") or "").strip()
+    occurred = _parse_iso(provided_timestamp)
+    event_id = _stable_event_id(
+        provider=PROVIDER_CURSOR,
+        agent_id=agent_id,
+        status=status,
+        payload=payload,
+        raw_body=raw_body,
+    )
     binding = _binding_for_agent(service, agent_id)
     if binding is None:
         return _result(outcome="rejected", reason="unbound external agent")
@@ -132,12 +183,16 @@ def ingest_authenticated_provider_event(
     if event_id in processed:
         return _result(outcome="replay_ignored", reason="duplicate provider event_id")
     clock = now or datetime.now(timezone.utc)
-    if occurred < clock - MAX_EVENT_AGE or occurred > clock + timedelta(minutes=5):
+    if occurred is not None and (occurred < clock - MAX_EVENT_AGE or occurred > clock + timedelta(minutes=5)):
         return _result(outcome="expired_rejected", reason="provider event expired or implausible")
     last_raw = (service._provider_ingestion.get("last_timestamp") or {}).get(agent_id)
     last = _parse_iso(last_raw)
-    if last is not None and occurred < last:
+    if occurred is not None and last is not None and occurred < last:
         return _result(outcome="reordered_rejected", reason="provider event older than last accepted event")
+    authority = assert_transition_authority(db, owner_id=owner_id)
+    if authority.get("outcome") != "allowed":
+        return authority
+    occurred = occurred or clock
 
     assignment_id = binding["assignment_id"]
     recipient = binding["recipient"]
@@ -179,6 +234,12 @@ def ingest_authenticated_provider_event(
         )
         transition = "completed"
         _prepare_examiner(service, owner_id=owner_id, parent_assignment_id=assignment_id)
+        extra_icv = {
+            "provider_reported_completion": True,
+            "independently_verified": False,
+            "verification_required": True,
+            "icv_registry": "app.mainai_verification_registry",
+        }
     elif status in TERMINAL_FAILURE:
         applied = service.fail(
             assignment_id=assignment_id,
@@ -220,7 +281,12 @@ def ingest_authenticated_provider_event(
         binding=binding,
         applied=applied,
         transition=transition,
-        extra={"fixture": fixture, "provider_authenticated": bool(verified.get("provider_authenticated"))},
+        extra={
+            "fixture": fixture,
+            "provider_authenticated": bool(verified.get("provider_authenticated")),
+            "authority_fence": authority.get("fence"),
+            **(extra_icv if status in TERMINAL_SUCCESS else {}),
+        },
     )
 
 
@@ -282,4 +348,62 @@ def _prepare_examiner(service: DurableCoordinationService, *, owner_id: str, par
 def persist_ingestion(db, *, owner_id, service: DurableCoordinationService) -> None:
     from app.agent_coordination.persist import persist_owner_ledger
 
+    authority = assert_transition_authority(db, owner_id=str(owner_id))
+    if authority.get("outcome") != "allowed":
+        raise KillSwitchError(authority.get("reason") or "persist refused", code=str(authority.get("code") or authority.get("outcome")))
     persist_owner_ledger(db, owner_id=owner_id, service=service, actor="provider_ingestion")
+
+
+def continue_after_independent_verification(
+    db,
+    service: DurableCoordinationService,
+    *,
+    owner_id: str,
+    assignment_id: str,
+    builder_identity: str,
+    candidate_sha: str,
+    component_id: str | None = None,
+    action: str = "next_verified_action",
+) -> dict[str, Any]:
+    """Provider completion is not ICV. Actions that require attestation must query the registry."""
+    record = service.get(assignment_id)
+    if record is None:
+        return _result(outcome="rejected", reason="assignment not found")
+    if record.get("status") != ObligationStatus.completed.value:
+        return _result(outcome="rejected", reason="provider execution is not completed")
+    if record.get("status") == ObligationStatus.independently_verified.value:
+        return _result(outcome="applied", reason="already independently verified", extra={"independently_verified": True})
+    component = component_id or f"provider_assignment:{assignment_id}"
+    try:
+        owner_uuid = uuid.UUID(str(owner_id))
+    except ValueError:
+        owner_uuid = None
+    found = find_independent_pass(
+        db,
+        component_id=component,
+        candidate_sha=candidate_sha,
+        builder_identity=builder_identity,
+        owner_id=owner_uuid,
+    )
+    if found is None:
+        return _result(
+            outcome="verification_required",
+            reason="independent attestation missing from mainai_verification_registry",
+            extra={
+                "action": action,
+                "provider_reported_completion": True,
+                "independently_verified": False,
+                "verification_required": True,
+            },
+        )
+    return _result(
+        outcome="attested",
+        reason="independent registry PASS",
+        extra={
+            "action": action,
+            "independently_verified": True,
+            "attestation_id": str(found.id),
+            "examiner_identity": found.examiner_identity,
+            "provider_reported_completion": True,
+        },
+    )
