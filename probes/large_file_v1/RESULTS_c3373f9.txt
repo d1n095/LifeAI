@@ -1,0 +1,4 @@
+target: /Users/dennistorildson/Library/Application Support/Claude/scratch-workspaces/4fb67e2b-ac65-4918-9c9e-5fbeb75d6101/dfc6b53c-9ba6-42fb-8c53-defc561c946b/scratch-2026-09-25-fe2f96/examiner/wtcert-c3373f9 @ c3373f93cb6d3881ed6560cdd106ac1852c54a1e
+XFAIL test_largefile.py::test_LF9_resume_hash_equals_single_pass_hash - CHECKPOINT-HASH: resuming from a checkpoint resets the sha256 and seeks to the offset, so the resumed final hash covers only post-offset bytes and silently differs from the single-pass full-file hash. A resumed large-file import cannot produce a verifiable whole-file checksum.
+8 passed, 1 xfailed in 0.10s
+target worktree unchanged
