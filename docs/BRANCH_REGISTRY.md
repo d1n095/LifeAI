@@ -39,8 +39,10 @@ does not enable Track B, does not accept `#280`, and does not implement Codex Gi
 | `cursor/provider-integration-stop-icv-91c1` | [#312](https://github.com/d1n095/LifeAI/pull/312) | **Isolated corrective successor of `#309` @ `aff5de1`. Head `dd31c201231ee80a5bd52a1c29aab30589744a74`. Does not amend `#309`/`#310`/`#311`.** | PI-STOP, ICV-WIRING, PI-DEDUP, RST-4. Reuses kill_switch + verification registry. |
 | `cursor/operational-handover-self-improve-91c1` | [#310](https://github.com/d1n095/LifeAI/pull/310) | **Preserved separate Gate-1 candidate.** | Absence mode, isolation, bounded self-improve. |
 | `cursor/large-file-background-workforce-91c1` | [#311](https://github.com/d1n095/LifeAI/pull/311) | **Preserved separate Gate-2 lane. Not 5 GB certified.** | Streaming import. |
+| `cursor/large-file-resumable-measure-91c1` | [#313](https://github.com/d1n095/LifeAI/pull/313) | **Preserved isolated `#311` child. Not 5 GB certified.** | Declared-5GB sessions + measured isolation. |
+| `cursor/delegate-wiring-spend-stop-91c1` | [#314](https://github.com/d1n095/LifeAI/pull/314) | **Isolated successor of `#312` @ `22458257`. Head `2308b697c6ffd4e792ffee5acccc4f4659d86389`. Does not amend `#309`–`#313`.** | Authorized operating cycle, SPEND-STOP, absence. |
 
-**Merge-ordning (provider/Gate lanes):** do not amend `#309`/`#310`/`#311`. This STOP/ICV successor is an isolated child of examined `#309` @ `aff5de1` and waits on Claude examination of this PR. `#310` and `#311` stay parallel — do not rebase them onto this branch. Large-file continuation is isolated `#313` from `#311` @ `c3373f9`.
+**Merge-ordning:** do not amend `#309`–`#313`. This cycle successor waits on Claude examination of this PR. Do not rebase `#310`/`#311`/`#313` onto it. Large-file HTTP remains a later isolated child of `#313`.
 
 **Must not:** alter frozen `#263`/`#276`/`#281`/`#282`/`#284`/`#285`/`#286`/`#287`/`#288`/`#289` or `#291` after freeze; compose `#280`; enable Track B; merge/deploy/Recall; paid providers; GitHub settings; duplicate Codex Git transport.
 

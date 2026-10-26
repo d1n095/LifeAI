@@ -712,6 +712,16 @@ def build_founder_ops_snapshot(
         "authority": _founder_authority(recall_http_mounted=recall_http_mounted),
         "security": _security_summary(db, owner_id=owner_id, recall_http_mounted=recall_http_mounted),
         "durable_coordination": _durable_coordination(db, owner_id=owner_id),
+        "operational_handover": _operational_handover_slice(
+            db,
+            owner_id=owner_id,
+            snapshot_parts={
+                "independent_ready_work": independent,
+                "authorization_requests": authorization_requests,
+                "stop": stop,
+                "spend": spend,
+            },
+        ),
         "invariant": "NEVER_COLLAPSE_TO_ONE_BOOLEAN",
         "communication_policy": "factual_accuracy_over_agreement",
     }
@@ -788,6 +798,40 @@ def _security_summary(db: Session, *, owner_id: uuid.UUID, recall_http_mounted: 
             "blocks_first_cycle": False,
             "dashboard_path": "/admin/security",
         }
+
+
+def _operational_handover_slice(db: Session, *, owner_id: uuid.UUID, snapshot_parts: dict[str, Any]) -> dict[str, Any]:
+    """Absence, isolation, and honest gates. Never claims an unpassed gate."""
+    from app.mainai_operational_handover.absence import evaluate_absence_tick, founder_catchup_report, items_from_snapshot
+    from app.mainai_operational_handover.gates import gate_status
+    from app.mainai_operational_handover.interactive import InteractiveIsolation
+
+    stop = snapshot_parts.get("stop") or {}
+    spend = snapshot_parts.get("spend") or {}
+    grants = spend.get("authorizations") or spend.get("grants") or []
+    evaluation = evaluate_absence_tick(
+        items=items_from_snapshot(
+            {
+                "independent_ready_work": snapshot_parts.get("independent_ready_work") or [],
+                "authorization_requests": snapshot_parts.get("authorization_requests") or [],
+            }
+        ),
+        stop_blocked=bool(stop.get("blocked")),
+        standing_grants=[{"scope": "read_only_audit", "active": True}] if grants else [],
+        spend_exhausted=bool(spend.get("exhausted")),
+        absence_enabled=False,
+    )
+    isolation = InteractiveIsolation()
+    return {
+        "absence": evaluation,
+        "catchup": founder_catchup_report(evaluation),
+        "interactive": isolation.public_view(),
+        "gates": gate_status(),
+        "self_improve": {"authority_expanded": False, "deployed": False},
+        "silence_is_not_approval": True,
+        "first_cycle_go": False,
+        "vendor_delivery_claimed": False,
+    }
 
 
 def recall_http_mounted(app: Any) -> bool:

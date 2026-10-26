@@ -261,6 +261,10 @@ class DurableCoordinationService:
             "records": [],
             "by_fingerprint": {},
         }
+        self._operational_handover: dict[str, Any] = {
+            "self_improve": {"cycles": [], "lessons": []},
+            "absence": {},
+        }
 
     # ------------------------------------------------------------------ assign
 
@@ -1161,7 +1165,13 @@ class DurableCoordinationService:
     def operational_handover_view(self) -> dict[str, Any]:
         from app.agent_coordination.connect import operational_handover_view
 
-        return operational_handover_view(self)
+        view = operational_handover_view(self)
+        store = self._operational_handover
+        view["absence"] = store.get("absence") or {}
+        view["self_improve"] = store.get("self_improve") or {"cycles": [], "lessons": []}
+        view["silence_is_not_approval"] = True
+        view["first_cycle_go"] = FIRST_CYCLE_GO
+        return view
 
     def delivery_public_view(self) -> dict[str, Any]:
         from app.agent_coordination.delivery import delivery_public_view
@@ -1334,6 +1344,28 @@ class DurableCoordinationService:
             if isinstance(restrictions.get("by_fingerprint"), dict):
                 merged_r["by_fingerprint"] = {**self._restrictions.get("by_fingerprint", {}), **restrictions["by_fingerprint"]}
             self._restrictions = merged_r
+        operational = payload.get("operational_handover")
+        if isinstance(operational, dict):
+            merged_ops = dict(self._operational_handover)
+            if isinstance(operational.get("self_improve"), dict):
+                incoming = operational["self_improve"]
+                current = dict(self._operational_handover.get("self_improve") or {})
+                cycles = list(current.get("cycles") or [])
+                known = {row.get("cycle_id") for row in cycles}
+                for row in incoming.get("cycles") or []:
+                    if isinstance(row, dict) and row.get("cycle_id") not in known:
+                        cycles.append(row)
+                        known.add(row.get("cycle_id"))
+                lessons = list(current.get("lessons") or [])
+                known_l = {row.get("lesson_id") for row in lessons}
+                for row in incoming.get("lessons") or []:
+                    if isinstance(row, dict) and row.get("lesson_id") not in known_l:
+                        lessons.append(row)
+                        known_l.add(row.get("lesson_id"))
+                merged_ops["self_improve"] = {"cycles": cycles, "lessons": lessons}
+            if isinstance(operational.get("absence"), dict):
+                merged_ops["absence"] = operational["absence"]
+            self._operational_handover = merged_ops
 
     def dump_for(self, assignment_id: str) -> dict[str, Any]:
         record = self._obligations.get(assignment_id)
@@ -1352,6 +1384,7 @@ class DurableCoordinationService:
             "delivery": json.loads(json.dumps(self._delivery)),
             "provider_ingestion": json.loads(json.dumps(self._provider_ingestion)),
             "restrictions": json.loads(json.dumps(self._restrictions)),
+            "operational_handover": json.loads(json.dumps(self._operational_handover)),
         }
 
     # -------------------------------------------------------------- internals
