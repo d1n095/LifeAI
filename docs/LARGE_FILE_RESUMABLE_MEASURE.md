@@ -14,7 +14,7 @@ Does **not** amend `#309`, `#310`, `#311`, or `#312`.
 
 ## What this does not do
 
-- No production HTTP resumable upload route
+- No production HTTP resumable upload route on this PR; HTTP is the isolated successor in `docs/LARGE_FILE_RESUMABLE_HTTP.md`
 - No Caddy / `MAX_UPLOAD_BYTES` change
 - No new Alembic table
 - No 5 GB file is created or certified
