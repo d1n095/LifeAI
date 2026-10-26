@@ -1,0 +1,12 @@
+target: /Users/dennistorildson/Library/Application Support/Claude/scratch-workspaces/4fb67e2b-ac65-4918-9c9e-5fbeb75d6101/dfc6b53c-9ba6-42fb-8c53-defc561c946b/scratch-2026-09-25-fe2f96/examiner/wtcert-7fbe677 @ 7fbe677166864f398ef2b32cc374487cc7034503
+PASSED test_fcpubexec.py::test_PE1_push_success_token_after_commit_single_effect
+PASSED test_fcpubexec.py::test_PE3_replayed_claim_mints_no_token_no_second_effect
+PASSED test_fcpubexec.py::test_PE4_base_moved_blocks_before_mint
+PASSED test_fcpubexec.py::test_PE5_existing_branch_blocks_push_before_mint
+PASSED test_fcpubexec.py::test_PE6_bundle_substitution_blocks_before_mint
+PASSED test_fcpubexec.py::test_PE7_concurrent_oneuse_grant_single_consumption
+PASSED test_fcpubexec.py::test_PE8_stop_between_issue_and_execute_blocks_before_mint
+PASSED test_fcpubexec.py::test_PE9_bad_lease_revokes_and_applies_no_effect
+PASSED test_fcpubexec.py::test_PE10_audit_receipts_are_runtime_append_only
+9 passed in 13.97s
+target worktree unchanged
