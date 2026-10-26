@@ -8,7 +8,7 @@
   `routers/founder_authority.py` (+127), `mainai_execution/remote_effect.py` (+106), `rls.py`.
 - **Lineage note:** the founder-authority capability core is inherited from `e68e7f4a` (2026-10-21);
   none of my previously certified SHAs (#303/#306/#309) are ancestors — this is a distinct line.
-- **Suite:** `probes/fc_pub_v1` — **9 passed**, driving the real module. Read-only; no token minted, no
+- **Suite:** `probes/fc_pub_v1` — **11 passed**, driving the real module. Read-only; no token minted, no
   network (egress-guarded). `first_cycle_go=false`.
 
 ## Exercised controls (executable adversarial tests, PASS)
@@ -23,6 +23,8 @@
 | PUB5 | **Revocation:** a cancelled grant cannot be claimed | `ReviewPublicationError` |
 | PUB6 | **STOP interaction:** an active Founder STOP blocks the claim *before* any token mint/network (`assert_grant_allowed`) | `ReviewPublicationError` "blocked by durable STOP" |
 | PUB7 | **Exact-bytes binding:** bundle bytes must match the signed manifest digest; path-escape read refused | `ReviewPublicationError` |
+| PUB8 | **Transport least privilege:** `_assert_lease` accepts the exact `{contents:write}` PUSH lease but rejects an extra `administration:write` scope, a wrong repository, and an effect mismatch | `ReviewPublicationError` ×3 |
+| PUB9 | **Credential protection:** the installation token is excluded from `InstallationTokenLease.__repr__` | token absent from `repr` |
 
 ## Code-reviewed controls (not fully exercised — no live GitHub App / network)
 - **Exact-SHA / tree / base binding at claim:** `claim_review_publication_grant` re-inspects the
@@ -33,12 +35,10 @@
 - **Single-use grant race-safety:** atomic `UPDATE … WHERE status='active' → consumed`; token minted
   only **after** the consumed grant is committed ("irreversible claim is durable before credential mint
   or network I/O"). Ordering verified by reading; the committed-then-mint path is not executed.
-- **Transport least privilege (`review_transport._assert_lease`):** the installation token's effect,
-  repository, installation-id and app-id must equal the consumed grant; permissions must match
-  `PERMISSIONS_BY_EFFECT` exactly (PUSH=`contents:write`; DRAFT_PR=`contents:read`+`pull_requests:write`);
-  **any unrelated write scope is rejected** (`write_scopes != expected_writes`). Fail-closed; read-only
-  `AnonymousGitHubObserver` raises on any non-200. Verified by reading (constructing a real signed
-  installation lease is out of scope without the GitHub App).
+- **Transport least privilege (`review_transport._assert_lease`):** now EXERCISED (PUB8) — rejects an
+  unrelated write scope / wrong repo / effect mismatch and accepts only the exact
+  `PERMISSIONS_BY_EFFECT` lease. Still code-reviewed only: the read-only `AnonymousGitHubObserver`
+  non-200 fail-closed path (needs a live HTTP peer).
 - **Audit integrity:** step-up receipts and grants carry a `*_digest` + `issuer_signature`
   (`_grant_is_authentic` / step-up signature checked at issue and claim); attempts are recorded.
   Tamper-evidence verified by reading.

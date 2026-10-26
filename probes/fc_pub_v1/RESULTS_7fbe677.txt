@@ -8,5 +8,7 @@ PASSED test_fcpub.py::test_PUB4_stepup_is_single_use
 PASSED test_fcpub.py::test_PUB5_cancelled_grant_cannot_be_claimed
 PASSED test_fcpub.py::test_PUB6_stop_blocks_claim_before_token_mint
 PASSED test_fcpub.py::test_PUB7_artifact_bundle_binding
-9 passed in 8.84s
+PASSED test_fcpub.py::test_PUB8_transport_lease_least_privilege
+PASSED test_fcpub.py::test_PUB9_lease_token_excluded_from_repr
+11 passed in 8.99s
 target worktree unchanged

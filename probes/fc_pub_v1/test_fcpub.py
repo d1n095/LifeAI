@@ -216,3 +216,43 @@ def test_PUB7_artifact_bundle_binding(tmp_path):
         inspect_review_artifact(artifact_root=root, bundle_relative_path="x.bundle", manifest_relative_path="x.json")
     with pytest.raises(Exception):                # path escape must not read outside the review root
         inspect_review_artifact(artifact_root=root, bundle_relative_path="../x.bundle", manifest_relative_path="x.json")
+
+
+# ---------------------------------------------------------------------------
+# PUB8 — transport least privilege: the installation token may carry no unrelated write scope
+# ---------------------------------------------------------------------------
+
+def _lease(grant, permissions, *, effect="push_branch", repo=REPO, app_id="app-1", inst=12345):
+    from app.mainai_execution.remote_effect import InstallationTokenLease
+    return InstallationTokenLease(repository=repo, effect=effect, app_id=app_id, installation_id=inst,
+                                  account_login="d1n095", permissions=permissions,
+                                  expires_at=datetime.utcnow() + timedelta(minutes=5), token="ghs_FAKE_TEST_TOKEN")
+
+
+def test_PUB8_transport_lease_least_privilege(superuser_db):
+    from app.founder_authority import review_transport as rt
+    from app.founder_authority.review_publication import ReviewPublicationError, PUSH_EFFECT
+    _, _, PBE = _effects()
+    f = _pinned_founder(superuser_db)
+    grant = _issue(superuser_db, f, _stepup(superuser_db, f, _session(superuser_db, f), PBE[PUSH_EFFECT]), PUSH_EFFECT)
+    # exact least-privilege lease for a PUSH grant is accepted
+    rt._assert_lease(grant, _lease(grant, {"contents": "write"}), transport_effect="push_branch")
+    # an extra unrelated write scope is rejected
+    with pytest.raises(ReviewPublicationError):
+        rt._assert_lease(grant, _lease(grant, {"contents": "write", "administration": "write"}),
+                         transport_effect="push_branch")
+    # wrong repository is rejected
+    with pytest.raises(ReviewPublicationError):
+        rt._assert_lease(grant, _lease(grant, {"contents": "write"}, repo="attacker/evil"),
+                         transport_effect="push_branch")
+    # effect mismatch (PUSH grant, open_pr token) is rejected
+    with pytest.raises(ReviewPublicationError):
+        rt._assert_lease(grant, _lease(grant, {"contents": "write"}, effect="open_pr"),
+                         transport_effect="open_pr")
+
+
+def test_PUB9_lease_token_excluded_from_repr(superuser_db):
+    """Credential protection: the short-lived token must not appear in repr/logs."""
+    f = _pinned_founder(superuser_db)
+    lease = _lease(None, {"contents": "write"})
+    assert "ghs_FAKE_TEST_TOKEN" not in repr(lease)
