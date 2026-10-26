@@ -59,9 +59,20 @@ class StreamingImportLane:
         offset = 0
         if checkpoint is not None:
             offset = checkpoint.offset
-            if checkpoint.sha256:
-                hasher = hashlib.sha256()
             handle.seek(offset)
+            # Whole-file sha256 cannot continue from a hex digest. Rebuild the
+            # prefix from the same source (already stored) so resume stays correct
+            # without loading the remainder. Peak buffer stays one chunk.
+            if offset:
+                handle.seek(0)
+                remaining = offset
+                while remaining:
+                    prefix = handle.read(min(self.chunk_size, remaining))
+                    if not prefix:
+                        break
+                    hasher.update(prefix)
+                    remaining -= len(prefix)
+                handle.seek(offset)
         path = str(getattr(source, "name", checkpoint.path if checkpoint else "stream"))
         bytes_seen = checkpoint.bytes_seen if checkpoint else 0
         try:

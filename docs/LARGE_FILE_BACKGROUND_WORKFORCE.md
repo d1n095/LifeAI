@@ -20,3 +20,5 @@ memory and interactive-responsiveness tests on real formats. Until those measure
 exist, `five_gb_supported` and `five_by_five_gb_measured` stay false.
 
 See `docs/LARGE_FILE_UPLOAD_PLAN.md` (worker memory before resumable HTTP).
+Successor `cursor/large-file-resumable-measure-91c1` adds durable declared-5GB sessions
+and measured isolation without flipping `five_gb_supported`.
