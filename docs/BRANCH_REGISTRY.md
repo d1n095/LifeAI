@@ -40,7 +40,7 @@ does not enable Track B, does not accept `#280`, and does not implement Codex Gi
 | `cursor/operational-handover-self-improve-91c1` | [#310](https://github.com/d1n095/LifeAI/pull/310) | **Preserved separate Gate-1 candidate.** | Absence mode, isolation, bounded self-improve. |
 | `cursor/large-file-background-workforce-91c1` | [#311](https://github.com/d1n095/LifeAI/pull/311) | **Preserved separate Gate-2 lane. Not 5 GB certified.** | Streaming import. |
 | `cursor/large-file-resumable-measure-91c1` | [#313](https://github.com/d1n095/LifeAI/pull/313) | **Preserved isolated `#311` child. Not 5 GB certified.** | Declared-5GB sessions + measured isolation. |
-| `cursor/delegate-wiring-spend-stop-91c1` | *(this PR)* | **Isolated successor of `#312` @ `22458257`. Composes `#310` policy. Does not amend `#309`–`#313`.** | Authorized operating cycle, SPEND-STOP, absence. |
+| `cursor/delegate-wiring-spend-stop-91c1` | [#314](https://github.com/d1n095/LifeAI/pull/314) | **Isolated successor of `#312` @ `22458257`. Head `2308b697c6ffd4e792ffee5acccc4f4659d86389`. Does not amend `#309`–`#313`.** | Authorized operating cycle, SPEND-STOP, absence. |
 
 **Merge-ordning:** do not amend `#309`–`#313`. This cycle successor waits on Claude examination of this PR. Do not rebase `#310`/`#311`/`#313` onto it. Large-file HTTP remains a later isolated child of `#313`.
 
