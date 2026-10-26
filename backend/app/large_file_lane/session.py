@@ -40,7 +40,10 @@ class SessionManifest:
 
 
 class ResumableUploadSession:
-    """Filesystem-backed session. No new Alembic table. No production HTTP route."""
+    """Filesystem-backed session. No new Alembic table.
+
+    Production HTTP is ``app.routers.library_resumable`` on top of this store.
+    """
 
     def __init__(self, root: Path, *, manifest: SessionManifest) -> None:
         self.root = Path(root)

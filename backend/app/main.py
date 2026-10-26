@@ -25,6 +25,7 @@ from app.routers import (
     inspectable_memory,
     knowledge,
     library,
+    library_resumable,
     mainai_execution,
     agent_gateway,
     mainai_founder_ops,
@@ -74,6 +75,7 @@ app.include_router(documents.router)
 app.include_router(projects.router)
 app.include_router(knowledge.router)
 app.include_router(library.router)
+app.include_router(library_resumable.router)
 app.include_router(workbench.router)
 app.include_router(admin.router)
 app.include_router(memory.router)
