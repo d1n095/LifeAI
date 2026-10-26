@@ -22,6 +22,8 @@ CLASSIFICATIONS = (
 )
 WORKAROUND_CLASSES = ("supported", "prohibited", "uncertain")
 SECRET_KEY = re.compile(r"(token|secret|password|authorization|api[_-]?key|cookie|credential)", re.I)
+BARE_CREDENTIAL_PREFIXES = ("sk-", "sk_live", "sk_test", "xoxb-", "ghp_", "key_live_")
+_CREDENTIAL_BODY = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
 PROHIBITED_REASONS = frozenset({"bypass_restriction", "expand_authority", "violate_terms", "exceed_spend"})
 
 
@@ -29,7 +31,30 @@ def _iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def _redact_embedded_credentials(value: str) -> str:
+    """Replace credential-shaped tokens even when they sit inside a sentence."""
+    out = value
+    for prefix in BARE_CREDENTIAL_PREFIXES:
+        start = 0
+        while True:
+            pos = out.lower().find(prefix, start)
+            if pos < 0:
+                break
+            end = pos + len(prefix)
+            while end < len(out) and out[end] in _CREDENTIAL_BODY:
+                end += 1
+            if end == pos + len(prefix):
+                start = end
+                continue
+            out = out[:pos] + "[redacted]" + out[end:]
+            start = pos + len("[redacted]")
+    return out
+
+
 def redact_secrets(value: Any) -> Any:
+    """Key-name redaction plus bare credential shapes. Reuses development-operator patterns."""
+    from app.development_operator.service import redact as operator_redact
+
     if isinstance(value, dict):
         out = {}
         for key, item in value.items():
@@ -40,7 +65,20 @@ def redact_secrets(value: Any) -> Any:
         return out
     if isinstance(value, list):
         return [redact_secrets(item) for item in value]
-    if isinstance(value, str) and len(value) > 24 and SECRET_KEY.search(value):
+    if not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    if any(stripped.startswith(prefix) for prefix in BARE_CREDENTIAL_PREFIXES):
+        return "[redacted]"
+    if stripped.lower().startswith("bearer "):
+        return "[redacted]"
+    operator = operator_redact(value)
+    if operator != value:
+        return operator.replace("[REDACTED]", "[redacted]")
+    embedded = _redact_embedded_credentials(value)
+    if embedded != value:
+        return embedded
+    if len(value) > 24 and SECRET_KEY.search(value):
         return "[redacted]"
     return value
 
