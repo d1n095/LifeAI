@@ -41,7 +41,10 @@ now CLOSED and independently verified** (#312 `22458257`, #313 `5cb9b46`); two r
 - **RST-4** — ✅ CLOSED (#312) for prefixed secrets; P4 residual (non-prefixed high-entropy) documented
 - **CHECKPOINT-HASH** — ✅ CLOSED (#313): resume re-hashes the prefix; resumed hash == single-pass (fc313_v1)
 - **SPEND-STOP** — ⬜ OPEN: spend reserve ↔ kill switch (spend_authority_v1 G1) — Cursor wiring
-- **DELEGATE-WIRING** — ⬜ OPEN: self-improvement proposal ↔ capability selector/executor (absence_v1 IE1) — Cursor wiring
+- **DELEGATE-WIRING** — ⬜ OPEN but NARROWER than first stated: the capability selector + delegation
+  broker are REAL and acceptance-passing (`autoloop_v1` AL1/AL3/AL5 on #312: evidence-based selection,
+  builder-cannot-self-verify, STOP-fail-closed, no-invention). The gap is only that #310 `self_improve`
+  does not yet call `workforce.broker.resolve_delegation` (absence_v1 IE1) — Cursor wiring.
 
 Where an existing kernel interface already suffices (per Codex's "identify, don't duplicate" rule):
 `kill_switch.assert_not_killed` / `assert_grant_allowed` (STOP + grant race), `provider_spend`

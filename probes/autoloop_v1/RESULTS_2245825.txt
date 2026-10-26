@@ -1,0 +1,7 @@
+target: /Users/dennistorildson/Library/Application Support/Claude/scratch-workspaces/4fb67e2b-ac65-4918-9c9e-5fbeb75d6101/dfc6b53c-9ba6-42fb-8c53-defc561c946b/scratch-2026-09-25-fe2f96/examiner/wtcert-2245825 @ 22458257fbcfcf4170d2a957cd1c6464b8a2cdc8
+PASSED test_autoloop.py::test_AL1_delegation_selects_evidenced_agent_without_provider
+PASSED test_autoloop.py::test_AL2_stop_blocks_delegation
+PASSED test_autoloop.py::test_AL3_builder_cannot_self_verify
+PASSED test_autoloop.py::test_AL5_no_selectable_agent_refuses
+4 passed in 4.94s
+target worktree unchanged
