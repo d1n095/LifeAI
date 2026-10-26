@@ -40,7 +40,7 @@ does not enable Track B, does not accept `#280`, and does not implement Codex Gi
 | `cursor/operational-handover-self-improve-91c1` | [#310](https://github.com/d1n095/LifeAI/pull/310) | **Preserved separate Gate-1 candidate.** | Absence mode, isolation, bounded self-improve. |
 | `cursor/large-file-background-workforce-91c1` | [#311](https://github.com/d1n095/LifeAI/pull/311) | **Preserved separate Gate-2 lane. Not 5 GB certified.** | Streaming import. |
 
-**Merge-ordning (provider/Gate lanes):** do not amend `#309`/`#310`/`#311`. This STOP/ICV successor is an isolated child of examined `#309` @ `aff5de1` and waits on Claude examination of this PR. `#310` and `#311` stay parallel — do not rebase them onto this branch. Large-file 5 GB work continues later from `#311` on a separate isolated child.
+**Merge-ordning (provider/Gate lanes):** do not amend `#309`/`#310`/`#311`. This STOP/ICV successor is an isolated child of examined `#309` @ `aff5de1` and waits on Claude examination of this PR. `#310` and `#311` stay parallel — do not rebase them onto this branch. Large-file continuation is isolated `#313` from `#311` @ `c3373f9`.
 
 **Must not:** alter frozen `#263`/`#276`/`#281`/`#282`/`#284`/`#285`/`#286`/`#287`/`#288`/`#289` or `#291` after freeze; compose `#280`; enable Track B; merge/deploy/Recall; paid providers; GitHub settings; duplicate Codex Git transport.
 
