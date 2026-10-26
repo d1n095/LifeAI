@@ -430,6 +430,16 @@ def reserve_provider_spend_call(
         # reserved or settled: idempotent return without increasing holds.
         return prior, False
 
+    from app.workforce.kill_switch import KillSwitchError, assert_grant_allowed, assert_not_killed
+
+    try:
+        assert_not_killed(db, owner_id)
+        assert_grant_allowed(db, owner_id=owner_id)
+    except KillSwitchError as exc:
+        raise ProviderSpendError(f"STOP/authority refused spend reservation: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 — refuse when authority cannot be established
+        raise ProviderSpendError(f"spend reservation authority unestablished: {type(exc).__name__}") from exc
+
     row = get_current_provider_spend_authorization(db, owner_id=owner_id, goal_id=goal_id)
     if row is None:
         raise ProviderSpendError("no live provider spend authorization for this goal")

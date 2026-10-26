@@ -161,6 +161,25 @@ def agent_gateway_transports(user: User = Depends(require_founder)):
     }
 
 
+@router.get("/operational-handover")
+def operational_handover_status(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    snapshot = build_founder_ops_snapshot(
+        db,
+        owner_id=user.id,
+        health=_health_payload(db),
+        recall_http_mounted=recall_http_mounted(request.app),
+    )
+    return {
+        "operational_handover": snapshot.get("operational_handover") or {},
+        "first_cycle_go": False,
+        "vendor_delivery_claimed": False,
+    }
+
+
 @router.get("/snapshot")
 def founder_ops_snapshot(
     request: Request,
