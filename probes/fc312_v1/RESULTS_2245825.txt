@@ -1,0 +1,10 @@
+target: /Users/dennistorildson/Library/Application Support/Claude/scratch-workspaces/4fb67e2b-ac65-4918-9c9e-5fbeb75d6101/dfc6b53c-9ba6-42fb-8c53-defc561c946b/scratch-2026-09-25-fe2f96/examiner/wtcert-2245825 @ 22458257fbcfcf4170d2a957cd1c6464b8a2cdc8
+PASSED test_fc312.py::test_FC312_PISTOP_clean_completes
+PASSED test_fc312.py::test_FC312_PISTOP_stop_blocks_completion
+PASSED test_fc312.py::test_FC312_PISTOP_no_session_fails_closed
+PASSED test_fc312.py::test_FC312_PIDEDUP_timestampless_duplicate_is_ignored
+PASSED test_fc312.py::test_FC312_ICV_requires_attestation_then_allows
+PASSED test_fc312.py::test_FC312_RST4_bare_prefixed_secret_redacted
+PASSED test_fc312.py::test_FC312_RST4_residual_nonprefixed_highentropy
+7 passed in 5.68s
+target worktree unchanged

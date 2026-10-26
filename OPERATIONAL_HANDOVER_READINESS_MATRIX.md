@@ -32,14 +32,16 @@ Each row: is the *mechanism* present, and is it *wired* into the path that needs
 | **Large-file resume integrity** (whole-file checksum) | **defective** (CHECKPOINT-HASH) | n/a | large_file_v1 LF9 xfail | Cursor (fix) |
 | Ordinary runtime cannot **grant itself authority / forge verification / forge Founder approval** | yes (DB trigger, append-only, authority fingerprint) | yes | indepcomp_v1 B1/B2, spend_authority_v1 E1 pass | Codex (FA-PRIV completes the DB-privilege set) |
 
-## The dominant remaining-work class: "sound subsystem, not wired"
-Four independently confirmed gaps share one shape — a correct, fail-closed authority/verification store
-exists but the acting path does not consult it. All are **wiring** owned by Cursor/MainAI (not
-Security-Kernel changes), each proven by a strict-xfail that flips the suite red when fixed:
-- **PI-STOP** — ingestion ↔ `assert_not_killed` (pistop_v1 B1–B5)
-- **SPEND-STOP** — spend reserve ↔ kill switch (spend_authority_v1 G1)
-- **ICV-WIRING** — provider cycle ↔ `find_independent_pass` (indepcomp_v1 E1)
-- **DELEGATE-WIRING** — self-improvement proposal ↔ capability selector/executor (absence_v1 IE1)
+## The dominant remaining-work class: "sound subsystem, not wired" — UPDATED
+Five gaps shared one shape — a correct, fail-closed store the acting path didn't consult. **Three are
+now CLOSED and independently verified** (#312 `22458257`, #313 `5cb9b46`); two remain open:
+- **PI-STOP** — ✅ CLOSED (#312): ingestion wraps `assert_not_killed`+`assert_grant_allowed`, fail-closed without a session (fc312_v1)
+- **ICV-WIRING** — ✅ CLOSED (#312): provider continuation queries `find_independent_pass` (fc312_v1)
+- **PI-DEDUP** — ✅ CLOSED (#312): stable `event_id` from `sha256(raw_body)` (fc312_v1)
+- **RST-4** — ✅ CLOSED (#312) for prefixed secrets; P4 residual (non-prefixed high-entropy) documented
+- **CHECKPOINT-HASH** — ✅ CLOSED (#313): resume re-hashes the prefix; resumed hash == single-pass (fc313_v1)
+- **SPEND-STOP** — ⬜ OPEN: spend reserve ↔ kill switch (spend_authority_v1 G1) — Cursor wiring
+- **DELEGATE-WIRING** — ⬜ OPEN: self-improvement proposal ↔ capability selector/executor (absence_v1 IE1) — Cursor wiring
 
 Where an existing kernel interface already suffices (per Codex's "identify, don't duplicate" rule):
 `kill_switch.assert_not_killed` / `assert_grant_allowed` (STOP + grant race), `provider_spend`
