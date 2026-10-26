@@ -1,7 +1,8 @@
 # Large-file resumable HTTP
 
-Isolated child of `#313` @ `5cb9b46d6471213ec430c88fccc936514c4e0e39`.
-Does **not** amend `#309`–`#314`.
+Isolated child of `#313` @ `5cb9b46d6471213ec430c88fccc936514c4e0e39`
+([#315](https://github.com/d1n095/LifeAI/pull/315)).
+Does **not** amend `#309`–`#314`. Product SHA `292a09110a2528871d2f537987c37050416f3707`.
 
 `first_cycle_go=false`. `five_gb_supported=false`. `five_by_five_gb_measured=false`.
 
