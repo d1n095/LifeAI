@@ -1,0 +1,20 @@
+# fc315http_v1 — #315 ACTUAL HTTP integration acceptance
+# target: wtcert-0741a3d @ 0741a3d5d7bda27f895fc382e1b4c8b1971aaa44 (docs-only child of product SHA 292a091)
+# 2026-10-27T05:24:44Z
+
+PASSED test_fc315http.py::test_HT1_founder_full_lifecycle_over_http
+PASSED test_fc315http.py::test_HT2_unauthenticated_and_nonfounder_rejected
+PASSED test_fc315http.py::test_HT3_mutating_routes_require_csrf
+PASSED test_fc315http.py::test_HT4_malformed_parts_and_ids
+PASSED test_fc315http.py::test_HT5_cross_owner_session_id_is_not_found
+PASSED test_fc315http.py::test_HT6_concurrent_http_puts_serialize_exactly
+PASSED test_fc315http.py::test_HT7_restart_resume_across_client_instances
+PASSED test_fc315http.py::test_HT8_owner_quota_exhaustion_surfaces_413
+PASSED test_fc315http.py::test_HT9_disk_headroom_surfaces_507
+PASSED test_fc315http.py::test_HT10_abort_finalize_race_is_coherent
+PASSED test_fc315http.py::test_HT11a_corrupted_same_length_spool_reports_hash_of_stored_bytes
+PASSED test_fc315http.py::test_HT11b_truncated_spool_finalize_behaviour
+PASSED test_fc315http.py::test_HT12_http_responses_never_overclaim
+PASSED test_fc315http.py::test_HT13_route_carries_library_rate_limit
+14 passed in 13.58s
+target worktree unchanged
