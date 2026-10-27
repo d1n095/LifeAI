@@ -1,0 +1,12 @@
+# fc315crash_v1 — #315 crash-consistency & finalized-file integrity
+# target: wtcert-0741a3d @ 0741a3d5d7bda27f895fc382e1b4c8b1971aaa44
+# 2026-10-27T15:09:47Z
+
+PASSED test_fc315crash.py::test_CC2_crash_resume_produces_overlong_duplicated_file_reported_complete
+PASSED test_fc315crash.py::test_CC3_torn_partial_spool_write_corrupts_arbitrary_offset
+PASSED test_fc315crash.py::test_CC4_declared_complete_can_finalize_fewer_bytes
+PASSED test_fc315crash.py::test_CC5_corrupt_manifest_is_fail_closed_on_recovery
+PASSED test_fc315crash.py::test_CC6_concurrent_finalize_and_resume_write_leave_coherent_state
+PASSED test_fc315crash.py::test_CC7_corrupted_file_is_presentable_as_valid_stored_content
+XFAIL test_fc315crash.py::test_CC1_finalized_file_matches_declared_after_crash_resume - CC1/O-1 P2: a process kill between the spool append (flushed) and the manifest persist, followed by a CORRECT client resume, yields a finalized file longer than declared_total with a duplicated chunk, and finalize's sha256 does not match the intended content. write_part opens 'ab' and never truncates the spool to manifest.offset on resume; finalize hashes the whole spool and never checks spool length == declared_total.
+6 passed, 1 xfailed in 0.15s
