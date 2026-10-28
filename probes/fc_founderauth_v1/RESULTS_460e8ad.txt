@@ -1,0 +1,19 @@
+target: examiner/wtcert-460e8ad @ 460e8ad8cbd40b7fb0d62702f28c14412688e298
+suite:  probes/fc_founderauth_v1 (DB-backed via target tests.conftest; drives the real FastAPI
+        auth routes via the product TestClient + migration-0095 founder identity/token guards)
+run:    probes/fc_founderauth_v1/run.sh ../wtcert-460e8ad
+
+test_fc_founderauth.py::test_FI1_reset_rejects_bad_proofs PASSED
+test_fc_founderauth.py::test_FI2_valid_reset_invalidates_sessions PASSED
+test_fc_founderauth.py::test_FI3_reset_proof_single_use PASSED
+test_fc_founderauth.py::test_FI4_old_access_token_rejected_after_reset PASSED
+test_fc_founderauth.py::test_FI5_old_refresh_token_rejected_after_reset PASSED
+test_fc_founderauth.py::test_FI6_logout_invalidates_access_immediately PASSED
+test_fc_founderauth.py::test_FI7_founder_token_guard_covers_reset_and_verification PASSED
+test_fc_founderauth.py::test_FI8_stop_does_not_block_founder_authentication PASSED
+test_fc_founderauth.py::test_FI9_auth_fails_closed PASSED
+test_fc_founderauth.py::test_FI10_refresh_replay_revokes_family PASSED
+============================== 10 passed in 9.78s ==============================
+
+target worktree unchanged (run.sh guard compares git status --porcelain before/after; RC=99 on any change)
+HEAD after run: 460e8ad8cbd40b7fb0d62702f28c14412688e298  porcelain: (empty)
