@@ -1,0 +1,21 @@
+target: examiner/wtcert-460e8ad @ 460e8ad8cbd40b7fb0d62702f28c14412688e298
+suite:  probes/fc_erasureauth_v1 (DB-backed via target tests.conftest; loopback-only egress guard)
+run:    probes/fc_erasureauth_v1/run.sh ../wtcert-460e8ad
+note:   RECALL KEPT INACTIVE — only the authority substrate (founder session + owner key + a
+        Recall grant to delete) is built via the product's own privileged services; no
+        ingestion/retrieval/activation. Exercises migrations 0085/0086 + 0088 (ordered phases).
+
+test_fc_erasureauth.py::test_AE1_reauth_receipts_are_governed PASSED
+test_fc_erasureauth.py::test_AE2_operations_are_governed PASSED
+test_fc_erasureauth.py::test_AE3_forged_erasure_guc_cannot_unlock_delete PASSED
+test_fc_erasureauth.py::test_AE4_begin_operation_validates_receipt PASSED
+test_fc_erasureauth.py::test_AE5_reauth_receipt_single_use_under_concurrency PASSED
+test_fc_erasureauth.py::test_AE6_cross_owner_cannot_erase PASSED
+test_fc_erasureauth.py::test_AE7_phase_transitions_are_bounded PASSED
+test_fc_erasureauth.py::test_AE8_delete_only_in_exact_phase_and_rollback_is_resumable PASSED
+test_fc_erasureauth.py::test_AE9_session_loss_recloses_gate PASSED
+test_fc_erasureauth.py::test_AE10_completion_closes_gate_and_preserves_record PASSED
+============================== 10 passed in 7.93s ==============================
+
+target worktree unchanged (run.sh guard compares git status --porcelain before/after; RC=99 on any change)
+HEAD after run: 460e8ad8cbd40b7fb0d62702f28c14412688e298  porcelain: (empty)
