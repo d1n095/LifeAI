@@ -23,7 +23,6 @@ from app.models.provider_spend import ProviderSpendUsageEvent
 from app.models.user import User
 from app.models.workforce import WorkforceAssignment, WorkforceDelegationRequest
 from app.provider_spend import ProviderSpendError, authorize_provider_spend, reserve_provider_spend_call
-from app.request_context import current_access_jti as current_access_jti_var
 from app.request_context import current_user_id as current_user_id_var
 from app.workforce.kill_switch import activate_kill_switch
 from app.workforce.registry import register_workforce_agent
@@ -38,18 +37,6 @@ def _privileges():
     from app.rls import apply_mainai_execution_privileges
 
     apply_mainai_execution_privileges(migration_engine)
-
-
-@pytest.fixture(autouse=True)
-def _isolate_request_context():
-    """Keep the simulated request identity from leaking into later test modules."""
-    current_user_id_var.set(None)
-    current_access_jti_var.set(None)
-    try:
-        yield
-    finally:
-        current_user_id_var.set(None)
-        current_access_jti_var.set(None)
 
 
 def _set_rls(session, owner_id) -> None:
