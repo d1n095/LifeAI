@@ -1,0 +1,27 @@
+target: examiner/wtcert-460e8ad @ 460e8ad8cbd40b7fb0d62702f28c14412688e298
+suite:  probes/fc_crossauth_v1 (DB-backed via target tests.conftest; loopback-only egress guard)
+run:    probes/fc_crossauth_v1/run.sh ../wtcert-460e8ad   (deterministic; run twice, 6 passed each)
+
+test_fc_crossauth.py::test_CB1_revoked_envelope_cannot_be_restored PASSED
+test_fc_crossauth.py::test_CB2_revoked_spend_cannot_be_restored PASSED
+test_fc_crossauth.py::test_CB3_cancelled_push_grant_cannot_be_restored PASSED
+test_fc_crossauth.py::test_CB4_credential_change_invalidates_prior_erasure_authority PASSED
+test_fc_crossauth.py::test_CB5_stop_blocks_push_effect_consume PASSED
+test_fc_crossauth.py::test_CB6_recovery_reflects_revocation PASSED
+============================== 6 passed in 6.32s ===============================
+
+target worktree unchanged (run.sh guard compares git status --porcelain before/after; RC=99 on any change)
+HEAD after run: 460e8ad8cbd40b7fb0d62702f28c14412688e298  porcelain: (empty)
+
+OBSERVATION (low / informational, not a defect): account_erasure_receipt_session_current
+validates a session via `rt.created_at > users.sessions_valid_after` and the revoked-access-token
+blocklist, but does NOT inspect `refresh_tokens.revoked_at`. sessions_valid_after is truncated to
+whole seconds while created_at keeps sub-second precision, so within the SAME wall-clock second as
+a password reset (which revokes refresh tokens and bumps sessions_valid_after to the truncated
+second), a just-revoked session's created_at can still be > sessions_valid_after and the erasure
+session-binding check can still pass for that sub-second window. Practical exploitability is
+negligible (same-second race; requires an already-minted, unconsumed reauth receipt from that very
+session; the next whole second closes it), and every other session-validity consumer that compares
+against an access-token iat uses <= and fails closed. Recorded for the builders as a minor
+consistency nit (consider checking rt.revoked_at in receipt_session_current, or comparing with the
+same <= second-truncation rule used for access tokens), not a release blocker.
