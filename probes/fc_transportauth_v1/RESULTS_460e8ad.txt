@@ -1,0 +1,17 @@
+target: examiner/wtcert-460e8ad @ 460e8ad8cbd40b7fb0d62702f28c14412688e298
+suite:  probes/fc_transportauth_v1 (DB-backed via target tests.conftest; loopback-only egress guard)
+run:    probes/fc_transportauth_v1/run.sh ../wtcert-460e8ad
+
+test_fc_transportauth.py::test_TR1_push_grant_cannot_be_deleted PASSED
+test_fc_transportauth.py::test_TR2_push_grant_must_leave_active_monotonically PASSED
+test_fc_transportauth.py::test_TR3_push_grant_bindings_are_immutable PASSED
+test_fc_transportauth.py::test_TR4_consumption_requires_job_and_timestamp PASSED
+test_fc_transportauth.py::test_TR5_concurrent_consume_is_single_use PASSED
+test_fc_transportauth.py::test_TR6_one_active_push_grant_per_task PASSED
+test_fc_transportauth.py::test_TR7_draft_pr_grant_delete_and_bindings PASSED
+test_fc_transportauth.py::test_TR8_remote_effect_receipt_is_append_only_one_way PASSED
+test_fc_transportauth.py::test_TR9_forged_owner_context_cannot_cross_owners PASSED
+============================== 9 passed in 7.79s ===============================
+
+target worktree unchanged (run.sh guard compares git status --porcelain before/after; RC=99 on any change)
+HEAD after run: 460e8ad8cbd40b7fb0d62702f28c14412688e298  porcelain: (empty)
