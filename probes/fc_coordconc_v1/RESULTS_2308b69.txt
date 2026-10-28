@@ -1,0 +1,100 @@
+target: examiner/wtcert-2308b69 @ 2308b697c6ffd4e792ffee5acccc4f4659d86389   (#314 production lineage)
+suite:  probes/fc_coordconc_v1 (DB-backed via target tests.conftest; two independent sessions/instances; loopback-only egress guard)
+run:    probes/fc_coordconc_v1/run.sh ../wtcert-2308b69   (deterministic; run 3x)
+
+RESULT: 3 passed, 4 xfailed    (xfailed = a REQUIRED multi-instance invariant that is NOT upheld)
+
+test_fc_coordconc.py::test_CC1_concurrent_same_work_double_assignment            XFAIL  (missing boundary, item 2)
+test_fc_coordconc.py::test_CC2_concurrent_terminal_transitions_both_commit       XFAIL  (missing boundary, items 3/6)
+test_fc_coordconc.py::test_CC3_stale_snapshot_overwrites_newer_state             XFAIL  (missing boundary, item 4)
+test_fc_coordconc.py::test_CC4_provider_event_dedup_is_per_process               XFAIL  (missing boundary, item 5)
+test_fc_coordconc.py::test_CC5_lease_takeover_fences_stale_holder                PASSED (real invariant, items 8/9)
+test_fc_coordconc.py::test_CC6_status_reflects_committed_state_not_stale_memory  PASSED (real invariant, items 1/12)
+test_fc_coordconc.py::test_CC7_owner_isolation_across_workers                    PASSED (real invariant, item 11)
+
+VERIFIED (via --runxfail) that each xfail fails at its INTENDED assertion, not setup:
+  CC1  count=2 (two assignments for one canonical work)
+  CC2  events=2 (two contradictory terminal status_changed events on one assignment)
+  CC3  reloaded ledger kept only {beta} -- alpha's obligation overwritten (lost update)
+  CC4  r2.outcome='applied' (second instance re-acted on the same provider event_id)
+
+target worktree unchanged (run.sh guard compares git status --porcelain before/after; RC=99 on change)
+HEAD after run: 2308b697c6ffd4e792ffee5acccc4f4659d86389   porcelain: (empty)
+
+====================================================================================
+WHAT THE DURABLE COORDINATION IMPLEMENTATION ACTUALLY IS (read on this SHA)
+====================================================================================
+Two separate substrates with very different multi-instance safety:
+
+A. RELATIONAL ROWS (agent_work_assignments, agent_scope_leases) -- shared across instances.
+   * LEASES are genuinely DB-fenced: acquire/renew/take_over use `SELECT ... FOR UPDATE`, a
+     per-assignment partial unique index (uq_agent_scope_leases_one_active_per_assignment),
+     generation + staleness checks. Takeover requires staleness and bumps the generation in
+     place; `expected_generation` makes double-takeover deterministic. -> CC5 PASS.
+   * ASSIGNMENT CREATION duplicate-work prevention is a check-then-insert
+     (is_duplicate_canonical_work SELECT -> add -> flush) with NO unique index: migration 0046
+     creates ix_agent_work_assignments_owner_work_key(owner_id, canonical_work_key) NON-uniquely.
+     The same migration DOES use a partial unique index for leases, so the pattern was known and
+     simply not applied here. The create_work_assignment docstring's claim "in addition to the DB
+     CHECK constraints -- defense in depth" is FALSE for duplicate work. -> CC1 (item 2).
+   * STATUS TRANSITIONS (transition_status) read status in Python and issue an unconditional ORM
+     UPDATE (no status-guarded WHERE, no version column), so two instances both drive one running
+     assignment to a terminal state and both record a status_changed event. -> CC2 (items 3/6).
+
+B. IN-MEMORY SERVICE SNAPSHOT (DurableCoordinationService) -- per process.
+   Obligations/handoffs/provider-dedup live in Python instance attributes (_obligations,
+   _by_canonical, _seen_event_ids, _provider_ingestion["processed_event_ids"]). persist_owner_ledger
+   serialises the WHOLE service to one JSON blob in provenance["durable_coordination"] with NO
+   version/optimistic-concurrency guard.
+   * A second instance that started without instance A's obligation overwrites the blob wholesale
+     -> lost update. -> CC3 (item 4).
+   * Dedup is per-instance, so two instances (e.g. after simultaneous restart, both loaded the
+     pre-event snapshot) each accept the SAME provider event_id and both act on it.
+     -> CC4 (item 5).
+
+====================================================================================
+PRIORITY-10 REQUIRED PROPERTIES -- how each stands on 2308b697
+====================================================================================
+  "No duplicate authorized assignment or external effect"
+       VIOLATED for assignment creation (CC1) and provider events (CC4); upheld for leases (CC5).
+  "No lost revocations or overwritten STOP state"
+       STOP/epoch revocation is certified elsewhere (fc_effauth/fc_crossauth, 460e8ad lineage);
+       the coordination-snapshot layer's wholesale overwrite (CC3) is a general lost-update that
+       would also drop concurrently-persisted coordination facts.
+  "No self-certification" / "No invented provider-delivery evidence"
+       not weakened by these findings (and fc314 already confirmed fixture-vs-live truthfulness).
+  "No stale state granting new execution authority"
+       leases fence stale holders (CC5); assignment readiness re-checks authority (see P11).
+  "Agent/provider identity must not be permanently hardcoded to one vendor" /
+  "Recovery must remain possible when Cursor or any other provider is unavailable"
+       the LEASE/recovery layer is vendor-neutral (CC5 + P11); the hardcoded CAPABILITY_TO_AGENT
+       default is the already-documented #314 selector defect (NOT re-litigated here).
+
+ITEMS 7 and 10 (not separate tests here, to avoid duplicating certified STOP coverage):
+  * Item 7 (STOP while multiple agents run): STOP is enforced at the cycle/execution-authority
+    layer (fc314 B1/C1: run_authorized_operating_cycle halts at entry under STOP; spend blocked),
+    not inside the low-level coordination ledger -- create_work_assignment/transition_status do
+    not themselves consult the kill switch. That is the intended layering; a coordination-level
+    STOP gate is not claimed by the product and is not asserted here.
+  * Item 10 (verification concurrent with reassignment): follows directly from CC2 (an unguarded
+    terminal transition such as verified->completed can race) + CC5 (lease recovery is fenced);
+    the verification-authority gate is certified under the 460e8ad independent-verification suites.
+
+CLASSIFICATION DISCIPLINE: per the assignment, a required multi-instance invariant that is not
+implemented is documented with an executable deterministic reproduction (xfail), NOT called PASS.
+Only genuinely-upheld invariants (CC5/CC6/CC7) are PASS. Read-only examiner; no paid calls;
+loopback only; no production branch modified; candidate detached at the exact SHA, unchanged.
+first_cycle_go=false.
+
+RESPONSIBLE COMPONENTS / REMEDIATION (builder-facing):
+  CC1  app.agent_coordination.service.create_work_assignment + migration 0046: add a partial
+       unique index on (owner_id, canonical_work_key) WHERE status NOT IN (terminal) AND
+       parallel_exploration_group_id IS NULL; keep the app check as defense-in-depth.
+  CC2  app.agent_coordination.service.transition_status: guard the UPDATE on the expected current
+       status (optimistic concurrency / status-conditioned WHERE), or SELECT ... FOR UPDATE the
+       assignment row before transitioning, so exactly one terminal transition wins.
+  CC3  app.agent_coordination.persist.persist_owner_ledger: version the snapshot (or move
+       obligations/handoffs to per-row storage with their own constraints) and reject a write
+       whose base version is stale.
+  CC4  provider/event dedup: back _seen_event_ids with a shared, transactional unique key (a
+       unique index on the provider event id / stable_event_id), not per-process memory.
