@@ -1,0 +1,18 @@
+target: examiner/wtcert-460e8ad @ 460e8ad8cbd40b7fb0d62702f28c14412688e298
+suite:  probes/fc_recallauth_v1 (DB-backed via target tests.conftest; loopback-only egress guard)
+run:    probes/fc_recallauth_v1/run.sh ../wtcert-460e8ad
+note:   RECALL KEPT INACTIVE — only the authority substrate (owner key + grant) is built, via
+        the product's own privileged services; no ingestion/retrieval/snapshot/activation.
+
+test_fc_recallauth.py::test_RC1_runtime_cannot_mint_grant PASSED
+test_fc_recallauth.py::test_RC2_runtime_cannot_create_or_rotate_owner_key PASSED
+test_fc_recallauth.py::test_RC3_grant_authority_guc_alone_is_insufficient PASSED
+test_fc_recallauth.py::test_RC4_authority_cannot_mint_cross_owner PASSED
+test_fc_recallauth.py::test_RC5_grant_is_revoke_only_and_bindings_immutable PASSED
+test_fc_recallauth.py::test_RC6_grant_and_key_not_deletable_outside_erasure PASSED
+test_fc_recallauth.py::test_RC7_protected_data_is_owner_isolated PASSED
+test_fc_recallauth.py::test_RC8_runtime_cannot_mutate_owner_key PASSED
+============================== 8 passed in 7.12s ===============================
+
+target worktree unchanged (run.sh guard compares git status --porcelain before/after; RC=99 on any change)
+HEAD after run: 460e8ad8cbd40b7fb0d62702f28c14412688e298  porcelain: (empty)
