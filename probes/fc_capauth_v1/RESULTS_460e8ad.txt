@@ -1,0 +1,19 @@
+target: examiner/wtcert-460e8ad @ 460e8ad8cbd40b7fb0d62702f28c14412688e298
+suite:  probes/fc_capauth_v1 (DB-backed via target tests.conftest; loopback-only egress guard)
+run:    probes/fc_capauth_v1/run.sh ../wtcert-460e8ad
+note:   exercises migration 0094 (founder authority & capability core) + 0095 runtime grants.
+
+test_fc_capauth.py::test_FC1_non_founder_cannot_create_proposal PASSED
+test_fc_capauth.py::test_FC2_runtime_cannot_mint_grant_or_policy PASSED
+test_fc_capauth.py::test_FC3_audit_receipts_immutable PASSED
+test_fc_capauth.py::test_FC4_step_up_one_way_consumption PASSED
+test_fc_capauth.py::test_FC5_grant_one_terminal_transition PASSED
+test_fc_capauth.py::test_FC6_policy_single_active_and_immutable PASSED
+test_fc_capauth.py::test_FC7_proposal_one_terminal_transition PASSED
+test_fc_capauth.py::test_FC8_owner_isolation PASSED
+test_fc_capauth.py::test_FC9_concurrent_grant_terminal_transition PASSED
+test_fc_capauth.py::test_FC10_duplicate_grant_idempotency_key_rejected PASSED
+============================== 10 passed in 7.06s ==============================
+
+target worktree unchanged (run.sh guard compares git status --porcelain before/after; RC=99 on any change)
+HEAD after run: 460e8ad8cbd40b7fb0d62702f28c14412688e298  porcelain: (empty)
