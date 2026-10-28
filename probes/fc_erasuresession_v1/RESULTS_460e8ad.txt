@@ -1,0 +1,103 @@
+target: examiner/wtcert-460e8ad @ 460e8ad8cbd40b7fb0d62702f28c14412688e298
+suite:  probes/fc_erasuresession_v1 (DB-backed via target tests.conftest; loopback-only egress guard)
+run:    probes/fc_erasuresession_v1/run.sh ../wtcert-460e8ad   (deterministic; run 3x, 7 passed each)
+
+test_fc_erasuresession.py::test_ES1_same_second_reset_leaves_session_current_true PASSED
+test_fc_erasuresession.py::test_ES2_condition_is_wallclock_independent PASSED
+test_fc_erasuresession.py::test_ES3_revoked_session_authorizes_real_protected_data_delete PASSED
+test_fc_erasuresession.py::test_ES4_jti_blocklist_closes_but_bulk_revoke_does_not PASSED
+test_fc_erasuresession.py::test_ES5_in_flight_operation_continues_unbounded PASSED
+test_fc_erasuresession.py::test_ES6_survives_fresh_db_session PASSED
+test_fc_erasuresession.py::test_ES7_remediation_revoked_at_is_the_fix_point PASSED
+============================== 7 passed in ~15-20s ===============================
+
+target worktree unchanged (run.sh guard compares git status --porcelain before/after; RC=99 on change)
+HEAD after run: 460e8ad8cbd40b7fb0d62702f28c14412688e298   porcelain: (empty)
+
+====================================================================================
+CONFIRMED DEFECT (reclassification of the prior fc_crossauth LOW/informational observation)
+====================================================================================
+
+WHAT:  An explicitly REVOKED Founder session can still satisfy account-erasure authority and
+       drive an ACTUAL protected-data deletion, for the full life of the reauth receipt when a
+       new operation is begun, and UNBOUNDED once an operation is already in flight.
+
+RESPONSIBLE COMPONENT:
+       account_erasure_receipt_session_current(p_owner_id, p_access_jti)
+       backend/alembic/versions/0086_account_erasure_reauth_binding.py  (authoritative body;
+       not redefined by 0088/0095/0097 — they only call it). It is the session-binding gate for
+       account_erasure_begin_operation / _set_phase / _complete_operation and for
+       personal_recall_erasure_current (the predicate every erasure-scoped grant delete consults).
+
+ROOT CAUSE (two interacting facts):
+  1. The helper decides "session still current" with:
+         AND rt.created_at > u.sessions_valid_after          -- two STORED timestamps
+     and it NEVER inspects refresh_tokens.revoked_at. The comparison is a pure function of
+     stored values; it does not change as the wall clock advances (ES2 — proven with rows dated
+     2020). The earlier claim that the window "closes the next second" was FALSE.
+  2. Every real revocation primitive sets sessions_valid_after to the CURRENT SECOND truncated
+     DOWN (to match the integer-second JWT `iat` check `iat <= sessions_valid_after`), and sets
+     refresh_tokens.revoked_at on the revoked session:
+         * reset_founder_password_with_token  (0095)  sessions_valid_after = date_trunc('second', clock_timestamp())
+         * revoke_current_founder_sessions     (0095)  same
+         * revoke_all_sessions_for_user        (app/token_revocation.py)  now = utcnow_seconds()
+     If the revoked session's refresh row was created at any sub-second offset within that same
+     second (created_at = S.xxx, sessions_valid_after = S.000), then created_at > sessions_valid_after
+     stays TRUE after the revoke, and — revoked_at being ignored — the just-revoked session is
+     still treated as a current session.
+
+WHY `iat` IS SAFE BUT THIS IS NOT: the access-token check in app/deps.py compares integer
+       seconds with `<=` (iat <= sessions_valid_after) and fails closed. The erasure helper
+       compares a MICROSECOND created_at against the same second-truncated value with strict `>`,
+       which is exactly the sub-second same-second window.
+
+EVIDENCE (what each test proves on the exact SHA, using the REAL production functions):
+  ES1  the REAL reset_founder_password_with_token revokes the session (revoked_at set,
+       sessions_valid_after bumped), yet with a same-second created_at the helper returns TRUE.
+  ES2  wall-clock independence: TRUE persists at +1s/+1min/years; the different-second (ordinary)
+       revoke is correctly FALSE — the defect is strictly the sub-second same-second case.
+  ES3  END TO END: under the revoked session a NEW erasure operation begins and a REAL
+       personal_recall_grants row is DELETED and committed (protected data destroyed).
+  ES4  mechanism matrix: the access-jti blocklist (single logout / family-reuse revocation,
+       app.token_revocation.revoke_access_token) DOES close the gate; the sessions_valid_after
+       bump used by reset / logout-all / revoke-sessions does NOT, in the same-second case.
+  ES5  an already-STARTED operation continues under the revoked session even after the consumed
+       reauth receipt is EXPIRED — the post-begin checks consult only session-currency +
+       consumed_at, never the receipt lifetime. The exposure is unbounded for an in-flight op.
+  ES6  survives a fresh DB session / process restart (the discrepancy is in committed rows).
+  ES7  remediation is deterministic: revoked_at IS NOT NULL after every revocation, and the
+       helper's EXISTS body PLUS `AND rt.revoked_at IS NULL` returns FALSE on the same rows.
+
+EXPLOITABILITY / SEVERITY: reclassified from LOW/informational to MEDIUM (confirmed, real
+       production paths, destructive capability). Preconditions bound attacker-driven abuse: an
+       already-minted unconsumed ACCOUNT_ERASURE reauth receipt bound to a compromised Founder
+       session, and the revoked session's refresh-token created_at falling in the same wall-clock
+       second the revocation truncates to (the attacker does not control reset timing). The
+       security-relevant failure DIRECTION is the concern: the system's own revocation primitives
+       (password reset / logout-all / revoke-sessions), used specifically to terminate a
+       compromised session, do NOT reliably cut off a destructive erasure — and an in-flight
+       erasure is not cut off at all. Not attacker-reliable, but a real correctness/defense-in-depth
+       defect in a destructive authority boundary, not a timing nit.
+
+NARROW REMEDIATION CONTRACT (for the development agent — examiner does NOT modify the product):
+  File:    backend/alembic/versions/0086_account_erasure_reauth_binding.py
+  Function: account_erasure_receipt_session_current (CREATE OR REPLACE)
+  Change:  add `AND rt.revoked_at IS NULL` to the EXISTS predicate (minimal, closes it for every
+           revocation path because each sets revoked_at). Optionally ALSO make the freshness
+           comparison match the fail-closed iat semantics, e.g.
+             AND date_trunc('second', rt.created_at) > u.sessions_valid_after
+           (or `rt.created_at >= u.sessions_valid_after + interval '1 second'`) so a session is
+           not considered current within the same truncated second it was invalidated in.
+  Scope:   a new forward migration that CREATE OR REPLACEs the function only; no table/privilege
+           change. Must NOT widen any other erasure/authority behavior (keep it a one-predicate fix).
+  Tests to add on the product side (regression gate, see fc_erasuresession ES1/ES3/ES5/ES7):
+    * a session revoked by each real primitive in the same second fails session-binding;
+    * no new erasure operation can begin, and no in-flight operation can delete, under a revoked
+      session;
+    * the ordinary (different-second) revoke still fails-closed (no behavior regression);
+    * a genuinely live session still passes (no false lockout of legitimate erasure).
+
+DISCIPLINE: read-only examiner; RECALL INACTIVE (the deleted row is a Recall GRANT minted via the
+       product's own privileged service purely as the erasure target — nothing ingested/retrieved);
+       loopback only; no paid calls; no production branch modified; candidate detached at the exact
+       SHA and left unchanged. first_cycle_go=false.
