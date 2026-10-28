@@ -1,0 +1,18 @@
+target: examiner/wtcert-460e8ad @ 460e8ad8cbd40b7fb0d62702f28c14412688e298
+suite:  probes/fc_spendauth_v1 (DB-backed via target tests.conftest; loopback-only egress guard)
+run:    probes/fc_spendauth_v1/run.sh ../wtcert-460e8ad
+
+test_fc_spendauth.py::test_SP1_ceiling_is_a_db_backstop PASSED
+test_fc_spendauth.py::test_SP2_ceilings_are_immutable PASSED
+test_fc_spendauth.py::test_SP3_committed_counters_are_monotonic PASSED
+test_fc_spendauth.py::test_SP4_runtime_cannot_release_only_audited_path_can PASSED
+test_fc_spendauth.py::test_SP5_stop_revoke_cannot_be_resurrected_or_reused PASSED
+test_fc_spendauth.py::test_SP6_spend_authority_and_usage_ledger_are_append_only PASSED
+test_fc_spendauth.py::test_SP7_forged_owner_context_cannot_cross_owners PASSED
+test_fc_spendauth.py::test_SP8_concurrent_reservations_cannot_exceed_ceiling PASSED
+test_fc_spendauth.py::test_SP9_settle_is_atomic_under_rollback PASSED
+test_fc_spendauth.py::test_SP10_reserve_settle_replay_is_idempotent_and_fails_closed PASSED
+============================== 10 passed in 7.68s ==============================
+
+target worktree unchanged (run.sh guard compares git status --porcelain before/after; RC=99 on any change)
+HEAD after run: 460e8ad8cbd40b7fb0d62702f28c14412688e298  porcelain: (empty)
