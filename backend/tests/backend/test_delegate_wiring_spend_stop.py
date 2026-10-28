@@ -21,9 +21,11 @@ from app.mainai_execution.planner import create_goal
 from app.mainai_operational_handover import evaluate_absence_tick, founder_catchup_report
 from app.models.provider_spend import ProviderSpendUsageEvent
 from app.models.user import User
+from app.models.workforce import WorkforceAssignment, WorkforceDelegationRequest
 from app.provider_spend import ProviderSpendError, authorize_provider_spend, reserve_provider_spend_call
 from app.request_context import current_user_id as current_user_id_var
 from app.workforce.kill_switch import activate_kill_switch
+from app.workforce.registry import register_workforce_agent
 
 SECRET = "fixture-webhook-secret"
 AGENT = "bc_cycle_agent"
@@ -47,6 +49,35 @@ def _sign(payload: dict) -> tuple[bytes, str]:
     return raw, "sha256=" + hmac.new(SECRET.encode(), raw, hashlib.sha256).hexdigest()
 
 
+def _cycle_profiles(db, owner_id, *, builder_provider: str = "cursor"):
+    suffix = uuid.uuid4().hex[:8]
+    builder = register_workforce_agent(
+        db,
+        owner_id=owner_id,
+        agent_key=f"workforce-builder-{suffix}",
+        name="Cycle builder",
+        role="builder",
+        agent_type="CODING",
+        provider_type=builder_provider,
+        trust_zone="CONTROLLED_INTERNAL",
+        capability_tags=["coding"],
+        status="active",
+    )
+    verifier = register_workforce_agent(
+        db,
+        owner_id=owner_id,
+        agent_key=f"workforce-verifier-{suffix}",
+        name="Cycle verifier",
+        role="verifier",
+        agent_type="REVIEW",
+        provider_type="none",
+        trust_zone="LOCAL_INTERNAL",
+        capability_tags=["verification"],
+        status="active",
+    )
+    return builder, verifier
+
+
 def test_cycle_refuses_when_authority_unestablished():
     owner = str(uuid.uuid4())
     result = run_authorized_operating_cycle(
@@ -63,6 +94,7 @@ def test_cycle_refuses_when_authority_unestablished():
 def test_cycle_wires_ingest_without_independent_certification(db_session, make_verified_user):
     user, _password = make_verified_user()
     _set_rls(db_session, user.id)
+    builder, verifier = _cycle_profiles(db_session, user.id)
     raw, signature = _sign(
         {
             "event": "statusChange",
@@ -71,9 +103,10 @@ def test_cycle_wires_ingest_without_independent_certification(db_session, make_v
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         }
     )
+    service = DurableCoordinationService()
     result = run_authorized_operating_cycle(
         db_session,
-        DurableCoordinationService(),
+        service,
         owner_id=str(user.id),
         goal_text="compose provider path",
         provider_secret=SECRET,
@@ -81,6 +114,7 @@ def test_cycle_wires_ingest_without_independent_certification(db_session, make_v
         provider_signature=signature,
         provider_user_agent=WEBHOOK_USER_AGENT,
         candidate_sha="b" * 40,
+        verifier_profile_id=verifier.id,
     )
     assert result["outcome"] == "cycled"
     assert result["ingest"]["transition"] == "completed"
@@ -90,6 +124,19 @@ def test_cycle_wires_ingest_without_independent_certification(db_session, make_v
     assert result["founder"]["admitted"] is True
     assert result["interactive"]["background_cannot_monopolize_interactive"] is True
     assert result["next_eligible"] is not None
+    assert result["selector"] == {"agent": "cursor", "note": "delegation_broker"}
+    assert result["workforce"]["agent_key"] == builder.agent_key
+    assert result["workforce"]["provider_identity"] == "cursor"
+    workforce_assignment = db_session.get(
+        WorkforceAssignment, uuid.UUID(result["workforce"]["assignment_id"])
+    )
+    assert workforce_assignment is not None
+    assert workforce_assignment.profile_id == builder.id
+    assert workforce_assignment.verifier_profile_id == verifier.id
+    obligation = service.get(result["assignment_id"])
+    assert obligation is not None
+    assert obligation["agent_identity"] == "cursor"
+    assert obligation["workforce_assignment_id"] == str(workforce_assignment.id)
 
 
 def test_cycle_stop_blocks_and_absence_pauses_all(db_session, make_verified_user):
@@ -131,6 +178,7 @@ def test_absence_silence_is_not_permission_and_catchup_is_real():
 def test_cycle_absence_and_handover_survive_restart(db_session, make_verified_user):
     user, _password = make_verified_user()
     _set_rls(db_session, user.id)
+    _builder, verifier = _cycle_profiles(db_session, user.id)
     service = DurableCoordinationService()
     result = run_authorized_operating_cycle(
         db_session,
@@ -138,6 +186,7 @@ def test_cycle_absence_and_handover_survive_restart(db_session, make_verified_us
         owner_id=str(user.id),
         goal_text="persist cycle",
         absence_enabled=True,
+        verifier_profile_id=verifier.id,
     )
     assert result["outcome"] == "cycled"
     persist_owner_ledger(db_session, owner_id=user.id, service=service, actor="cycle")
@@ -149,6 +198,112 @@ def test_cycle_absence_and_handover_survive_restart(db_session, make_verified_us
     handover = restored.founder_view()["operational_handover"]
     assert handover["silence_is_not_approval"] is True
     assert handover.get("absence")
+
+
+def test_cycle_fails_closed_without_a_delegation_broker_candidate(db_session, make_verified_user):
+    user, _password = make_verified_user()
+    _set_rls(db_session, user.id)
+    service = DurableCoordinationService()
+    result = run_authorized_operating_cycle(
+        db_session,
+        service,
+        owner_id=str(user.id),
+        goal_text="must not use a provider-name fallback",
+        verifier_profile_id=uuid.uuid4(),
+    )
+    assert result["outcome"] == "delegation_rejected"
+    assert service.founder_view()["obligations"] == []
+    assert list(
+        db_session.execute(
+            select(WorkforceDelegationRequest).where(WorkforceDelegationRequest.owner_id == user.id)
+        ).scalars()
+    ) == []
+
+
+def test_cycle_rejects_builder_as_its_own_verifier(db_session, make_verified_user):
+    user, _password = make_verified_user()
+    _set_rls(db_session, user.id)
+    builder, _verifier = _cycle_profiles(db_session, user.id)
+    service = DurableCoordinationService()
+    result = run_authorized_operating_cycle(
+        db_session,
+        service,
+        owner_id=str(user.id),
+        goal_text="self verification must fail",
+        verifier_profile_id=builder.id,
+    )
+    assert result["outcome"] == "delegation_rejected"
+    assert "BUILDER_CANNOT_SELF_VERIFY" in result["reason"]
+    assert service.founder_view()["obligations"] == []
+
+
+def test_cycle_provider_namespace_is_not_inferred_from_workforce_agent_key(
+    db_session, make_verified_user
+):
+    user, _password = make_verified_user()
+    _set_rls(db_session, user.id)
+    _builder, verifier = _cycle_profiles(db_session, user.id, builder_provider="claude")
+    service = DurableCoordinationService()
+    result = run_authorized_operating_cycle(
+        db_session,
+        service,
+        owner_id=str(user.id),
+        goal_text="cursor ingress cannot bind a claude workforce profile",
+        verifier_profile_id=verifier.id,
+    )
+    assert result["outcome"] == "delegation_rejected"
+    assert "no selectable workforce agent" in result["reason"]
+    assert service.founder_view()["obligations"] == []
+
+
+def test_cycle_retry_reuses_one_broker_assignment_and_rechecks_revocation(
+    db_session, make_verified_user
+):
+    user, _password = make_verified_user()
+    _set_rls(db_session, user.id)
+    _builder, verifier = _cycle_profiles(db_session, user.id)
+    service = DurableCoordinationService()
+    first = run_authorized_operating_cycle(
+        db_session,
+        service,
+        owner_id=str(user.id),
+        goal_text="one canonical broker assignment",
+        verifier_profile_id=verifier.id,
+    )
+    second = run_authorized_operating_cycle(
+        db_session,
+        service,
+        owner_id=str(user.id),
+        goal_text="one canonical broker assignment",
+        verifier_profile_id=verifier.id,
+    )
+    assert first["outcome"] == second["outcome"] == "cycled"
+    assert first["assignment_id"] == second["assignment_id"]
+    assert first["workforce"]["assignment_id"] == second["workforce"]["assignment_id"]
+    requests = list(
+        db_session.execute(
+            select(WorkforceDelegationRequest).where(WorkforceDelegationRequest.owner_id == user.id)
+        ).scalars()
+    )
+    assignments = list(
+        db_session.execute(
+            select(WorkforceAssignment).where(WorkforceAssignment.owner_id == user.id)
+        ).scalars()
+    )
+    assert len(requests) == len(assignments) == 1
+
+    assignments[0].status = "revoked"
+    assignments[0].revoked_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    db_session.flush()
+    rejected = run_authorized_operating_cycle(
+        db_session,
+        service,
+        owner_id=str(user.id),
+        goal_text="one canonical broker assignment",
+        verifier_profile_id=verifier.id,
+    )
+    assert rejected["outcome"] == "delegation_authority_invalid"
+    assert "revoked" in rejected["reason"]
 
 
 def _owner_goal_envelope(db):

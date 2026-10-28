@@ -111,6 +111,7 @@ def resolve_delegation(
     prefer_local_only: bool = False,
     ttl_hours: int = 24,
     verifier_profile_id: uuid.UUID | None = None,
+    required_provider_type: str | None = None,
 ) -> WorkforceAssignment:
     """Broker: select agent → package context → mint task-scoped assignment.
 
@@ -140,6 +141,7 @@ def resolve_delegation(
         data_sensitivity=request.data_sensitivity,
         prefer_local_only=prefer_local,
         cost_ceiling_usd=request.cost_ceiling_usd,
+        required_provider_type=required_provider_type,
     )
     profile = get_workforce_agent(db, owner_id=owner_id, agent_id=best.profile_id)
     assert_agent_selectable(profile)
