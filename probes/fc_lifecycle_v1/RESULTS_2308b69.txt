@@ -1,0 +1,21 @@
+# fc_lifecycle_v1 — Production Agent Lifecycle Integration Gate
+# target: wtcert-2308b69 @ 2308b697c6ffd4e792ffee5acccc4f4659d86389 (#314 head; composed #312->#314 provider lineage)
+# 2026-10-28T09:32:44Z
+# Evidence class: AUTHENTICATED-LOCAL (locally-signed HMAC events; NO genuine external provider call)
+
+PASSED test_fc_lifecycle_p1.py::test_PL1_identity_binding_and_forgery
+PASSED test_fc_lifecycle_p1.py::test_PL2_replay_and_reorder_rejected
+PASSED test_fc_lifecycle_p1.py::test_PL3_stop_during_execution_blocks_completion
+PASSED test_fc_lifecycle_p1.py::test_PL4_restart_no_duplicate_completion
+PASSED test_fc_lifecycle_p1.py::test_PL5_finished_is_not_certification
+PASSED test_fc_lifecycle_p1.py::test_PL6_continuation_requires_independent_attestation
+PASSED test_fc_lifecycle_p1.py::test_PL7_blocked_agent_does_not_block_unrelated_work
+PASSED test_fc_lifecycle_p1.py::test_PL8_founder_view_reflects_persisted_ledger
+PASSED test_fc_lifecycle_p2.py::test_RT1_worker_loop_starts_polls_and_shuts_down
+PASSED test_fc_lifecycle_p2.py::test_RT2_worker_loop_survives_run_once_exception
+PASSED test_fc_lifecycle_p2.py::test_RT3evidence_zero_production_drivers_today
+PASSED test_fc_lifecycle_p2.py::test_RT4_scheduler_runs_only_token_cleanup
+PASSED test_fc_lifecycle_p2.py::test_RT5_product_reports_unattended_cycle_not_ready
+XFAIL test_fc_lifecycle_p2.py::test_RT3_operating_cycle_has_a_production_driver - RT3/RUNTIME-BOUNDARY: run_authorized_operating_cycle has NO production caller/driver — no scheduler job and no worker handler invokes it, so the autonomous operating cycle only advances when something manually calls the tick. This is a manual tick, not autonomous production operation.
+13 passed, 1 xfailed in 11.21s
+target worktree unchanged
