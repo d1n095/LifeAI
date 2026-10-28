@@ -1,0 +1,55 @@
+target: examiner/wtcert-460e8ad @ 460e8ad8cbd40b7fb0d62702f28c14412688e298
+suite:  probes/fc_sessionreg_v1 (DB-backed via target tests.conftest; loopback-only egress guard)
+run:    probes/fc_sessionreg_v1/run.sh ../wtcert-460e8ad   (deterministic; run 3x)
+
+RESULT: 3 passed, 3 xfailed    (expected on the UNFIXED candidate 460e8ad8)
+
+test_fc_sessionreg.py::test_RG1_erasure_rejects_same_second_revoked_session   XFAIL  (P8 defect)
+test_fc_sessionreg.py::test_RG2_erasure_rejects_expired_session               XFAIL  (P8 defect)
+test_fc_sessionreg.py::test_RG3_erasure_rejects_explicitly_revoked_token      XFAIL  (P8 defect)
+test_fc_sessionreg.py::test_RG4_founder_authority_rejects_same_second_revoked_session  PASSED
+test_fc_sessionreg.py::test_RG5_founder_authority_rejects_expired_session      PASSED
+test_fc_sessionreg.py::test_RG6_privileged_effect_refuses_revoked_session      PASSED
+
+target worktree unchanged (run.sh guard compares git status --porcelain before/after; RC=99 on change)
+HEAD after run: 460e8ad8cbd40b7fb0d62702f28c14412688e298   porcelain: (empty)
+
+====================================================================================
+WHAT THIS GATE IS
+====================================================================================
+An independent regression gate that encodes the REQUIRED invariant exposed by Priority 8:
+
+  Every session-gated authority helper must treat a session invalidated by ANY real revocation
+  primitive (revoked_at set / sessions_valid_after bumped / expired) as NOT current, regardless
+  of sub-second truncation, with timestamp semantics consistent with the access-token iat check.
+
+RG1/RG2/RG3 assert that REQUIRED behaviour for account_erasure_receipt_session_current (0086).
+They are pytest.mark.xfail(strict=True) keyed to the confirmed Priority-8 defect:
+
+  * on the current (UNFIXED) build they FAIL and are reported as XFAIL (expected-fail) -> the
+    suite exits green, documenting the defect without a permanently red bar;
+  * the moment the one-line fix lands (add `AND rt.revoked_at IS NULL`, align the freshness
+    comparison), the required assertion starts PASSING -> strict xfail turns the XPASS into a
+    FAILURE -> the loud signal to drop the xfail marker and enforce the gate as a hard pass.
+
+RG4/RG5/RG6 are plain PASS invariant-locks on the CORRECT pattern the codebase already ships,
+so a future change cannot silently regress them:
+
+  * RG4/RG5 -- personal_recall_founder_authority_current (0083) already checks revoked_at +
+    expires_at + created_at>sessions_valid_after and correctly rejects a same-second-reset-revoked
+    session and an expired session. This is the exact pattern the erasure helper must match.
+  * RG6 -- revoke_current_founder_sessions (0095), a privileged session-gated effect, refuses a
+    revoked session ('live canonical Founder session required for session revocation'): the
+    privileged-effect surface's session semantics are already consistent and fail-closed.
+
+SURFACE COVERAGE (the three the assignment named):
+  * Account erasure authority         -> RG1/RG2/RG3 (required; currently xfail = defect).
+  * Founder authority                 -> RG4/RG5 (correct reference pattern; pass).
+  * Privileged effect authorization   -> RG6 (session-gated revocation effect; pass). Envelope/
+    spend/push transport effects are STOP-epoch / grant-state gated (they do NOT use the
+    session-timestamp pattern) and their revoked-stays-revoked behaviour is certified by
+    fc_effauth / fc_crossauth; not re-tested here (non-duplication).
+
+DISCIPLINE: read-only examiner; drives the REAL reset / authority helpers via the target's own
+conftest; RECALL INACTIVE; loopback only; no paid calls; no production branch modified; candidate
+detached at the exact SHA and left unchanged. first_cycle_go=false.
