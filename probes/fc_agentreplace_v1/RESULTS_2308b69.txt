@@ -1,0 +1,75 @@
+target: examiner/wtcert-2308b69 @ 2308b697c6ffd4e792ffee5acccc4f4659d86389   (#314 production lineage)
+suite:  probes/fc_agentreplace_v1 (DB-backed via target tests.conftest; loopback-only egress guard)
+run:    probes/fc_agentreplace_v1/run.sh ../wtcert-2308b69   (deterministic; run 3x)
+
+RESULT: 5 passed, 1 xfailed
+
+test_fc_agentreplace.py::test_AR1_recovery_is_vendor_neutral              PASSED
+test_fc_agentreplace.py::test_AR2_recovery_records_provenance            PASSED
+test_fc_agentreplace.py::test_AR3_recovered_retry_is_idempotent          PASSED
+test_fc_agentreplace.py::test_AR4_replacement_authorization_is_rechecked PASSED
+test_fc_agentreplace.py::test_AR5_recovery_cannot_widen_scope            PASSED
+test_fc_agentreplace.py::test_AR6_recovery_leaves_source_orphaned        XFAIL (acceptance requirement)
+
+VERIFIED (via --runxfail): AR6 fails at its intended assertion -- after take_over_lease the source
+assignment is left in status 'running' (not superseded/failed/cancelled).
+
+target worktree unchanged (run.sh guard compares git status --porcelain before/after; RC=99 on change)
+HEAD after run: 2308b697c6ffd4e792ffee5acccc4f4659d86389   porcelain: (empty)
+
+====================================================================================
+WHAT THE RECOVERY / REPLACEMENT MECHANISM IS (read on this SHA)
+====================================================================================
+There is NO assignment-level reassignment/replacement primitive in app.agent_coordination.service.
+The only transfer mechanism is `take_over_lease` (lease-level write authority). Dynamic replacement
+is therefore ASSEMBLED by the orchestrator from three steps: (1) take over the stale lease,
+(2) stand up a successor assignment, (3) terminate the source. Steps 2 and 3 are the caller's
+responsibility; the primitive performs only step 1. This suite tests the safety properties of the
+transfer and records the one acceptance requirement for the missing atomic step. It does NOT
+re-litigate the already-documented #314 selector/broker defects (SELECTOR-ASSIGN-NAMESPACE,
+DELEGATE-BROKER-BYPASS).
+
+FINDINGS (distinct failure modes):
+  AR1  PASS  Recovery is vendor-neutral. A Codex agent takes over a stale lease that a Cursor agent
+             held; the Cursor holder is fenced (renew with the old generation rejected). Satisfies
+             "recovery must remain possible when Cursor or any other provider is unavailable" and
+             "agent/provider identity must not be permanently hardcoded to one vendor" AT THE
+             LEASE/RECOVERY LAYER. (Selection-layer vendor hardcoding is the documented #314
+             selector defect, out of scope here.)
+  AR2  PASS  Recovery preserves provenance: the `lease_taken_over` event records old_agent_id ->
+             new_agent_id and old_generation(1) -> new_generation(2). The transfer is auditable.
+  AR3  PASS  Recovery does not duplicate work within an instance: a recovered retry for the same
+             canonical work (even by a different vendor) is idempotent -- "old completion cannot
+             mint a second assignment" (one obligation). NOTE: cross-INSTANCE duplication IS broken
+             -- see P10 CC1 (assignment double-insert) and CC4 (per-process provider dedup); not
+             repeated here.
+  AR4  PASS  Delegation authorization is re-checked for a replacement (fail-closed):
+             evaluate_assignment_readiness returns AGENT_UNAVAILABLE for an unavailable replacement
+             and AUTHORITY_CHANGED when the goal's authorized instruction no longer matches the
+             authority the assignment was created under. A replacement cannot run on stale
+             authority; both checks short-circuit before LEASE_REQUIRED.
+  AR5  PASS  Recovery cannot widen write scope: take_over_lease keeps the lease's original
+             allowed_paths, and a re-acquire that tries to widen is rejected (ScopeExpansionError).
+  AR6  XFAIL ACCEPTANCE REQUIREMENT -- orphan not reaped. take_over_lease transfers write authority
+             but does NOT terminate the recovered-away source assignment, and `running ->
+             superseded` is not an allowed transition, so recovery alone leaves the source in a
+             live `running` state (an orphan). A correct dynamic replacement must atomically
+             terminate (supersede/fail) the source when its lease is taken over.
+
+BUILDER-FACING ACCEPTANCE REQUIREMENTS (Priority 11):
+  R1  Provide an atomic assignment-level replacement operation that, in one transaction:
+        (a) fences the source (take over its lease, generation bump),
+        (b) terminates the source assignment (a legal running -> superseded/failed transition),
+        (c) binds the successor assignment, which MUST carry the same authorized authority
+            (authorized_instruction_sha256) and a scope that is a subset of the source's.
+  R2  The replacement path must re-run evaluate_assignment_readiness for the successor (AR4 shows
+      the gates exist) -- recovery must never skip the AUTHORITY_CHANGED / AGENT_UNAVAILABLE gate.
+  R3  Recovery must stay vendor-neutral (AR1): never hardcode the successor to one provider; a
+      capable authorized agent of any vendor must be eligible. (Depends on fixing the documented
+      #314 selector namespace defect so a real workforce agent_key can actually be assigned.)
+  R4  De-duplication of external effects on recovery must be transactional and cross-instance
+      (P10 CC1/CC4), not the current per-process canonical/seen-event memory.
+
+DISCIPLINE: read-only examiner; drove the real app.agent_coordination recovery primitives via the
+target's own conftest; no paid calls; loopback only; no production branch modified; candidate
+detached at the exact SHA, unchanged. first_cycle_go=false.
