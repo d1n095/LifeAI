@@ -1,0 +1,18 @@
+target: examiner/wtcert-460e8ad @ 460e8ad8cbd40b7fb0d62702f28c14412688e298
+suite:  probes/fc_effauth_v1 (DB-backed via target tests.conftest; loopback-only egress guard)
+run:    probes/fc_effauth_v1/run.sh ../wtcert-460e8ad
+
+test_fc_effauth.py::test_EA1_runtime_role_has_no_envelope_update_at_all PASSED
+test_fc_effauth.py::test_EA2_body_refuses_runtime_login_even_with_execute_granted PASSED
+test_fc_effauth.py::test_EA3_incomplete_or_malformed_binding_fails_closed PASSED
+test_fc_effauth.py::test_EA4_global_epoch_staleness_is_fenced PASSED
+test_fc_effauth.py::test_EA5_transition_and_audit_are_atomic_under_rollback PASSED
+test_fc_effauth.py::test_EA6_concurrent_stop_closes_toctou_window PASSED
+test_fc_effauth.py::test_EA7_runtime_privileges_compatible_with_prior_controls PASSED
+============================== 7 passed in 8.87s ===============================
+
+target worktree unchanged (run.sh guard compares git status --porcelain before/after; RC=99 on any change)
+
+--- independent reproduction of the builder's own new 0099 proof (archive evidence check) ---
+tests/backend/test_effect_specific_database_authority.py ............ 4 passed in 6.31s
+(independently re-run on the exact candidate SHA; target worktree unchanged)
