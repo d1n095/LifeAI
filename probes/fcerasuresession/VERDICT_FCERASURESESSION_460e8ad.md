@@ -82,6 +82,19 @@ down. AE9's fixture over-revoked and so could not surface the sub-second same-se
   a revoked session; the different-second revoke still fails closed; a genuinely live session
   still passes (no false lockout). ES1/ES3/ES5/ES7 are the executable templates.
 
+## Spread analysis — the defect is a single, localizable instance
+A repo-wide search for the vulnerable pattern (a refresh-token freshness comparison
+`rt.created_at > u.sessions_valid_after` **without** a `revoked_at` / `expires_at` guard) finds it
+in exactly **one** function: `account_erasure_receipt_session_current` (0086). The two other
+sites that compare `created_at > sessions_valid_after` — `personal_recall_founder_authority_current`
+(0083 / re-stated 0084:36-38) and the live-session precondition of `revoke_current_founder_sessions`
+(0095:192-193) — both ALSO require `rt.revoked_at IS NULL AND rt.expires_at > now()`, i.e. the
+correct pattern. The live `personal_recall_erasure_current` (0086:260) delegates its session
+check to the one defective helper, so it inherits the flaw rather than adding a second instance.
+Conclusion: the one-line remediation on `account_erasure_receipt_session_current` is **complete**
+— no sibling fix is required — and the regression gate `fc_sessionreg_v1` (Priority 9) already
+locks the two correct helpers against regressing.
+
 ## Scope / discipline
 Read-only examiner; drove the real reset / revoke-sessions production functions and the real
 erasure state machine via the target's own conftest. RECALL STAYS INACTIVE — the deleted row is
