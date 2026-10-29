@@ -1,0 +1,7 @@
+# Build artifacts and generated code — never committed.
+.app-build/
+node_modules/
+src-tauri/target/
+src-tauri/gen/
+# Generated icon rasters (regenerated with `cargo tauri icon`); keep the source SVG only.
+src-tauri/icons/

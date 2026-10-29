@@ -1,0 +1,15 @@
+{
+  "name": "mainai-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "MainAI cross-platform shell (Tauri 2) — macOS + Android. Reuses ../frontend and ../backend.",
+  "scripts": {
+    "export:frontend": "bash scripts/prepare-frontend-export.sh",
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

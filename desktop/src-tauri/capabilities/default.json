@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimal MainAI capability set. Grants only: core window/app defaults, opening a file picker for uploads, native notifications, and OS-info. No filesystem, shell, arbitrary HTTP, clipboard, or process permissions are granted — the webview cannot reach the host beyond this list, and all network egress is constrained to the mainaiapi: proxy scheme by the CSP.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "notification:default",
+    "os:default"
+  ]
+}

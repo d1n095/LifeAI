@@ -6,6 +6,25 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## MainAI Cross-Platform App — macOS + Android (Tauri 2) (2026-10-29)
+
+Grundarens produktkrav: MainAI som installerbar app för macOS (Apple Silicon) och Android
+(Pixel), **utöver** den befintliga webbappen. Implementeras som ett **separat, additivt
+app-skal** (ny toppkatalog `desktop/`) som återanvänder `frontend/`:s UI (statisk export)
+och `backend/`:s API:er + Security Kernel oförändrat. Ingen duplicerad backend, inget eget
+minnes-/auth-system. Webb-deployen rörs inte.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `claude/mainai-crossplatform-app-shell` | — | **Aktiv (ingen PR ännu)** | Tauri 2-skal. Statisk export av `frontend/` som buntade assets; `/api/*`-proxy återskapad i Rust (`src-tauri/src/proxy.rs`) så HttpOnly-sessionscookies bor i en Rust cookie-jar/OS-skyddad lagring och aldrig i webview/JS. Minimala Tauri-capabilities + strikt CSP (ingen oinskränkt WebView-bridge). macOS `.app`/`.dmg` + Android `.apk` via samma kodbas. Grenad från `64c07d5b0` (#236-tip). |
+
+**Beroenden:** inga mot andra aktiva brancher — ändrar bara ny `desktop/`-katalog (+ denna
+registerrad). Rör inte `backend/` eller `frontend/` (web-deploy bevaras). Isolerad lane,
+oberoende merge-bar. Separat auktoriserad granskare krävs (författaren självcertifierar ej).
+
+**Verktygskedja (denna maskin 2026-10-29):** node ✓, Rust/Android-SDK/NDK/JDK ej
+förinstallerade — DMG/APK rapporteras som byggda först när de faktiskt byggts och körts.
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en
