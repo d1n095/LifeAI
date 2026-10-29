@@ -83,6 +83,10 @@ class Settings(BaseSettings):
     webauthn_rp_id: str = "localhost"
     webauthn_rp_name: str = "MainAI"
     webauthn_rp_origin: str = "http://localhost:3000"
+    # Require user VERIFICATION (biometric / PIN), not just user presence. True for the real
+    # deployment (Touch ID / Android fingerprint). Can be relaxed only for automated tests that
+    # drive a software authenticator unable to assert UV.
+    webauthn_require_user_verification: bool = True
 
     # SMTP — if smtp_host is unset, app/email.py falls back to a local dev-only outbox
     # (never the application log — see app/email.py for why) instead of sending it.
