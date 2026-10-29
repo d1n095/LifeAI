@@ -67,6 +67,23 @@ class Settings(BaseSettings):
     # accidentally break email links by editing the CORS config, or vice versa.
     public_app_url: str = "http://localhost:3000"
 
+    # WebAuthn / passkeys (see docs/PASSKEYS_WEBAUTHN_DESIGN.md).
+    # These MUST stay configurable and MUST NOT be prematurely bound to an unapproved domain:
+    #   * webauthn_rp_id     — the Relying Party ID = the registrable domain WITHOUT scheme/port
+    #                          (e.g. "app.example.com"). A credential is cryptographically bound
+    #                          to this value, so changing it later invalidates existing passkeys.
+    #                          Defaults to "localhost" for local dev only.
+    #   * webauthn_rp_name   — human-facing name shown in the OS passkey UI.
+    #   * webauthn_rp_origin — the full expected origin (scheme+host+port) the assertion must
+    #                          have come from (e.g. "https://app.example.com"). Comma-separated
+    #                          to allow more than one (e.g. a localhost dev origin alongside the
+    #                          real one). Verified server-side on every assertion.
+    # Leave as the localhost defaults until the Founder-approved HTTPS domain is decided; set
+    # them (env: WEBAUTHN_RP_ID / WEBAUTHN_RP_NAME / WEBAUTHN_RP_ORIGIN) at that point only.
+    webauthn_rp_id: str = "localhost"
+    webauthn_rp_name: str = "MainAI"
+    webauthn_rp_origin: str = "http://localhost:3000"
+
     # SMTP — if smtp_host is unset, app/email.py falls back to a local dev-only outbox
     # (never the application log — see app/email.py for why) instead of sending it.
     smtp_host: str | None = None

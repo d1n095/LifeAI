@@ -6,6 +6,24 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## MainAI passkeys / WebAuthn (2026-10-29)
+
+Grundarens P1: säker passkey-enrollment, autentisering, hantering och revokering för
+Founder-kontot (Pixel fingeravtryck / Android passkeys, Mac Touch ID). WebAuthn/FIDO2 med
+auktoritativ backend-verifiering (`py_webauthn`). RP ID/origin konfigurerbara, **ej** bundna
+till en ogodkänd domän i förväg. Bevarar befintlig auth/CSRF/sessioner/RLS/recovery.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `claude/mainai-passkeys-webauthn` | — | **Aktiv (grund lagd, ingen PR)** | Grenad `64c07d5b0`. **Denna commit:** konfigurerbara RP-settings i `app/config.py` + fullständig design/schema (`docs/PASSKEYS_WEBAUTHN_DESIGN.md`). **Nästa commits:** migration 0069 (`webauthn_credentials` RLS-ägarscoped + `webauthn_challenges` ej-RLS, single-use) + modeller, router `/api/auth/webauthn/*` (register/authenticate begin+complete, list, delete m. step-up), frontend-UI, round-trip-tester m. mjukvaruautentiserare. |
+
+**Beroenden/kollisionsrisk:** oberoende av PWA- (`claude/mainai-pwa-installable`) och Tauri-
+branchen (`claude/mainai-crossplatform-app-shell`) — olika filer. **Migrationsnummer 0069**:
+basen `64c07d5b0` har migrationer t.o.m. 0068; säkerhetskärne-migrationerna (0086/0095 m.fl.)
+ligger på en senare kandidatlinje, inte här — renumrera 0069 vid behov om en annan branch tar
+numret först (se 0063:s kollisionsnot). End-to-end på enhet kräver den godkända HTTPS-domänen
+(samma gate som Pixel-PWA). Separat granskare krävs; författaren självcertifierar ej.
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en
