@@ -18,3 +18,6 @@ slowapi==0.1.9
 redis==5.2.1
 alembic==1.13.3
 apscheduler==3.10.4
+# WebAuthn / passkeys authoritative verification (app/webauthn_service.py) — see
+# docs/PASSKEYS_WEBAUTHN_DESIGN.md. No hand-rolled crypto.
+webauthn==3.0.1
