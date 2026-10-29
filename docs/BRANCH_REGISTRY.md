@@ -18,6 +18,15 @@ minnes-/auth-system. Webb-deployen rörs inte.
 |---|---|---|---|
 | `claude/mainai-crossplatform-app-shell` | — | **Aktiv (ingen PR ännu)** | Tauri 2-skal. Statisk export av `frontend/` som buntade assets; `/api/*`-proxy återskapad i Rust (`src-tauri/src/proxy.rs`) så HttpOnly-sessionscookies bor i en Rust cookie-jar/OS-skyddad lagring och aldrig i webview/JS. Minimala Tauri-capabilities + strikt CSP (ingen oinskränkt WebView-bridge). macOS `.app`/`.dmg` + Android `.apk` via samma kodbas. Grenad från `64c07d5b0` (#236-tip). |
 
+**Status (2026-10-29):** macOS **verifierat byggt** @ `7de509412` — `MainAI_0.1.0_aarch64.dmg`
+(arm64 Mach-O, id `ai.mainai.client`, Next-SPA inbäddad, appen startar utan fel; endast
+visuell skärmdump ej tagen pga macOS Screen Recording-behörighet). Android: lokal SDK/NDK/JDK-
+installation **medvetet skippad** (disk 92% full, ~16 GB < grundarens 20 GB-golv) → bygget
+flyttat till CI/dedikerad maskin @ `5d5bca9aa` (`.github/workflows/mainai-android-apk.yml` +
+`desktop/scripts/build-android.sh`). APK ej hävdad byggd förrän CI faktiskt producerat+verifierat
+den. En separat auktoriserad granskare krävs. Enda kända lucka i macOS-skalet: `library/[id]`-
+detaljvyn (dynamisk rutt) deferrad från statisk export — följdarbete: query-param/SPA-fallback.
+
 **Beroenden:** inga mot andra aktiva brancher — ändrar bara ny `desktop/`-katalog (+ denna
 registerrad). Rör inte `backend/` eller `frontend/` (web-deploy bevaras). Isolerad lane,
 oberoende merge-bar. Separat auktoriserad granskare krävs (författaren självcertifierar ej).
