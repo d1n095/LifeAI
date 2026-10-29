@@ -21,13 +21,13 @@ def test_declared_5gb_session_resumes_without_claiming_support(tmp_path: Path):
     )
     assert created.manifest.public()["declared_meets_5gb_target"] is True
     assert created.manifest.public()["five_gb_supported"] is False
-    first = created.write_part(b"a" * 1024)
+    first = created.write_part(b"a" * 1024, expected_offset=0)
     assert first["outcome"] == "accepted"
-    second = created.write_part(b"b" * 1024)
+    second = created.write_part(b"b" * 1024, expected_offset=1024)
     assert second["offset"] == 2048
     restored = ResumableUploadSession.load(root)
     assert restored.manifest.offset == 2048
-    third = restored.write_part(b"c" * 512)
+    third = restored.write_part(b"c" * 512, expected_offset=2048)
     assert third["outcome"] == "accepted"
     assert third["offset"] == 2560
     unfinished = restored.finalize()
@@ -47,18 +47,18 @@ def test_crash_resume_finalizes_from_spool_hash(tmp_path: Path):
         chunk_size=4096,
     )
     mid = len(payload) // 2
-    assert session.write_part(payload[:4096])["outcome"] == "accepted"
+    assert session.write_part(payload[:4096], expected_offset=0)["outcome"] == "accepted"
     offset = 4096
     while offset < mid:
         chunk = payload[offset : offset + 4096]
-        session.write_part(chunk)
+        session.write_part(chunk, expected_offset=offset)
         offset += len(chunk)
     crashed_offset = session.manifest.offset
     restored = ResumableUploadSession.load(root)
     assert restored.manifest.offset == crashed_offset
     while restored.manifest.offset < len(payload):
         start = restored.manifest.offset
-        restored.write_part(payload[start : start + 4096])
+        restored.write_part(payload[start : start + 4096], expected_offset=start)
     done = restored.finalize()
     assert done["outcome"] == "stored"
     assert done["sha256"] == hashlib.sha256(payload).hexdigest()
@@ -67,7 +67,7 @@ def test_crash_resume_finalizes_from_spool_hash(tmp_path: Path):
     assert done["understood"] is False
     assert done["five_gb_supported"] is False
     assert restored.peak_part_bytes <= 4096
-    oversized = restored.write_part(b"x")
+    oversized = restored.write_part(b"x", expected_offset=len(payload))
     assert oversized["outcome"] == "rejected"
 
 

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,7 @@ from app.large_file_lane.http_store import (
     ResumableHttpError,
     ResumableHttpStore,
 )
+from app.large_file_lane.session import MANIFEST, SPOOL, ResumableUploadSession
 from app.large_file_lane.stream import TARGET_FILE_BYTES
 from app.limiter import limiter
 from app.models.user import UserRole
@@ -84,14 +87,14 @@ def test_store_resumes_after_new_process_and_finalizes_hash(store: ResumableHttp
     created = store.create(FOUNDER_USER_ID, declared_total_bytes=len(payload), declared_filename="notes.bin")
     session_id = uuid.UUID(created["session_id"])
     first = payload[: HTTP_PART_MAX_BYTES]
-    store.write_part(FOUNDER_USER_ID, session_id, first)
+    store.write_part(FOUNDER_USER_ID, session_id, first, expected_offset=0)
     restarted = ResumableHttpStore(store.root)
     status = restarted.get(FOUNDER_USER_ID, session_id)
     assert status["offset"] == len(first)
     remaining = payload[len(first) :]
     while remaining:
         chunk = remaining[: HTTP_PART_MAX_BYTES]
-        restarted.write_part(FOUNDER_USER_ID, session_id, chunk)
+        restarted.write_part(FOUNDER_USER_ID, session_id, chunk, expected_offset=len(payload) - len(remaining))
         remaining = remaining[len(chunk) :]
     done = restarted.finalize(FOUNDER_USER_ID, session_id)
     assert done["outcome"] == "stored"
@@ -100,10 +103,131 @@ def test_store_resumes_after_new_process_and_finalizes_hash(store: ResumableHttp
     assert done["five_gb_supported"] is False
 
 
+def test_crash_after_spool_write_rolls_back_uncommitted_tail(
+    store: ResumableHttpStore,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    payload = b"committed-after-retry"
+    created = store.create(FOUNDER_USER_ID, declared_total_bytes=len(payload))
+    session_id = uuid.UUID(created["session_id"])
+    original_persist = ResumableUploadSession._persist
+
+    def crash_before_manifest(_session: ResumableUploadSession) -> None:
+        raise RuntimeError("simulated process crash before manifest commit")
+
+    monkeypatch.setattr(ResumableUploadSession, "_persist", crash_before_manifest)
+    with pytest.raises(RuntimeError, match="simulated process crash"):
+        store.write_part(FOUNDER_USER_ID, session_id, payload, expected_offset=0)
+    monkeypatch.setattr(ResumableUploadSession, "_persist", original_persist)
+
+    restarted = ResumableHttpStore(store.root)
+    assert restarted.get(FOUNDER_USER_ID, session_id)["offset"] == 0
+    root = restarted.session_root(FOUNDER_USER_ID, session_id)
+    assert (root / SPOOL).stat().st_size == 0
+    restarted.write_part(FOUNDER_USER_ID, session_id, payload, expected_offset=0)
+    done = restarted.finalize(FOUNDER_USER_ID, session_id)
+    assert done["sha256"] == hashlib.sha256(payload).hexdigest()
+
+
+def test_response_loss_retry_cannot_duplicate_committed_part(store: ResumableHttpStore):
+    payload = b"one-effect"
+    created = store.create(FOUNDER_USER_ID, declared_total_bytes=len(payload))
+    session_id = uuid.UUID(created["session_id"])
+    store.write_part(FOUNDER_USER_ID, session_id, payload, expected_offset=0)
+
+    with pytest.raises(ResumableHttpError) as replay:
+        store.write_part(FOUNDER_USER_ID, session_id, payload, expected_offset=0)
+    assert replay.value.code == "offset_mismatch"
+    assert store.session_root(FOUNDER_USER_ID, session_id).joinpath(SPOOL).read_bytes() == payload
+    assert store.finalize(FOUNDER_USER_ID, session_id)["sha256"] == hashlib.sha256(payload).hexdigest()
+
+
+def test_manifest_ahead_of_spool_fails_closed(store: ResumableHttpStore):
+    payload = b"durable"
+    created = store.create(FOUNDER_USER_ID, declared_total_bytes=len(payload))
+    session_id = uuid.UUID(created["session_id"])
+    store.write_part(FOUNDER_USER_ID, session_id, payload, expected_offset=0)
+    root = store.session_root(FOUNDER_USER_ID, session_id)
+    (root / SPOOL).write_bytes(payload[:-1])
+
+    restarted = ResumableHttpStore(store.root)
+    with pytest.raises(ResumableHttpError) as corrupt:
+        restarted.get(FOUNDER_USER_ID, session_id)
+    assert corrupt.value.code == "session_integrity_error"
+    with pytest.raises(ResumableHttpError):
+        restarted.finalize(FOUNDER_USER_ID, session_id)
+
+
+def test_uncommitted_tail_is_removed_before_next_part(store: ResumableHttpStore):
+    first = b"abc"
+    second = b"def"
+    created = store.create(FOUNDER_USER_ID, declared_total_bytes=len(first + second))
+    session_id = uuid.UUID(created["session_id"])
+    store.write_part(FOUNDER_USER_ID, session_id, first, expected_offset=0)
+    root = store.session_root(FOUNDER_USER_ID, session_id)
+    with (root / SPOOL).open("ab") as handle:
+        handle.write(b"uncommitted-crash-tail")
+
+    restarted = ResumableHttpStore(store.root)
+    assert restarted.get(FOUNDER_USER_ID, session_id)["offset"] == len(first)
+    assert (root / SPOOL).read_bytes() == first
+    restarted.write_part(FOUNDER_USER_ID, session_id, second, expected_offset=len(first))
+    assert restarted.finalize(FOUNDER_USER_ID, session_id)["sha256"] == hashlib.sha256(first + second).hexdigest()
+
+
+def test_concurrent_same_offset_has_one_winner(store: ResumableHttpStore):
+    payload = b"only-once"
+    created = store.create(FOUNDER_USER_ID, declared_total_bytes=len(payload))
+    session_id = uuid.UUID(created["session_id"])
+
+    def attempt() -> str:
+        try:
+            store.write_part(FOUNDER_USER_ID, session_id, payload, expected_offset=0)
+            return "accepted"
+        except ResumableHttpError as exc:
+            return exc.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(lambda _index: attempt(), range(2)))
+    assert sorted(outcomes) == ["accepted", "offset_mismatch"]
+    assert store.session_root(FOUNDER_USER_ID, session_id).joinpath(SPOOL).read_bytes() == payload
+
+
+def test_corrupt_manifest_blocks_quota_and_listing(store: ResumableHttpStore):
+    created = store.create(FOUNDER_USER_ID, declared_total_bytes=16)
+    session_id = uuid.UUID(created["session_id"])
+    root = store.session_root(FOUNDER_USER_ID, session_id)
+    (root / MANIFEST).write_text("not-json")
+
+    with pytest.raises(ResumableHttpError) as quota:
+        store.create(FOUNDER_USER_ID, declared_total_bytes=1)
+    assert quota.value.code == "session_integrity_error"
+    with pytest.raises(ResumableHttpError) as listing:
+        store.list_sessions(FOUNDER_USER_ID)
+    assert listing.value.code == "session_integrity_error"
+    response = TestClient(_app(store)).get("/api/library/resumable/sessions")
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "session_integrity_error"
+
+
+def test_manifest_identity_cannot_be_substituted(store: ResumableHttpStore):
+    created = store.create(FOUNDER_USER_ID, declared_total_bytes=4)
+    session_id = uuid.UUID(created["session_id"])
+    root = store.session_root(FOUNDER_USER_ID, session_id)
+    manifest_path = root / MANIFEST
+    manifest = json.loads(manifest_path.read_text())
+    manifest["session_id"] = str(uuid.uuid4())
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(ResumableHttpError) as substituted:
+        store.get(FOUNDER_USER_ID, session_id)
+    assert substituted.value.code == "session_integrity_error"
+
+
 def test_owner_isolation_and_path_traversal(store: ResumableHttpStore):
     created = store.create(FOUNDER_USER_ID, declared_total_bytes=32, declared_filename="own.bin")
     session_id = uuid.UUID(created["session_id"])
-    store.write_part(FOUNDER_USER_ID, session_id, b"x" * 32)
+    store.write_part(FOUNDER_USER_ID, session_id, b"x" * 32, expected_offset=0)
     other = uuid.UUID(int=99)
     with pytest.raises(ResumableHttpError) as exc:
         store.get(other, session_id)
@@ -128,7 +252,12 @@ def test_quota_disk_and_part_bounds(store: ResumableHttpStore):
     created = store.create(FOUNDER_USER_ID, declared_total_bytes=8, declared_filename="tiny.bin")
     session_id = uuid.UUID(created["session_id"])
     with pytest.raises(ResumableHttpError) as part:
-        store.write_part(FOUNDER_USER_ID, session_id, b"x" * (HTTP_PART_MAX_BYTES + 1))
+        store.write_part(
+            FOUNDER_USER_ID,
+            session_id,
+            b"x" * (HTTP_PART_MAX_BYTES + 1),
+            expected_offset=0,
+        )
     assert part.value.http_status == 413
     with pytest.raises(ResumableHttpError) as name:
         store.create(FOUNDER_USER_ID, declared_total_bytes=8, declared_filename="../secret.bin")
@@ -158,13 +287,21 @@ def test_http_founder_cycle_and_restart(store: ResumableHttpStore):
     session_id = body["session_id"]
     assert body["five_gb_supported"] is False
     assert body["http_part_max_bytes"] == HTTP_PART_MAX_BYTES
-    first = client.put(f"/api/library/resumable/sessions/{session_id}/parts", content=b"A" * 64)
+    first = client.put(
+        f"/api/library/resumable/sessions/{session_id}/parts",
+        content=b"A" * 64,
+        headers={"Upload-Offset": "0"},
+    )
     assert first.status_code == 200
     restarted = TestClient(_app(ResumableHttpStore(store.root)))
     status = restarted.get(f"/api/library/resumable/sessions/{session_id}")
     assert status.status_code == 200
     assert status.json()["offset"] == 64
-    second = restarted.put(f"/api/library/resumable/sessions/{session_id}/parts", content=b"B" * 36)
+    second = restarted.put(
+        f"/api/library/resumable/sessions/{session_id}/parts",
+        content=b"B" * 36,
+        headers={"Upload-Offset": "64"},
+    )
     assert second.status_code == 200
     done = restarted.post(f"/api/library/resumable/sessions/{session_id}/finalize")
     assert done.status_code == 200
@@ -177,6 +314,22 @@ def test_http_founder_cycle_and_restart(store: ResumableHttpStore):
     assert listed.json()["sessions"][0]["session_id"] == session_id
 
 
+def test_http_requires_and_validates_upload_offset(store: ResumableHttpStore):
+    client = TestClient(_app(store))
+    created = client.post("/api/library/resumable/sessions", json={"declared_total_bytes": 4})
+    session_id = created.json()["session_id"]
+    missing = client.put(f"/api/library/resumable/sessions/{session_id}/parts", content=b"data")
+    assert missing.status_code == 400
+    assert missing.json()["detail"]["code"] == "missing_upload_offset"
+    invalid = client.put(
+        f"/api/library/resumable/sessions/{session_id}/parts",
+        content=b"data",
+        headers={"Upload-Offset": "-1"},
+    )
+    assert invalid.status_code == 400
+    assert invalid.json()["detail"]["code"] == "invalid_upload_offset"
+
+
 def test_http_rejects_non_founder_oversize_and_traversal(store: ResumableHttpStore):
     founder = TestClient(_app(store))
     created = founder.post("/api/library/resumable/sessions", json={"declared_total_bytes": 32})
@@ -187,6 +340,7 @@ def test_http_rejects_non_founder_oversize_and_traversal(store: ResumableHttpSto
     too_big = founder.put(
         f"/api/library/resumable/sessions/{session_id}/parts",
         content=b"x" * (HTTP_PART_MAX_BYTES + 1),
+        headers={"Upload-Offset": "0"},
     )
     assert too_big.status_code == 413
     assert founder.get("/api/library/resumable/sessions/not-a-uuid").status_code == 400
