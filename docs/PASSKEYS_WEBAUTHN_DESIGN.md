@@ -9,6 +9,32 @@ This document is the contract the migration + router commits implement. **Founda
 (this one):** configurable RP settings + this design. **Next commits:** migration 0069 +
 models, the router + verification, the frontend UI, and the tests described in §7.
 
+## 0. As-built status (2026-10-29)
+
+Implemented and verified on `claude/mainai-passkeys-webauthn`:
+- `dba3d13b7` — verification core (`app/webauthn_service.py`) + 4 round-trip tests (soft_webauthn).
+- `2a26610ae` — migration-compatibility assessment (non-numeric revision id).
+- `a2d03ba5a` — migration `webauthn_passkeys_01` + models + RLS registration (RLS registry test green).
+- `895a11a45` — router `/api/auth/webauthn/*` + credential lifecycle + DB-backed integration tests
+  (4 pass) + regression (33 pass: session-auth, RLS registry, RLS isolation).
+
+**As-built deviation from §4 (authentication is username-first, not usernameless).** The client
+supplies the account email on `authenticate/begin`; that claim scopes the RLS owner context for
+the credential lookup on both begin and complete, so the lookup stays RLS-enforced **without a
+SECURITY DEFINER bypass**. Security is unchanged: the claim only selects which credentials are
+allowed; authentication still requires a valid assertion signed by that account's authenticator
+(verified in `webauthn_service.verify_authentication`, with sign-count regression + origin/rp_id
+checks). Discoverable (resident) credentials are still requested at registration, so a future
+usernameless variant can be added via a minimal SECURITY DEFINER lookup without changing the
+verification core.
+
+**Independent review (author does not self-certify):** review `app/webauthn_service.py`,
+`app/routers/webauthn.py`, migration `webauthn_passkeys_01`, the `app/rls.py` additions, and the
+two test files. Top questions: (1) does any path read/write webauthn_credentials without the
+owner RLS context? (2) is the pre-login `SET LOCAL app.current_user_id` strictly limited to the
+claimed-user lookup and never a privilege grant? (3) is UV-required (`REQUIRE_UV`) on in
+production config? (4) challenge single-use/expiry and step-up on revoke.
+
 ## 1. Standards & library
 - W3C WebAuthn / FIDO2, platform authenticators, discoverable credentials (resident keys) so
   the Pixel/Mac can offer the passkey without the user typing an email.

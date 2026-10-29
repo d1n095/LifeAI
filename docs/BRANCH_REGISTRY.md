@@ -22,9 +22,12 @@ branchen (`claude/mainai-crossplatform-app-shell`) — olika filer. **Migration:
 revisions-id `webauthn_passkeys_01`** (`down_revision="0068"`), EJ ett nummer — numren 0069–0099
 är upptagna på andra linjer (#312 har `0069_workforce_authority_epoch`…`0089`; 0069 finns i 5
 varianter), så ett nummer skulle krocka. Pekas om / `alembic merge` vid integration mot
-mållinjens head, utan att röra frysta kandidater. Status: verifieringskärna klar+testad
-(`dba3d13b7`); migration/modeller/router återstår. End-to-end på enhet kräver godkänd HTTPS-
-domän (samma gate som Pixel-PWA). Separat granskare krävs; författaren självcertifierar ej.
+mållinjens head, utan att röra frysta kandidater. **Status: backend KOMPLETT + VERIFIERAD** —
+verifieringskärna+tester `dba3d13b7`, migration-kompat `2a26610ae`, migration/modeller/RLS
+`a2d03ba5a` (RLS-registertest grönt), router+livscykel+integrationstester `895a11a45` (4 pass +
+33 regress: session-auth/RLS-register/RLS-isolation). Kvar: frontend-UI (enroll/hantera) + end-
+to-end på enhet (kräver godkänd HTTPS-domän, samma gate som Pixel-PWA) + Alembic merge-head vid
+integration. Separat granskare krävs; författaren självcertifierar ej.
 
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
