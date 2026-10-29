@@ -1,0 +1,84 @@
+name: MainAI Android APK (Tauri)
+
+# Builds a MainAI Android DEBUG APK (arm64, for a Google Pixel) from the desktop/ Tauri 2
+# project and uploads it as a workflow artifact. This exists because the Android SDK + NDK +
+# JDK toolchain is multi-GB and was intentionally NOT installed on the Founder's disk-
+# constrained MacBook Air (see desktop/README.md) — CI is the build-environment that supports
+# producing a verified APK.
+#
+# This workflow NEVER deploys, NEVER publishes to a store, and uses NO secrets or provider
+# keys. It only produces an unsigned debug APK artifact. Manual trigger only (workflow_dispatch)
+# so it never runs on WIP pushes. The backend URL is a build-time input (not a secret) — the
+# client calls it through the Rust proxy; no API keys are ever embedded in the package.
+on:
+  workflow_dispatch:
+    inputs:
+      backend_url:
+        description: "Backend origin the app calls (device-reachable; e.g. https://api.example.com). NOT a secret."
+        required: true
+        default: "http://10.0.2.2:8000"
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    name: Build debug APK (aarch64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Set up Rust (stable) with Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK + platform/build-tools
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;26.3.11579264"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/26.3.11579264" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> "$GITHUB_ENV"
+
+      - name: Build debug APK
+        working-directory: desktop
+        env:
+          MAINAI_BACKEND_URL: ${{ github.event.inputs.backend_url }}
+        run: |
+          set -euo pipefail
+          npm install
+          node_modules/.bin/tauri icon src-tauri/app-icon.svg
+          node_modules/.bin/tauri android init
+          node_modules/.bin/tauri android build --apk --debug --target aarch64
+
+      - name: Locate + describe APK
+        working-directory: desktop
+        run: |
+          set -euo pipefail
+          APK="$(find src-tauri/gen/android -name '*.apk' -path '*debug*' | head -1)"
+          echo "APK: $APK"
+          ls -lh "$APK"
+          "$ANDROID_HOME"/build-tools/34.0.0/aapt dump badging "$APK" | grep -E "package:|application-label:" || true
+          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mainai-android-arm64-debug
+          path: desktop/${{ env.APK_PATH }}
+          if-no-files-found: error

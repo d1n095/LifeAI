@@ -115,9 +115,24 @@ time). Point it at the production HTTPS backend for a real installable build.
   a `--bundles app` build) to see it. With no backend on `http://localhost:8000`, the login
   screen renders and API calls return the proxy's 502 until a backend is running.
 
-### Android — NOT BUILT (toolchain absent)
-Source + mobile entry point (`#[cfg_attr(mobile, …)]`) and icon set are ready. Building a real
-APK needs the Android SDK + NDK + JDK 17 (multi-GB) and `tauri android init`. No APK is claimed
-as built until that toolchain is installed and the APK is actually produced and verified.
+### Android — build on CI (local install intentionally skipped)
+The source, mobile entry point (`#[cfg_attr(mobile, …)]`), and icon set are ready. Building a
+real APK needs the Android SDK + NDK + JDK 17 (multi-GB).
+
+Local install was **intentionally skipped**: this MacBook Air had only ~16 GB free (disk 92%
+full), below the Founder's 20 GB floor, so per instruction the build moves to CI / a dedicated
+box rather than exhausting the laptop's disk. Two reproducible paths are provided:
+
+- **CI:** `.github/workflows/mainai-android-apk.yml` (manual `workflow_dispatch`) installs
+  JDK 17 + Android SDK/NDK + Rust Android targets, runs `tauri android init` and
+  `tauri android build --apk --debug --target aarch64`, and uploads the APK artifact. No
+  secrets, no provider keys, no deploy.
+- **Dedicated box:** `scripts/build-android.sh` runs the same steps where ANDROID_HOME / NDK /
+  JDK 17 already exist.
+
+Target: Google Pixel / Android **arm64**. Package identity: `ai.mainai.client`. No APK is
+claimed as built until it is actually produced and verified (existence, package id, install).
+Set `MAINAI_BACKEND_URL` to a device-reachable origin (a physical Pixel cannot reach the host's
+`localhost`; the emulator uses `http://10.0.2.2:8000`).
 
 No DMG or APK is reported as "working" anywhere unless it was actually built and launched.
