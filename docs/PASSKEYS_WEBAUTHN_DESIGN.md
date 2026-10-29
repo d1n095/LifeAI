@@ -24,7 +24,19 @@ models, the router + verification, the frontend UI, and the tests described in �
 passkeys would be invalidated when it changes. The router splits `webauthn_rp_origin` on commas
 and verifies the assertion origin is one of them.
 
-## 3. Data model (migration 0069, next commit)
+## 3. Data model (next commit) — migration placement
+
+**Migration-compatibility assessment (2026-10-29).** The numeric migration space is a collision
+storm across lineages: numbers **0069–0099 are all taken**, several numbers by *multiple
+different* revisions (e.g. `0069` exists as `workforce_authority_epoch`, `mainai_stop_controls`,
+`self_improvement_roi`, `structured_claims_owner_entity_fks`, `idea_incubation_disposition` on
+different branches). The #312 lineage specifically has `0069_workforce_authority_epoch … 0089`.
+So **any numeric slot collides.** Decision: this migration uses a **unique, non-numeric
+revision id `webauthn_passkeys_01`** with `down_revision = "0068"` (this branch's alembic head,
+so it is runnable/testable here). It claims no numbered slot, so it cannot collide with 0069+.
+At integration time its `down_revision` is re-pointed to the target lineage's actual single
+head, or reconciled with an `alembic merge` — coordinated via BRANCH_REGISTRY, without touching
+any frozen candidate or another agent's migration file.
 
 ### `webauthn_credentials` — RLS owner-scoped (one row per passkey)
 ```

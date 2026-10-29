@@ -18,11 +18,13 @@ till en ogodkänd domän i förväg. Bevarar befintlig auth/CSRF/sessioner/RLS/r
 | `claude/mainai-passkeys-webauthn` | — | **Aktiv (grund lagd, ingen PR)** | Grenad `64c07d5b0`. **Denna commit:** konfigurerbara RP-settings i `app/config.py` + fullständig design/schema (`docs/PASSKEYS_WEBAUTHN_DESIGN.md`). **Nästa commits:** migration 0069 (`webauthn_credentials` RLS-ägarscoped + `webauthn_challenges` ej-RLS, single-use) + modeller, router `/api/auth/webauthn/*` (register/authenticate begin+complete, list, delete m. step-up), frontend-UI, round-trip-tester m. mjukvaruautentiserare. |
 
 **Beroenden/kollisionsrisk:** oberoende av PWA- (`claude/mainai-pwa-installable`) och Tauri-
-branchen (`claude/mainai-crossplatform-app-shell`) — olika filer. **Migrationsnummer 0069**:
-basen `64c07d5b0` har migrationer t.o.m. 0068; säkerhetskärne-migrationerna (0086/0095 m.fl.)
-ligger på en senare kandidatlinje, inte här — renumrera 0069 vid behov om en annan branch tar
-numret först (se 0063:s kollisionsnot). End-to-end på enhet kräver den godkända HTTPS-domänen
-(samma gate som Pixel-PWA). Separat granskare krävs; författaren självcertifierar ej.
+branchen (`claude/mainai-crossplatform-app-shell`) — olika filer. **Migration: icke-numeriskt
+revisions-id `webauthn_passkeys_01`** (`down_revision="0068"`), EJ ett nummer — numren 0069–0099
+är upptagna på andra linjer (#312 har `0069_workforce_authority_epoch`…`0089`; 0069 finns i 5
+varianter), så ett nummer skulle krocka. Pekas om / `alembic merge` vid integration mot
+mållinjens head, utan att röra frysta kandidater. Status: verifieringskärna klar+testad
+(`dba3d13b7`); migration/modeller/router återstår. End-to-end på enhet kräver godkänd HTTPS-
+domän (samma gate som Pixel-PWA). Separat granskare krävs; författaren självcertifierar ej.
 
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
