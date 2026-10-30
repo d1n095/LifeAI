@@ -6,6 +6,22 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## MainAI installerbar PWA (2026-10-29)
+
+Grundarens prioritetsändring: innan den stora Android-verktygskedjan installeras ska MainAI
+göras till en installerbar **PWA** — en säker, server-hostad MainAI nåbar via egen subdomän
+(STRATO DNS), lätt installation på macOS och Pixel. Återanvänder befintlig frontend + backend.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `claude/mainai-pwa-installable` | — | **Aktiv (ingen PR ännu)** | Lägger web app manifest (`app/manifest.ts`), service worker (`public/sw.js`, cachar ALDRIG `/api/*` eller autentiserade vyer — bara publika hashade assets), PWA-ikoner (`public/icons/*` + generator), install-UI (`components/PwaController.tsx`), manifest/theme/apple-metadata i `app/layout.tsx`, och `docs/PWA_STRATO_DNS.md` (DNS-runbook, ingen deploy). Grenad från `64c07d5b0`. Rör bara `frontend/` + en doc + denna rad. |
+
+**Beroenden:** oberoende av `claude/mainai-crossplatform-app-shell` (Tauri/macOS, egen branch —
+rör `desktop/`, bevaras). Ingen konflikt (olika kataloger). Oberoende merge-bar. Säkerhet:
+auth-modellen (HttpOnly + CSRF) oförändrad; SW säkerhetsgranskad mot cachning av känslig data.
+Separat auktoriserad granskare krävs. Android-APK kvarstår som CI-väg (ingen lokal multi-GB-
+installation).
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en
