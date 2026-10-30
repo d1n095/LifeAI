@@ -54,6 +54,10 @@ RLS_STATEMENTS = [
     # integration note) — see app/models/mainai_job.py.
     "ALTER TABLE mainai_jobs ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE mainai_jobs FORCE ROW LEVEL SECURITY",
+    # Passkeys (migration webauthn_passkeys_01). webauthn_challenges is intentionally NOT here
+    # (pre-login ceremony has no app.current_user_id; random single-use handles, no PII).
+    "ALTER TABLE webauthn_credentials ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE webauthn_credentials FORCE ROW LEVEL SECURITY",
     "ALTER TABLE mainai_job_events ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE mainai_job_events FORCE ROW LEVEL SECURITY",
     "ALTER TABLE mainai_job_proposals ENABLE ROW LEVEL SECURITY",
@@ -218,6 +222,11 @@ POLICY_DEFINITIONS = [
     {
         "table": "memory_source_backfill_failures",
         "name": "memory_source_backfill_failures_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "webauthn_credentials",
+        "name": "webauthn_credentials_isolation",
         "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
     {
