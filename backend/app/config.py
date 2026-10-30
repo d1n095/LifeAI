@@ -167,6 +167,12 @@ class Settings(BaseSettings):
     worker_poll_interval_seconds: float = 2.0
     worker_lease_seconds: int = 120
     worker_concurrency: int = 1
+    # RT3 is shipped dark. A Founder must both create an explicit authorized cycle and
+    # enable this worker gate; absence/silence never starts background provider work.
+    authorized_cycle_worker_enabled: bool = False
+    cursor_cloud_webhook_secret: str | None = None
+    provider_webhook_max_body_bytes: int = 65536
+    provider_webhook_max_age_seconds: int = 300
     # Identifies which worker process/container claimed a job (GET /api/library/ops/status,
     # troubleshooting) — defaults to the container's own hostname (stable per-container,
     # unique per replica) rather than a random id, so a founder reading ops status or logs

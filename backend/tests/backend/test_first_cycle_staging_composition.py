@@ -133,12 +133,12 @@ def test_composition_markers_from_each_accepted_input():
     assert "CRED-8 ordinary pytest cannot access host git credentials" in cred_test
 
 
-def test_single_alembic_head_is_activation_branch_protection_not_codex_0089():
+def test_single_alembic_head_includes_rt3_cycle_ingress():
     config = Config(str(BACKEND_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
-    assert heads == ["0089_activation_branch_protect"], heads
+    assert heads == ["0100_rt3_cycle_webhooks"], heads
     versions = BACKEND_ROOT / "alembic" / "versions"
     assert (versions / "0089_mainai_activation_branch_protection.py").is_file()
     assert not (versions / "0089_mainai_activation_security.py").exists()

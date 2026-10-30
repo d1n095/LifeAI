@@ -76,6 +76,7 @@ from app.models.founder_memory import (
     FounderMemoryNote,
 )
 from app.models.import_job import ImportJob
+from app.models.operating_cycle import AuthorizedOperatingCycle, ProviderWebhookEvent
 from app.models.intelligence_governance import (
     ClassificationBasis,
     ExecutionRole,
