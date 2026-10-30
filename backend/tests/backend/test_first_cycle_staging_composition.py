@@ -138,7 +138,7 @@ def test_single_alembic_head_includes_rt3_cycle_ingress():
     config.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
-    assert heads == ["0100_rt3_cycle_webhooks"], heads
+    assert heads == ["0101_coordination_fencing"], heads
     versions = BACKEND_ROOT / "alembic" / "versions"
     assert (versions / "0089_mainai_activation_branch_protection.py").is_file()
     assert not (versions / "0089_mainai_activation_security.py").exists()

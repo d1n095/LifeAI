@@ -642,6 +642,8 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
     {"name": "erase_own_provider_disclosure_events", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
     {"name": "provider_disclosure_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
     {"name": "provider_webhook_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False, "security_definer": False},
+    {"name": "enforce_agent_work_assignment_canonical_exclusivity", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False, "security_definer": False},
+    {"name": "enforce_agent_work_assignment_status_transition", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False, "security_definer": False},
     {"name": "mainai_task_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
     {"name": "mainai_checkpoints_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
     {"name": "mainai_recovery_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
