@@ -6,6 +6,21 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## MainAI passkeys — frontend-UI (2026-10-29)
+
+Frontend för passkey-enrollment, inloggning och hantering. Konsumerar backend-endpointsen
+`/api/auth/webauthn/*` som levereras på `claude/mainai-passkeys-webauthn`.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `claude/mainai-passkeys-frontend` | — | **Aktiv (ingen PR ännu)** | Endast `frontend/`: `lib/webauthn.ts` (WebAuthn-ceremoni i webbläsaren, base64url↔ArrayBuffer, `enrollPasskey`/`loginWithPasskey`), `lib/api.ts` (nya webauthn-metoder + `PasskeyItem`), `components/PasskeyManager.tsx` (lista/lägg till/ta bort m. lösenords-step-up), passkey-knapp på login-sidan, `<PasskeyManager/>` i kontosidan. Grenad `64c07d5b0`. |
+
+**Beroende (TRACEABILITY):** kräver `claude/mainai-passkeys-webauthn` (backend-endpoints) —
+den måste mergas FÖRST (merge-regeln: rebasa/uppdatera inte i förväg). Ingen egen backend-
+ändring; anropar bara HTTP. Oberoende av PWA/Tauri-brancherna (andra filer). E2E (riktig
+ceremoni, t.ex. Playwright virtuell authenticator mot körande backend) är nästa verifiering;
+`next build` grönt. Separat granskare krävs; författaren självcertifierar ej.
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { api, NetworkError } from "@/lib/api";
+import { loginWithPasskey, usePasskeySupport } from "@/lib/webauthn";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -13,6 +14,26 @@ export default function LoginPage() {
   const [unverified, setUnverified] = useState(false);
   const [resendStatus, setResendStatus] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [passkeyLoading, setPasskeyLoading] = useState(false);
+  const canUsePasskey = usePasskeySupport();
+
+  async function handlePasskeyLogin() {
+    setError(null);
+    if (!email) {
+      setError("Fyll i din e-post för att logga in med passkey.");
+      return;
+    }
+    setPasskeyLoading(true);
+    try {
+      await loginWithPasskey(email);
+      router.replace("/");
+    } catch (err) {
+      // A cancelled/failed ceremony or no matching passkey — keep it generic, offer password.
+      setError(err instanceof NetworkError ? err.message : "Kunde inte logga in med passkey. Prova lösenord.");
+    } finally {
+      setPasskeyLoading(false);
+    }
+  }
 
   useEffect(() => {
     // No client-readable token to check (see docs/AUTH_THREAT_MODEL.md) — ask the backend
@@ -127,6 +148,17 @@ export default function LoginPage() {
         >
           {loading ? "Loggar in…" : "Logga in"}
         </button>
+
+        {canUsePasskey && (
+          <button
+            type="button"
+            disabled={passkeyLoading}
+            onClick={handlePasskeyLogin}
+            className="mt-3 w-full rounded-lg border border-border px-4 py-2 text-sm font-medium disabled:opacity-50"
+          >
+            {passkeyLoading ? "Väntar på passkey…" : "Fortsätt med passkey"}
+          </button>
+        )}
 
         <div className="mt-4 flex justify-end text-sm text-white/40">
           <Link href="/forgot-password" className="text-accent2 hover:underline">
