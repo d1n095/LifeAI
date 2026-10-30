@@ -2,13 +2,13 @@
 
 import { useEffect, useState } from "react";
 import { api, PasskeyItem } from "@/lib/api";
-import { enrollPasskey, passkeysSupported } from "@/lib/webauthn";
+import { enrollPasskey, usePasskeySupport } from "@/lib/webauthn";
 
 export default function PasskeyManager() {
   const [items, setItems] = useState<PasskeyItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [supported, setSupported] = useState(true);
+  const supported = usePasskeySupport();
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [deletePw, setDeletePw] = useState("");
 
@@ -21,8 +21,20 @@ export default function PasskeyManager() {
   }
 
   useEffect(() => {
-    setSupported(passkeysSupported());
-    refresh();
+    // Initial load: setState happens in the async callback (not synchronously in the effect
+    // body), so it does not trigger cascading renders. refresh() is reused by the handlers.
+    let active = true;
+    api.listPasskeys().then(
+      (list) => {
+        if (active) setItems(list);
+      },
+      () => {
+        if (active) setItems([]);
+      }
+    );
+    return () => {
+      active = false;
+    };
   }, []);
 
   async function handleAdd() {

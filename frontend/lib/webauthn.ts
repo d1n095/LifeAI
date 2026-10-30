@@ -5,6 +5,7 @@
 //
 // No secret ever lives here: the private key stays in the platform authenticator; the session is
 // issued by the backend as HttpOnly cookies exactly like password login (see lib/api.ts).
+import { useSyncExternalStore } from "react";
 import { api, CurrentUser } from "@/lib/api";
 
 export class PasskeyUnsupportedError extends Error {
@@ -20,6 +21,14 @@ export function passkeysSupported(): boolean {
     typeof window.PublicKeyCredential !== "undefined" &&
     !!navigator.credentials
   );
+}
+
+// SSR-safe React hook for "are passkeys available in this browser". Uses useSyncExternalStore
+// (server snapshot = false) so there is no setState-in-effect and no hydration mismatch — the
+// value is false during SSR/first paint and reflects the real capability on the client.
+const noopSubscribe = () => () => {};
+export function usePasskeySupport(): boolean {
+  return useSyncExternalStore(noopSubscribe, passkeysSupported, () => false);
 }
 
 function b64urlToBuffer(value: string): ArrayBuffer {
@@ -38,7 +47,6 @@ function bufferToB64url(buf: ArrayBuffer): string {
   return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
 function toCreationOptions(options: any): PublicKeyCredentialCreationOptions {
   return {
     ...options,
@@ -92,7 +100,6 @@ function assertionToJSON(cred: PublicKeyCredential): any {
     clientExtensionResults: cred.getClientExtensionResults(),
   };
 }
-/* eslint-enable @typescript-eslint/no-explicit-any */
 
 /** Enroll a new passkey for the logged-in user. Runs the platform authenticator. */
 export async function enrollPasskey(label: string): Promise<void> {

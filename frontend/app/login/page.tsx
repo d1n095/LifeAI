@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { api, NetworkError } from "@/lib/api";
-import { loginWithPasskey, passkeysSupported } from "@/lib/webauthn";
+import { loginWithPasskey, usePasskeySupport } from "@/lib/webauthn";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -15,11 +15,7 @@ export default function LoginPage() {
   const [resendStatus, setResendStatus] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [passkeyLoading, setPasskeyLoading] = useState(false);
-  const [canUsePasskey, setCanUsePasskey] = useState(false);
-
-  useEffect(() => {
-    setCanUsePasskey(passkeysSupported());
-  }, []);
+  const canUsePasskey = usePasskeySupport();
 
   async function handlePasskeyLogin() {
     setError(null);
