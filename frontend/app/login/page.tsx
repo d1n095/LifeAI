@@ -160,7 +160,7 @@ export default function LoginPage() {
             onClick={handlePasskeyLogin}
             className="mt-3 w-full rounded-lg border border-border px-4 py-2 text-sm font-medium disabled:opacity-50"
           >
-            {passkeyLoading ? "Väntar på passkey…" : "Logga in med passkey"}
+            {passkeyLoading ? "Väntar på passkey…" : "Fortsätt med passkey"}
           </button>
         )}
 
