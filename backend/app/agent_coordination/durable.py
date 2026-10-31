@@ -1266,6 +1266,9 @@ class DurableCoordinationService:
     def restore(self, payload: dict[str, Any]) -> None:
         obligation = payload.get("obligation")
         if isinstance(obligation, dict) and obligation.get("assignment_id"):
+            current = self._obligations.get(obligation["assignment_id"])
+            if current is not None:
+                obligation = _merge_obligation_records(current, obligation)
             self._obligations[obligation["assignment_id"]] = obligation
             self._by_canonical[obligation["canonical_work_key"]] = obligation["assignment_id"]
             for event in obligation.get("events") or []:
@@ -1273,7 +1276,9 @@ class DurableCoordinationService:
                     self._seen_event_ids.add(event["event_id"])
         for handoff in payload.get("handoffs") or []:
             if isinstance(handoff, dict) and handoff.get("handoff_id"):
-                self._handoffs[handoff["handoff_id"]] = handoff
+                current_handoff = self._handoffs.get(handoff["handoff_id"])
+                if current_handoff is None or str(handoff.get("updated_at") or "") >= str(current_handoff.get("updated_at") or ""):
+                    self._handoffs[handoff["handoff_id"]] = handoff
         for event_id in payload.get("seen_event_ids") or []:
             self._seen_event_ids.add(str(event_id))
         for row in payload.get("obligations") or []:
@@ -1281,6 +1286,8 @@ class DurableCoordinationService:
                 current = self._obligations.get(row["assignment_id"])
                 if current is not None and _obligation_rank(current) > _obligation_rank(row):
                     continue
+                if current is not None:
+                    row = _merge_obligation_records(current, row)
                 self._obligations[row["assignment_id"]] = row
                 if row.get("canonical_work_key"):
                     self._by_canonical[row["canonical_work_key"]] = row["assignment_id"]
@@ -1293,6 +1300,9 @@ class DurableCoordinationService:
             merged.update(intake)
             if isinstance(intake.get("candidates"), dict):
                 merged["candidates"] = {**self._github_intake.get("candidates", {}), **intake["candidates"]}
+            for field in ("seen_deliveries", "stale_rejected"):
+                if isinstance(intake.get(field), list):
+                    merged[field] = _merge_json_rows(self._github_intake.get(field), intake[field])
             self._github_intake = merged
         lifecycle = payload.get("lifecycle")
         if isinstance(lifecycle, dict):
@@ -1303,7 +1313,13 @@ class DurableCoordinationService:
                     set(self._lifecycle.get("processed_event_ids") or []) | set(lifecycle["processed_event_ids"])
                 )
             if isinstance(lifecycle.get("decisions"), list):
-                merged_life["decisions"] = list(lifecycle["decisions"])
+                merged_life["decisions"] = _merge_json_rows(self._lifecycle.get("decisions"), lifecycle["decisions"])
+            for field in ("builder_eligible", "adapters"):
+                if isinstance(lifecycle.get(field), list):
+                    merged_life[field] = _merge_json_rows(self._lifecycle.get(field), lifecycle[field])
+            merged_life["watermark"] = max(
+                str(self._lifecycle.get("watermark") or ""), str(lifecycle.get("watermark") or "")
+            ) or None
             self._lifecycle = merged_life
         delivery = payload.get("delivery")
         if isinstance(delivery, dict):
@@ -1327,6 +1343,10 @@ class DurableCoordinationService:
                 merged_delivery["processed_ids"] = sorted(
                     set(self._delivery.get("processed_ids") or []) | set(delivery["processed_ids"])
                 )
+            if isinstance(delivery.get("decisions"), list):
+                merged_delivery["decisions"] = _merge_json_rows(
+                    self._delivery.get("decisions"), delivery["decisions"]
+                )
             self._delivery = merged_delivery
         provider_ingestion = payload.get("provider_ingestion")
         if isinstance(provider_ingestion, dict):
@@ -1339,9 +1359,20 @@ class DurableCoordinationService:
                     set(self._provider_ingestion.get("processed_event_ids") or []) | set(provider_ingestion["processed_event_ids"])
                 )
             if isinstance(provider_ingestion.get("events"), list):
-                merged_pi["events"] = list(provider_ingestion["events"])
+                combined_events = {
+                    str(row.get("event_id")): row
+                    for row in (self._provider_ingestion.get("events") or [])
+                    if isinstance(row, dict) and row.get("event_id")
+                }
+                for row in provider_ingestion["events"]:
+                    if isinstance(row, dict) and row.get("event_id"):
+                        combined_events.setdefault(str(row["event_id"]), row)
+                merged_pi["events"] = list(combined_events.values())
             if isinstance(provider_ingestion.get("last_timestamp"), dict):
-                merged_pi["last_timestamp"] = {**self._provider_ingestion.get("last_timestamp", {}), **provider_ingestion["last_timestamp"]}
+                timestamps = dict(self._provider_ingestion.get("last_timestamp") or {})
+                for agent_id, stamp in provider_ingestion["last_timestamp"].items():
+                    timestamps[agent_id] = max(str(timestamps.get(agent_id) or ""), str(stamp or ""))
+                merged_pi["last_timestamp"] = timestamps
             self._provider_ingestion = merged_pi
         restrictions = payload.get("restrictions")
         if isinstance(restrictions, dict):
@@ -1539,6 +1570,48 @@ def _public_obligation(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _merge_obligation_records(current: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    """Merge same-obligation snapshots without dropping independently appended evidence."""
+    current_rank = _obligation_rank(current)
+    incoming_rank = _obligation_rank(incoming)
+    if current_rank > incoming_rank:
+        winner, other = current, incoming
+    elif incoming_rank > current_rank:
+        winner, other = incoming, current
+    else:
+        current_stamp = str(current.get("updated_at") or "")
+        incoming_stamp = str(incoming.get("updated_at") or "")
+        winner, other = (incoming, current) if incoming_stamp >= current_stamp else (current, incoming)
+    merged = json.loads(json.dumps(winner))
+    for slice_name, identity in (("events", "event_id"), ("evidence", "evidence_id")):
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in list(other.get(slice_name) or []) + list(winner.get(slice_name) or []):
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get(identity) or json.dumps(row, sort_keys=True))
+            if key not in seen:
+                rows.append(row)
+                seen.add(key)
+        merged[slice_name] = rows
+    merged["instruction_ids"] = sorted(
+        set(current.get("instruction_ids") or []) | set(incoming.get("instruction_ids") or [])
+    )
+    return merged
+
+
+def _merge_json_rows(current: Any, incoming: Any) -> list[Any]:
+    """Stable union for append-only JSON list slices lacking a universal identifier."""
+    merged: list[Any] = []
+    seen: set[str] = set()
+    for row in list(current or []) + list(incoming or []):
+        key = json.dumps(row, sort_keys=True, separators=(",", ":"))
+        if key not in seen:
+            merged.append(row)
+            seen.add(key)
+    return merged
+
+
 def _safe_workspace_path(root: Path, raw: str) -> Path:
     if not raw or raw.startswith("~") or Path(raw).is_absolute():
         raise ValueError("path must be a relative workspace path")
@@ -1608,6 +1681,12 @@ def persist_to_assignment(
 
 def load_owner_ledger(db: Session, *, owner_id: uuid.UUID) -> DurableCoordinationService:
     service = DurableCoordinationService()
+    from app.models.agent_coordination import CoordinationOwnerLedger
+
+    authority = db.get(CoordinationOwnerLedger, owner_id)
+    if authority is not None and isinstance(authority.payload, dict) and authority.payload:
+        service.restore(dict(authority.payload))
+        return service
     rows = list(
         db.execute(select(AgentWorkAssignment).where(AgentWorkAssignment.owner_id == owner_id)).scalars()
     )

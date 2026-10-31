@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import JSON, Boolean, DateTime, Enum, ForeignKey, ForeignKeyConstraint, Integer, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -213,6 +213,38 @@ class AgentWorkAssignment(Base):
             ondelete="SET NULL",
         ),
     )
+
+
+class CoordinationOwnerLedger(Base):
+    """Single authoritative, owner-scoped coordination snapshot.
+
+    Legacy assignment provenance remains a compatibility mirror.  This row is the
+    serialization point which prevents two processes from replacing one another's
+    whole-ledger updates.
+    """
+
+    __tablename__ = "coordination_owner_ledgers"
+
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class CoordinationEventReceipt(Base):
+    """Append-only database receipt for cross-process event deduplication."""
+
+    __tablename__ = "coordination_event_receipts"
+
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    namespace: Mapped[str] = mapped_column(String(64), primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(512), primary_key=True)
+    payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class AgentWorkAssignmentDependency(Base):

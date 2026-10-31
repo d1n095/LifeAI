@@ -16,7 +16,6 @@ from sqlalchemy.orm import Session
 from app.models.workforce import WorkforceAssignment, WorkforceDelegationRequest
 from app.models.workforce_ops import WorkforceAssignmentCheckpoint
 from app.workforce.authority import TaskScopedAuthority, assignment_authority_is_live, revoke_assignment_authority
-from app.workforce.broker import DelegationBrokerError
 from app.workforce.context import create_context_package
 from app.workforce.registry import assert_agent_selectable, get_workforce_agent
 
@@ -207,6 +206,32 @@ def alternate_agent_takeover(
     from app.workforce.kill_switch import assert_authority_grant_allowed
 
     grant_fence = assert_authority_grant_allowed(db, owner_id=owner_id)
+
+    locked_assignment = db.execute(
+        select(WorkforceAssignment)
+        .where(
+            WorkforceAssignment.id == failed_assignment.id,
+            WorkforceAssignment.owner_id == owner_id,
+        )
+        .with_for_update()
+    ).scalar_one_or_none()
+    if locked_assignment is None:
+        raise FailureTakeoverError("failed assignment is missing or outside owner scope")
+    failed_assignment = locked_assignment
+    if failed_assignment.status != "failed":
+        raise FailureTakeoverError("alternate takeover requires the authoritative assignment state to be failed")
+
+    locked_request = db.execute(
+        select(WorkforceDelegationRequest)
+        .where(
+            WorkforceDelegationRequest.id == request.id,
+            WorkforceDelegationRequest.owner_id == owner_id,
+        )
+        .with_for_update()
+    ).scalar_one_or_none()
+    if locked_request is None or locked_request.id != failed_assignment.delegation_request_id:
+        raise FailureTakeoverError("delegation request is missing, cross-owner, or not bound to the failed assignment")
+    request = locked_request
 
     ok, reason = can_safely_retry(failed_assignment)
     if not ok:

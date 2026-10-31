@@ -11,11 +11,14 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
 from app.agent_coordination.delivery import FIRST_CYCLE_GO, ensure_delivery
 from app.agent_coordination.durable import DurableCoordinationService, ObligationStatus
 from app.agent_coordination.external_connectivity.cursor_cloud import verify_v0_webhook
 from app.agent_coordination.external_connectivity.identity import IdentityClass
 from app.mainai_verification_registry import find_independent_pass
+from app.models.agent_coordination import CoordinationEventReceipt
 from app.workforce.kill_switch import KillSwitchError, assert_grant_allowed, assert_not_killed
 
 PROVIDER_CURSOR = "cursor"
@@ -192,6 +195,14 @@ def ingest_authenticated_provider_event(
     authority = assert_transition_authority(db, owner_id=owner_id)
     if authority.get("outcome") != "allowed":
         return authority
+    if db is not None and not _claim_event_receipt(
+        db,
+        owner_id=owner_id,
+        namespace="legacy_provider_webhook",
+        event_id=event_id,
+        payload_sha256=hashlib.sha256(raw_body).hexdigest(),
+    ):
+        return _result(outcome="replay_ignored", reason="duplicate provider event_id")
     occurred = occurred or clock
 
     assignment_id = binding["assignment_id"]
@@ -288,6 +299,40 @@ def ingest_authenticated_provider_event(
             **(extra_icv if status in TERMINAL_SUCCESS else {}),
         },
     )
+
+
+def _claim_event_receipt(
+    db,
+    *,
+    owner_id: str,
+    namespace: str,
+    event_id: str,
+    payload_sha256: str,
+) -> bool:
+    """Atomically claim an event in the caller's transaction.
+
+    ``ON CONFLICT DO NOTHING`` serializes separate processes and restarts without
+    turning a duplicate into a failed transaction.
+    """
+    owner_uuid = uuid.UUID(str(owner_id))
+    statement = (
+        pg_insert(CoordinationEventReceipt)
+        .values(
+            owner_id=owner_uuid,
+            namespace=namespace,
+            event_id=event_id,
+            payload_sha256=payload_sha256,
+        )
+        .on_conflict_do_nothing(
+            index_elements=[
+                CoordinationEventReceipt.owner_id,
+                CoordinationEventReceipt.namespace,
+                CoordinationEventReceipt.event_id,
+            ]
+        )
+        .returning(CoordinationEventReceipt.event_id)
+    )
+    return db.execute(statement).scalar_one_or_none() is not None
 
 
 def _after_store(
