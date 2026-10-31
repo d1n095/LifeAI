@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.intelligence_governance import record_evidence, record_execution
@@ -311,6 +311,14 @@ def is_duplicate_canonical_work(
     ).scalars().first()
 
 
+def _lock_canonical_work(db: Session, *, owner_id: uuid.UUID, canonical_work_key: str) -> None:
+    """Serialize the check/insert pair across processes without inventing a new authority store."""
+    db.execute(
+        text("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(:key, 101))"),
+        {"key": f"{owner_id}:{canonical_work_key}"},
+    )
+
+
 _REVIEW_ONLY_ROLES = frozenset({WorkAssignmentRole.reviewer, WorkAssignmentRole.researcher})
 
 # Instance-satisfying dependency-release rule: a dependent (e.g. a REVIEWER) is releasable
@@ -359,6 +367,7 @@ def create_work_assignment(
     canonical_work_key = _canonical_work_key(
         goal_id=goal_id, task_id=task_id, role=role.value, repository_identity=repository_identity, allowed_paths=allowed_paths
     )
+    _lock_canonical_work(db, owner_id=owner_id, canonical_work_key=canonical_work_key)
     duplicate = is_duplicate_canonical_work(
         db, owner_id=owner_id, canonical_work_key=canonical_work_key, parallel_exploration_group_id=parallel_exploration_group_id
     )
@@ -465,6 +474,17 @@ ALLOWED_TRANSITIONS: dict[WorkAssignmentStatus, frozenset[WorkAssignmentStatus]]
 def transition_status(
     db: Session, *, assignment: AgentWorkAssignment, new_status: str, detail: dict[str, Any] | None = None
 ) -> AgentWorkAssignment:
+    # The supplied ORM object may have been read before a concurrent terminal transition.
+    # Re-read it under a row lock and populate the identity-map object before deciding.
+    locked = db.execute(
+        select(AgentWorkAssignment)
+        .where(AgentWorkAssignment.id == assignment.id, AgentWorkAssignment.owner_id == assignment.owner_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if locked is None:
+        raise CoordinationError("assignment is missing or outside the owner scope")
+    assignment = locked
     current = assignment.status
     target = WorkAssignmentStatus(new_status)
     if target == current:
