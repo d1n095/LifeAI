@@ -202,6 +202,26 @@ def _clean_tables(_test_database):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_request_context():
+    """Prevent simulated request identity from leaking between tests.
+
+    Several integration tests deliberately drive request-bound database behavior through
+    the same ContextVars used by production request middleware.  ContextVars persist in the
+    pytest task unless explicitly cleared, so a later raw-session RLS test could otherwise
+    inherit an unrelated owner's identity after starting a new transaction.
+    """
+    from app.request_context import current_access_jti, current_user_id
+
+    current_user_id.set(None)
+    current_access_jti.set(None)
+    try:
+        yield
+    finally:
+        current_user_id.set(None)
+        current_access_jti.set(None)
+
+
+@pytest.fixture(autouse=True)
 def _clean_rate_limits():
     """Flushes the rate limiter's Redis DB before each test — unlike Postgres (truncated
     above), nothing else resets it between tests, so without this, tests that make several

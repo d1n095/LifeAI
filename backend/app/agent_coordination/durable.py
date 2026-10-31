@@ -268,6 +268,16 @@ class DurableCoordinationService:
 
     # ------------------------------------------------------------------ assign
 
+    def get_by_canonical_work(
+        self, *, owner_id: str, workstream: str, instruction_id: str
+    ) -> dict[str, Any] | None:
+        """Return an existing obligation without allowing callers to mutate ledger internals."""
+        key = canonical_work_key(
+            owner_id=owner_id, workstream=workstream, instruction_id=instruction_id
+        )
+        assignment_id = self._by_canonical.get(key)
+        return self.get(assignment_id) if assignment_id else None
+
     def assign(
         self,
         *,
@@ -278,6 +288,7 @@ class DurableCoordinationService:
         dependencies: Iterable[str] = (),
         assignment_id: str | None = None,
         backing_assignment_id: str | None = None,
+        workforce_assignment_id: str | None = None,
         event_id: str | None = None,
         occurred_at: str | None = None,
         actor: str | None = None,
@@ -325,6 +336,7 @@ class DurableCoordinationService:
             "blocked_reason": None,
             "missing_capability": None,
             "backing_assignment_id": backing_assignment_id,
+            "workforce_assignment_id": workforce_assignment_id,
             "created_at": now,
             "updated_at": now,
             "planning_streak": 0,
@@ -382,6 +394,7 @@ class DurableCoordinationService:
             instruction_id=instruction_id,
             dependencies=current["dependencies"],
             backing_assignment_id=current.get("backing_assignment_id"),
+            workforce_assignment_id=current.get("workforce_assignment_id"),
             event_id=str(uuid.uuid4()),
             occurred_at=occurred_at,
             actor=actor,
@@ -1515,6 +1528,7 @@ def _public_obligation(record: dict[str, Any]) -> dict[str, Any]:
         "blocked_reason": record.get("blocked_reason"),
         "missing_capability": record.get("missing_capability"),
         "backing_assignment_id": record.get("backing_assignment_id"),
+        "workforce_assignment_id": record.get("workforce_assignment_id"),
         "created_at": record["created_at"],
         "updated_at": record["updated_at"],
         "owner_label": record["agent_identity"],

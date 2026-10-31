@@ -23,15 +23,14 @@ from app.agent_coordination.provider_ingestion import (
 )
 from app.mainai_operational_handover.absence import evaluate_absence_tick, founder_catchup_report
 from app.mainai_operational_handover.interactive import InteractiveIsolation
+from app.models.workforce import WorkforceAssignment
 from app.workforce.kill_switch import KillSwitchError, assert_grant_allowed
-from app.workforce.selector import SelectorError, select_best_candidate
+from app.workforce.authority import AuthorityEnvelopeError, require_live_assignment_authority
+from app.workforce.broker import DelegationBrokerError, resolve_delegation, submit_delegation_request
+from app.workforce.registry import WorkforceRegistryError, get_workforce_agent
+from app.workforce.selector import SelectorError
 
-CAPABILITY_TO_AGENT = {
-    "coding": "cursor",
-    "review": "examiner",
-    "planning": "claude",
-    "security": "codex",
-}
+AUTHORIZED_PROVIDER = "cursor"
 
 
 def _result(**extra: Any) -> dict[str, Any]:
@@ -94,6 +93,7 @@ def run_authorized_operating_cycle(
     provider_user_agent: str | None = None,
     candidate_sha: str | None = None,
     isolation: InteractiveIsolation | None = None,
+    verifier_profile_id: str | uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """One production tick. Interactive Founder work stays admitted throughout."""
     iso = isolation or InteractiveIsolation()
@@ -144,27 +144,88 @@ def run_authorized_operating_cycle(
             next_eligible=None,
         )
 
-    selected_agent = CAPABILITY_TO_AGENT.get(required_capability, "cursor")
-    selector_note = "capability_default"
-    try:
-        owner_uuid = uuid.UUID(str(owner_id))
-        best = select_best_candidate(db, owner_id=owner_uuid, required_capability=required_capability)
-        selected_agent = str(best.agent_key)
-        selector_note = "workforce_selector"
-    except (SelectorError, ValueError):
-        selector_note = "no_workforce_agent_use_capability_default"
-
-    assignment_id = str(uuid.uuid4())
-    assigned = service.assign(
-        agent_identity=selected_agent,
-        workstream="authorized_operating_cycle",
-        owner_id=str(owner_id),
-        instruction_id=goal_text[:200],
-        assignment_id=assignment_id,
-        actor="founder",
+    instruction_id = goal_text[:200]
+    workstream = "authorized_operating_cycle"
+    existing = service.get_by_canonical_work(
+        owner_id=str(owner_id), workstream=workstream, instruction_id=instruction_id
     )
-    if not assigned.accepted:
-        return _result(outcome="assign_rejected", reason=assigned.reason, founder=founder)
+    existing_id = existing.get("assignment_id") if existing else None
+
+    workforce_assignment = None
+    selected_profile = None
+    assignment_id = existing_id
+    if existing is not None:
+        workforce_assignment_id = existing.get("workforce_assignment_id")
+        if not workforce_assignment_id:
+            return _result(
+                outcome="delegation_authority_missing",
+                reason="existing obligation has no Delegation Broker assignment",
+                founder=founder,
+            )
+        try:
+            workforce_assignment = db.get(WorkforceAssignment, uuid.UUID(str(workforce_assignment_id)))
+            if workforce_assignment is None or workforce_assignment.owner_id != owner_uuid:
+                raise DelegationBrokerError("workforce assignment owner mismatch")
+            require_live_assignment_authority(workforce_assignment)
+            selected_profile = get_workforce_agent(
+                db, owner_id=owner_uuid, agent_id=workforce_assignment.profile_id
+            )
+            if selected_profile.provider_type != AUTHORIZED_PROVIDER:
+                raise DelegationBrokerError("selected workforce profile is not bound to the authorized provider")
+        except (ValueError, DelegationBrokerError, AuthorityEnvelopeError, WorkforceRegistryError) as exc:
+            return _result(outcome="delegation_authority_invalid", reason=str(exc), founder=founder)
+    else:
+        if verifier_profile_id is None:
+            return _result(
+                outcome="delegation_rejected",
+                reason="independent verifier profile is required by the Delegation Broker",
+                founder=founder,
+            )
+        try:
+            verifier_uuid = uuid.UUID(str(verifier_profile_id))
+        except ValueError:
+            return _result(outcome="delegation_rejected", reason="invalid verifier profile", founder=founder)
+        try:
+            with db.begin_nested():
+                request = submit_delegation_request(
+                    db,
+                    owner_id=owner_uuid,
+                    goal_text=goal_text,
+                    required_capability=required_capability,
+                    verification_requirement="independent_verifier",
+                    provenance={"source": workstream, "first_cycle_go": FIRST_CYCLE_GO},
+                )
+                workforce_assignment = resolve_delegation(
+                    db,
+                    owner_id=owner_uuid,
+                    request=request,
+                    verifier_profile_id=verifier_uuid,
+                    required_provider_type=AUTHORIZED_PROVIDER,
+                )
+                selected_profile = get_workforce_agent(
+                    db, owner_id=owner_uuid, agent_id=workforce_assignment.profile_id
+                )
+                if selected_profile.provider_type != AUTHORIZED_PROVIDER:
+                    raise DelegationBrokerError("selected workforce profile is not bound to the authorized provider")
+                assignment_id = str(uuid.uuid4())
+                assigned = service.assign(
+                    agent_identity=AUTHORIZED_PROVIDER,
+                    workstream=workstream,
+                    owner_id=str(owner_id),
+                    instruction_id=instruction_id,
+                    assignment_id=assignment_id,
+                    workforce_assignment_id=str(workforce_assignment.id),
+                    actor="mainai",
+                )
+                if not assigned.accepted:
+                    raise DelegationBrokerError(assigned.reason)
+        except (DelegationBrokerError, SelectorError, WorkforceRegistryError) as exc:
+            return _result(outcome="delegation_rejected", reason=str(exc), founder=founder)
+
+    if selected_profile is None or workforce_assignment is None or assignment_id is None:
+        return _result(outcome="delegation_rejected", reason="broker assignment unavailable", founder=founder)
+    selected_agent = AUTHORIZED_PROVIDER
+    selector_note = "delegation_broker"
 
     bind = bind_provider_assignment(
         service,
@@ -215,6 +276,13 @@ def run_authorized_operating_cycle(
         background=background,
         interactive=iso.public_view(),
         selector={"agent": selected_agent, "note": selector_note},
+        workforce={
+            "agent_key": selected_profile.agent_key,
+            "profile_id": str(selected_profile.id),
+            "delegation_request_id": str(workforce_assignment.delegation_request_id),
+            "assignment_id": str(workforce_assignment.id),
+            "provider_identity": selected_agent,
+        },
         assignment_id=assignment_id,
         bind=bind,
         ingest=ingest,
