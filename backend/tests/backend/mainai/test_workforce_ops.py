@@ -30,7 +30,6 @@ from app.workforce import (
     assert_scopes_allow_spend,
     can_safely_retry,
     clear_owner_stop,
-    create_context_package,
     form_pattern_team,
     looks_like_prompt_injection,
     mark_failure,
@@ -297,6 +296,100 @@ def test_none_proven_allows_retry_and_takeover_preserves_partial(superuser_db):
     assert new_a.provenance["authority_widened"] is False
     assert new_a.result_payload["inherited_partial"]["progress"] == 40
     assert a.status == "superseded"
+
+
+def test_alternate_takeover_refuses_authoritative_running_assignment(superuser_db):
+    owner = _owner(superuser_db)
+    _builder, verifier = _pair(superuser_db, owner.id, suffix="-ar6-running")
+    alternate = register_workforce_agent(
+        superuser_db,
+        owner_id=owner.id,
+        agent_key="alt-ar6-running",
+        name="Alt AR6",
+        role="builder",
+        agent_type="CODING",
+        trust_zone="LOCAL_INTERNAL",
+        capability_tags=["low_risk_classification"],
+        allowed_tool_classes=["read_excerpt"],
+        status="active",
+    )
+    request = submit_delegation_request(
+        superuser_db,
+        owner_id=owner.id,
+        goal_text="ar6 running",
+        required_capability="low_risk_classification",
+        verification_requirement="independent_verifier",
+    )
+    assignment = resolve_delegation(
+        superuser_db, owner_id=owner.id, request=request, verifier_profile_id=verifier.id
+    )
+    assignment.status = "running"
+    assignment.external_effect_state = "none_proven"
+    superuser_db.flush()
+
+    with pytest.raises(FailureTakeoverError, match="authoritative assignment state to be failed"):
+        alternate_agent_takeover(
+            superuser_db,
+            owner_id=owner.id,
+            failed_assignment=assignment,
+            request=request,
+            alternate_profile_id=alternate.id,
+            verifier_profile_id=verifier.id,
+        )
+
+
+def test_stale_worker_cannot_resurrect_assignment_after_takeover(superuser_db):
+    owner = _owner(superuser_db)
+    _builder, verifier = _pair(superuser_db, owner.id, suffix="-ar6-stale")
+    alternate = register_workforce_agent(
+        superuser_db,
+        owner_id=owner.id,
+        agent_key="alt-ar6-stale",
+        name="Alt AR6 stale",
+        role="builder",
+        agent_type="CODING",
+        trust_zone="LOCAL_INTERNAL",
+        capability_tags=["low_risk_classification"],
+        allowed_tool_classes=["read_excerpt"],
+        status="active",
+    )
+    request = submit_delegation_request(
+        superuser_db,
+        owner_id=owner.id,
+        goal_text="ar6 stale",
+        required_capability="low_risk_classification",
+        verification_requirement="independent_verifier",
+    )
+    assignment = resolve_delegation(
+        superuser_db, owner_id=owner.id, request=request, verifier_profile_id=verifier.id
+    )
+    mark_failure(
+        superuser_db,
+        owner_id=owner.id,
+        assignment=assignment,
+        failure_class="agent_crash",
+        external_effect_state="none_proven",
+    )
+    alternate_agent_takeover(
+        superuser_db,
+        owner_id=owner.id,
+        failed_assignment=assignment,
+        request=request,
+        alternate_profile_id=alternate.id,
+        verifier_profile_id=verifier.id,
+    )
+    superuser_db.flush()
+
+    from sqlalchemy import text as sa_text
+    from sqlalchemy.exc import DBAPIError
+
+    with pytest.raises(DBAPIError, match="invalid workforce assignment status transition"):
+        superuser_db.execute(
+            sa_text("UPDATE workforce_assignments SET status='running' WHERE id=:id"),
+            {"id": assignment.id},
+        )
+        superuser_db.flush()
+    superuser_db.rollback()
 
 
 def test_restart_preserves_checkpoint(superuser_db):

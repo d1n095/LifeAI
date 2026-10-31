@@ -12,10 +12,11 @@ import uuid
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.agent_coordination.durable import DurableCoordinationService, persist_to_assignment
-from app.models.agent_coordination import AgentWorkAssignment
+from app.models.agent_coordination import AgentWorkAssignment, CoordinationOwnerLedger
 from app.models.mainai_execution import MainAIGoal, MainAITask
 
 LEDGER_BACKING_KEY = "ledger_backing"
@@ -150,22 +151,48 @@ def persist_owner_ledger(
     service: DurableCoordinationService,
     actor: str = "coordination",
 ) -> AgentWorkAssignment:
-    """Write every obligation, handoff, GitHub intake, lifecycle and delivery slice."""
+    """Atomically merge and persist the complete owner ledger.
+
+    The owner-ledger row is the authoritative serialization point. Assignment JSON
+    remains a compatibility mirror and is never used over a present authority row.
+    """
+    db.execute(
+        pg_insert(CoordinationOwnerLedger)
+        .values(owner_id=owner_id, revision=0, payload={})
+        .on_conflict_do_nothing(index_elements=[CoordinationOwnerLedger.owner_id])
+    )
+    authority = db.execute(
+        select(CoordinationOwnerLedger)
+        .where(CoordinationOwnerLedger.owner_id == owner_id)
+        .with_for_update()
+    ).scalar_one()
+
+    merged = DurableCoordinationService()
+    if authority.payload:
+        merged.restore(dict(authority.payload))
+    incoming_id = next(iter(service._obligations), str(owner_id))
+    merged.restore(service.dump_for(incoming_id))
+
     backing = ensure_owner_ledger_backing(db, owner_id=owner_id)
-    for record in service._obligations.values():
+    for record in merged._obligations.values():
         record.setdefault("backing_assignment_id", str(backing.id))
     assignments = find_owner_assignments(db, owner_id=owner_id)
     if backing not in assignments:
         assignments.append(backing)
-    obligation_id = next(iter(service._obligations), str(backing.id))
+    obligation_id = next(iter(merged._obligations), str(backing.id))
+    canonical = merged.dump_for(obligation_id)
+    authority.payload = canonical
+    authority.revision = int(authority.revision or 0) + 1
+    db.flush()
+    service.restore(canonical)
     persist_to_assignment(
         db,
         assignment=backing,
-        service=service,
+        service=merged,
         obligation_id=obligation_id,
         actor=actor,
     )
-    dump = service.dump_for(obligation_id)
+    dump = canonical
     provenance = dict(backing.provenance or {})
     if _is_backing(backing):
         dump[LEDGER_BACKING_KEY] = True
@@ -185,7 +212,7 @@ def persist_owner_ledger(
         persist_to_assignment(
             db,
             assignment=assignment,
-            service=service,
+            service=merged,
             obligation_id=obligation_id,
             actor=actor,
         )
