@@ -101,7 +101,10 @@ def list_resumable_sessions(
     user: User = Depends(require_founder),
     store: ResumableHttpStore = Depends(get_resumable_store),
 ):
-    return {"sessions": store.list_sessions(user.id), "five_gb_supported": False}
+    try:
+        return {"sessions": store.list_sessions(user.id), "five_gb_supported": False}
+    except ResumableHttpError as exc:
+        raise _http_error(exc) from exc
 
 
 @router.get("/sessions/{session_id}")
@@ -126,8 +129,26 @@ async def put_resumable_part(
 ):
     try:
         parsed = parse_session_id(session_id)
+        raw_offset = request.headers.get("upload-offset")
+        if raw_offset is None:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "missing_upload_offset", "message": "Upload-Offset is required"},
+            )
+        try:
+            expected_offset = int(raw_offset)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "invalid_upload_offset", "message": "Upload-Offset must be a non-negative integer"},
+            ) from exc
+        if expected_offset < 0:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "invalid_upload_offset", "message": "Upload-Offset must be a non-negative integer"},
+            )
         data = await _read_bounded_part(request, max_bytes=store.part_max_bytes)
-        return store.write_part(user.id, parsed, data)
+        return store.write_part(user.id, parsed, data, expected_offset=expected_offset)
     except ResumableHttpError as exc:
         raise _http_error(exc) from exc
 

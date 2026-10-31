@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 from uuid import UUID
 
-from app.large_file_lane.session import MANIFEST, ResumableUploadSession
+from app.large_file_lane.session import MANIFEST, ResumableUploadSession, SessionIntegrityError
 from app.large_file_lane.stream import DEFAULT_CHUNK, TARGET_FILE_BYTES, five_gb_not_supported
 
 HTTP_PART_MAX_BYTES = DEFAULT_CHUNK
@@ -57,9 +57,14 @@ def parse_session_id(raw: str) -> UUID:
 
 
 @contextmanager
-def _session_lock(root: Path) -> Iterator[None]:
-    root.mkdir(parents=True, exist_ok=True)
-    with (root / LOCK_NAME).open("a+") as handle:
+def _session_lock(root: Path, *, create: bool = False) -> Iterator[None]:
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
+    try:
+        handle = (root / LOCK_NAME).open("a+")
+    except FileNotFoundError as exc:
+        raise ResumableHttpError("not_found", "session not found", http_status=404) from exc
+    with handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
             yield
@@ -117,8 +122,12 @@ class ResumableHttpStore:
             try:
                 payload = json.loads(manifest.read_text())
                 total += int(payload.get("declared_total_bytes") or 0)
-            except (OSError, TypeError, ValueError, json.JSONDecodeError):
-                continue
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ResumableHttpError(
+                    "session_integrity_error",
+                    "owner reservation state is unreadable",
+                    http_status=409,
+                ) from exc
         return total
 
     def create(
@@ -150,7 +159,7 @@ class ResumableHttpStore:
             )
         session_id = uuid.uuid4()
         root = self.session_root(owner_id, session_id)
-        with _session_lock(root):
+        with _session_lock(root, create=True):
             session = ResumableUploadSession.create(
                 root,
                 session_id=str(session_id),
@@ -167,7 +176,9 @@ class ResumableHttpStore:
             return self._public(session, owner_id)
 
     def get(self, owner_id: UUID, session_id: UUID) -> dict[str, Any]:
-        return self._public(self._load(owner_id, session_id), owner_id)
+        root = self.session_root(owner_id, session_id)
+        with _session_lock(root):
+            return self._public(self._load(owner_id, session_id), owner_id)
 
     def list_sessions(self, owner_id: UUID) -> list[dict[str, Any]]:
         root = self.owner_root(owner_id)
@@ -178,22 +189,30 @@ class ResumableHttpStore:
             if not (child / MANIFEST).is_file():
                 continue
             try:
-                parse_session_id(child.name)
+                session_id = parse_session_id(child.name)
             except ResumableHttpError:
                 continue
-            rows.append(self._public(ResumableUploadSession.load(child), owner_id))
+            with _session_lock(child):
+                rows.append(self._public(self._load(owner_id, session_id), owner_id))
         return rows
 
-    def write_part(self, owner_id: UUID, session_id: UUID, data: bytes) -> dict[str, Any]:
+    def write_part(
+        self,
+        owner_id: UUID,
+        session_id: UUID,
+        data: bytes,
+        *,
+        expected_offset: int,
+    ) -> dict[str, Any]:
         if len(data) > self.part_max_bytes:
             raise ResumableHttpError("part_too_large", "part exceeds HTTP 64 KiB bound", http_status=413)
         root = self.session_root(owner_id, session_id)
         with _session_lock(root):
             session = self._load(owner_id, session_id)
-            result = session.write_part(data)
+            result = session.write_part(data, expected_offset=expected_offset)
             if result["outcome"] == "rejected":
                 raise ResumableHttpError(
-                    "part_rejected",
+                    str(result.get("code") or "part_rejected"),
                     str(result.get("reason") or "part rejected"),
                     http_status=409,
                 )
@@ -228,7 +247,21 @@ class ResumableHttpStore:
         root = self.session_root(owner_id, session_id)
         if not (root / MANIFEST).is_file():
             raise ResumableHttpError("not_found", "session not found", http_status=404)
-        return ResumableUploadSession.load(root)
+        try:
+            session = ResumableUploadSession.load(root)
+        except SessionIntegrityError as exc:
+            raise ResumableHttpError(
+                "session_integrity_error",
+                "session state is inconsistent and cannot be resumed safely",
+                http_status=409,
+            ) from exc
+        if session.manifest.session_id != str(session_id):
+            raise ResumableHttpError(
+                "session_integrity_error",
+                "session manifest identity does not match its durable path",
+                http_status=409,
+            )
+        return session
 
     def _filename(self, session: ResumableUploadSession) -> str | None:
         meta = session.root / OWNER_META

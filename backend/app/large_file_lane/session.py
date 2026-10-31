@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,19 @@ from app.large_file_lane.stream import TARGET_FILE_BYTES, five_gb_not_supported
 
 MANIFEST = "manifest.json"
 SPOOL = "spool.bin"
+
+
+class SessionIntegrityError(RuntimeError):
+    """Durable session state cannot be reconciled without inventing bytes."""
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 @dataclass
@@ -74,18 +88,36 @@ class ResumableUploadSession:
             chunk_size=int(chunk_size),
         )
         session = cls(root, manifest=manifest)
+        with session.spool_path.open("xb") as handle:
+            handle.flush()
+            os.fsync(handle.fileno())
+        _fsync_directory(root)
         session._persist()
-        session.spool_path.touch(exist_ok=True)
         return session
 
     @classmethod
     def load(cls, root: Path) -> "ResumableUploadSession":
-        payload = json.loads((Path(root) / MANIFEST).read_text())
-        return cls(root, manifest=SessionManifest(**payload))
+        root = Path(root)
+        try:
+            payload = json.loads((root / MANIFEST).read_text())
+            session = cls(root, manifest=SessionManifest(**payload))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise SessionIntegrityError("session manifest is unreadable") from exc
+        session._validate_manifest()
+        session._reconcile_spool()
+        return session
 
-    def write_part(self, data: bytes) -> dict[str, Any]:
+    def write_part(self, data: bytes, *, expected_offset: int) -> dict[str, Any]:
+        self._reconcile_spool()
         if self.manifest.finalized:
             return {"outcome": "rejected", "reason": "session already finalized", **self.manifest.public()}
+        if expected_offset != self.manifest.offset:
+            return {
+                "outcome": "rejected",
+                "reason": "expected offset does not match committed offset",
+                "code": "offset_mismatch",
+                **self.manifest.public(),
+            }
         if not data:
             return {"outcome": "rejected", "reason": "empty part", **self.manifest.public()}
         if len(data) > self.manifest.chunk_size:
@@ -93,15 +125,18 @@ class ResumableUploadSession:
         if self.manifest.offset + len(data) > self.manifest.declared_total_bytes:
             return {"outcome": "rejected", "reason": "part would exceed declared_total_bytes", **self.manifest.public()}
         self.peak_part_bytes = max(self.peak_part_bytes, len(data))
-        with self.spool_path.open("ab") as handle:
+        with self.spool_path.open("r+b") as handle:
+            handle.seek(self.manifest.offset)
             handle.write(data)
             handle.flush()
+            os.fsync(handle.fileno())
         self.manifest.offset += len(data)
         self.manifest.parts_accepted += 1
         self._persist()
         return {"outcome": "accepted", "offset": self.manifest.offset, **self.manifest.public()}
 
     def finalize(self) -> dict[str, Any]:
+        self._reconcile_spool()
         if self.manifest.offset != self.manifest.declared_total_bytes:
             return {
                 "outcome": "incomplete",
@@ -116,6 +151,8 @@ class ResumableUploadSession:
                     break
                 self.peak_part_bytes = max(self.peak_part_bytes, len(chunk))
                 hasher.update(chunk)
+        if self.spool_path.stat().st_size != self.manifest.declared_total_bytes:
+            raise SessionIntegrityError("spool size changed during finalize")
         self.manifest.sha256 = hasher.hexdigest()
         self.manifest.finalized = True
         self.manifest.indexed = False
@@ -132,5 +169,44 @@ class ResumableUploadSession:
 
     def _persist(self) -> None:
         tmp = self.root / f".{MANIFEST}.tmp"
-        tmp.write_text(json.dumps(asdict(self.manifest), indent=2, sort_keys=True))
-        tmp.replace(self.root / MANIFEST)
+        with tmp.open("w") as handle:
+            json.dump(asdict(self.manifest), handle, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, self.root / MANIFEST)
+        _fsync_directory(self.root)
+
+    def _validate_manifest(self) -> None:
+        manifest = self.manifest
+        if manifest.declared_total_bytes <= 0 or manifest.chunk_size <= 0:
+            raise SessionIntegrityError("session manifest contains invalid bounds")
+        if manifest.offset < 0 or manifest.offset > manifest.declared_total_bytes:
+            raise SessionIntegrityError("session manifest contains an invalid offset")
+        if manifest.parts_accepted < 0:
+            raise SessionIntegrityError("session manifest contains an invalid part count")
+        if manifest.finalized and (
+            manifest.offset != manifest.declared_total_bytes or not manifest.sha256
+        ):
+            raise SessionIntegrityError("finalized session manifest is incomplete")
+
+    def _reconcile_spool(self) -> None:
+        """Discard only bytes that were never committed by a durable manifest.
+
+        The spool is fsynced before the manifest.  Therefore a longer spool is an
+        interrupted append and can be rolled back to the last committed offset.  A shorter
+        spool means the manifest claims bytes that do not exist and must fail closed.
+        """
+        try:
+            size = self.spool_path.stat().st_size
+        except OSError as exc:
+            raise SessionIntegrityError("session spool is unavailable") from exc
+        if size < self.manifest.offset:
+            raise SessionIntegrityError("session spool is shorter than its committed offset")
+        if size == self.manifest.offset:
+            return
+        if self.manifest.finalized:
+            raise SessionIntegrityError("finalized session spool has unexpected bytes")
+        with self.spool_path.open("r+b") as handle:
+            handle.truncate(self.manifest.offset)
+            handle.flush()
+            os.fsync(handle.fileno())
