@@ -1010,10 +1010,45 @@ class Worker:
             # second scan covers crash/retry graphs that became terminal without that gate.
             self._finalize_mainai_execution_goals(claim_db)
             self._advance_mainai_execution_tasks(claim_db)
-            claimed = claim_next_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
-            mainai_claimed = None if claimed is not None else claim_next_mainai_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
+            cycle_claimed = None
+            if self.settings.authorized_cycle_worker_enabled:
+                from app.agent_coordination.operating_cycle_runtime import claim_next_cycle
+
+                cycle_claimed = claim_next_cycle(
+                    claim_db,
+                    worker_id=self.worker_id,
+                    lease_seconds=self.settings.worker_lease_seconds,
+                )
+            claimed = None if cycle_claimed is not None else claim_next_job(
+                claim_db, self.worker_id, self.settings.worker_lease_seconds
+            )
+            mainai_claimed = None if cycle_claimed is not None or claimed is not None else claim_next_mainai_job(
+                claim_db, self.worker_id, self.settings.worker_lease_seconds
+            )
         finally:
             claim_db.close()
+
+        if cycle_claimed is not None:
+            cycle_id, owner_id, generation = cycle_claimed
+            db = SessionLocal()
+            try:
+                _set_mainai_job_rls_owner(db, owner_id)
+                from app.agent_coordination.operating_cycle_runtime import run_claimed_cycle_step
+
+                result = run_claimed_cycle_step(
+                    db,
+                    cycle_id=cycle_id,
+                    owner_id=owner_id,
+                    worker_id=self.worker_id,
+                    generation=generation,
+                )
+                logger.info("Worker %s: RT3 cycle %s -> %s.", self.worker_id, cycle_id, result.get("state"))
+            except Exception:
+                db.rollback()
+                logger.exception("Worker %s: failed RT3 cycle %s.", self.worker_id, cycle_id)
+            finally:
+                db.close()
+            return True
 
         if claimed is not None:
             job_id, owner_id = claimed

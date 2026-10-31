@@ -235,6 +235,9 @@ services:
       # backend/docker-entrypoint.sh) — it still fails closed if that state is wrong, it just
       # never itself writes to it.
       RUN_PRIVILEGE_BOOT: "false"
+      # HMAC verification belongs only to the HTTP backend ingress. The worker never
+      # receives or needs this secret, even though both services share an env_file.
+      CURSOR_CLOUD_WEBHOOK_SECRET: ""
       REDIS_URL: redis://:${REDIS_PASSWORD:?sätt REDIS_PASSWORD i /etc/lifeai/lifeai.env}@redis:6379/0
     depends_on:
       redis:

@@ -4,6 +4,8 @@ Exposes STOP, readiness, spend and canonical work status that already exist as P
 services. Does not enable Recall, GitHub writes, activation mode, or first-cycle GO.
 """
 
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -57,6 +59,84 @@ class CoordinationEventIn(BaseModel):
 class IssueBridgeIn(BaseModel):
     recipient: str = Field(min_length=1, max_length=32)
     ttl_seconds: int = Field(default=3600, ge=60, le=86400)
+
+
+class CreateOperatingCycleIn(BaseModel):
+    goal_id: uuid.UUID
+    execution_envelope_id: uuid.UUID
+    verifier_profile_id: uuid.UUID
+    max_attempts: int = Field(default=3, ge=1, le=10)
+
+
+class BindCycleDispatchIn(BaseModel):
+    external_agent_id: str = Field(min_length=1, max_length=256)
+    dispatch_receipt: str = Field(min_length=1, max_length=256)
+
+
+@router.post("/operating-cycles")
+@limiter.limit(f"{settings.rate_limit_default_per_minute}/minute")
+def create_operating_cycle(
+    request: Request,
+    payload: CreateOperatingCycleIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Persist explicit Founder intent; does not itself dispatch or spend."""
+    from sqlalchemy.exc import IntegrityError
+
+    from app.agent_coordination.operating_cycle_runtime import CycleAuthorityError, create_authorized_cycle
+    from app.workforce.kill_switch import KillSwitchError
+    from app.workforce.registry import WorkforceRegistryError
+
+    try:
+        row = create_authorized_cycle(
+            db,
+            owner_id=user.id,
+            goal_id=payload.goal_id,
+            envelope_id=payload.execution_envelope_id,
+            verifier_profile_id=payload.verifier_profile_id,
+            max_attempts=payload.max_attempts,
+        )
+        db.commit()
+    except (CycleAuthorityError, IntegrityError, KillSwitchError, WorkforceRegistryError, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return {
+        "cycle_id": str(row.id),
+        "state": row.state,
+        "worker_enabled": bool(get_settings().authorized_cycle_worker_enabled),
+        "first_cycle_go": False,
+        "remote_effect": False,
+    }
+
+
+@router.post("/operating-cycles/{cycle_id}/dispatch-binding")
+@limiter.limit(f"{settings.rate_limit_default_per_minute}/minute")
+def bind_operating_cycle_dispatch(
+    cycle_id: uuid.UUID,
+    request: Request,
+    payload: BindCycleDispatchIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Record a separately authorized provider dispatch receipt; never creates it."""
+    from sqlalchemy.exc import IntegrityError
+
+    from app.agent_coordination.operating_cycle_runtime import CycleAuthorityError, bind_cycle_dispatch
+
+    try:
+        row = bind_cycle_dispatch(
+            db,
+            owner_id=user.id,
+            cycle_id=cycle_id,
+            external_agent_id=payload.external_agent_id,
+            dispatch_receipt=payload.dispatch_receipt,
+        )
+        db.commit()
+    except (CycleAuthorityError, IntegrityError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return {"cycle_id": str(row.id), "state": row.state, "first_cycle_go": False, "dispatch_created_here": False}
 
 
 @router.post("/github-intake/refresh")
