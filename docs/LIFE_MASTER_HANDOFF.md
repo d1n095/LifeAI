@@ -43,8 +43,9 @@ ingestion demo + first blocker: `docs/LIFE_LOCAL_FIRST_INGESTION_DEMO.md` · Gov
   (`embed_with_policy`: ingest/retrieve/media/library) **+ chat** (`chat_with_fallback`), all via `owner_id`.
   The real gap — on-host local calls ledgered as external disclosures — is **fixed in PR #326**
   (`decision='local'`, migration 0069, checkable no-egress invariant).
-- **Extraction fidelity (measured this session):** text/md/html/docx-paras/PDF-text-layer/A+V ✅; **GAPS:
-  DOCX tables/headers/footers dropped; scanned/image PDF → empty text (no OCR); standalone images unhandled.**
+- **Extraction fidelity:** text/md/html/PDF-text-layer/A+V ✅; **DOCX tables/nested/headers/footers now
+  extracted (PR #327, draft)**; **remaining GAPS: scanned/image PDF → empty text (no OCR); standalone
+  images; DOCX text boxes/footnotes (detected+reported, not extracted).**
 - **`embedding_dim=1536` hardwired** → a real local embedder needs a schema migration + Founder decision (blocker).
 - **Provider-key pre-verification missing** (invalid-but-set key → silent `failed`).
 - **Background non-blocking:** two durable lease job systems (`knowledge_import_jobs`/worker.py;
@@ -57,8 +58,10 @@ ingestion demo + first blocker: `docs/LIFE_LOCAL_FIRST_INGESTION_DEMO.md` · Gov
   · #322 `a7c1ffa3` PASS** (single mig heads 0100/0101; full suites 3545/3530/3555/3561, 0 genuine fails).
 - **#324 `306b980f4`** `codex/coordination-ledger-dedup-takeover` (parent #322; mig 0102) = **active Codex
   CC3/CC4/AR6**. Inspect only; do not duplicate/modify; sequence after #322.
-- Claude: **#326** (egress local/external distinction + local-first ingestion demo, **draft @ `3a07f58b0`**,
-  review required; migration 0069 single head; 1193+1-skip regression green), **#325** (recon + handoff +
+- Claude: **#327** (DOCX extraction completeness — tables/nested/headers/footers, **draft @ `69cdaf342`**,
+  review required; rag regression 409 pass/1 skip), **#326** (egress local/external distinction + local-first
+  ingestion demo, **draft @ `3a07f58b0`**, review required; migration 0069 single head; 1193+1-skip regression
+  green), **#325** (recon + handoff +
   `LIFE_MASTER_BLUEPRINT.md`, draft, docs-only), **#323** (npm-audit + CI Playwright pin, green),
   #316/#317/#318 (passkeys/PWA). Deep cursor/* stack #285–#315 unmerged.
 
@@ -76,8 +79,10 @@ Claude (this lane): exams #319–#322 (done, PASS); recon + handoff (#325). Code
 **Priority (per the Founder's refinement): verified sources + Blueprint first, then build.** The Blueprint
 (`LIFE_MASTER_BLUEPRINT.md`) and the local-first ingestion demo (#326) are delivered. The gating item is
 now **§5 Q1 — designate ONE authorized historical source** so the ⟨access⟩-marked corpus can actually be
-ingested and the vision verified (today it is not reachable from Git). After that, the smallest verified
-build units, each its own reviewed PR (none started beyond #326): **(1)** DOCX table extraction,
-**(2)** scanned-PDF/image OCR, **(3)** configurable `embedding_dim` (needs Founder model decision),
-**(4)** S4 message→claim + export importer. No implementation without established scope + authorization.
+ingested and the vision verified (today it is not reachable from Git). Extraction-fidelity build units,
+each its own reviewed PR: **✅ DOCX tables/headers/footers done (#327)**; remaining, in order —
+**(1)** scanned-PDF/image OCR *(needs a local OCR-engine decision — local-first)*, **(2)** standalone image
+ingestion, **(3)** full extraction of detected-but-unsupported DOCX constructs (text boxes/footnotes),
+**(4)** configurable `embedding_dim` (needs Founder model decision), **(5)** S4 message→claim + export
+importer. No implementation without established scope + authorization.
 M1 (reconcile `BRANCH_REGISTRY` ↔ real PR graph) remains a zero-risk docs step that can proceed now.

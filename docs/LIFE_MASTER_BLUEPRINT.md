@@ -48,15 +48,17 @@ Probed the real extractor (`backend/app/rag/extract.py::extract_text`) across fo
 | text / markdown / code | ✅ exact | byte→text round-trip, encoding preserved |
 | HTML | ✅ (minor noise) | tags stripped; **note**: `BeautifulSoup.get_text` keeps `<script>/<style>` text |
 | DOCX paragraphs | ✅ | all paragraphs, in order |
-| **DOCX tables / text-boxes / headers / footers** | 🔴 **GAP** | `extract.py` reads `doc.paragraphs` only → table/cell content is **silently dropped** (reproduced: `CELL_A`/`CELL_B` lost) |
+| **DOCX tables / nested tables / headers / footers** | ✅ **FIXED (PR #327, draft)** | `app/rag/docx_extract.py` walks body children in reading order; tables + nested tables + headers/footers extracted, merged cells de-duplicated; 12 unit tests + e2e. Previously `doc.paragraphs`-only (dropped tables). |
+| DOCX text boxes / footnotes / comments / SmartArt | 🟡 **detected, not extracted** | #327 **reports** these as an explicit limitation note instead of dropping them silently |
 | PDF (digital text layer) | ✅ | `pypdf` extracts the embedded text layer |
 | **PDF (scanned / image-only)** | 🔴 **GAP** | no OCR → image-only pages yield **empty text** (silent content loss) |
 | Images (standalone) | 🔴 **GAP** | no image-text/OCR path confirmed |
 | Audio / video | ✅ | `rag/media_import.py` STEG 12 (timed transcript segments) |
 
-These two **DOCX-tables** and **scanned-PDF/image OCR** gaps are the concrete extraction blockers
-to *comprehensive* historical processing — see §9 deliverable #4. (Fidelity probe is reproducible:
-`backend` + the real `extract_text`.)
+The DOCX-completeness gap is **fixed in draft PR #327** (review pending). The remaining concrete
+extraction blockers to *comprehensive* historical processing are **scanned-PDF/image OCR** and
+**standalone images** — see §9 deliverable #4. (Fidelity probe reproducible: `backend` + the real
+`extract_text`.)
 
 ---
 
@@ -174,8 +176,9 @@ Reconciliation: [`MAINAI_CONCEPT_RECONCILIATION.md`](MAINAI_CONCEPT_RECONCILIATI
 - **Default** `claude/det-kommer-mer-879lcm` @ `64c07d5b0`; **no open PR merged into it yet** (~40 open).
 - **Codex** (coordination lane): #319 `397672d84`, #320 `6c1240d8`, #321 `e1f649a9`, #322 `a7c1ffa3`
   — independently **PASS** this session; **#324** `306b980f4` active (CC3/CC4/AR6; inspect-only, sequences after #322).
-- **Claude**: **#326** (this session — egress local/external distinction, **draft, review required**),
-  #325 (recon + handoff + this Blueprint, docs), #323 (npm-audit + CI pin, green), #316/#317/#318 (passkeys/PWA).
+- **Claude**: **#327** (DOCX extraction completeness — tables/nested/headers/footers, **draft, review required**),
+  **#326** (egress local/external distinction, **draft, review required**), #325 (recon + handoff + this
+  Blueprint, docs), #323 (npm-audit + CI pin, green), #316/#317/#318 (passkeys/PWA).
 - **Cursor**: #285–#315 (first-cycle, founder-workflow, coordination, large-file, messaging) — unmerged.
 - **Gaps (ranked):** (1) no historical-conversation→claim path (S4 not wired; no ChatGPT/export importer);
   (2) extraction fidelity: DOCX tables + scanned-PDF/image OCR (§1.2); (3) `embedding_dim=1536` hardwired
@@ -215,11 +218,13 @@ Built & in code: **P1** provider pre-verify · **P2** zip hardening · **P3** do
   then the extraction-fidelity fixes (§1.2) and the `embedding_dim` decision.
 
 ### Smallest missing capabilities for comprehensive historical processing (deliverable #4)
-Ordered by value/safety, each its own bounded, independently-reviewed PR — **none started** beyond #326:
-1. **DOCX table/header/footer extraction** in `extract.py` (verified gap; smallest, self-contained).
-2. **Image/scanned-PDF OCR** path (larger; needs a local OCR engine choice — local-first).
-3. **Configurable `embedding_dim`** / per-model vector columns (schema migration + **Founder decision** on the local model).
-4. **S4 message→claim wiring** + a **ChatGPT/export importer** (the biggest comprehension unlock; reuses `memory_source_unit`).
+Ordered by value/safety, each its own bounded, independently-reviewed PR:
+- ✅ **DOCX table/header/footer extraction** — **done in draft PR #327** (review pending).
+1. **Image/scanned-PDF OCR** path (larger; needs a local OCR engine choice — local-first). *← next smallest verified blocker.*
+2. **Standalone image ingestion** (depends on the OCR/vision choice above).
+3. **Full extraction of the detected-but-unsupported DOCX constructs** (text boxes/footnotes/comments) — currently reported, not extracted.
+4. **Configurable `embedding_dim`** / per-model vector columns (schema migration + **Founder decision** on the local model).
+5. **S4 message→claim wiring** + a **ChatGPT/export importer** (the biggest comprehension unlock; reuses `memory_source_unit`).
 
 ---
 

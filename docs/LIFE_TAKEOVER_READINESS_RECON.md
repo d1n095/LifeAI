@@ -109,7 +109,7 @@ not yet represented in Git content and are expected to arrive via authorized his
 | 1. Authorized source **discovery** | **Absent / manual** | Intake is Founder-initiated upload via `/api/library/import`; no autonomous external-source scan/watch. |
 | 2. Large-file **intake** | **Not on default** (built on PRs #311–#315/#320) | Default has standard upload + `zip_import.py` (MAX_FILES=500, 200 MB/pkg; no nested-zip/password handling). |
 | 3. Integrity + **immutable originals** | **Built & verified** | `storage/local_fs.py` content-addressed `{sha256}`, atomic write→fsync→rename, dedup, path-traversal/symlink-safe; durable worker stores+verifies original *before* any AI step. |
-| 4. Secure **extraction** (text/image/structured) | **Built (text/md/html/docx-paras/PDF-text-layer/A+V); two measured gaps** | `extract.py` + `media_import.py` STEG 12. **Fidelity probed this session** (real `extract_text`): text/md/html/docx-paragraphs/PDF-text-layer ✅; **GAP — DOCX tables/headers/footers dropped** (`doc.paragraphs` only; reproduced), **GAP — scanned/image-only PDF → empty text (no OCR)** + standalone images unhandled. See `LIFE_MASTER_BLUEPRINT.md` §1.2. |
+| 4. Secure **extraction** (text/image/structured) | **Built (text/md/html/docx-full/PDF-text-layer/A+V); DOCX fixed #327; PDF-OCR/images remain** | `extract.py` + `media_import.py` STEG 12. **DOCX tables/nested/headers/footers now extracted** via `app/rag/docx_extract.py` (draft **PR #327**, 409-pass rag regression; text boxes/footnotes detected+reported, not silently dropped). **Remaining GAP — scanned/image-only PDF → empty text (no OCR)** + standalone images unhandled. See `LIFE_MASTER_BLUEPRINT.md` §1.2. |
 | 5. **Chunking** + source refs | **Built** | `chunking.py`; `document_chunk` carries source refs; media chunks carry `[start,end)` time ranges for exact-moment citation. |
 | 6. **Classification** + semantic reconciliation | **Built (document path)** | `claims.py` (claim_type + objective word-overlap `grounding_score`, bounded one-call/chunk capped/doc); `concept_reconciliation/` deterministic, provider-free, one canonical `ProjectEntity` per idea (mig 0064). |
 | 7. Durable **memory integration** | **Built layers 1–3; `memory_source_unit` incl. message subtype (S1C)**; **layers 4–8 partial/missing**; **message→claim (S4) not wired** | `claims.py` extracts from `DocumentChunk` only; `MessageSourceUnit` rows exist (provenance) but do not yet flow into claims. |
@@ -146,8 +146,9 @@ not yet represented in Git content and are expected to arrive via authorized his
 **#319 `397672d84` PASS · #320 `6c1240d8` PASS · #321 `e1f649a9` PASS · #322 `a7c1ffa3` PASS**
 (single migration heads 0100/0101 verified; full suites reproduced 3545/3530/3555/3561, 0 genuine failures).
 **#324 `306b980f4`** (`codex/coordination-ledger-dedup-takeover`, parent #322, mig 0102) = **active Codex
-CC3/CC4/AR6 work — inspected scope/ancestry only; not duplicated/modified.** Claude lanes: **#326**
-(this session — egress local/external distinction + local-first ingestion demo, **draft, review required**),
+CC3/CC4/AR6 work — inspected scope/ancestry only; not duplicated/modified.** Claude lanes: **#327**
+(DOCX extraction completeness — tables/nested/headers/footers, **draft, review required**), **#326**
+(egress local/external distinction + local-first ingestion demo, **draft, review required**),
 **#323** (npm-audit + CI Playwright `ubuntu-24.04` pin, CI green), #316/#317/#318 (passkeys/PWA), **#325**
 (this reconnaissance + `LIFE_MASTER_BLUEPRINT.md`). Integration risks: stacked bases (merge order matters; no rebase-ahead-of-dependency per
 `CLAUDE.md`); per-doc status must be read, not inferred; `BRANCH_REGISTRY` needs reconciliation vs the real
