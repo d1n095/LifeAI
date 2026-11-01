@@ -109,7 +109,7 @@ not yet represented in Git content and are expected to arrive via authorized his
 | 1. Authorized source **discovery** | **Absent / manual** | Intake is Founder-initiated upload via `/api/library/import`; no autonomous external-source scan/watch. |
 | 2. Large-file **intake** | **Not on default** (built on PRs #311–#315/#320) | Default has standard upload + `zip_import.py` (MAX_FILES=500, 200 MB/pkg; no nested-zip/password handling). |
 | 3. Integrity + **immutable originals** | **Built & verified** | `storage/local_fs.py` content-addressed `{sha256}`, atomic write→fsync→rename, dedup, path-traversal/symlink-safe; durable worker stores+verifies original *before* any AI step. |
-| 4. Secure **extraction** (text/image/structured) | **Built (text + A/V); images partial** | `extract.py` (PDF/DOCX magic-byte verified); `media_import.py` STEG 12 (mp3/mp4, timed transcript segments). Image-OCR path not confirmed — likely a gap. |
+| 4. Secure **extraction** (text/image/structured) | **Built (text/md/html/docx-paras/PDF-text-layer/A+V); two measured gaps** | `extract.py` + `media_import.py` STEG 12. **Fidelity probed this session** (real `extract_text`): text/md/html/docx-paragraphs/PDF-text-layer ✅; **GAP — DOCX tables/headers/footers dropped** (`doc.paragraphs` only; reproduced), **GAP — scanned/image-only PDF → empty text (no OCR)** + standalone images unhandled. See `LIFE_MASTER_BLUEPRINT.md` §1.2. |
 | 5. **Chunking** + source refs | **Built** | `chunking.py`; `document_chunk` carries source refs; media chunks carry `[start,end)` time ranges for exact-moment citation. |
 | 6. **Classification** + semantic reconciliation | **Built (document path)** | `claims.py` (claim_type + objective word-overlap `grounding_score`, bounded one-call/chunk capped/doc); `concept_reconciliation/` deterministic, provider-free, one canonical `ProjectEntity` per idea (mig 0064). |
 | 7. Durable **memory integration** | **Built layers 1–3; `memory_source_unit` incl. message subtype (S1C)**; **layers 4–8 partial/missing**; **message→claim (S4) not wired** | `claims.py` extracts from `DocumentChunk` only; `MessageSourceUnit` rows exist (provenance) but do not yet flow into claims. |
@@ -122,11 +122,17 @@ not yet represented in Git content and are expected to arrive via authorized his
   `knowledge_import_jobs` (`worker.py`, `FOR UPDATE SKIP LOCKED`, restart-safe) and `mainai_jobs`
   (`jobs/service.py`, append-only `MainAIJobEvent` + `AuditLog`, RLS-scoped) — plus `InteractiveIsolation`
   (admits interactive Founder work alongside background). Large imports run in the worker, not the request.
-- **Untrusted source content / egress:** **Partial.** `egress_policy/` is a **default-deny** gate
-  (`enforce_egress_policy`, `MODEL_REQUESTED_CONTEXT != AUTHORIZED_EGRESS_CONTEXT`) but is **wired only into
-  the Safe Planner boundary**; `chat.py` and the **RAG embedding** call sites are **not gated yet** — raw
-  source content can still reach external providers there (tracked V1/V2 gaps). **This is the key safety
-  gap for historical ingestion.**
+- **Untrusted source content / egress:** **Built & wired (maturing).** _Correction to Rev. 2: a code
+  re-read this session shows the gate is **no longer** Safe-Planner-only._ `egress_policy/` default-deny
+  gate (`enforce_egress_policy`, `MODEL_REQUESTED_CONTEXT != AUTHORIZED_EGRESS_CONTEXT`) is wired into the
+  Safe Planner **and** the RAG embedding path (`embed_with_policy`, used by `rag/ingest.py`,
+  `rag/retrieve.py`, `rag/media_import.py`, `routers/library.py`) **and** chat
+  (`chat_with_fallback`) — each turned on via `owner_id` (verified in `routers/chat.py:132,221`,
+  `rag/ingest.py:98`, `rag/retrieve.py:27`). The real remaining gap was that the gate **could not
+  distinguish a local on-host provider from an external one**, so an on-host Ollama embed was ledgered as
+  an external-AI disclosure — no checkable no-egress invariant. **Fixed in PR #326** (truthful
+  `decision='local'`; migration 0069; never relaxes a deny). Chat-path NEVER_EGRESS behaviour on degraded
+  replies remains a smaller follow-up.
 - **Provider-key pre-verification:** **Missing.** Status checks `is_configured()` only; an invalid-but-set
   key yields a silent `failed` import (`MAINAI_PROJECT_UNDERSTANDING_PLAN.md` §0).
 - **Independently-verified autonomy:** partial — #205 self-improve ran on a disposable mirror, not the real
@@ -140,9 +146,10 @@ not yet represented in Git content and are expected to arrive via authorized his
 **#319 `397672d84` PASS · #320 `6c1240d8` PASS · #321 `e1f649a9` PASS · #322 `a7c1ffa3` PASS**
 (single migration heads 0100/0101 verified; full suites reproduced 3545/3530/3555/3561, 0 genuine failures).
 **#324 `306b980f4`** (`codex/coordination-ledger-dedup-takeover`, parent #322, mig 0102) = **active Codex
-CC3/CC4/AR6 work — inspected scope/ancestry only; not duplicated/modified.** Claude lanes: **#323**
-(npm-audit + CI Playwright `ubuntu-24.04` pin, CI green), #316/#317/#318 (passkeys/PWA), **#325** (this
-reconnaissance). Integration risks: stacked bases (merge order matters; no rebase-ahead-of-dependency per
+CC3/CC4/AR6 work — inspected scope/ancestry only; not duplicated/modified.** Claude lanes: **#326**
+(this session — egress local/external distinction + local-first ingestion demo, **draft, review required**),
+**#323** (npm-audit + CI Playwright `ubuntu-24.04` pin, CI green), #316/#317/#318 (passkeys/PWA), **#325**
+(this reconnaissance + `LIFE_MASTER_BLUEPRINT.md`). Integration risks: stacked bases (merge order matters; no rebase-ahead-of-dependency per
 `CLAUDE.md`); per-doc status must be read, not inferred; `BRANCH_REGISTRY` needs reconciliation vs the real
 PR graph; #324 sequences after #322.
 
@@ -153,8 +160,10 @@ PR graph; #324 sequences after #322.
 1. **No path from historical conversations → durable claim memory.** Message *source units* exist (S1C) but
    message→claim extraction (S4) is not wired; and there is **no importer** for a ChatGPT/export archive.
    This is the biggest blocker to "stop developing from fragmented conversation context."
-2. **Egress gating incomplete** — chat + RAG-embedding paths send source content to providers ungated.
-   Trust in durable memory requires classified egress on the ingestion path.
+2. **Egress local/external truthfulness** — _corrected:_ chat + RAG-embedding paths **are** gated
+   (`owner_id`); the gap was that on-host local calls were ledgered as external disclosures. **Addressed
+   in PR #326** (`decision='local'`, checkable no-egress invariant). Remaining: chat-path NEVER_EGRESS on
+   degraded replies (smaller).
 3. **Provider-key pre-verification missing** — real ingestion fails silently on an invalid-but-set key.
 4. **No autonomous source discovery** — intake is manual upload; large-file lane not on default.
 5. **Memory layers 4–8 + automatic relationship discovery** partial/manual.
