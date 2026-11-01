@@ -40,16 +40,25 @@ was unavailable here to prove the container path.
 proxy for both messaging and multipart upload are all present and consistent (see table above). The repo's
 Playwright **E2E harness exists** (`frontend/e2e`, `playwright.*.config.ts`) but currently **fails in CI for
 an environment reason unrelated to the app** — base `ci.yml` runs E2E on `ubuntu-latest` (now Ubuntu 26.04),
-where Playwright has no Chromium build; **PR #323 fixes this** (pin to `ubuntu-24.04`) and is unmerged.
-Backend unit/integration tests pass. A true end-to-end pass therefore needs either #323 on the base or a
-local `docker compose up` run (Founder-side; see §5).
+where Playwright has no Chromium build; **PR #323 fixes this** (pin to `ubuntu-24.04`). Backend unit/
+integration tests pass. A true end-to-end pass therefore needs either #323 on the base or a local
+`docker compose up` run (Founder-side; see §5).
+
+**Confirmed 2026-11-01 (Rev. 2):** PR #323 (`claude/frontend-npm-audit-baseline-consolidation` @ `04b27e9`)
+is now **fully green in CI** — `All required checks passed`, including *E2E Playwright (full stack)*, *E2E
+same-origin proxy*, and *npm audit* — and is **ready (not draft), MERGEABLE, mergeStateStatus CLEAN**. On
+#326 and #327 the **only** failing checks are exactly those three (E2E Playwright, E2E same-origin proxy, npm
+audit); their *Backend unit/integration*, *RLS & session-security*, and *Alembic migration* checks all
+**pass**. Direct comparison therefore confirms #326/#327's red checks are **base-inherited pre-#323
+failures**, not regressions — they go green once #323 is in the base.
 
 ## 3. Minimum branch/PR integration sequence (Deliverables #2) — dependency-ordered
 > Do not merge/rebase blindly; preserve frozen SHAs; each needs independent review. Migrations: base head
 > `0068`; #326 adds `0069`. No rebase ahead of a dependency actually merging (repo `CLAUDE.md`).
 
-1. **#323** — frontend npm-audit + CI Playwright `ubuntu-24.04` pin. *First*: turns E2E/npm CI green so every
-   later PR is trustworthy; no migration; no app-logic change. (CI green on its own branch.)
+1. **#323** — frontend npm-audit baseline + CI Playwright `ubuntu-24.04` pin (`04b27e9`). *First*: turns
+   E2E/npm CI green so every later PR is trustworthy; no migration; no app-logic change. **Now fully green in
+   CI, ready (not draft), MERGEABLE/CLEAN** — the one PR that is review-ready for integration today.
 2. **#327** — DOCX extraction completeness (no migration; independent of #326). *Review → merge.*
 3. **#326** — egress local/external distinction + migration `0069` (local-first no-egress invariant). *Review
    → merge after 0068.* Low risk, backward-compatible.
@@ -91,6 +100,24 @@ Run in an authorized environment (not this review clone). Nothing below enables 
 ## 6. Next safe executable step (Deliverable #8)
 **Assign independent review of #323 → #327 → #326, then do a supervised `docker compose up` dry-run of the §5
 checklist in an authorized environment** (Docker is unavailable in the review clone, so the container path is
-unproven here). In parallel, the Founder decides the **local embedding model** so §4 can be turned into a
-bounded migration PR — the one change that unblocks fully-offline retrieval. No further code is landed here:
-no boot-blocking code defect was found, and the remaining blocker is a design decision, not a bug.
+unproven here). In parallel, the Founder decides the **local embedding model** (Blueprint §14) so §4 can be
+turned into a bounded migration PR — the one change that unblocks fully-offline retrieval. No further code is
+landed here: no boot-blocking code defect was found, and the remaining blocker is a design decision, not a bug.
+
+## 7. Independent-review package + fresh local evidence (Rev. 2, 2026-11-01)
+Author cannot self-certify (repo `CLAUDE.md`; no independent reviewer available in this session). This is the
+**review package + evidence**, not a PASS. Review order **#323 → #327 → #326**; all three base on
+`claude/det-kommer-mer-879lcm` @ `64c07d5b0` (base migration head `0068`), all MERGEABLE.
+
+| PR | Branch @ SHA | Migr. head | CI (required) | Local regression here (Postgres 5433 + pgvector 0.8.6) |
+|---|---|---|---|---|
+| **#323** | `claude/frontend-npm-audit-baseline-consolidation` @ `04b27e9` | none | **all green**; ready/not-draft | n/a (frontend/CI) |
+| **#327** | `claude/docx-extraction-completeness` @ `69cdaf3` | none | backend/RLS/alembic **pass**; red only on the 3 #323-fixed checks | `tests/backend/rag/` = **407 passed, 1 skipped, 2 failed**; both failures reproduce on untouched base `64c07d5b0` and are **environmental**: one is a host-timezone artifact (recency assert off by exactly 3600 s — host is UTC+1, CI is UTC), one needs Docker (`..._via_docker_entrypoint`). **Zero #327 regressions.** |
+| **#326** | `claude/egress-local-provider-no-egress-ledger` @ `3a07f58` | **0069** (single head after 0068; CHECK-widen for `decision='local'`) | backend/RLS/alembic **pass**; red only on the 3 #323-fixed checks | egress + provider-locality + cross-session restart demo = **26 passed** (incl. the restart-persistence proof, §P3). |
+
+**Security invariants to confirm in review:** #326 never relaxes a deny path (NEVER_EGRESS + incomplete-request
+still hard-deny for local), `is_external_egress` defaults True (fail-safe: a provider is external unless it
+proves loopback/in-deployment), and the `local` decision still requires `sent_content_hash` NOT NULL (CHECK).
+#327 treats documents as untrusted, runs no macros, is bounded/deterministic, and reports (never silently
+drops) detected-but-unsupported constructs. **Integration blocker:** #323 must merge first; then #327 and #326
+rebase and their three red checks go green. #326's `0069` is the only migration and must sequence after `0068`.

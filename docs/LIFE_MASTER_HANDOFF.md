@@ -4,7 +4,7 @@
 knowledge store. When this disagrees with an authoritative doc, the authoritative doc wins — fix this file.
 Keep it short. `first_cycle_go=false` everywhere.
 
-_Rev. 2 — 2026-11-01 — Claude Opus 4.8 (independent). Base: `claude/det-kommer-mer-879lcm` @ `64c07d5b0`._
+_Rev. 3 — 2026-11-01 — Claude Opus 4.8 (independent). Base: `claude/det-kommer-mer-879lcm` @ `64c07d5b0`._
 
 ## 0. Standing invariants (never violate without explicit Founder say-so)
 No merge · no deploy · no DNS/STRATO · no paid/live provider calls · **no paid-provider data egress** · no
@@ -58,6 +58,20 @@ ingestion demo + first blocker: `docs/LIFE_LOCAL_FIRST_INGESTION_DEMO.md` · Gov
   extracted (PR #327, draft)**; **remaining GAPS: scanned/image PDF → empty text (no OCR); standalone
   images; DOCX text boxes/footnotes (detected+reported, not extracted).**
 - **`embedding_dim=1536` hardwired** → a real local embedder needs a schema migration + Founder decision (blocker).
+  **Why it is coupled (verified Rev. 3):** an HNSW index (`document_chunks_embedding_hnsw_idx`,
+  `vector_cosine_ops`, migration 0004) sits on the `vector(1536)` column; pgvector ANN indexes require a fixed
+  dimension, so one column can't serve two model sizes with ANN. All good local embedders are 768/1024-dim.
+  *Model identity+dim* can be made configurable **non-destructively** (additive columns + fail-closed guard —
+  Blueprint §14.3); the *width change* (→1024) is a one-time Founder-gated re-embed migration (vectors must be
+  recomputed). Recommended local models (validate on Founder data via ScandEval/MTEB-sv): embedding **bge-m3**
+  or **multilingual-e5-large** (both 1024) / KBLab Swedish (768); chat **Qwen2.5-7B** / Gemma-2-9B / Llama-3.1-8B
+  / GPT-SW3 (Swedish-native). See Blueprint §14.
+- **CI reality (verified Rev. 3, 2026-11-01):** **#323 (`04b27e9`) is fully green and ready (not draft),
+  MERGEABLE/CLEAN.** #326/#327 fail **only** the 3 checks #323 fixes (E2E Playwright, E2E same-origin proxy,
+  npm audit); their backend/RLS/alembic checks pass → their red is base-inherited, not a regression. Fresh
+  local regression (Postgres 5433 + pgvector 0.8.6): #326 egress+locality+restart-demo = **26 passed**; #327
+  `tests/backend/rag/` = **407 passed / 1 skip / 2 env-only fails** (both reproduce on untouched base — a
+  host-UTC+1 timezone artifact + a Docker-only test; zero #327 regressions).
 - **Provider-key pre-verification missing** (invalid-but-set key → silent `failed`).
 - **Background non-blocking:** two durable lease job systems (`knowledge_import_jobs`/worker.py;
   `mainai_jobs`/jobs service) + `InteractiveIsolation` = built.
@@ -87,6 +101,14 @@ Claude (this lane): exams #319–#322 (done, PASS); recon + handoff (#325). Code
 **#324 active**. Cursor: autonomy/first-cycle/large-file/messaging lanes (#285–#315). Don't overlap.
 
 ## 7. Next safe action
+**Rev. 3 lead:** the integration bottleneck is **review, not more code**. (1) Review+merge **#323 first**
+(green/ready today) → turns #326/#327's three red checks green. (2) Independent review of **#327 then #326**
+(package + fresh evidence in `LIFE_FIRST_STARTUP_READINESS.md` §7). (3) Founder picks the **local embedding +
+chat models** (Blueprint §14) → unblocks the configurable-embedding PR (§14.3, additive/non-destructive,
+sequenced *after* #326's `0069`) and then the one-time re-embed migration. (4) Supervised `docker compose up`
+dry-run of the startup checklist (runbook §5) in an authorized env. No 4th PR was stacked this round, by
+design (don't dilute review; don't collide with `0069`; the offline blocker is a model decision, not a bug).
+
 **Priority (per the Founder's refinement): verified sources + Blueprint first, then build.** Blueprint
 (`LIFE_MASTER_BLUEPRINT.md`, incl. §11 source audit, §12 comprehension gap analysis, §13 next-blocker +
 acceptance criteria) and the local-first ingestion demo (#326) are delivered. **Source-access audit (§11):

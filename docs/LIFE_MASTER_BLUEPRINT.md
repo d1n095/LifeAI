@@ -312,6 +312,81 @@ choice (or authorized egress). Acceptance criteria for that unit, when unblocked
 8. Adversarial + regression tests; independent review before merge.
 Until (a)+(b) are resolved, this stays a blocker, not an implementation.
 
+## 14. Local AI model compatibility & configurable-embedding architecture (P2)
+Goal = **long-term provider independence**, not swapping one paid API for another. Two separate questions:
+the *model choice* (Founder decision, below) and the *schema coupling* that must stop forcing that choice.
+
+### 14.1 The coupling to break (verified in code @ `64c07d5b0`)
+`document_chunks.embedding` is `vector(1536)` — the dimension is **fixed at migration time**
+(`0004_pgvector_document_chunks.py`) and mirrored by `config.embedding_dim = 1536`
+(`app/models/document_chunk.py:43`). An **HNSW index** (`document_chunks_embedding_hnsw_idx`,
+`vector_cosine_ops`) sits on that column; pgvector's ANN indexes **require a declared dimension**, so a single
+physical column cannot serve two models of different size while keeping ANN search. Consequences:
+- A real local embedder (all good options below are 768/1024-dim, **not** 1536) cannot write a chunk today —
+  it hits the column type, and `index_document` embeds *before* it writes any chunk, so retrieval is fully
+  blocked offline (Blueprint §13, runbook §4). This is the first genuine offline blocker.
+- **What can be made configurable without a destructive migration:** the *model identity and dimension as a
+  recorded, validated pair* — additive columns + a fail-closed guard (§14.3). **What cannot:** the vector
+  width itself. Changing 1536→1024 is an `ALTER COLUMN ... TYPE vector(N)` + HNSW rebuild + a **full
+  re-embed** (the stored numbers must be recomputed in the new model's space); that is inherently a one-way
+  data operation, so it is done *once*, Founder-gated, into a new/parallel column with verify-then-swap — not
+  avoided, but made safe and non-silent. Mixing dimensions in one column is unsafe: a query vector of the
+  wrong width raises a raw pgvector error mid-request.
+
+### 14.2 Model comparison (grounded; validate on Founder data before committing — see sources)
+**Embedding (retrieval) — Swedish-capable, offline, CPU-tolerant:**
+| Model | Dim | Swedish | Footprint | Notes |
+|---|---|---|---|---|
+| **bge-m3** (BAAI) | **1024** | strong (100+ langs) | ~1.2 GB, CPU-OK | dense+sparse+ColBERT; 8k ctx; in Ollama lib (default pull = dense only). Best general multilingual pick. |
+| **multilingual-e5-large** (intfloat) | **1024** | strong; appears on Swedish ScandEval excerpts | ~1 GB | mature, well-benchmarked for Scandinavian retrieval; needs `query:`/`passage:` prefixes. |
+| multilingual-e5-base | 768 | good | ~0.5 GB | lighter fallback for constrained hardware. |
+| **KBLab sentence-bert-swedish-cased** | 768 | Swedish-native (Kungliga biblioteket) | small | best *Swedish-specific* semantics; runs via sentence-transformers, not Ollama — ops cost. |
+| nomic-embed-text | 768 | weak (English-centric) | ~0.3 GB | **not** recommended for Swedish despite being the easy Ollama default. |
+
+**Chat (claim extraction / decision-vs-idea classification) — Swedish, local:**
+| Model | Swedish | Hardware | Notes |
+|---|---|---|---|
+| **Qwen2.5-7B-Instruct** | good multilingual | ~6–8 GB RAM (quantized), ~18 tok/s on Apple-silicon CPU | strong instruction-following; 3B variant for very constrained hosts. |
+| Llama-3.1-8B-Instruct | good | similar | solid general multilingual. |
+| Gemma-2-9B | often cited best for European langs | ~8–10 GB | community-preferred for EU languages. |
+| GPT-SW3-6.7B-instruct (AI Sweden) | Swedish-native | ~7 GB | Swedish-first; verify a current GGUF/Ollama build + instruct quality before relying on it. |
+| Phi-4-mini / Qwen2.5-3B / Llama-3.2-3B | fair | ~2.5 GB, CPU-friendly | low-hardware fallback; expect weaker Swedish nuance. |
+
+**Benchmarks to settle the choice on real data, not vibes:** ScandEval (Scandinavian NLU/generation) and
+MTEB filtered to Swedish/Scandinavian retrieval. Pick embedding + chat **together**, record exact model
+version+revision for reproducibility, and re-validate after any hardware migration.
+
+### 14.3 Recommended smallest safe change (ready to build; not landed this round)
+A **separate, isolated draft PR, sequenced *after* #326 merges** (to avoid colliding with #326's migration
+`0069` and to respect the repo's "don't stack ahead of a dependency" rule — repo `CLAUDE.md`). Scope =
+"record embedding provenance + fail closed on mismatch", **without choosing a model**:
+1. Config: treat `embedding_model` + `embedding_dim` as one validated pair (a known-models table maps
+   model→dim; startup refuses an inconsistent pair instead of trusting a bare `1536`).
+2. Additive migration (**non-destructive**, nullable): `document_chunks.embedding_model text`,
+   `embedding_dim int`. Back-fill existing rows to the current model/1536. No data rewrite, reversible.
+3. `vector_store.upsert_chunks` records the active model/dim per chunk; `search`/`retrieve` **fail closed**
+   (explicit error, never a raw pgvector throw and never a cross-space comparison) when the query model/dim
+   ≠ the stored rows' — making a model switch *detectable*, not silently wrong.
+4. The actual width change (→1024) stays a **later, Founder-gated** re-embed migration (§14.1), unblocked
+   only once the Founder picks the model. This PR is the safe prerequisite that makes that switch auditable.
+Acceptance: additive migration applies+reverses on a from-scratch DB; mixed-model corpus is rejected with a
+clear error (adversarial test); existing 1536/OpenAI path unchanged (regression); owner isolation intact;
+independent review before merge.
+
+## 15. First historical-comprehension test — design (P4; runs only after startup+upload are proven)
+Milestone after a verified supervised startup (runbook §5) and the local-model path (§14). Pipeline reuses
+existing infrastructure end to end — **no new store, no autonomy**:
+Founder-authorized historical file → §1.2/#327 extraction (fidelity-checked) → `memory_source_unit`
+provenance → **local** semantic analysis (claims via a local chat model, ledger `local`) → concept
+reconciliation (deterministic, provider-free) → **provisional** Blueprint proposal → Founder review.
+Life must distinguish, and label, five epistemic classes — **historical fact · Founder-approved decision ·
+proposal/inference · superseded decision · unresolved contradiction** — and must **never silently promote an
+inference into an authoritative requirement** (proposals stay proposals until the Founder approves). Where a
+decision is strategic, Life **gathers questions and respectfully proposes a meeting**; it does not
+independently schedule one without an explicit mandate. Success = every surfaced claim is source-linked, the
+five classes are separated, contradictions are shown rather than resolved away, and what was *not* understood
+is reported explicitly. This is a design, not an implementation — it is gated on §13(a)+(b) and §14.
+
 ---
 **This Blueprint is a traceable synthesis of reachable evidence. It does not invent missing history,
 overstate coverage, rewrite originals, or claim authority. `first_cycle_go=false`.**
