@@ -1,230 +1,237 @@
 # Life (MainAI) — Whole-Project Reconnaissance & Verified State-of-the-Project Report
 
 **Status:** Read-only reconnaissance. **Proposal for Founder–Life discussion — NOT authorization to build
-the roadmap.** No code written, no merge, no deploy, no spend, no Recall, no autonomous enablement.
-`first_cycle_go=false`.
+the roadmap.** No code written, no merge, no deploy, no spend, no paid-provider egress, no Recall, no
+autonomous enablement. `first_cycle_go=false`.
 
-**Author:** Claude Opus 4.8 (independent examiner/reconnaissance). **Base:** default branch
-`claude/det-kommer-mer-879lcm` @ `64c07d5b0` (verified = origin default tip, 0 ahead / 0 behind).
-**Method:** direct reading of the repository at that SHA — 113 `docs/`, `backend/app/` (44 packages,
-55 models, 68 migrations, 198 backend test files, 62 registered RLS policies), and the open-PR graph via
-the GitHub API. Every major claim is traceable to a source. Where a claim is a *plan/proposal* rather than
-*verified behaviour*, it is labelled. **Honesty rule observed:** this report distinguishes what was
-actually examined from what is present-but-unread and from what is inaccessible; it does not claim to have
-read material it could not reach, and it does not turn an interpretation into a Founder-approved requirement.
+**Author:** Claude Opus 4.8 (independent). **Base:** default branch `claude/det-kommer-mer-879lcm`
+@ `64c07d5b0` (= origin default tip). **Method:** direct reading of the repository at that SHA — 113
+`docs/`, `backend/app/` (44 packages, 55 models, 68 migrations, 198 backend test files, 62 RLS policies),
+and the open-PR graph via the GitHub API. Every major claim is traceable; plans vs verified behaviour are
+labelled. **Rev. 2 (2026-11-01)** folds in Founder scope corrections and a deep ingestion→memory inventory.
 
----
-
-## A. Verified existing inventory — what is present and where
-
-**Backend (`backend/app/`, 44 packages).** Capability clusters (each a real package at `64c07d5b0`):
-- **Memory / knowledge:** `rag/` (content-addressed storage, chunks, KnowledgeClaim + objective
-  `grounding_score`, `trust.py`), `inspectable_memory/`, `founder_memory/`, `founder_memory_signals/`,
-  `memory_threads/`, `memory_work_linkage/`, `project_entities/`, `concept_reconciliation/`,
-  `work_candidates/`, `active_context/`, `context/` (turn `resolver.py`).
-- **Autonomy / execution:** `mainai_execution/`, `mainai_executive/`, `development_supervisor/`,
-  `development_driver/`, `development_operator/`, `safe_planner/`, `execution_envelopes/`,
-  `autonomous_gap/`, `jobs/`, `workforce/`, `agent_coordination/` (durable ledger `durable.py`).
-- **Local-first learning:** `mainai_school/` (Local Intelligence School, #236 = current tip),
-  `capability_reality/`, `strategy_synthesis/`, `strategy_evaluation/`, `work_intelligence/`,
-  `problem_learning/`, `corpus_trial/` (corpus intake trial harness, migration 0052).
-- **Security kernel:** `rls.py` (FORCE ROW LEVEL SECURITY, **62 policies**), `egress_policy/`,
-  `provider_spend/` (reserve→settle, SPEND-STOP, mig 0060), `workforce/kill_switch.py`,
-  `workforce/authority.py`, `execution_envelopes/` (authority envelope, mig 0057), `account/erasure.py`.
-- **Readiness / diagnostics:** `mainai_startup_readiness/`, `diagnosis/`, `intelligence_governance/`.
-- **Providers / integration:** `providers/`, `provider_planning/`, `integrations/`,
-  `providers/transcription.py`.
-
-**Frontend:** Next.js 16 / React 19 portal (Dashboard, Chat, Knowledge, Projects, Documents, Admin).
-
-**Life Vault:** a real design lane (`docs/LIFE_VAULT_EGRESS_CONTROL.md`,
-`docs/LIFE_SOURCE_VAULT_FUTURE_COMPATIBILITY.md`, `docs/LIFE_VAULT_V4_V5_V7_V8_DESIGN_MEMOS.md`,
-`docs/CLAUDE_LIFE_VAULT_EGRESS_LANE.md`). Core invariant: **REPO-WRITE ≠ PROVIDER-SPEND ≠ EGRESS AUTHORITY.**
-Target long-term shape: original→hashing→dedup→chunking→compression→encryption→durable/cold storage, Life
-working from derived knowledge and decrypting original chunks on demand (future-compat review concludes **no
-code change needed yet** — the abstraction boundary is already compatible).
-
-**Stored source material in git:** **none** — no committed originals/archives/ZIP/PDF. Actual uploaded
-content lives in the `lifeai_uploads` volume and DB, not the repository (see B).
+> **Scope corrections the Founder issued for this revision (authoritative):**
+> 1. Life's full vision is **substantially broader** than the technical categories documented in the repo.
+>    **Business, finance, communication, multiple companies and other Founder-defined domains are already
+>    part of the intended scope** — they are *not* open authorization questions.
+> 2. **Absence from Git ≠ nonexistence.** Historical material (conversations, documents, images, project
+>    files) may already live in Life's uploads, Library, Vault, database, or external Founder-controlled
+>    files, and must eventually be read from all *authorized* sources, originals preserved.
+> 3. The Founder **prioritizes whole-project comprehension before extensive new development.**
+> 4. **Local-first processing and reducing paid-AI dependence are strategic objectives.**
+> 5. Independent examinations: **#319/#320/#321/#322 all PASS**; **#324** is Codex's CC3/CC4/AR6 work —
+>    inspect, do not duplicate.
+> This report does **not** impose a fixed product taxonomy and does **not** treat the current architecture
+> docs as the complete vision; the full architecture must be *discovered and reconciled from the historical
+> record*, not invented from a summary.
 
 ---
 
-## B. Historical coverage — what was examined, what is missing, how complete this picture is
+## A. Verified existing inventory — what is present and where (in Git @ `64c07d5b0`)
 
-**Actually examined (read this session):** `MAINAI_PROJECT_UNDERSTANDING_PLAN.md` (8-layer memory, §0/§2),
-`MAINAI_STARTUP_READINESS.md`, `MAINAI_V1_GOAL_TO_AUTONOMY.md`, `MAINAI_V1_READINESS.md`,
-`FIRST_AUTONOMOUS_TASK_BLOCKER_MAP.md`, `MAINAI_LOCAL_INTELLIGENCE_SCHOOL.md`,
-`MAINAI_CONCEPT_RECONCILIATION.md`, `SECURITY_BLOCKERS.md`, `ROADMAP.md`, `LIFE_VAULT_EGRESS_CONTROL.md`,
-`LIFE_SOURCE_VAULT_FUTURE_COMPATIBILITY.md`; the full `backend/app/` module tree; `rls.py`; the open-PR
-graph; and (full source read) the #319/#320/#321/#322 candidates.
+**Backend (44 packages).** Capability clusters:
+- **Memory / knowledge:** `rag/` (`extract.py`, `chunking.py`, `claims.py`+objective `grounding_score`,
+  `trust.py`, `retrieve.py`, `vector_store.py`, `ingest.py`, `library_import.py`, `media_import.py`,
+  `memory_source.py`, `message_source.py`, `corpus_batch.py`, `zip_import.py`, `backfill/`),
+  `inspectable_memory/`, `founder_memory/`, `memory_threads/`, `memory_work_linkage/`, `project_entities/`,
+  `project_memory/`, `concept_reconciliation/`, `work_candidates/`, `active_context/`, `context/resolver.py`.
+- **Autonomy / execution:** `mainai_execution/`, `mainai_executive/` (`why_graph.py`, `missing_piece.py`,
+  `continuity.py`), `development_supervisor/`/`development_driver/`/`development_operator/`, `safe_planner/`,
+  `execution_envelopes/` (mig 0057), `autonomous_gap/`, `jobs/` (durable `mainai_jobs`), `workforce/`,
+  `agent_coordination/` (durable ledger).
+- **Local-first learning (strategic objective):** `mainai_school/` (#236 tip), `capability_reality/`,
+  `strategy_synthesis/`, `strategy_evaluation/`, `work_intelligence/`, `problem_learning/`, `corpus_trial/`.
+- **Security kernel:** `rls.py` (FORCE RLS, 62 policies), **`egress_policy/`** (default-deny gate),
+  `provider_spend/` (mig 0060), `workforce/kill_switch.py`, `workforce/authority.py`, `account/erasure.py`.
+- **Readiness/diagnostics:** `mainai_startup_readiness/`, `diagnosis/`, `intelligence_governance/`.
 
-**Present but not yet fully read (113 docs total; ~90 unread in depth):** the remaining `LIFE_*`, `MAINAI_*`,
-`ACTIVE_WORK_*`, `HANDOFF_*` design docs. Named in the index; not line-read here.
+**Memory/knowledge schema (models):** `document`, `document_chunk`, `knowledge_claim`, `knowledge_version`,
+`claim_relationship`, `source_relationship`, **`memory_source_unit`** (unified provenance: subtypes
+document_chunk/version/record **and `message`**), `memory_thread`, `memory_truth_claim`, `project_entities`,
+`project_memory`, `founder_memory`, `conversation`(+`message`), `import_job`, `source_import_batch`,
+`corpus_trial_run`, `mainai_job`, `memory_source_backfill_run`.
 
-**Inaccessible / requires Founder-authorized access (NOT examined, do not assume content):**
-- **Historical ChatGPT conversations** — the Founder's primary concern. There is **no importer** and **no
-  stored export** in the repo. `account/export.py` exports the user's *own account data*; it does not import
-  ChatGPT. A conversation data model exists (`models/conversation.py`, `memory_threads/`), and
-  `context/resolver.py` classifies turns, but **conversation turns are not yet a first-class memory source**
-  feeding the claim pipeline (`MAINAI_PROJECT_UNDERSTANDING_PLAN.md` §2 layer 7).
-- **The broader business / financial / communication / multi-project vision.** A content search of all 113
-  docs (Swedish + English terms) returned **zero** hits for business/finance/revenue/communication/
-  multi-project narrative. **Evidence-backed conclusion:** the Founder's belief that the full vision is
-  broader than the recent technical categories is consistent with the evidence — **that broader vision is
-  not captured in this repository.** It most likely lives in the inaccessible ChatGPT conversations and
-  other external sources, and will require authorized export to reconstruct.
-- **The running system's data** — the actual Library/Vault contents, memory DB rows, uploaded originals —
-  exist only in a live deployment/volume, not in git; not inspected here.
+**Life Vault** (design + partial build): `docs/LIFE_VAULT_EGRESS_CONTROL.md` + `egress_policy/`. Invariant
+`REPO-WRITE ≠ PROVIDER-SPEND ≠ EGRESS AUTHORITY`; two of three built (envelope 0057, spend 0060); egress
+gate now exists but is **wired only into the Safe Planner path** (see D/F).
 
-**Completeness estimate:** the *technical platform* picture is **high-confidence** (code+migrations+tests
-read directly). The *historical-vision* picture is **low-confidence and known-incomplete** — the material
-that would complete it is inaccessible from the repo alone.
-
----
-
-## C. Reconstructed vision map (from repo evidence only; NOT a Founder-approved spec)
-
-Recurring, cross-referenced intentions evidenced in the docs/code:
-1. **One unified, RLS-scoped memory/knowledge base** (not per-feature silos) with an unbroken provenance
-   chain original→source→claim→project/idea/decision/founder/constitution
-   (`MAINAI_PROJECT_UNDERSTANDING_PLAN.md`).
-2. **Life as persistent operator/partner**, external APIs as *teachers/critics/examiners* not permanent
-   brain (`MAINAI_LOCAL_INTELLIGENCE_SCHOOL.md`), progressing toward local-first.
-3. **Authority separation as a first principle** — REPO-WRITE ≠ PROVIDER-SPEND ≠ EGRESS; approval
-   double-gates; `UNKNOWN != VERIFIED` (`LIFE_VAULT_EGRESS_CONTROL.md`, `MAINAI_STARTUP_READINESS.md`).
-4. **Supervised autonomy before unattended autonomy** — bounded cycles, STOP/epoch fencing, independent
-   verification that provider completion cannot bypass (#319/#321 verified).
-5. **The same concept under different names** — "MainAI" / "Life"; "whole-project understanding" /
-   "project map" / `project_entities` + concept-reconciliation; "constitution" = layer 8 governing docs.
-
-Concepts appearing under different names, shared foundations, and dependencies are mapped in §A clusters.
-**Conflict/supersession:** doc status must be read per-doc (many carry explicit `Status:` headers); the
-deep PR stack (§E) contains successors that re-scope earlier candidates. This report does **not** re-date or
-alter any source.
+**Not on the default branch (in-flight on PRs):** `large_file_lane/` (resumable large-file intake) lives on
+cursor PRs #311–#315 / codex #320, **absent at `64c07d5b0`** — large-file intake is *not* yet a default-
+branch capability. `docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md` (the S1 message-source design) is likewise
+absent on default although its *code* (`rag/message_source.py`, migration 0037) is present.
 
 ---
 
-## D. Implementation reality (built / partial / proposed / independently verified / blocked)
+## B. Historical-source coverage matrix — honest accounting (**absence from Git ≠ nonexistence**)
 
-| Capability | State | Evidence |
+This repository is **not** the authoritative store of Life's history. The following four-way matrix states
+what was actually examined vs what remains.
+
+| Class | What it covers | This session's status |
 |---|---|---|
-| Immutable content-addressed originals, atomic store, dedup, path-traversal/symlink-safe | **Built & verified** | `storage/local_fs.py`, durable-worker (`MAINAI_PROJECT_UNDERSTANDING_PLAN.md` §1.1) |
-| Durable restart-safe worker (`FOR UPDATE SKIP LOCKED`), per-file state machine received→…→indexed | **Built & verified** | `worker.py` |
-| Extraction → chunk → claim + objective grounding | **Built** (layers 1–3) | `rag/`, KnowledgeClaim, `trust.py` |
-| Project/idea/decision/founder/constitution memory (layers 4–8) | **Partial / missing** | `MAINAI_PROJECT_UNDERSTANDING_PLAN.md` §2 |
-| Provider-key **pre-verification** (key *works*, not just set) | **Missing (blocker)** | §0 of the plan |
-| Cross-source reconciliation (one canonical entity per idea) | **Built, provider-free** | `concept_reconciliation/`, mig 0064 |
-| Founder→worker autonomy chain (both entry paths) | **Substantially built** | `MAINAI_V1_GOAL_TO_AUTONOMY.md` (file:line-cited) |
-| Responsiveness while background workers run (interactive isolation) | **Built** | `InteractiveIsolation`, `operational_handover/absence` |
-| Authorized external comms (messaging/delivery gateway, GitHub intake) | **Partial, on unmerged PRs** | #300–#304 |
-| Supervised agent coordination + review + follow-up | **Built + hardening under exam** | `agent_coordination/`, #319/#321/#322 |
-| Failure detection / safe resume after interruption | **Built** | durable ledger, lease/epoch fencing (#321 verified) |
-| Evidence-based prioritization / readiness levels | **Built** | `mainai_startup_readiness/`, `FIRST_AUTONOMOUS_TASK_BLOCKER_MAP.md` |
-| Local code dev/test without paid APIs | **Framework only, NOT production-ready** | `mainai_school/`; `TRAINING DATA ≠ MODEL TRAINED ≠ IMPROVED ≠ SAFE` |
-| **External-AI egress classification/filtering** | **Missing** — chat sends raw content to providers unfiltered | `LIFE_VAULT_EGRESS_CONTROL.md` |
-| Independently-verified autonomy behaviour | **Partial** | #205 self-improve ran on disposable mirror, not real checkout (`MAINAI_V1_READINESS.md`) |
+| **EXAMINED** (read directly) | ~20 strategic docs (listed in Sources); `backend/app/` module tree; key pipeline modules (`claims.py`, `message_source.py`, `egress_policy`, `jobs/service.py`, `retrieve.py`, `media_import.py`, `storage/local_fs.py`); the #319/#320/#321/#322 candidates; open-PR graph. | **High-confidence** for the *technical platform*. |
+| **DISCOVERABLE-BUT-UNEXAMINED** (present, not yet read in depth) | ~90 of 113 `docs/` (remaining `LIFE_*`/`MAINAI_*`/`ACTIVE_WORK_*`/`HANDOFF_*`); full source of most packages; all 68 migrations individually. | Named/located; **not** line-read. A future pass can read these without new authorization. |
+| **INACCESSIBLE FROM GIT — requires live system or Founder-authorized access** | The **running system's data**: actual Library/Vault contents, uploaded **originals** (`lifeai_uploads` volume), memory DB rows, `conversation`/`message` rows, corpus-trial runs. **Historical ChatGPT conversations and other external Founder files.** | **Not inspected** (no running deployment reachable here; no export in repo). May already contain large parts of the vision. **Not claimed read.** |
+| **MISSING / NOT YET BUILT** | A ChatGPT/conversation **export importer**; autonomous **source discovery**; message→claim extraction (S4); memory layers 4–8 completion; automatic relationship discovery; egress gating on chat/RAG paths; provider-key pre-verification. | Evidence-backed gaps (see D/F). |
+
+**Completeness statement (not overstated):** the *technical platform* picture is high-confidence; the
+*historical-content* picture is **known-incomplete** because the authoritative sources are the live
+system + Founder-controlled files, which this read-only Git pass cannot reach. The broader vision very
+likely exists — in those sources — and must be ingested and reconciled, not inferred.
 
 ---
 
-## E. Current agent / PR landscape (coordination truth)
+## C. Reconstructed vision map (from available evidence; discovered, not imposed)
 
-~40 open PRs, **none merged into default yet**, on long stacked chains:
-- **codex/\*** frozen review successors: **#319→#321→#322→#324** (plus independent **#320**). #319/#320/#321
-  independently examined & PASS this session; #322 examination completing. **#324
-  `codex/coordination-ledger-dedup-takeover`** (parent `a7c1ffa3a` = #322 head; adds mig
-  `0102_coordination_ledger_authority`) is **active Codex work** closing **CC3/CC4/AR6** — the exact gaps
-  #322 scoped out. *Inspected scope/ancestry only; not duplicated or modified.*
-- **cursor/\*** chains: coordination, provider integration, large-file lanes, founder-workflow, first-cycle
-  execution, activation-readiness (#285–#315), messaging-gateway/GitHub-intake (#300–#304).
-- **claude/\***: #316/#317/#318 (passkeys/PWA), **#323** (npm-audit baseline + CI Playwright `ubuntu-24.04`
-  pin; CI green).
-
-**Integration risks:** (a) stacked bases → merge **order** matters and rebase-ahead-of-dependency is
-forbidden (`CLAUDE.md`); (b) active vs proposed vs superseded must be read per-doc, not inferred;
-(c) `docs/BRANCH_REGISTRY.md` must be reconciled against the real PR graph before any sequencing is proposed;
-(d) #324 overlaps the coordination layer #319/#321/#322 harden — sequence after #322.
+Recurring, cross-referenced intentions (same idea often under different names):
+1. **One unified, RLS-scoped memory/knowledge base** with an unbroken provenance chain
+   original→source→claim→project/idea/decision/founder/constitution (`MAINAI_PROJECT_UNDERSTANDING_PLAN.md`);
+   the `memory_source_unit` abstraction already generalises "source" across documents **and messages**.
+2. **Life as the Founder's persistent partner & overarching intelligence** — coordinating specialist agents
+   and future companies, acting within delegated authority, with APIs as *teachers/critics/examiners*
+   (`MAINAI_LOCAL_INTELLIGENCE_SCHOOL.md`) and progressive local-first independence.
+3. **Authority separation as a first principle** — `REPO-WRITE ≠ PROVIDER-SPEND ≠ EGRESS`; approval
+   double-gates; `UNKNOWN != VERIFIED`.
+4. **Supervised autonomy before unattended** — bounded cycles, STOP/epoch fencing, provider completion
+   cannot bypass independent verification (#319/#321 verified this session).
+5. **Whole-project comprehension before new development** (Founder priority, this revision).
+The business/finance/communication/multi-company domains are **in scope by Founder definition**; they are
+not yet represented in Git content and are expected to arrive via authorized historical ingestion (B).
+*No source is re-dated or altered; conflicting/superseded status must be read from each doc's own header.*
 
 ---
 
-## F. Critical architecture gaps (esp. turning historical sources into durable understanding)
+## D. Implementation reality + ingestion→memory capability map
 
-1. **No path from historical conversations → durable memory.** No ChatGPT importer; conversations not a
-   first-class claim source. This is the single biggest blocker to "stop developing from fragmented
-   conversation context." Requires authorized export + an additive conversation-provenance model (layer 7).
-2. **No external-AI egress classification** — sensitive source content can leave to providers unfiltered
-   (`LIFE_VAULT_EGRESS_CONTROL.md`). Trust in durable memory is undercut if ingestion/egress is unclassified.
-3. **Provider-key pre-verification missing** — real ingestion silently fails on an invalid-but-set key (§0).
-4. **Memory layers 4–8 partial/missing** — provenance links (Task→claim→source), idea/decision/founder/
-   constitution structure.
-5. **Autonomy proven on a mirror, not the real checkout** (#205 caveat) — the supervised real-checkout cycle
-   is unproven.
-6. **Fragmentation itself** — 40 unmerged PRs + 113 docs; no single reconciled source of truth (this report
-   + the MASTER HANDOFF begin to address it, pointing to authoritative docs rather than replacing them).
+### D.1 Stage-by-stage pipeline (the Founder's named chain), evidenced at `64c07d5b0`
+| Stage | State | Evidence / note |
+|---|---|---|
+| 1. Authorized source **discovery** | **Absent / manual** | Intake is Founder-initiated upload via `/api/library/import`; no autonomous external-source scan/watch. |
+| 2. Large-file **intake** | **Not on default** (built on PRs #311–#315/#320) | Default has standard upload + `zip_import.py` (MAX_FILES=500, 200 MB/pkg; no nested-zip/password handling). |
+| 3. Integrity + **immutable originals** | **Built & verified** | `storage/local_fs.py` content-addressed `{sha256}`, atomic write→fsync→rename, dedup, path-traversal/symlink-safe; durable worker stores+verifies original *before* any AI step. |
+| 4. Secure **extraction** (text/image/structured) | **Built (text + A/V); images partial** | `extract.py` (PDF/DOCX magic-byte verified); `media_import.py` STEG 12 (mp3/mp4, timed transcript segments). Image-OCR path not confirmed — likely a gap. |
+| 5. **Chunking** + source refs | **Built** | `chunking.py`; `document_chunk` carries source refs; media chunks carry `[start,end)` time ranges for exact-moment citation. |
+| 6. **Classification** + semantic reconciliation | **Built (document path)** | `claims.py` (claim_type + objective word-overlap `grounding_score`, bounded one-call/chunk capped/doc); `concept_reconciliation/` deterministic, provider-free, one canonical `ProjectEntity` per idea (mig 0064). |
+| 7. Durable **memory integration** | **Built layers 1–3; `memory_source_unit` incl. message subtype (S1C)**; **layers 4–8 partial/missing**; **message→claim (S4) not wired** | `claims.py` extracts from `DocumentChunk` only; `MessageSourceUnit` rows exist (provenance) but do not yet flow into claims. |
+| 8. Cross-document **relationships** | **Partial** | `source_relationship`/`claim_relationship` models exist but are created **manually**; automatic discovery absent; `ClaimRelationship` is read by `trust.py`, written by no code path yet. |
+| 9. **Retrieval with provenance** | **Built** | `retrieve.py`→`search()` returns chunk hits with document/chunk identity + score; media opens at timestamp. |
+| 10. **Whole-project understanding** | **Partial** | `project_entities/` + `concept_reconciliation/` + `mainai_executive/why_graph.py`/`missing_piece.py`; the unified queryable project-map over all layers is the design target, partially realised. |
+
+### D.2 Responsiveness, durability, egress, safety
+- **Background without blocking the interface:** **Built.** Two durable, lease-fenced job systems —
+  `knowledge_import_jobs` (`worker.py`, `FOR UPDATE SKIP LOCKED`, restart-safe) and `mainai_jobs`
+  (`jobs/service.py`, append-only `MainAIJobEvent` + `AuditLog`, RLS-scoped) — plus `InteractiveIsolation`
+  (admits interactive Founder work alongside background). Large imports run in the worker, not the request.
+- **Untrusted source content / egress:** **Partial.** `egress_policy/` is a **default-deny** gate
+  (`enforce_egress_policy`, `MODEL_REQUESTED_CONTEXT != AUTHORIZED_EGRESS_CONTEXT`) but is **wired only into
+  the Safe Planner boundary**; `chat.py` and the **RAG embedding** call sites are **not gated yet** — raw
+  source content can still reach external providers there (tracked V1/V2 gaps). **This is the key safety
+  gap for historical ingestion.**
+- **Provider-key pre-verification:** **Missing.** Status checks `is_configured()` only; an invalid-but-set
+  key yields a silent `failed` import (`MAINAI_PROJECT_UNDERSTANDING_PLAN.md` §0).
+- **Independently-verified autonomy:** partial — #205 self-improve ran on a disposable mirror, not the real
+  checkout.
+
+---
+
+## E. Current agent / PR landscape
+
+~40 open PRs, **none merged to default yet**. Independent-exam verdicts this session (posted on each PR):
+**#319 `397672d84` PASS · #320 `6c1240d8` PASS · #321 `e1f649a9` PASS · #322 `a7c1ffa3` PASS**
+(single migration heads 0100/0101 verified; full suites reproduced 3545/3530/3555/3561, 0 genuine failures).
+**#324 `306b980f4`** (`codex/coordination-ledger-dedup-takeover`, parent #322, mig 0102) = **active Codex
+CC3/CC4/AR6 work — inspected scope/ancestry only; not duplicated/modified.** Claude lanes: **#323**
+(npm-audit + CI Playwright `ubuntu-24.04` pin, CI green), #316/#317/#318 (passkeys/PWA), **#325** (this
+reconnaissance). Integration risks: stacked bases (merge order matters; no rebase-ahead-of-dependency per
+`CLAUDE.md`); per-doc status must be read, not inferred; `BRANCH_REGISTRY` needs reconciliation vs the real
+PR graph; #324 sequences after #322.
+
+---
+
+## F. Critical architecture gaps (esp. turning historical sources into trustworthy durable understanding)
+
+1. **No path from historical conversations → durable claim memory.** Message *source units* exist (S1C) but
+   message→claim extraction (S4) is not wired; and there is **no importer** for a ChatGPT/export archive.
+   This is the biggest blocker to "stop developing from fragmented conversation context."
+2. **Egress gating incomplete** — chat + RAG-embedding paths send source content to providers ungated.
+   Trust in durable memory requires classified egress on the ingestion path.
+3. **Provider-key pre-verification missing** — real ingestion fails silently on an invalid-but-set key.
+4. **No autonomous source discovery** — intake is manual upload; large-file lane not on default.
+5. **Memory layers 4–8 + automatic relationship discovery** partial/manual.
+6. **Fragmentation** — 40 unmerged PRs + 113 docs; this report + MASTER HANDOFF begin a single reconciled
+   pointer-of-record (not a competing store).
 
 ---
 
 ## G. Smallest viable next milestones (ordered by dependency / safety / cost / Founder value)
 
-Target rung: **`READY_FOR_SAFE_INTERNAL_RUN`** (bounded, supervised, local, no paid provider). Each milestone
-is independently verifiable and gated on the readiness evaluator + independent review:
-1. **M1 — Reconcile the map (docs-only).** This report + MASTER HANDOFF + `BRANCH_REGISTRY` ↔ real-PR-graph
-   reconciliation + per-doc active/proposed/superseded status pass. *Verify:* a reviewer derives truth &
-   merge order with no prior context. (Zero code; highest leverage.)
-2. **M2 — Historical-source intake path (the Founder's priority).** Design + minimal build of an **authorized
-   conversation/export importer** into the existing immutable-original → claim pipeline (reusing `rag/` +
-   `memory_threads/`, NOT a new memory store). *Verify:* one authorized export → immutable original →
-   extracted → claims with provenance, retrievable. *Depends on:* Founder-authorized export + egress stance.
-3. **M3 — Provider-key pre-verification + distinct resumable `blocked_provider` state** (§0 blocker).
-4. **M4 — Readiness truth board.** Wire `evaluate_startup_readiness(...)` into one live read-only
-   "what blocks the first safe internal run now" view (machine-checked gates, not hardcoded).
-5. **M5 — Supervised internal run on the real checkout, bounded** (closes the #205 mirror caveat): one small,
-   reversible, local task, full STOP/epoch fencing, focused verification, `first_cycle_go` stays false.
-Deferred (design now, build later): memory layers 5–8, egress-classification build, automatic relationship
-discovery, local weight-training, multi-project/business expansion, constitution activation (P7B).
+Guiding principle: **plan the country's infrastructure, build only today's house.** Reuse existing modules
+(`rag/`, `memory_source_unit`, `jobs/`, `egress_policy`, `concept_reconciliation`) — introduce **no**
+competing store/queue/memory system.
+1. **M1 — Reconcile the map (docs-only):** this report + MASTER HANDOFF + `BRANCH_REGISTRY` ↔ real-PR-graph
+   + per-doc active/proposed/superseded pass. Zero risk, highest leverage.
+2. **M2 — Local-first historical-ingestion proof** (see I) on ONE authorized existing file/export, reusing
+   the built intake→original→extract→chunk→claim→retrieve chain, with **no paid-provider egress**
+   (local/offline embedding or deferred) and provider-key pre-verification. *This is the Founder's priority.*
+3. **M3 — Close the ingestion safety gaps M2 surfaces** (only the smallest necessary): provider-key
+   pre-verification + a distinct resumable `blocked_provider` state; extend the default-deny egress gate to
+   the ingestion/embedding path actually used by M2.
+4. **M4 — Message→claim (S4) minimal slice:** let ONE authorized conversation become provenance-linked
+   claims through the existing `MessageSourceUnit`→claims path (reusing `concept_reconciliation`).
+5. **M5 — Readiness truth board** + the supervised real-checkout cycle (closes the #205 mirror caveat), only
+   after comprehension milestones land.
+Deferred (design now, build later): memory layers 5–8, autonomous discovery, local weight-training,
+multi-company/business expansion surfaces, constitution activation (P7B).
 
 ---
 
-## H. Questions for the Founder (only genuine, evidence-unresolvable ambiguities)
+## H. Genuinely unresolved Founder decisions (only what evidence cannot settle)
 
-1. **ChatGPT history:** can you provide an authorized export (e.g., the OpenAI data-export archive)? Without
-   it, the historical vision cannot be reconstructed from the repo. *(I will not assume access.)*
-2. **Egress stance for ingestion:** when historical/sensitive sources are imported, what may leave to
-   external providers for embedding/classification — nothing (local-only), or a defined classified subset?
-   (Drives whether M2 can use paid embeddings.)
-3. **Scope of "whole project":** is the business/financial/communication/multi-project layer meant to live in
-   Life's memory now, or is the immediate scope the technical platform + knowledge base? (The repo contains
-   only the latter.)
-4. **First-takeover target:** do you want M5 (a bounded code task on the real checkout) as the first
-   demonstration, or an ingestion/comprehension demonstration (M2)?
+*(Business/finance/communication/multi-company scope is settled = in scope, not asked here.)*
+1. **Which authorized source first?** Point to ONE existing file/export for M2 — a current Library/Vault
+   upload already in the system, or a new Founder-provided export (e.g. a ChatGPT data export). *I will not
+   assume access; I need you to designate it.*
+2. **Local-first embedding for ingestion:** confirm M2 must use a **local/offline** embedding path (no paid
+   provider, no egress) for the first proof — or whether a classified subset may use a paid embedder once
+   the egress gate covers that path.
+3. **First-proof emphasis:** the ingestion/comprehension proof (M2, recommended) as the first supervised
+   demonstration — confirm, or redirect.
 
 ---
 
-## I. Recommended first supervised takeover demonstration (measurable, with acceptance criteria)
+## I. Recommended first measurable proof — supervised, local-first historical ingestion
 
-**Option A (comprehension-first, matches the Founder's stated priority):** *Authorized-export → durable
-understanding.* Founder provides one authorized conversation/document export; Life ingests it through the
-immutable-original → extraction → claim pipeline, reconciles concepts against existing `project_entities`,
-and answers a Founder question with **full provenance** (claim→chunk→source→original).
-*Acceptance:* (1) original stored immutably + verified before any AI step; (2) ≥N claims created with
-grounding scores; (3) a retrieval answer cites its exact sources; (4) an invalid provider key yields a
-distinct resumable state, never silent `failed`; (5) no unclassified egress of flagged content; (6)
-independently reviewed; `first_cycle_go=false`.
+**One Founder-authorized existing file/export → trustworthy, retrievable understanding — no paid egress.**
+Reuse the built chain; add only the smallest missing piece M3 names. **Acceptance criteria (all required):**
+1. **Original preserved byte-for-byte** (content-addressed store; re-hash matches on read-back).
+2. **Source identity + hash verified** before any AI step (`original_stored` reached first).
+3. **Extraction accuracy checked** against the original (spot-verifiable text/segment offsets).
+4. **Historical claims linked to exact source locations** (claim→chunk→version→source→original, with
+   objective grounding score).
+5. **Related concepts reconciled** via `concept_reconciliation` **without silently inventing decisions**
+   (new interpretations are *proposals*, not auto-approved).
+6. **Memory + retrieval persist across sessions** (durable rows; a later session retrieves the same claims).
+7. **Life answers a question with traceable evidence** (every answer cites its exact sources).
+8. **Failures visible + recoverable** (invalid key → distinct resumable `blocked_provider`, never silent
+   `failed`; worker restart resumes).
+9. **Background processing does not monopolize the interactive interface** (import runs in the durable
+   worker; `InteractiveIsolation` keeps Founder chat admitted).
+10. **No unauthorized external data transfer** (egress default-deny on the path M2 uses; local-first
+    embedding or deferred; independently reviewed).
 
-**Option B (code-first):** the bounded supervised real-checkout cycle (M5) — one small reversible change,
-STOP/epoch-fenced, focused verification, independent review.
-
-*Recommendation:* **Option A** — it directly attacks the fragmentation problem the Founder raised and
-exercises the intake→memory→comprehension chain end-to-end, with lower blast radius than a code-writing run.
+If any prerequisite is missing, implement **only** the smallest piece required (M3), not a broader build.
 
 ---
 
 ## Sources
-Repository @ `64c07d5b0`: the `docs/` named in §B; `backend/app/` module tree (44 pkgs, 55 models, 68
-migrations, 198 test files, 62 RLS policies); `backend/app/rls.py`; `storage/local_fs.py`; `worker.py`;
-`models/conversation.py`; `context/resolver.py`; `account/export.py`; the open-PR graph (#285–#324) via the
-GitHub API; independent-examination verdicts #319/#320/#321/#322 (this session). Content searches over all
-113 docs are reproducible with the queries in §B. Items labelled "to be re-verified" (e.g. hardware) are
-prior-session notes requiring confirmation.
+Repository @ `64c07d5b0`: `docs/` — `MAINAI_PROJECT_UNDERSTANDING_PLAN.md`, `MAINAI_STARTUP_READINESS.md`,
+`MAINAI_V1_GOAL_TO_AUTONOMY.md`, `MAINAI_V1_READINESS.md`, `FIRST_AUTONOMOUS_TASK_BLOCKER_MAP.md`,
+`MAINAI_LOCAL_INTELLIGENCE_SCHOOL.md`, `MAINAI_CONCEPT_RECONCILIATION.md`, `LIFE_VAULT_EGRESS_CONTROL.md`,
+`LIFE_SOURCE_VAULT_FUTURE_COMPATIBILITY.md`, `SECURITY_BLOCKERS.md`, `ROADMAP.md`; code —
+`backend/app/` tree, `rag/{claims,message_source,memory_source,retrieve,media_import,chunking,extract}.py`,
+`egress_policy/service.py`, `jobs/service.py`, `worker.py`, `storage/local_fs.py`, `models/*`, `rls.py`;
+open-PR graph (#285–#325); exam verdicts #319/#320/#321/#322 (this session). Content searches over all 113
+docs are reproducible. Items in class INACCESSIBLE were **not** read and are **not** claimed as read.
 
 **This is a proposal for Founder–Life discussion. No implementation authority is claimed or requested.
 `first_cycle_go=false`.**

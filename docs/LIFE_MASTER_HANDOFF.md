@@ -2,61 +2,69 @@
 
 **Read this first in any new conversation or agent session.** It is a *pointer index*, not a second
 knowledge store. When this disagrees with an authoritative doc, the authoritative doc wins — fix this file.
-Keep it short. Do not grow it into a parallel plan. `first_cycle_go=false` everywhere.
+Keep it short. `first_cycle_go=false` everywhere.
 
-_Last updated: 2026-11-01 by Claude Opus 4.8 (independent examiner). Base: `claude/det-kommer-mer-879lcm`
-@ `64c07d5b0` (= origin default tip)._
+_Rev. 2 — 2026-11-01 — Claude Opus 4.8 (independent). Base: `claude/det-kommer-mer-879lcm` @ `64c07d5b0`._
 
 ## 0. Standing invariants (never violate without explicit Founder say-so)
-No merge · no deploy · no DNS/STRATO change · no paid/live provider calls · no Recall activation · no
-autonomous GO · do not modify frozen candidates · do not overwrite another agent's branch · independent
-reviewer required (no self-certification) · `UNKNOWN != VERIFIED` · `REPO-WRITE ≠ PROVIDER-SPEND ≠ EGRESS`.
+No merge · no deploy · no DNS/STRATO · no paid/live provider calls · **no paid-provider data egress** · no
+Recall · no autonomous GO · don't modify frozen candidates · don't overwrite another agent's branch ·
+independent reviewer required (no self-cert) · `UNKNOWN != VERIFIED` · `REPO-WRITE ≠ PROVIDER-SPEND ≠ EGRESS`.
 
-## 1. Authoritative documents (read these, don't re-summarize them here)
-- Vision / memory architecture: `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` (8-layer model, §0 blocker, §2 gaps)
-- Readiness ladder: `docs/MAINAI_STARTUP_READINESS.md` (`BLOCKED→SAFE_INTERNAL_RUN→LOW_RISK_PROVIDER→SERIOUS_AUTONOMOUS`)
-- Autonomy chain: `docs/MAINAI_V1_GOAL_TO_AUTONOMY.md`; blockers: `docs/FIRST_AUTONOMOUS_TASK_BLOCKER_MAP.md`
-- Local-first: `docs/MAINAI_LOCAL_INTELLIGENCE_SCHOOL.md`; vault/egress: `docs/LIFE_VAULT_EGRESS_CONTROL.md`
-- Security deferrals: `docs/SECURITY_BLOCKERS.md`; living branch map: `docs/BRANCH_REGISTRY.md`
-- **This recon's full report:** `docs/LIFE_TAKEOVER_READINESS_RECON.md` (A–I evidence)
-- Governance for every session: repo `CLAUDE.md` (isolate/verify/coordinate/review; merge-rule).
+## 1. Founder scope (authoritative — not open questions)
+Life = the Founder's **persistent digital partner & overarching intelligence**; coordinates specialist
+agents and **future companies**, acts within delegated authority, communicates naturally, gains progressive
+**local-first** coding/operational independence. **Business, finance, communication, multiple companies and
+other Founder-defined domains are already in scope.** The full vision is **broader than the repo docs** and
+must be **discovered + reconciled from authorized historical sources**, not invented from a summary.
+**Absence from Git ≠ nonexistence** — history may live in uploads/Library/Vault/DB/external Founder files.
+**Priority: whole-project comprehension before extensive new development.**
 
-## 2. Verified facts (this session, evidence-backed)
-- Platform is mature: 44 backend packages, 55 models, 68 migrations, 198 backend test files, 62 RLS policies.
-- Memory layers 1–3 built (immutable originals, source, claims+grounding); 4–8 partial/missing.
-- Founder→worker autonomy chain substantially built; BUT first self-improve run (#205) used a disposable
-  mirror, not the real checkout — real-checkout supervised cycle is **unproven**.
-- Local coding = **framework only** (`mainai_school/`), not production-ready.
-- **Egress classification missing**; chat sends raw content to providers unfiltered.
-- **Historical ChatGPT vision is NOT in the repo** (0 doc hits for business/finance/comms/multi-project);
-  no ChatGPT importer; conversations not yet a first-class memory source. Needs Founder-authorized export.
+## 2. Authoritative documents (read these; don't re-summarize here)
+Vision/memory: `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` · Readiness: `docs/MAINAI_STARTUP_READINESS.md`
+· Autonomy: `docs/MAINAI_V1_GOAL_TO_AUTONOMY.md` + `docs/FIRST_AUTONOMOUS_TASK_BLOCKER_MAP.md` · Local-first:
+`docs/MAINAI_LOCAL_INTELLIGENCE_SCHOOL.md` · Vault/egress: `docs/LIFE_VAULT_EGRESS_CONTROL.md` · Branch map:
+`docs/BRANCH_REGISTRY.md` · **Full recon (A–I):** `docs/LIFE_TAKEOVER_READINESS_RECON.md` · Governance: repo
+`CLAUDE.md`.
 
-## 3. Exact PR / commit state (as of 2026-11-01)
-- Default branch `claude/det-kommer-mer-879lcm` @ `64c07d5b0`; **no open PR merged into it yet.**
-- Independent-exam verdicts (this session), each posted on its PR:
-  - **#319** `397672d84` selector/delegation — **PASS**
-  - **#320** `6c1240d8` crash/resume (independent lineage) — **PASS**
-  - **#321** `e1f649a9` RT3 cycle/webhook (single mig head `0100`) — **PASS**
-  - **#322** `a7c1ffa3` coordination fencing (single mig head `0101`) — **exam completing; verdict pending full suite**
-- **#324** `306b980f4` `codex/coordination-ledger-dedup-takeover` (parent `a7c1ffa3`=#322; mig `0102`) —
-  **ACTIVE Codex work** (CC3/CC4/AR6). Do not duplicate/modify; sequence after #322.
-- Claude lanes: **#323** (npm-audit baseline + CI Playwright `ubuntu-24.04` pin) CI green; #316/#317/#318
-  (passkeys/PWA) code CI green, npm-audit clears once #323 merges to base.
-- Deep cursor/* stack #285–#315 (coordination/provider/large-file/founder-workflow/first-cycle); unmerged.
+## 3. Verified facts (this session; corrected Rev. 2)
+- Platform mature: 44 backend pkgs, 55 models, 68 migrations, 198 test files, 62 RLS policies.
+- **Ingestion→memory (default branch @ 64c07d5b0):** immutable content-addressed originals + durable
+  restart-safe worker **built & verified**; extraction text+A/V built (image-OCR likely gap); chunking +
+  provenance built; claim extraction + objective grounding + concept-reconciliation built **for documents**;
+  retrieval-with-provenance built. **`memory_source_unit` unifies provenance across documents AND messages
+  (S1C built)** — BUT **message→claim extraction (S4) is NOT wired** and there is **no ChatGPT/export
+  importer**. **Large-file lane is NOT on default** (cursor PRs #311–#315/#320). Memory layers 4–8 +
+  automatic relationship discovery partial/manual.
+- **Egress:** `egress_policy/` default-deny gate **exists** but wired **only into Safe Planner**; chat.py +
+  RAG-embedding paths **not gated** (raw content can reach providers there) = key ingestion safety gap.
+- **Provider-key pre-verification missing** (invalid-but-set key → silent `failed`).
+- **Background non-blocking:** two durable lease job systems (`knowledge_import_jobs`/worker.py;
+  `mainai_jobs`/jobs service) + `InteractiveIsolation` = built.
+- Autonomy proven on a disposable mirror (#205), NOT the real checkout.
 
-## 4. Open questions for the Founder (block progress; see report §H)
-1. Authorized ChatGPT export available? 2. Egress stance for ingestion (local-only vs classified subset)?
-3. Is the business/financial/multi-project layer in-scope for Life's memory now? 4. First takeover demo =
-comprehension (ingest an authorized export) or code (bounded real-checkout cycle)?
+## 4. Exact PR / commit state (2026-11-01)
+- Default `claude/det-kommer-mer-879lcm` @ `64c07d5b0`; no open PR merged into it yet.
+- **Exam verdicts (posted on each PR): #319 `397672d84` PASS · #320 `6c1240d8` PASS · #321 `e1f649a9` PASS
+  · #322 `a7c1ffa3` PASS** (single mig heads 0100/0101; full suites 3545/3530/3555/3561, 0 genuine fails).
+- **#324 `306b980f4`** `codex/coordination-ledger-dedup-takeover` (parent #322; mig 0102) = **active Codex
+  CC3/CC4/AR6**. Inspect only; do not duplicate/modify; sequence after #322.
+- Claude: **#325** (this recon+handoff, draft, docs-only), **#323** (npm-audit + CI Playwright pin, green),
+  #316/#317/#318 (passkeys/PWA). Deep cursor/* stack #285–#315 unmerged.
 
-## 5. Current assignments / ownership
-- **Claude (this lane):** independent examinations #319–#322 (+#320); this reconnaissance + handoff.
-- **Codex:** #319/#321/#322 builder + **#324 active** (coordination/takeover fencing). Do not overlap.
-- **Cursor:** autonomy-activation + first-cycle + messaging/GitHub-intake lanes (#285–#315, #300–#304).
+## 5. Genuinely open Founder decisions (block M2; recon §H)
+1. **Designate ONE authorized source** for the first ingestion proof (existing Library/Vault upload, or a
+   new export e.g. ChatGPT data export) — I will not assume access.
+2. Confirm **local-first/offline embedding (no egress)** for the first proof.
+3. Confirm the **ingestion/comprehension proof (M2)** as the first supervised demonstration.
 
-## 6. Next safe action
-Publish this handoff + `LIFE_TAKEOVER_READINESS_RECON.md` on an isolated docs branch with a **draft** PR
-(after #322's verdict). Then await Founder answers to §4 before any build. Recommended first milestone:
-**M1 (reconcile `BRANCH_REGISTRY` ↔ real PR graph + per-doc status)** — zero-risk, highest leverage — and
-pose the §4 questions. No code until the Founder picks the first-takeover demo (report §I: Option A
-comprehension-first recommended).
+## 6. Ownership
+Claude (this lane): exams #319–#322 (done, PASS); recon + handoff (#325). Codex: #319/#321/#322 builder +
+**#324 active**. Cursor: autonomy/first-cycle/large-file/messaging lanes (#285–#315). Don't overlap.
+
+## 7. Next safe action
+No implementation without an established scope + authorization. **Recommended first milestone: M2 — a
+supervised, local-first historical-ingestion proof on ONE Founder-designated authorized file/export**,
+reusing the built `rag/`+`memory_source_unit`+`jobs/`+`egress_policy`+`concept_reconciliation` chain, with
+the 10 acceptance criteria in recon §I and NO paid-provider egress. First resolve §5 Q1–Q3. M1 (reconcile
+`BRANCH_REGISTRY` ↔ real PR graph) is a zero-risk docs step that can proceed now.
