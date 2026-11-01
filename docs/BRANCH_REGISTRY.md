@@ -8145,3 +8145,18 @@ lease-omverifiering före varje durabel skrivning. **P1 (icke-blockerande, för 
 "Autonomous Gap → Child-Task Generation")**: `create_plan()` är full-supersession-bara — ingen
 primitiv för att foga in EN ny child-task under en befintlig plan utan att kansellera alla
 syskon-tasks; måste byggas innan den funktionen kan börjas.
+
+---
+
+## `claude/life-whole-project-reconnaissance` (2026-11-01, docs-only, draft PR)
+
+Isolerad dokumentationsgren grenad från `claude/det-kommer-mer-879lcm` @ `64c07d5b0`. Lägger
+**bara** till två nya docs, rör ingen befintlig kod/doc: `docs/LIFE_TAKEOVER_READINESS_RECON.md`
+(evidensbaserad helhetsrekognosering A–I — verifierat inventarium, historisk täckning, återskapad
+visionskarta, implementationsverklighet, PR-landskap inkl. #324, kritiska luckor, minsta nästa
+milstolpar, frågor till grundaren, rekommenderad första övertagandedemo) och
+`docs/LIFE_MASTER_HANDOFF.md` (kortfattat kontinuitetsindex för nya sessioner — pekar på de
+auktoritativa dokumenten, ersätter dem inte; exakta PR/commit-tillstånd, verifierade fakta, öppna
+frågor, ägarskap, nästa säkra åtgärd). **Förslag för grundardiskussion — INTE implementeringsmandat.**
+Ingen merge/deploy/spend/Recall/autonomi; frusna kandidater och #324 orörda; `first_cycle_go=false`.
+Oberoende examinationsverdikt denna session: #319/#320/#321/#322 = PASS (postade på respektive PR).
