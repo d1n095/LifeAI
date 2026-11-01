@@ -214,3 +214,87 @@ def test_task_goal_job_context_is_recorded_when_provided(db_session, owner_id):
     assert row.task_id == task_id
     assert row.goal_id == goal_id
     assert row.job_id == job_id
+
+
+# --- Local-vs-external provider distinction -------------------------------------------------
+# A call to an on-host local model runner (Ollama on loopback / in the same deployment) is not
+# an external-AI disclosure. provider_is_local=True records it as `local` instead of `allowed`,
+# so a local-first ingestion produces zero external `allowed` rows -- a checkable no-egress
+# invariant. It must NEVER relax a deny: the four tests below prove every deny/redaction path
+# applies identically whether the provider is local or external.
+
+
+def test_local_provider_call_is_ledgered_as_local_not_external_disclosure(db_session, owner_id):
+    sanitized = enforce_egress_policy(
+        db_session, **_base_kwargs(owner_id, provider="ollama", payload={"doc": "en vanlig mening"}, provider_is_local=True)
+    )
+    db_session.commit()
+    assert sanitized == {"doc": "en vanlig mening"}
+
+    row = db_session.execute(
+        select(ProviderDisclosureEvent).where(ProviderDisclosureEvent.owner_id == owner_id)
+    ).scalar_one()
+    assert row.decision == "local"  # NOT "allowed" -- content never left the host
+    assert row.sent_content_hash is not None
+    assert row.redaction_categories == []
+    assert "no external-AI egress" in row.reason
+
+
+def test_local_provider_still_hard_denies_never_egress_marker(db_session, owner_id):
+    """Fail-safe: locality is best-effort and a NEVER_EGRESS marker means the content must not
+    cross its trust boundary at all -- a local provider does not earn an exemption."""
+    payload = {"secret": "NEVER_EGRESS: the founder's private plan"}
+    with pytest.raises(EgressDeniedError):
+        enforce_egress_policy(db_session, **_base_kwargs(owner_id, provider="ollama", payload=payload, provider_is_local=True))
+    db_session.commit()
+
+    row = db_session.execute(
+        select(ProviderDisclosureEvent).where(ProviderDisclosureEvent.owner_id == owner_id)
+    ).scalar_one()
+    assert row.decision == "denied"  # never "local"
+    assert row.sent_content_hash is None
+    assert "never_egress_marker" in row.redaction_categories
+
+
+def test_local_provider_still_denies_incomplete_request(db_session, owner_id):
+    with pytest.raises(EgressDeniedError):
+        enforce_egress_policy(db_session, **_base_kwargs(owner_id, provider="", provider_is_local=True))
+    db_session.commit()
+
+    row = db_session.execute(
+        select(ProviderDisclosureEvent).where(ProviderDisclosureEvent.owner_id == owner_id)
+    ).scalar_one()
+    assert row.decision == "denied"  # a malformed call is a bug regardless of destination
+    assert "incomplete egress request" in row.reason
+
+
+def test_local_provider_still_redacts_secret_patterns(db_session, owner_id):
+    payload = {"doc": "anropa med api_key=sk-abcdefghijklmnopqrstuvwx tack"}
+    sanitized = enforce_egress_policy(
+        db_session, **_base_kwargs(owner_id, provider="ollama", payload=payload, provider_is_local=True)
+    )
+    db_session.commit()
+    assert "sk-abcdefghijklmnopqrstuvwx" not in str(sanitized)
+
+    row = db_session.execute(
+        select(ProviderDisclosureEvent).where(ProviderDisclosureEvent.owner_id == owner_id)
+    ).scalar_one()
+    assert row.decision == "local"  # on-host, but still redacted
+    assert "secret_pattern" in row.redaction_categories
+    assert row.sent_content_hash != row.attempted_content_hash
+
+
+def test_local_and_external_same_content_get_distinct_independent_decisions(db_session, owner_id):
+    """Identical content, two providers of different locality -> two independent rows with
+    distinct decisions; a local classification never inherits to or from an external call."""
+    payload = {"doc": "samma innehall, tva leverantorer"}
+    enforce_egress_policy(db_session, **_base_kwargs(owner_id, provider="ollama", payload=payload, provider_is_local=True))
+    enforce_egress_policy(db_session, **_base_kwargs(owner_id, provider="openai", payload=payload, provider_is_local=False))
+    db_session.commit()
+
+    rows = db_session.execute(
+        select(ProviderDisclosureEvent).where(ProviderDisclosureEvent.owner_id == owner_id)
+    ).scalars().all()
+    assert len(rows) == 2
+    assert {r.decision for r in rows} == {"local", "allowed"}
+    assert all(r.attempted_content_hash == rows[0].attempted_content_hash for r in rows)  # same content
