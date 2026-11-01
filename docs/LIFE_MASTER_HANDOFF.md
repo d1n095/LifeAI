@@ -76,9 +76,15 @@ Claude (this lane): exams #319–#322 (done, PASS); recon + handoff (#325). Code
 **#324 active**. Cursor: autonomy/first-cycle/large-file/messaging lanes (#285–#315). Don't overlap.
 
 ## 7. Next safe action
-**Priority (per the Founder's refinement): verified sources + Blueprint first, then build.** The Blueprint
-(`LIFE_MASTER_BLUEPRINT.md`) and the local-first ingestion demo (#326) are delivered. The gating item is
-now **§5 Q1 — designate ONE authorized historical source** so the ⟨access⟩-marked corpus can actually be
+**Priority (per the Founder's refinement): verified sources + Blueprint first, then build.** Blueprint
+(`LIFE_MASTER_BLUEPRINT.md`, incl. §11 source audit, §12 comprehension gap analysis, §13 next-blocker +
+acceptance criteria) and the local-first ingestion demo (#326) are delivered. **Source-access audit (§11):
+no authorized historical source is reachable in the review environment** — only disposable `examiner_*` DBs
+and `.env.example` templates. Three decisions gate all further comprehension work: **(i)** independent review
+of #326/#327 (CI red checks are base-inherited pre-#323 E2E/npm failures; Backend tests pass — see each PR's
+CI-status comment); **(ii)** designate ONE authorized source (§11 procedure A or B); **(iii)** choose a
+local-first *chat* model (claim extraction needs one) or authorize a classified egress. The gating item is
+**§5 Q1 — designate ONE authorized historical source** so the ⟨access⟩-marked corpus can actually be
 ingested and the vision verified (today it is not reachable from Git). Extraction-fidelity build units,
 each its own reviewed PR: **✅ DOCX tables/headers/footers done (#327)**; remaining, in order —
 **(1)** scanned-PDF/image OCR *(needs a local OCR-engine decision — local-first)*, **(2)** standalone image

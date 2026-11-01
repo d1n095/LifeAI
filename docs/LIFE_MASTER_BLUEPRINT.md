@@ -238,5 +238,72 @@ Ordered by value/safety, each its own bounded, independently-reviewed PR:
    next build after evidence is established.
 
 ---
+
+## 11. Historical-source access audit (read-only, verified 2026-11-01)
+Probed the actual environment — **not** inferred from Git. Result: **no authorized historical source is
+reachable here.**
+
+| Candidate source | Status | Evidence |
+|---|---|---|
+| Life Library / uploaded-document storage | **inaccessible** | no `lifeai_uploads`/data volume on disk; the `backend/app/storage` paths are module *source code*, not data; `STORAGE_ROOT` is a disposable per-test temp dir |
+| Vault / database records | **present-but-not-authorized** | the DB server holds only disposable `examiner_*` exam/probe databases (synthetic test data from prior reviews) — **no** production Life DB, and none is a designated authorized source |
+| Conversation archives / previously imported files | **missing here** | none committed to Git; none on disk in this clone |
+| Founder-approved local file collections | **needs Founder action** | only `.env.example`/`.env.vps.example` templates exist — no real config pointing at a populated store |
+| Export/import interfaces | **built, idle** | `/api/library/import`, `zip_import.py`, `library_import.py` exist and work, but have no authorized source to run against here |
+
+**Minimum access procedure the Founder must complete (pick one):**
+- **A — point at existing deployed data:** give this (or an authorized) environment read-only access to the
+  live deployment's `DATABASE_URL` **and** its `STORAGE_ROOT` volume (or a copy), so the existing Library
+  can be enumerated and ONE source chosen. Do **not** copy private originals into GitHub.
+- **B — provide one file/export:** place ONE authorized source (e.g. a ChatGPT data export `.zip`/`.json`,
+  or a specific document) at a designated local path this session may read, and confirm it is authorized for
+  ingestion.
+- **Either way:** confirm local-first/offline embedding **and** a local-first *chat* model (claim extraction
+  needs a chat-capable model — see §12), or explicitly authorize a classified egress for the first proof.
+
+## 12. Comprehension readiness — what retrieval proves, what it does not, and the 8-layer gaps
+**Proven today** (local-first ingestion demo, PR #326 + DOCX completeness #327): exact original preservation,
+correct extraction (incl. DOCX tables/headers/footers), **source-linked retrieval**, durability across a
+worker/session restart, owner isolation (RLS), and zero external egress. **Not proven: semantic
+comprehension.** Vector + keyword retrieval with provenance shows Life can *find and cite* the right source;
+it does **not** establish that she *understands* relationships, reconciles contradictions, or separates a
+decision from an idea. Those need the claim/interpretation layers below — and **claim extraction requires a
+chat-capable model** (`rag/claims.py` → `chat_with_fallback`, one call/chunk), so comprehension is gated on a
+local-first chat model **or** authorized egress, plus a designated source.
+
+**Gap analysis for "Life reconstructs her own Blueprint" (eight-layer architecture):**
+
+| Capability needed | State | Precise gap |
+|---|---|---|
+| Historical **conversation ingestion** | 🟡 | `MessageSourceUnit` provenance built (S1C); no importer for a ChatGPT/export archive |
+| **Message→claim** extraction (S4) | 🔴 | `claims.py` reads `DocumentChunk` only; no path from `MessageSourceUnit`→`KnowledgeClaim` |
+| **Cross-source semantic reconciliation** | 🟡 | `concept_reconciliation/` is deterministic entity **dedup** wired into `project_entities`, **not** contradiction/relationship resolution across sources; automatic relationship discovery absent |
+| **Decision provenance + Founder approval** | 🟡 | `claim_type` distinguishes decision/idea (needs a model); the interpretation/approval queue that turns claims into *proposed* project/idea/decision memory (plan P4) is **not built** — inferred ideas must never auto-promote to approved decisions |
+| **Blueprint generation + versioning** (by Life) | 🔴 | net-new; today the Blueprint is agent-authored. Needs a queryable project-map (plan P4) + a generation/versioning surface |
+| **Continuous updates without losing history** | 🟡 | immutable originals + append-only provenance exist; no living-Blueprint update loop |
+| **Background processing without blocking the Founder** | ✅ | two durable lease-fenced job systems + `InteractiveIsolation` |
+
+**Additional components actually required for cross-document understanding** (beyond retrieval): (1) the
+message→claim path (S4) + an export importer; (2) a chat-capable **local** model for claim/`claim_type`
+extraction (to stay no-egress); (3) relationship/contradiction discovery over claims (plan P4, beyond
+today's dedup); (4) the interpretation/approval queue so conclusions are **proposals**, not auto-approved.
+
+## 13. Next bounded blocker — report + acceptance criteria (P5)
+No new code is landed this round: every high-impact next unit needs a Founder decision, and #326/#327 are
+still awaiting independent review (stacking more unreviewed code would dilute review and risk rework). The
+smallest verified blocker that *directly* advances comprehension is **the message→claim (S4) slice with a
+local-first chat model**, which is **blocked on**: (a) §11 source designation, and (b) a local chat-model
+choice (or authorized egress). Acceptance criteria for that unit, when unblocked:
+1. ONE authorized conversation/export ingested through the existing `MessageSourceUnit` path (no new store).
+2. Claims extracted from messages via a **local** chat model — zero external egress (ledger shows `local`).
+3. Every claim carries provenance back to the exact message/source/original (unbroken chain).
+4. `claim_type` separates decision vs idea vs task; **inferred items are proposals, never auto-approved**.
+5. Durable + restart-safe (runs as a `memory_processing_jobs`/worker job, not in the request).
+6. Owner isolation (RLS) verified on every new row; untrusted content never gains authority.
+7. Explicit reporting of what was NOT understood/extracted (no silent gaps).
+8. Adversarial + regression tests; independent review before merge.
+Until (a)+(b) are resolved, this stays a blocker, not an implementation.
+
+---
 **This Blueprint is a traceable synthesis of reachable evidence. It does not invent missing history,
 overstate coverage, rewrite originals, or claim authority. `first_cycle_go=false`.**
