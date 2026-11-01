@@ -23,7 +23,9 @@ must be **discovered + reconciled from authorized historical sources**, not inve
 ## 2. Authoritative documents (read these; don't re-summarize here)
 **START HERE → `docs/LIFE_MASTER_BLUEPRINT.md`** — the shared, source-linked entry point to the whole
 intended system (vision, maturity, dependency graph, roadmap, open decisions; marked INCOMPLETE where the
-historical corpus is not yet reachable). Then:
+historical corpus is not yet reachable). **For getting Life running: `docs/LIFE_FIRST_STARTUP_READINESS.md`**
+— the operational runbook (readiness verdict, offline-vs-model split, branch integration order, first
+blocker, Founder-supervised startup checklist). Then:
 Vision/memory: `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` · Readiness: `docs/MAINAI_STARTUP_READINESS.md`
 · Autonomy: `docs/MAINAI_V1_GOAL_TO_AUTONOMY.md` + `docs/FIRST_AUTONOMOUS_TASK_BLOCKER_MAP.md` · Local-first:
 `docs/MAINAI_LOCAL_INTELLIGENCE_SCHOOL.md` · Vault/egress: `docs/LIFE_VAULT_EGRESS_CONTROL.md` · Branch map:
@@ -31,6 +33,15 @@ Vision/memory: `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` · Readiness: `docs/M
 ingestion demo + first blocker: `docs/LIFE_LOCAL_FIRST_INGESTION_DEMO.md` · Governance: repo `CLAUDE.md`.
 
 ## 3. Verified facts (this session; corrected Rev. 2)
+- **Runtime status (Founder fact):** last Founder-used version = **v0.1** (messaging worked, **upload did
+  not**, **no historical corpus ever provided**). Current ~40-PR system **never started end-to-end with the
+  Founder** → not a Founder-tested runtime. First supervised startup + verified small-file upload must
+  precede real historical comprehension. Missing corpus is **expected**, not lost. See startup runbook.
+- **Startup audit (default `64c07d5b0`, Docker unavailable in review env):** minimal run (login, navigate,
+  message, upload one small file, durable store + sha256, extract) = **READY-pending-boot**; offline
+  **retrieval is BLOCKED** (`index_document` needs embedding before any chunk; only offline embedder = Ollama,
+  whose dim ≠ hardwired `embedding_dim=1536`); large-file/resumable UI not on default (#311–#315). Messaging
+  send/receive stores offline; assistant replies need a model.
 - Platform mature: 44 backend pkgs, 55 models, 68 migrations, 198 test files, 62 RLS policies.
 - **Ingestion→memory (default branch @ 64c07d5b0):** immutable content-addressed originals + durable
   restart-safe worker **built & verified**; extraction text+A/V built (image-OCR likely gap); chunking +
@@ -80,11 +91,14 @@ Claude (this lane): exams #319–#322 (done, PASS); recon + handoff (#325). Code
 (`LIFE_MASTER_BLUEPRINT.md`, incl. §11 source audit, §12 comprehension gap analysis, §13 next-blocker +
 acceptance criteria) and the local-first ingestion demo (#326) are delivered. **Source-access audit (§11):
 no authorized historical source is reachable in the review environment** — only disposable `examiner_*` DBs
-and `.env.example` templates. Three decisions gate all further comprehension work: **(i)** independent review
-of #326/#327 (CI red checks are base-inherited pre-#323 E2E/npm failures; Backend tests pass — see each PR's
-CI-status comment); **(ii)** designate ONE authorized source (§11 procedure A or B); **(iii)** choose a
-local-first *chat* model (claim extraction needs one) or authorize a classified egress. The gating item is
-**§5 Q1 — designate ONE authorized historical source** so the ⟨access⟩-marked corpus can actually be
+and `.env.example` templates. **Immediate path = first supervised startup** (runbook `LIFE_FIRST_STARTUP_READINESS.md`): assign
+independent review in order **#323 → #327 → #326**, then run a supervised `docker compose up` dry-run of the
+startup checklist in an authorized env (Docker unavailable in the review clone). Decisions that gate further
+comprehension work: **(i)** that independent review; **(ii)** choose a **local embedding model** → turns the
+`embedding_dim` blocker into a bounded migration (unblocks offline retrieval); **(iii)** designate ONE
+authorized source (Blueprint §11 A or B); **(iv)** choose a local-first *chat* model (claim extraction needs
+one) or authorize a classified egress. The historical-ingestion gate remains
+**Blueprint §10 Q1 — designate ONE authorized historical source** so the ⟨access⟩-marked corpus can actually be
 ingested and the vision verified (today it is not reachable from Git). Extraction-fidelity build units,
 each its own reviewed PR: **✅ DOCX tables/headers/footers done (#327)**; remaining, in order —
 **(1)** scanned-PDF/image OCR *(needs a local OCR-engine decision — local-first)*, **(2)** standalone image

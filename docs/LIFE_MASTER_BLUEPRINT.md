@@ -15,6 +15,14 @@ _Rev. 1 — 2026-11-01 — Claude Opus 4.8 (independent). Base: `claude/det-komm
 `64c07d5b0`. Companion evidence: [`LIFE_TAKEOVER_READINESS_RECON.md`](LIFE_TAKEOVER_READINESS_RECON.md).
 `first_cycle_go=false`. A proposal for Founder–Life discussion; no implementation authority claimed._
 
+> **RUNTIME STATUS (Founder fact, 2026-11-01).** The last version the Founder actually used was Life
+> **v0.1**: **basic messaging worked, file upload did not, and no historical corpus was ever successfully
+> provided.** The current ~40-PR system has **never been started/tested end-to-end with the Founder** —
+> these candidates are **not** a Founder-tested runtime. **A first supervised startup and a verified
+> small-file upload must precede any real historical comprehension.** Operational runbook + readiness
+> verdict + startup checklist: [`LIFE_FIRST_STARTUP_READINESS.md`](LIFE_FIRST_STARTUP_READINESS.md).
+> (This also means §1's missing historical corpus is *expected*, not a loss.)
+
 ## Legend
 **Verification:** ✅ verified-in-code · 🟡 partial/one-sided · 🔴 absent · ⟨access⟩ needs Founder source.
 **Status of interpretation:** *fact* (read from source) · *proposal* (my best reconciliation,
