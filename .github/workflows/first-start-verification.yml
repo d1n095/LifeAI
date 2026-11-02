@@ -91,6 +91,13 @@ jobs:
       PUBLIC_APP_URL: http://127.0.0.1:3020
       OPENAI_API_KEY: fake-key-for-first-start
       ENABLE_SCHEDULED_CLEANUP: "false"
+      # This driver is a non-browser Python http client over http://127.0.0.1. The app's
+      # default Secure cookies rely on the browser "localhost is a secure context" exception,
+      # which Python's cookiejar does not implement, so a Secure cookie would never be sent
+      # back and every authenticated call would 401. Disable Secure for this synthetic local
+      # test only — allowed because ENVIRONMENT is not production (the _check_cookies_secure
+      # guard only fires in production). SameSite=none is irrelevant to a non-browser client.
+      COOKIE_SECURE: "false"
       # Stable workspace-local upload store so immutable originals survive the process restart
       # within this job (the whole point of the restart-persistence check). Shared by backend
       # and worker. Thrown away with the runner.
