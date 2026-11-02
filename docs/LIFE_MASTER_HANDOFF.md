@@ -4,7 +4,7 @@
 knowledge store. When this disagrees with an authoritative doc, the authoritative doc wins — fix this file.
 Keep it short. `first_cycle_go=false` everywhere.
 
-_Rev. 6 — 2026-11-02 — Claude Opus 4.8 (independent). Base: `claude/det-kommer-mer-879lcm` @ `64c07d5b0`._
+_Rev. 7 — 2026-11-02 — Claude Opus 4.8 (independent). Base: `claude/det-kommer-mer-879lcm` @ `64c07d5b0`._
 
 ## 0. Standing invariants (never violate without explicit Founder say-so)
 No merge · no deploy · no DNS/STRATO · no paid/live provider calls · **no paid-provider data egress** · no
@@ -117,6 +117,51 @@ ingestion demo + first blocker: `docs/LIFE_LOCAL_FIRST_INGESTION_DEMO.md` · Gov
   Otherwise the required trust properties verified present in code: owner-scope (`uploaded_by == owner_id`
   + `deleted_at IS NULL`, RLS backstop), integrity gate before any byte, revoked/deleted/not-found all 404
   (indistinguishable), one audit row per access with no storage_key in the detail, no provider call/egress.
+- **Rev. 7 (2026-11-02) — disposable integration candidate + STRATO sizing + streaming remediation design (no
+  production change, nothing merged):**
+  - **Integration candidate (local, disposable, NEVER pushed/merged):** worktree `examiner/wtintegration`,
+    branch `examiner/integration-firststart`, = base `64c07d5` + #323 + #328 + #329 + #327, **stack-merged with
+    ZERO conflicts** (tip `3ce5377`; #326 deliberately kept out — its egress lane stays in independent review).
+    This is the no-model first-start footprint. **Integration-test PASS (NOT a container-runtime PASS):**
+    `test_basic_startup_no_model` + `test_original_retrieval` + `test_openapi_schema` = **23 passed**; full
+    `tests/backend/rag` on the combined tree = **423 passed, 1 skipped, 2 failed** where both fails are the
+    SAME two pre-existing environmental artifacts (`test_ops_status…` host-TZ; `…_via_docker_entrypoint`
+    Docker-less) that fail identically on untouched base; the `-k "storage or library or document"` subset =
+    **274 passed, 1 failed** (only the same `test_ops_status…` host-TZ artifact) — **zero integration-introduced
+    regressions** across both runs. A full
+    `docker compose up` runtime PASS remains **unverified — Docker is unavailable in this clone**; no E2E boot
+    was run, none is claimed.
+  - **STRATO VPS feasibility (verified from `docker-compose.vps.yml` + `docs/STRATO_VPS_DEPLOY.md:51`):**
+    decisive fact — **Postgres does NOT run on the VPS** (external Supabase Session Pooler); images are built in
+    CI and only pulled by digest (no on-box build). So the VPS runs only caddy+frontend+backend+worker+redis
+    (Valkey, tmpfs, no disk). **Configured `mem_limit` ceilings (measured from the compose, NOT runtime RSS):**
+    caddy 128m · frontend 512m · backend 512m · worker 384m · redis 128m = **~1664 MB of limits** (+ a one-shot
+    `uploads-init` 64m that exits); cpus ceilings sum 3.25 (oversubscribed on 2 cores, acceptable for one light
+    founder). **Disk 90 GB = ample** (no local DB; only images ~1–2 GB + the `lifeai_uploads` volume + capped
+    logs). **RAM is the binding constraint:** 1.66 GB of limits + host OS/Docker/page-cache (~0.3–0.5 GB) sits
+    right at the 2 GB ceiling — **Option A (current 2 GB) can boot a supervised single-founder no-model start
+    only with swap and/or trimmed limits, with no headroom** for concurrent large downloads, backups, or image
+    pulls. **Recommended: Option B (STRATO VPS L, 8 GB / 4 vCore)** — comfortable headroom + operational
+    reliability for an actually-usable durable install, still no local AI. **Option C (16 GB) is premature** —
+    only justified once local embedding+chat inference (Blueprint §14; a 7B Q4 model alone wants ~6–8 GB) runs
+    on the box, which is explicitly a separate later concern. *These are estimates from configured limits, not
+    measured usage — the Founder (or an authorized operator) should confirm with `docker stats --no-stream`,
+    `free -h`, `df -h`, `docker system df` on the running stack (read-only; see the §7 checklist).*
+  - **#329 streaming remediation — smallest safe design (NOT implemented; conflicts with #329's active review
+    lane, so proposed only, as its own later reviewed PR):** the integrity guarantee does NOT have to weaken to
+    bound memory, because the store is **content-addressed + write-once**: a blob's bytes never change in place
+    (the only mutation is purge/delete), and `open_read` holds an fd (`O_NOFOLLOW`) so an in-flight download
+    keeps serving the correct inode even if the blob is purged mid-stream (POSIX unlink-after-open). Therefore:
+    (1) keep the existing **pre-stream `verify()`** (a full streaming hash of the stored blob, holds nothing in
+    RAM) as the authoritative fail-closed gate — storage corruption → 503, zero bytes sent; (2) **small files
+    (≤ a threshold, e.g. 1–4 MB): keep today's buffered path** for the clean-503 TOCTOU re-hash guarantee;
+    (3) **large files (threshold…60 MB cap): `StreamingResponse`** yielding bounded chunks (e.g. 64–256 KB),
+    dropping per-request memory from O(file)≈2× to O(chunk) — the real DoS/resource-exhaustion win for
+    concurrent downloads; hash incrementally and, on the by-construction-impossible content mismatch, abort the
+    connection (no clean EOF) rather than trust wrong bytes. **Auth/revocation/owner checks unchanged** (run
+    before verify/open; revoked/deleted → 404 before any byte). **Audit:** write the row at stream start (access
+    authorized + verify passed), so a client disconnect still records the access. Not a correctness bug in #329
+    (it is already bounded by the 60 MB cap + fail-closed); this is a scale/DoS-hardening optimization.
 
 ## 4. Exact PR / commit state (2026-11-01)
 - Default `claude/det-kommer-mer-879lcm` @ `64c07d5b0`; no open PR merged into it yet.
@@ -146,8 +191,19 @@ Claude (this lane): exams #319–#322 (done, PASS); recon + handoff (#325). Code
 **#324 active**. Cursor: autonomy/first-cycle/large-file/messaging lanes (#285–#315). Don't overlap.
 
 ## 7. Next safe action
-**Rev. 6 lead:** the integration bottleneck is **review, not more code** — confirmed again 2026-11-02 (all
-PRs draft except #323, **zero reviews on every PR**, nothing merged, SHAs unchanged). Independent-review queue
+**Rev. 7 lead — practical path to the first REAL supervised startup:** (a) assign the independent review below
+and **merge #323 first** (it is the only non-draft/green PR and unblocks #326/#327); (b) the no-model
+integration candidate is proven at the integration-test level (worktree `examiner/wtintegration` @ `3ce5377`,
+base+#323+#328+#329+#327, 23+423+274 passing, 0 new regressions) — the remaining gap to a *real* start is a
+**`docker compose -f docker-compose.vps.yml up` boot in an authorized Docker environment** (unavailable here);
+(c) the first boot needs the external Supabase Postgres creds + a domain + GHCR pull token already documented
+in `docs/STRATO_VPS_DEPLOY.md`. **Founder read-only STRATO sizing checklist** (run on the existing 2 GB VPS to
+replace the estimate with measured numbers — none of these change anything): `free -h` (total/used/available
+RAM + swap), `nproc` (cores), `df -h /` + `docker system df` (disk + image/volume/log usage), and, once the
+stack is up, `docker stats --no-stream` (per-container real RSS vs the mem_limit ceilings). If RAM `available`
+under load is thin or swap is heavy → size up to **VPS L (8 GB)**; if comfortable → 2 GB can serve a single
+founder's no-model start. **Independent-review queue** — confirmed again 2026-11-02 (all PRs draft except #323,
+**zero reviews on every PR**, nothing merged, SHAs unchanged):
 (base `64c07d5`): **#323** `04b27e9` (green/ready — review+merge FIRST → turns #326/#327's three red checks
 green), **#327** `69cdaf3`, **#326** `3a07f58`, **#328** `fa840e4`, **#329** `830ab4d` (shared-original
 retrieval — independent of the other four, review in parallel; see the §3 Rev. 6 pre-review audit for its two
