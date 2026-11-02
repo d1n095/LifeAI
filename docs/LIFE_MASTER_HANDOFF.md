@@ -4,7 +4,7 @@
 knowledge store. When this disagrees with an authoritative doc, the authoritative doc wins — fix this file.
 Keep it short. `first_cycle_go=false` everywhere.
 
-_Rev. 5 — 2026-11-02 — Claude Opus 4.8 (independent). Base: `claude/det-kommer-mer-879lcm` @ `64c07d5b0`._
+_Rev. 6 — 2026-11-02 — Claude Opus 4.8 (independent). Base: `claude/det-kommer-mer-879lcm` @ `64c07d5b0`._
 
 ## 0. Standing invariants (never violate without explicit Founder say-so)
 No merge · no deploy · no DNS/STRATO · no paid/live provider calls · **no paid-provider data egress** · no
@@ -93,6 +93,30 @@ ingestion demo + first blocker: `docs/LIFE_LOCAL_FIRST_INGESTION_DEMO.md` · Gov
   base `64c07d5`, no migration, independent of #323/#326/#327/#328. Full matrix `tests/backend/rag/
   test_original_retrieval.py` = **16 passed**; regression green except the one pre-existing host-TZ `ops_status`
   test (fails identically on untouched base). Not self-certified, not merged. Contract: Blueprint §16.6.
+- **#329 pre-review audit (Rev. 6, verified read-only @ `830ab4d`) — two honest reviewer concerns, no code
+  changed this round (review-gated; author cannot self-certify):**
+  1. **Whole-original buffering, not streamed (performance/memory).** `load_original` does
+     `handle.read()` into one `bytes` (`originals.py:153`), then the endpoint returns `Response(content=…)`
+     (`routers/library.py`, a second full copy) — so one `/original` request holds the original ~twice in
+     memory transiently, ×concurrency. **Bounded today** by the hard `MAX_UPLOAD_BYTES = 60 MB` upload cap
+     (`routers/library.py:69`), and it matches the existing `/media` endpoint's pattern, so it is not *worse*
+     than the established convention — but it does not scale and is the one thing the long-term design must
+     change. `LocalFsStorage.open_read` already returns a seekable `BinaryIO`, so a `StreamingResponse` is
+     architecturally available. **Design tradeoff to resolve in the streamed version, not paper over:** the
+     current full-buffer re-hash (`originals.py:162-164`) closes the verify→open TOCTOU by hashing *all* bytes
+     before returning any; a streamed version must hash incrementally and can only *abort the connection*
+     mid-stream on a late mismatch (bytes already sent cannot be recalled) instead of returning a clean 503.
+     Recommend: keep buffered ≤ a small threshold for the clean-error guarantee, stream above it, documented.
+  2. **Life path is a helper, NOT yet an executable tool (authority/delegation).** `load_original_as_life`
+     has **no caller anywhere** except its own module + test — grep-verified. The Founder HTTP endpoint is the
+     only live caller of `load_original`. So "Life can retrieve originals" is true only as an *authorized
+     capability that exists*; it is **not** registered in any executive/workforce tool surface, has no
+     delegation/authority wiring, and no worker invokes it. A backend helper is not an operational Life tool —
+     tool-registration + bounded-delegation is a separate, later, reviewed step (do not claim Life operationally
+     retrieves originals yet).
+  Otherwise the required trust properties verified present in code: owner-scope (`uploaded_by == owner_id`
+  + `deleted_at IS NULL`, RLS backstop), integrity gate before any byte, revoked/deleted/not-found all 404
+  (indistinguishable), one audit row per access with no storage_key in the detail, no provider call/egress.
 
 ## 4. Exact PR / commit state (2026-11-01)
 - Default `claude/det-kommer-mer-879lcm` @ `64c07d5b0`; no open PR merged into it yet.
@@ -122,10 +146,24 @@ Claude (this lane): exams #319–#322 (done, PASS); recon + handoff (#325). Code
 **#324 active**. Cursor: autonomy/first-cycle/large-file/messaging lanes (#285–#315). Don't overlap.
 
 ## 7. Next safe action
-**Rev. 5 lead:** the integration bottleneck is **review, not more code**. Independent-review queue (verified
-2026-11-02, all draft, zero reviews, base `64c07d5`): **#323** `04b27e9` (green/ready — review+merge FIRST →
-turns #326/#327's three red checks green), **#327** `69cdaf3`, **#326** `3a07f58`, **#328** `fa840e4`,
-**#329** `830ab4d` (shared-original retrieval — independent of the other four, can be reviewed in parallel).
+**Rev. 6 lead:** the integration bottleneck is **review, not more code** — confirmed again 2026-11-02 (all
+PRs draft except #323, **zero reviews on every PR**, nothing merged, SHAs unchanged). Independent-review queue
+(base `64c07d5`): **#323** `04b27e9` (green/ready — review+merge FIRST → turns #326/#327's three red checks
+green), **#327** `69cdaf3`, **#326** `3a07f58`, **#328** `fa840e4`, **#329** `830ab4d` (shared-original
+retrieval — independent of the other four, review in parallel; see the §3 Rev. 6 pre-review audit for its two
+reviewer concerns). **First usable Library = a no-model integration candidate** (base + #323 + #328 + #329,
+#327 optional) demonstrating login → conversation persistence → small-file upload → immutable original storage
+→ Library browse → **original download (#329)** → extraction → restart recovery. No AI model needed (#328
+proves the model-independent path at the service-test level, 2 passed). A throwaway integration *can* be built
+without merging to the default branch (merge the candidates into a disposable integration branch/worktree off
+base), but a full **`docker compose up` runtime PASS is still environment-blocked — Docker is unavailable in
+this review clone**, so no end-to-end boot has been run and none is claimed. **Frontend "Download original"
+spec (minimal, review-ready, not yet implemented — would be its own small reviewed PR):** (a) `lib/api.ts` add
+`getLibraryOriginalUrl: (id) => \`${API_URL}/api/library/${id}/original\`` (mirror of `getLibraryMediaUrl`);
+(b) `app/(shell)/library/[id]/page.tsx` header block render `<a href={api.getLibraryOriginalUrl(source.id)}
+download>` gated on the original being present (status past the pre-storage phase). Auth needs nothing new:
+the endpoint is GET + HttpOnly same-origin session cookie, exactly like the existing `<audio src>` media URL
+(no CSRF header needed for GET). Backend already fails closed (founder-only, owner-scoped, 404 otherwise).
 Then: (2) Independent review of **#327 then #326** (package + fresh evidence in `LIFE_FIRST_STARTUP_READINESS.md`
 §7). (3) Founder picks the **local embedding +
 chat models** (Blueprint §14) → unblocks the configurable-embedding PR (§14.3, additive/non-destructive,
