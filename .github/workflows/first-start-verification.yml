@@ -305,14 +305,21 @@ jobs:
                   st, bd, _ = call("GET", f"/api/library/{source_id}")
                   det = json.loads(bd) if st == 200 else {}
                   idx = det.get("status")
+                  # These statuses are reached only AFTER text extraction (app/rag/ingest.py).
+                  # awaiting_provider / blocked_provider mean extraction succeeded and only the
+                  # EMBEDDING step is paused for want of a verified AI provider — the expected,
+                  # correct model-independent first-start outcome (see
+                  # tests/backend/test_basic_startup_no_model.py: content_preview is cached with
+                  # no model; a provider-paused job is a resumable pause, never a failure).
+                  provider_paused = idx in ("awaiting_provider", "blocked_provider")
                   extracted = idx in ("extracted", "awaiting_classification", "embedding",
-                                       "indexed", "awaiting_provider")
-                  has_text = (det.get("chunk_count", 0) or 0) > 0 or bool(det.get("chunk_preview"))
+                                      "indexed") or provider_paused
                   if idx in ("extraction_failed", "failed", "storage_failed"):
                       record("document_extraction", "FAIL", f"index status {idx}")
                   elif extracted:
+                      note = " (embedding paused — no verified model; model-independent)" if provider_paused else ""
                       record("document_extraction", "PASS",
-                              f"index status {idx}, chunks={det.get('chunk_count')}, job={final_status}")
+                              f"extraction completed; index status {idx}, chunks={det.get('chunk_count')}, job={final_status}{note}")
                   else:
                       record("document_extraction", "BLOCKED", f"index status {idx}, job={final_status}")
               else:
