@@ -4,7 +4,7 @@
 knowledge store. When this disagrees with an authoritative doc, the authoritative doc wins — fix this file.
 Keep it short. `first_cycle_go=false` everywhere.
 
-_Rev. 7 — 2026-11-02 — Claude Opus 4.8 (independent). Base: `claude/det-kommer-mer-879lcm` @ `64c07d5b0`._
+_Rev. 8 — 2026-11-02 — Claude Opus 4.8 (independent). Base: `claude/det-kommer-mer-879lcm` @ `64c07d5b0`._
 
 ## 0. Standing invariants (never violate without explicit Founder say-so)
 No merge · no deploy · no DNS/STRATO · no paid/live provider calls · **no paid-provider data egress** · no
@@ -162,6 +162,42 @@ ingestion demo + first blocker: `docs/LIFE_LOCAL_FIRST_INGESTION_DEMO.md` · Gov
     before verify/open; revoked/deleted → 404 before any byte). **Audit:** write the row at stream start (access
     authorized + verify passed), so a client disconnect still records the access. Not a correctness bug in #329
     (it is already bounded by the 60 MB cap + fail-closed); this is a scale/DoS-hardening optimization.
+- **Rev. 8 (2026-11-02) — Founder infra decision: PORTABILITY & CONTINUITY (build now, measure, upgrade later;
+  no infra rewrite, nothing deployed).** Verified against the existing code/compose/scripts — the stack is
+  already portable; this records the strategy, it does not change the architecture.
+  - **A. What stays in GitHub (`d1n095/LifeAI`):** all application code, migrations, `docker-compose*.yml` +
+    `Caddyfile`, the Master Blueprint + this HANDOFF + runbooks + tests. **Never committed** (verified
+    `.gitignore`): `.env*`, `postgres_data/`, `qdrant_data/`, `ollama_data/`, venvs — i.e. no secrets, no DB
+    data, no original documents, no operational memory. CI (GitHub Actions) builds+pushes digest-pinned images
+    to GHCR; the VPS only *pulls* by digest.
+  - **B. What runs on STRATO now / not now:** NOW = the 4 light runtime containers + Valkey (caddy 128m,
+    frontend 512m, backend 512m, worker 384m, valkey 128m — `docker-compose.vps.yml`). NOT on STRATO:
+    Postgres (external Supabase pooler, `STRATO_VPS_DEPLOY.md:51`), image builds (CI only), and **any local AI
+    inference** (embedding/chat models — Blueprint §14, deferred to a future dedicated host; requirement #6
+    compute-vs-storage separation). Do not install dev services on the 2 GB box that compete with the runtime.
+  - **C. Keep the Mac light:** prefer remote GitHub + CI for test/build over local worktrees. This session
+    pruned 8 stale worktree metadata entries and removed its own disposable integration worktree (branch ref
+    `examiner/integration-firststart` @ `3ce5377` kept — re-add in one command); the ~70 other `examiner/*`
+    worktrees belong to other agents' lanes and were left untouched. Mac ~10 GB free — run heavy pytest suites
+    in CI, not locally, going forward.
+  - **D. Evidence that would justify 2 GB → 8 GB (or 16 GB):** measured, not guessed — `free -h` shows thin
+    `available` RAM or heavy/growing swap under real use; `docker stats --no-stream` shows containers steadily
+    at their mem_limit ceilings or being OOM-killed (`docker inspect … State.OOMKilled`); upload/extraction of
+    a real document fails or is very slow under memory pressure. **16 GB only** once local AI inference is
+    moved onto the box (a 7B Q4 model wants ~6–8 GB alone) — not before.
+  - **E. Migrate originals + DB + memory without loss (verified `scripts/vps/backup.sh`/`restore.sh` +
+    `docs/VPS_BACKUP_RESTORE.md`):** (i) **Originals** = the `lifeai_uploads` named volume (content-addressed
+    write-once blobs) → `backup.sh` tars it + writes a key manifest; restore into a disposable dir then swap.
+    (ii) **DB + persistent memory + provenance + auth boundaries** all live in **external Postgres (Supabase)**
+    — NOT in the volume backup; migrate via `pg_dump`/restore between Supabase projects or re-point
+    `DATABASE_URL`/`APP_DATABASE_URL` (both env-driven settings, `config.py:113-114`) at the new DB. (iii)
+    **Secrets** (`/etc/lifeai/lifeai.env`) are deliberately excluded from backups and moved out-of-band. (iv)
+    `storage_root` is an env-overridable setting (`config.py:151`, default `/var/lib/lifeai/uploads`) — no code
+    assumes a machine-specific absolute path, so a new host just mounts the volume at that path. Life's identity
+    = DB rows + secrets; both move by (ii)+(iii).
+  - **F. Next safe executable task:** unchanged — assign independent review + **merge #323 first**, then a
+    supervised `docker compose -f docker-compose.vps.yml up` first-start in an authorized Docker env, kept
+    strictly separate from any autonomous AI operation (`first_cycle_go=false`).
 
 ## 4. Exact PR / commit state (2026-11-01)
 - Default `claude/det-kommer-mer-879lcm` @ `64c07d5b0`; no open PR merged into it yet.
