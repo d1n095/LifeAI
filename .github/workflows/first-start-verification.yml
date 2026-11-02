@@ -15,22 +15,27 @@
 # service containers; the upload store is a throwaway workspace directory. Everything is torn
 # down with the runner.
 #
+# Code under test = the integration candidate, which is a LOCAL-ONLY, reconstructible
+# composition (it is deliberately not pushed as a ref). This workflow therefore RECONSTRUCTS
+# it deterministically from the pinned, already-pushed PR heads and asserts the resulting tree
+# equals the candidate's known tree (ebdced820…) before running anything — so the evidence is
+# tied to an exact, verified tree, and a moved PR branch fails the run instead of silently
+# testing something else.
+#
+#   candidate = #323 head (04b27e9, trunk)  + merge #328 (fa840e4)
+#                                            + merge #329 (830ab4d)
+#                                            + merge #327 (69cdaf3)   => tree ebdced820…
+#
 # Trigger model:
-#   * workflow_dispatch — the intended long-term interface; pick the ref to verify (defaults
-#     to the integration candidate). Becomes available in the Actions UI once this file is on
-#     the default branch.
+#   * workflow_dispatch — the intended long-term manual interface. Becomes available in the
+#     Actions UI once this file is on the default branch.
 #   * push (THIS branch only) — a bootstrap so the very first run produces real PASS/FAIL/
 #     BLOCKED evidence before merge. Remove the `push:` block once the workflow is on the
 #     default branch and dispatched manually.
 name: First-start verification (manual)
 
 on:
-  workflow_dispatch:
-    inputs:
-      ref:
-        description: "Commit SHA / ref to verify (code under test)."
-        required: false
-        default: "3ce537759298be5eb0570efcb4858d54df940065"
+  workflow_dispatch: {}
   push:
     branches:
       - claude/first-start-verification
@@ -40,9 +45,16 @@ permissions:
 
 env:
   PYTHON_VERSION: "3.12"
-  # Resolve the ref under test: the dispatch input when present, else the pinned integration
-  # candidate (used by the bootstrap push run).
-  VERIFY_REF: ${{ github.event.inputs.ref || '3ce537759298be5eb0570efcb4858d54df940065' }}
+  # Pinned reconstruction recipe (all on origin as PR-head branches). Order matters.
+  CAND_TRUNK_BRANCH: claude/frontend-npm-audit-baseline-consolidation   # #323
+  CAND_TRUNK_SHA: "04b27e9585ea9def58d24407f7000a51577c89bf"
+  CAND_MERGE_1_BRANCH: claude/basic-startup-no-model-proof              # #328
+  CAND_MERGE_1_SHA: "fa840e47ae44490777a56e3684cf5c26085b7e5c"
+  CAND_MERGE_2_BRANCH: claude/library-original-retrieval               # #329
+  CAND_MERGE_2_SHA: "830ab4d9cf2edab27c6a91787988f5fbff1593da"
+  CAND_MERGE_3_BRANCH: claude/docx-extraction-completeness             # #327
+  CAND_MERGE_3_SHA: "69cdaf342b6f3adacc6fa18455f14c5ac452a198"
+  CAND_EXPECTED_TREE: "ebdced820249b584b69c9d6418e9895cc5c380bf"
 
 jobs:
   first-start:
@@ -87,18 +99,41 @@ jobs:
       FS_BASE_URL: http://127.0.0.1:8010
       FS_STATE_FILE: ${{ github.workspace }}/first_start_state.json
     steps:
-      - name: Check out code under test (candidate ref)
+      - name: Check out candidate trunk (#323)
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.VERIFY_REF }}
+          ref: ${{ env.CAND_TRUNK_BRANCH }}
           path: candidate
+          fetch-depth: 0
 
-      - name: Record resolved SHA
+      - name: Reconstruct integration candidate (deterministic, tree-verified)
         id: sha
+        working-directory: candidate
         run: |
-          cd candidate
-          echo "resolved=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "Resolved code-under-test SHA: $(git rev-parse HEAD)"
+          set -euo pipefail
+          git config user.email "ci@local"
+          git config user.name "first-start-ci"
+          # Pin the trunk: the checked-out branch tip must be the expected SHA.
+          test "$(git rev-parse HEAD)" = "$CAND_TRUNK_SHA" \
+            || { echo "::error::trunk ${CAND_TRUNK_BRANCH} moved: $(git rev-parse HEAD) != ${CAND_TRUNK_SHA}"; exit 1; }
+          # Replay the three merges in order, each pinned to its expected SHA.
+          replay() {
+            local branch="$1" sha="$2"
+            git fetch --no-tags origin "$branch"
+            test "$(git rev-parse FETCH_HEAD)" = "$sha" \
+              || { echo "::error::${branch} moved: $(git rev-parse FETCH_HEAD) != ${sha}"; exit 1; }
+            git merge --no-ff --no-edit "$sha" \
+              || { echo "::error::unexpected merge conflict merging ${branch} (${sha})"; exit 1; }
+          }
+          replay "$CAND_MERGE_1_BRANCH" "$CAND_MERGE_1_SHA"
+          replay "$CAND_MERGE_2_BRANCH" "$CAND_MERGE_2_SHA"
+          replay "$CAND_MERGE_3_BRANCH" "$CAND_MERGE_3_SHA"
+          TREE="$(git rev-parse HEAD^{tree})"
+          echo "Reconstructed tree: $TREE (expected $CAND_EXPECTED_TREE)"
+          test "$TREE" = "$CAND_EXPECTED_TREE" \
+            || { echo "::error::reconstructed tree $TREE != expected $CAND_EXPECTED_TREE — recipe stale"; exit 1; }
+          echo "resolved=$TREE" >> "$GITHUB_OUTPUT"
+          echo "Integration candidate reconstructed and tree-verified: $TREE"
 
       - uses: actions/setup-python@v5
         with:
