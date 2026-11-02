@@ -4,7 +4,7 @@
 knowledge store. When this disagrees with an authoritative doc, the authoritative doc wins — fix this file.
 Keep it short. `first_cycle_go=false` everywhere.
 
-_Rev. 4 — 2026-11-02 — Claude Opus 4.8 (independent). Base: `claude/det-kommer-mer-879lcm` @ `64c07d5b0`._
+_Rev. 5 — 2026-11-02 — Claude Opus 4.8 (independent). Base: `claude/det-kommer-mer-879lcm` @ `64c07d5b0`._
 
 ## 0. Standing invariants (never violate without explicit Founder say-so)
 No merge · no deploy · no DNS/STRATO · no paid/live provider calls · **no paid-provider data egress** · no
@@ -86,6 +86,13 @@ ingestion demo + first blocker: `docs/LIFE_LOCAL_FIRST_INGESTION_DEMO.md` · Gov
   message→claim (S4) unwired + `ClaimRelationship` never populated (trust.py reads edges nothing creates); (c)
   the multi-agent workforce verifier (`BUILDER_CANNOT_SELF_VERIFY`) is a built framework driven by the gated
   executive loop, not wired into document analysis. Smallest next milestone + acceptance criteria: Blueprint §16.6.
+- **Shared-original retrieval (Rev. 5) — IMPLEMENTED, PR #329 `830ab4d`, draft/review-pending.** Closes §16's
+  sharpest gap: `GET /api/library/{source_id}/original` (founder) + `load_original_as_life()` (Life), one shared
+  enforcement point `app/library/originals.py::load_original` — owner-scoped, sha256 integrity gate, octet-stream
+  +attachment+nosniff, audited, no storage-key leak, **no provider call / no egress** (reading ≠ disclosure). Off
+  base `64c07d5`, no migration, independent of #323/#326/#327/#328. Full matrix `tests/backend/rag/
+  test_original_retrieval.py` = **16 passed**; regression green except the one pre-existing host-TZ `ops_status`
+  test (fails identically on untouched base). Not self-certified, not merged. Contract: Blueprint §16.6.
 
 ## 4. Exact PR / commit state (2026-11-01)
 - Default `claude/det-kommer-mer-879lcm` @ `64c07d5b0`; no open PR merged into it yet.
@@ -115,9 +122,12 @@ Claude (this lane): exams #319–#322 (done, PASS); recon + handoff (#325). Code
 **#324 active**. Cursor: autonomy/first-cycle/large-file/messaging lanes (#285–#315). Don't overlap.
 
 ## 7. Next safe action
-**Rev. 3 lead:** the integration bottleneck is **review, not more code**. (1) Review+merge **#323 first**
-(green/ready today) → turns #326/#327's three red checks green. (2) Independent review of **#327 then #326**
-(package + fresh evidence in `LIFE_FIRST_STARTUP_READINESS.md` §7). (3) Founder picks the **local embedding +
+**Rev. 5 lead:** the integration bottleneck is **review, not more code**. Independent-review queue (verified
+2026-11-02, all draft, zero reviews, base `64c07d5`): **#323** `04b27e9` (green/ready — review+merge FIRST →
+turns #326/#327's three red checks green), **#327** `69cdaf3`, **#326** `3a07f58`, **#328** `fa840e4`,
+**#329** `830ab4d` (shared-original retrieval — independent of the other four, can be reviewed in parallel).
+Then: (2) Independent review of **#327 then #326** (package + fresh evidence in `LIFE_FIRST_STARTUP_READINESS.md`
+§7). (3) Founder picks the **local embedding +
 chat models** (Blueprint §14) → unblocks the configurable-embedding PR (§14.3, additive/non-destructive,
 sequenced *after* #326's `0069`) and then the one-time re-embed migration. (4) Supervised `docker compose up`
 dry-run of the startup checklist (runbook §5) in an authorized env. No 4th PR was stacked this round, by

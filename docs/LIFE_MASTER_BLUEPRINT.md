@@ -488,20 +488,35 @@ pre-AI path (upload→store→hash→extract→restart) is **model-independent**
 *unsupported* transition: offline retrieval/analysis needs a local embedding+chat model (§13/§14) — a Founder
 decision, not a defect.
 
-### 16.6 Smallest safe next milestone — report + acceptance criteria (NOT built; gated)
-Root cause of the sharpest gap: **the Library preserves originals but cannot hand a whole original back** — to
-the Founder (non-media) or to Life (at all). This blocks "Founder and Life share access to the same originals"
-and "Life revisits the original". Bounded, isolated, review-first fix (one function = one PR):
-1. `GET /api/library/{source_id}/original` → streams `Document.storage_key` bytes with `Content-Disposition`,
-   same RLS-scoped `_visible_document_query`, for every source kind (generalizes the media route).
-   **Accept:** founder downloads a text/PDF/DOCX original byte-identical to upload (sha256 == `Document.checksum`);
-   deleted/other-owner source 404s; no new storage copy created; regression test.
-2. A single authorized, owner-scoped Life tool that reuses (1)'s service to fetch an original for a source Life
-   is already authorized to see. **Accept:** egress-ledgered as `local`; refuses cross-owner; refuses a
-   `revoked`/`purged` memory source; test proving Life cannot read an original the Founder has revoked.
-Each is additive, needs no migration, and must land only after #326/#327/#328 clear independent review (do not
-stack ahead of a dependency). Everything else above (S4, claim-relationship population, wiring the verifier
-into analysis) stays design-only until the Founder confirms scope and a local model — `first_cycle_go=false`.
+### 16.6 Shared-original retrieval — IMPLEMENTED (PR #329, draft, review-pending)
+Root cause of the sharpest gap: **the Library preserved originals but could not hand a whole original back** — to
+the Founder (non-media) or to Life (at all). This blocked "Founder and Life share access to the same originals"
+and "Life revisits the original". Now built as one bounded, additive, no-migration branch off base `64c07d5`
+(`claude/library-original-retrieval`, **PR #329**), reusing existing storage/Library/ownership/RLS/auth:
+
+- **Founder endpoint** `GET /api/library/{source_id}/original` (founder-only via the router dependency): owner-
+  scoped (`deleted_at` excluded, RLS backstop), sha256 integrity gate (`storage.verify` + re-hash of the bytes
+  actually read → closes the verify→open TOCTOU), serves `application/octet-stream` + `attachment` + `nosniff`
+  (never the declared media type, so an HTML/SVG original cannot render inline), one audit row per access,
+  sanitized download filename. 404 for not-found/not-available/deleted (indistinguishable), 503 on integrity
+  failure. Storage keys/paths never exposed.
+- **Life path** `app/library/originals.py::load_original_as_life()` — the same underlying capability through an
+  explicitly authorized, read-only, audited function; identical owner-bound authority, never more; no
+  unrestricted DB/FS access.
+- **Egress boundary made explicit:** reading an original is NOT authority to disclose it to an external model.
+  The retrieval path performs no provider call and no egress; egress stays governed by `app/egress_policy.py`
+  on any later provider call (test `test_retrieval_performs_no_provider_call_or_egress`).
+
+Both callers go through the single enforcement point `load_original()` (`app/library/originals.py`). Verified by
+`tests/backend/rag/test_original_retrieval.py` — the full required matrix (16 passed): byte-identical download,
+sha256 integrity, owner auth, cross-owner denial, revoked/deleted denial, missing + corrupted object, safe
+filename/Content-Disposition, concurrent reads, no external egress, no mutation, audit. **Status: draft, awaiting
+independent review — not self-certified, not merged.** Independent of #323/#326/#327/#328.
+
+The remaining §16 gaps stay design-only, subsequent milestones (not part of this bounded task): message→claim
+(S4), cross-source contradiction detection / claim-relationship population, wiring the independent verifier into
+document analysis, Life-authored versioned Blueprint, local semantic comprehension, supervised startup +
+historical corpus import. All gated on Founder scope + a local model — `first_cycle_go=false`.
 
 ---
 **This Blueprint is a traceable synthesis of reachable evidence. It does not invent missing history,
