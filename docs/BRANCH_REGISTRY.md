@@ -6,6 +6,34 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## AKTUELLT LÄGE (verifierat 2026-11-02, Claude Opus 4.8) — bas `claude/det-kommer-mer-879lcm` @ `64c07d5`
+
+> Resten av filen nedan är historisk och föregår #323–#329 (full avstämning är en egen,
+> spårad docs-uppgift). Detta avsnitt är den aktuella, verifierade sanningen för de öppna
+> Claude-PR:erna. Verifierat mot GitHub + `git merge-base`, inte gissat.
+
+Öppna PR:er, alla grenade direkt från basen `64c07d5` (ingen stackning, inga inbördes beroenden),
+alla draft utom #323, **noll reviews** — granskning är flaskhalsen, inte mer kod:
+
+| PR | branch | SHA | migration | status | beroende |
+|----|--------|-----|-----------|--------|----------|
+| #323 | `claude/frontend-npm-audit-baseline-consolidation` | `04b27e9` | nej | **grön, ready/not-draft, MERGEABLE/CLEAN** | — (merga FÖRST → grönar #326/#327:s tre ärvda checks) |
+| #327 | `claude/docx-extraction-completeness` | `69cdaf3` | nej | draft, review-pending | oberoende |
+| #326 | `claude/egress-local-provider-no-egress-ledger` | `3a07f58` | 0069 (enda, efter bas 0068) | draft, review-pending | oberoende |
+| #328 | `claude/basic-startup-no-model-proof` | `fa840e4` | nej (test-only) | draft, review-pending | oberoende |
+| #329 | `claude/library-original-retrieval` | `830ab4d` | nej | draft, review-pending | oberoende av #323/#326/#327/#328 |
+| #325 | `claude/life-whole-project-reconnaissance` | docs-only | nej | draft | oberoende (Blueprint/HANDOFF/register) |
+
+**Rekommenderad merge-ordning:** #323 först; därefter #327, #326, #328, #329 oberoende av varandra
+när var och en fått oberoende granskning. Ingen self-cert, ingen merge utan auktorisation. Merge-regeln:
+rör INTE #326/#327 i förväg — de rebasas först när #323 faktiskt mergats. `first_cycle_go=false`.
+
+**#329 (ny, 2026-11-02):** delad original-åtkomst — `GET /api/library/{source_id}/original` (grundare) +
+`load_original_as_life()` (Life) via en gemensam auktoriserad punkt `app/library/originals.py::load_original`.
+Owner-scopad, sha256-integritetsgrind, octet-stream+attachment+nosniff, auditerad, ingen storage-key-läcka,
+**ingen provider-/egress-väg** (läsning ≠ disclosure). Återanvänder befintlig storage/Library/RLS/auth, ingen
+migration. Full matris `tests/backend/rag/test_original_retrieval.py` = 16 passed. Kontrakt: Blueprint §16.6.
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en
@@ -8145,3 +8173,18 @@ lease-omverifiering före varje durabel skrivning. **P1 (icke-blockerande, för 
 "Autonomous Gap → Child-Task Generation")**: `create_plan()` är full-supersession-bara — ingen
 primitiv för att foga in EN ny child-task under en befintlig plan utan att kansellera alla
 syskon-tasks; måste byggas innan den funktionen kan börjas.
+
+---
+
+## `claude/life-whole-project-reconnaissance` (2026-11-01, docs-only, draft PR)
+
+Isolerad dokumentationsgren grenad från `claude/det-kommer-mer-879lcm` @ `64c07d5b0`. Lägger
+**bara** till två nya docs, rör ingen befintlig kod/doc: `docs/LIFE_TAKEOVER_READINESS_RECON.md`
+(evidensbaserad helhetsrekognosering A–I — verifierat inventarium, historisk täckning, återskapad
+visionskarta, implementationsverklighet, PR-landskap inkl. #324, kritiska luckor, minsta nästa
+milstolpar, frågor till grundaren, rekommenderad första övertagandedemo) och
+`docs/LIFE_MASTER_HANDOFF.md` (kortfattat kontinuitetsindex för nya sessioner — pekar på de
+auktoritativa dokumenten, ersätter dem inte; exakta PR/commit-tillstånd, verifierade fakta, öppna
+frågor, ägarskap, nästa säkra åtgärd). **Förslag för grundardiskussion — INTE implementeringsmandat.**
+Ingen merge/deploy/spend/Recall/autonomi; frusna kandidater och #324 orörda; `first_cycle_go=false`.
+Oberoende examinationsverdikt denna session: #319/#320/#321/#322 = PASS (postade på respektive PR).
