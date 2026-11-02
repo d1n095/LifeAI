@@ -135,3 +135,122 @@ proves loopback/in-deployment), and the `local` decision still requires `sent_co
 #327 treats documents as untrusted, runs no macros, is bounded/deterministic, and reports (never silently
 drops) detected-but-unsupported constructs. **Integration blocker:** #323 must merge first; then #327 and #326
 rebase and their three red checks go green. #326's `0069` is the only migration and must sequence after `0068`.
+
+## 8. First real startup — execution pack (Rev. 3, 2026-11-02)
+
+### A. The actual next action that removes the review blocker
+**Verified repo review governance:** there is NO CODEOWNERS file, NO branch protection on the default branch
+(`gh api …/protection` → 404 "Branch not protected"), and the repo has exactly ONE collaborator account,
+`d1n095` (the Founder). Every candidate PR (#323/#326/#327/#328/#329) is authored by `d1n095` and **committed
+under the identity `Claude Opus 4.8`** — i.e. the same model lane as this examiner. **Consequence:** there is
+no in-repo automated review gate, and I cannot credibly self-certify *any* of the five (not even #323) as an
+independent review, because they all carry my own model identity. The project's established independent-review
+mechanism is the one used for #319–#322: **the Founder assigns a SEPARATE examiner session/agent** (a different
+lane from the author) to review and post a verdict on each PR. **So the single action that removes the blocker
+is: the Founder assigns an independent examiner session to review #323 first, then #327/#326/#328/#329.** This
+is an authorization/coordination step only the Founder can take; it is not a missing piece of code.
+
+### Executable reviewer handoff (hand this verbatim to the assigned examiner)
+- **Responsible reviewer:** a Claude/Codex/human examiner session that did NOT author the branch under review
+  (author lane = `Claude Opus 4.8`). Post a PASS/FAIL verdict as a PR comment; do not merge without Founder say-so.
+- **Order & SHAs (all base `claude/det-kommer-mer-879lcm` @ `64c07d5b0`, migration head `0068`):**
+  1. `#323` `04b27e9585` — frontend npm-audit/CI consolidation (no migration). **Merge FIRST** — green/ready;
+     unblocks #326/#327's three red checks.
+  2. `#327` `69cdaf342` — DOCX extraction completeness (no migration).
+  3. `#328` `fa840e47ae` — model-independent startup proof (test-only, no migration).
+  4. `#329` `830ab4d9cf` — shared-original retrieval (no migration; independent of the others).
+  5. `#326` `3a07f58b` — egress local/external distinction (**migration `0069`, must sequence after `0068`**).
+- **Verification commands (each PR, in its own checkout; Postgres 5433 + pgvector 0.8.6, `venv312`):**
+  - `#327`: `python3 -m pytest tests/backend/rag -q`  → expect **~423 passed / 1 skip**; the only fails allowed
+    are the two known environmental ones (`test_ops_status…` host-TZ, `…_via_docker_entrypoint` Docker-less).
+  - `#328`: `python3 -m pytest tests/backend/test_basic_startup_no_model.py -q` → **2 passed**.
+  - `#329`: `python3 -m pytest tests/backend/rag/test_original_retrieval.py tests/backend/test_openapi_schema.py -q`
+    → **21 passed** (16 retrieval + 5 openapi).
+  - `#326`: `python3 -m pytest -q -k "egress or locality or restart"` → **26 passed**; `alembic heads` → single head `0069`.
+  - `#323`: CI only (frontend/npm) — confirm the GitHub checks are green.
+- **Security-critical assertions to confirm (fail the review if any is false):**
+  - `#329`: owner-scope (`uploaded_by == owner_id` + `deleted_at IS NULL`) enforced in `load_original`; sha256
+    integrity gate before any byte; revoked/deleted/not-found all 404 (indistinguishable); octet-stream +
+    attachment + nosniff (never the declared media type); one audit row per access, no `storage_key` in detail;
+    **no provider call / no egress** on the retrieval path.
+  - `#326`: never relaxes a deny (NEVER_EGRESS + incomplete request still hard-deny); `is_external_egress`
+    defaults True; the `local` decision requires `sent_content_hash IS NOT NULL` (CHECK).
+  - `#327`: documents treated as untrusted; no macro execution; bounded/deterministic; unsupported constructs
+    reported, never silently dropped.
+  - `#328`: `embed()` is patched to raise and **zero** `DocumentChunk`s are written on the no-model path
+    (proves the model is never called); upload commits `storage_key` + sha256 **before** indexing.
+
+### B. Reproducible, pinned integration candidate (VERIFIED deterministic)
+The disposable candidate `examiner/integration-firststart` @ `3ce5377` = base + #323 + #328 + #329 + #327 is
+reproducible from pinned commits **independent of merge-commit timestamps**: its working tree is
+`ebdced820249b584b69c9d6418e9895cc5c380bf`, and re-deriving it from the pinned SHAs yields the identical tree
+(verified 2026-11-02). Frozen branches are untouched; #326 is deliberately excluded (its egress lane stays in
+independent review). Reconstruct in a throwaway worktree:
+```
+git fetch origin
+git worktree add -b integration-firststart-redo <disposable-dir> 64c07d5b0
+cd <disposable-dir>
+git merge --no-edit 04b27e9585   # #323
+git merge --no-edit fa840e47ae   # #328
+git merge --no-edit 830ab4d9cf   # #329
+git merge --no-edit 69cdaf342b   # #327
+test "$(git rev-parse HEAD^{tree})" = ebdced820249b584b69c9d6418e9895cc5c380bf && echo "candidate reproduced"
+```
+All four `git merge` steps apply cleanly (no conflicts). **Integration-test evidence (NOT runtime evidence):**
+on this tree, 23 targeted + 423 rag + 274 storage/library/document passed, the only fails being the two known
+environmental artifacts → zero integration-introduced regressions. A real `docker compose up` boot remains
+**unverified here (Docker unavailable)**.
+
+### C. STRATO read-only preflight + resource STOP conditions
+Run as the deploy user on the VPS; all read-only, none of it changes the running stack or Founder data:
+```
+free -h                      # total/used/available RAM + swap
+swapon --show                # is swap configured at all?
+nproc                        # cores
+df -h / /var/lib/docker      # disk headroom (image/volume store)
+docker system df             # image/container/volume/build-cache usage
+docker ps --format '{{.Names}}\t{{.Status}}\t{{.Image}}'          # existing Life containers + health
+docker volume ls | grep lifeai                                    # persistent volumes present
+docker stats --no-stream --format 'table {{.Name}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.CPUPerc}}'  # REAL RSS vs the mem_limit ceilings
+ls -1 /path/to/backups/lifeai-backup-*.tar.gz 2>/dev/null | tail  # backups present? (scripts/vps/backup.sh output)
+# DB connectivity (read-only; creds from /etc/lifeai/lifeai.env — do NOT print them):
+docker compose -f docker-compose.vps.yml exec backend curl -sf http://127.0.0.1:8000/api/health
+```
+**Do NOT conclude "2 GB is runtime-ready" from the ~1.66 GB of configured mem_limits alone** — those are
+ceilings, not measured usage. Decide on the measured numbers above.
+**Measurable STOP conditions (abort/scale-up if any is hit):**
+- **OOM:** any `docker inspect <ctr> --format '{{.State.OOMKilled}}'` = `true`, or `dmesg | grep -i oom` shows a kill.
+- **Excessive swap:** `free -h` swap `used` > ~256 MB sustained, or `available` RAM < ~150 MB under load.
+- **Storage pressure:** `df -h /` or `/var/lib/docker` > 85% used, or `docker system df` reclaimable climbing toward the free margin.
+- **Service instability:** any container not `healthy`/`Up` after `start_period`, or a restart loop
+  (`docker ps` restart count rising), or `/api/health` non-200.
+Hitting any of these is the measured evidence for the 2 GB → 8 GB upgrade (HANDOFF §3 Rev. 8 D).
+
+### D. Exact supervised no-model startup — tested vs unverified
+**Isolation (critical on a 2 GB box):** do NOT run a second full stack beside the live one — 2×~1.66 GB exceeds
+2 GB. Run this isolated no-model proof on the **Mac (local `docker-compose.yml`, throwaway volumes)** or a
+separate host, NOT concurrently with the live STRATO install, and NEVER pointed at the Founder's real Supabase
+DB — use a throwaway/empty database. Each acceptance criterion below is labelled **[TESTED]** (proven at the
+integration-test level on `3ce5377`, see §7 + B) or **[UNVERIFIED]** (needs a real boot — not run here).
+```
+# One-time: throwaway env, paid providers UNSET (offline), isolated project name + empty DB
+cp .env.example .env            # set SECRET_KEY, FOUNDER_EMAIL, FOUNDER_PASSWORD, FRONTEND_ORIGINS;
+                                # DATABASE_URL/APP_DATABASE_URL -> a THROWAWAY empty DB (not Founder's)
+docker compose -p lifetest up -d postgres redis backend frontend   # local compose; -p isolates volumes/network
+```
+1. **Services boot** — `docker compose -p lifetest ps` all `healthy`. **[UNVERIFIED]** (no Docker here).
+2. **Founder auth** — log in at the frontend; founder auto-bootstraps from env. **[UNVERIFIED runtime]** / login logic **[TESTED]** in suite.
+3. **Messages persist** — send one; confirm it survives reload. **[UNVERIFIED runtime]** / persistence **[TESTED]**.
+4. **Small file uploads** — `POST /api/documents/upload` a tiny .txt. **[TESTED]** (#328).
+5. **Original stored byte-for-byte** — Document row has `storage_key`; blob == upload. **[TESTED]** (#328/#329).
+6. **SHA-256 verified** — stored `checksum` == `sha256(bytes)`. **[TESTED]** (#328/#329).
+7. **Original downloads via authorized Library route** — `GET /api/library/{id}/original` returns identical
+   bytes, `Content-Disposition: attachment`, octet-stream. **[TESTED]** (#329, 16/16).
+8. **Text extraction with no AI model** — `content_preview` populated; DOCX tables too (#327). **[TESTED]** (#327/#328).
+9. **Safe pause at `awaiting_provider`** — no provider → status parks, zero chunks, no error. **[TESTED]** (#328).
+10. **State survives controlled restart** — `docker compose -p lifetest restart backend`; file+messages+status
+    persist. **[TESTED]** at the clock/session level (#328); container-restart form **[UNVERIFIED]**.
+**Teardown (reversible):** `docker compose -p lifetest down -v` removes the throwaway volumes — the live install
+and Founder data are never touched. **Summary:** criteria 4–9 are proven at the integration-test level today;
+boot, live auth/messaging UI, and the container-restart form (1,2,3,10) remain UNVERIFIED pending a real boot by
+an authorized operator. No runtime PASS is claimed.
