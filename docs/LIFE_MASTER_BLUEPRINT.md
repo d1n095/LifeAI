@@ -371,7 +371,28 @@ A **separate, isolated draft PR, sequenced *after* #326 merges** (to avoid colli
    only once the Founder picks the model. This PR is the safe prerequisite that makes that switch auditable.
 Acceptance: additive migration applies+reverses on a from-scratch DB; mixed-model corpus is rejected with a
 clear error (adversarial test); existing 1536/OpenAI path unchanged (regression); owner isolation intact;
-independent review before merge.
+independent review before merge. **This is exactly the "prevent cross-model vector contamination" guarantee:**
+every chunk records the model+dim that produced it, and retrieval refuses to compare vectors from different
+models/dims — so a model switch can never silently mix incompatible embedding spaces.
+
+### 14.4 MacBook Air M1 fit (the Founder's current hardware — estimates, label-measured on boot)
+M1 Air = 8-core CPU + 7/8-core GPU, **unified memory 8 GB or 16 GB**, fanless (sustained load thermally
+throttles). Ollama/llama.cpp use the **Metal** backend; all of the below run **fully offline**. Figures are
+estimates to validate on the actual machine (and depend on 8 vs 16 GB):
+| Role | Recommended on M1 Air | Footprint (Q4_K_M GGUF) | Notes |
+|---|---|---|---|
+| Embedding | **multilingual-e5-base** (768) or **bge-m3** (1024) | ~0.5 GB / ~1.2 GB | both fine on 8 GB; batch latency tens–hundreds of ms; e5 needs `query:`/`passage:` prefixes. |
+| Chat (claim extraction), **8 GB** | **Qwen2.5-3B-Instruct** / Llama-3.2-3B | ~2–3 GB | leaves room for OS + Postgres + app; ~15–40 tok/s; weaker Swedish nuance. |
+| Chat, **16 GB** | **Qwen2.5-7B** / Gemma-2-9B / Llama-3.1-8B | ~5–6 GB | comfortable; best Swedish quality in the local tier; ~10–20 tok/s. |
+- **Context window:** keep to 4k–8k on 8 GB (KV-cache grows with context and competes for unified memory);
+  chunking (`MAX_CHUNK_CHARS`) already keeps inputs small.
+- **Quantization/runtime:** Q4_K_M is the size/quality sweet spot; Ollama bundles llama.cpp+Metal, no extra
+  toolchain. **Reproducibility:** pin the exact Ollama model **digest** (not just the tag) and record it with
+  the embedding provenance (§14.3) so a re-pull can't silently change the vector space.
+- **Do not** pre-download large models or call paid APIs without Founder approval; a 3B+base-embedder combo is
+  the smallest offline-capable set and the safest first pull on an 8 GB Air.
+- **Startup does not wait on any of this** — basic messaging/upload/extraction/persistence are proven
+  model-independent (PR #328; runbook §7). The model choice gates *comprehension*, not *first start*.
 
 ## 15. First historical-comprehension test — design (P4; runs only after startup+upload are proven)
 Milestone after a verified supervised startup (runbook §5) and the local-model path (§14). Pipeline reuses

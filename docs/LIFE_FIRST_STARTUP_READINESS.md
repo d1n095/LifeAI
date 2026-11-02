@@ -114,6 +114,20 @@ Author cannot self-certify (repo `CLAUDE.md`; no independent reviewer available 
 | **#323** | `claude/frontend-npm-audit-baseline-consolidation` @ `04b27e9` | none | **all green**; ready/not-draft | n/a (frontend/CI) |
 | **#327** | `claude/docx-extraction-completeness` @ `69cdaf3` | none | backend/RLS/alembic **pass**; red only on the 3 #323-fixed checks | `tests/backend/rag/` = **407 passed, 1 skipped, 2 failed**; both failures reproduce on untouched base `64c07d5b0` and are **environmental**: one is a host-timezone artifact (recency assert off by exactly 3600 s — host is UTC+1, CI is UTC), one needs Docker (`..._via_docker_entrypoint`). **Zero #327 regressions.** |
 | **#326** | `claude/egress-local-provider-no-egress-ledger` @ `3a07f58` | **0069** (single head after 0068; CHECK-widen for `decision='local'`) | backend/RLS/alembic **pass**; red only on the 3 #323-fixed checks | egress + provider-locality + cross-session restart demo = **26 passed** (incl. the restart-persistence proof, §P3). |
+| **#328** | `claude/basic-startup-no-model-proof` @ `fa840e4` | none (test-only) | n/a (new; not yet run in CI) | **2 passed** — basic startup proven **model-independent** (below). |
+
+### Basic startup is NOT blocked by any AI model (Deliverable #4 — executable proof, PR #328)
+A plain `POST /api/documents/upload` with **no embedding/chat provider available** commits the original
+byte-exact (`storage_key`) + **sha256** before indexing, runs **extraction** (text cached in
+`content_preview`), is driven through the **real** owner-blind claim clock + `process_claimed_job` after the
+request session is closed (a simulated restart) and re-read in two further fresh sessions, and lands on
+**`awaiting_provider`** — a resumable *pause*, never a failure, never a lost upload. **Zero `DocumentChunk`s**
+are written and `embed()` is patched to raise, so "the model is never called on the basic path" is *enforced*.
+Verified in code: the worker reaches `IndexStatus.extracted` (committed) **before** any model is touched
+(`library_import.py`), and `index_document` parks at `awaiting_provider` when the provider is `not_configured`
+(`ingest.py`) — the original is re-derivable deterministically from the preserved bytes at any time. **So
+messaging, upload, durable storage, sha256 integrity, extraction and restart-persistence are all demonstrable
+before the local-AI-model migration; only embedding/retrieval needs a model, and its absence is graceful.**
 
 **Security invariants to confirm in review:** #326 never relaxes a deny path (NEVER_EGRESS + incomplete-request
 still hard-deny for local), `is_external_egress` defaults True (fail-safe: a provider is external unless it

@@ -87,8 +87,12 @@ ingestion demo + first blocker: `docs/LIFE_LOCAL_FIRST_INGESTION_DEMO.md` · Gov
   review required; rag regression 409 pass/1 skip), **#326** (egress local/external distinction + local-first
   ingestion demo, **draft @ `3a07f58b0`**, review required; migration 0069 single head; 1193+1-skip regression
   green), **#325** (recon + handoff +
-  `LIFE_MASTER_BLUEPRINT.md`, draft, docs-only), **#323** (npm-audit + CI Playwright pin, green),
-  #316/#317/#318 (passkeys/PWA). Deep cursor/* stack #285–#315 unmerged.
+  `LIFE_MASTER_BLUEPRINT.md`, draft, docs-only, @ `0aaa419`), **#323** (npm-audit baseline + CI Playwright
+  pin, @ `04b27e9`, **now fully green & ready/not-draft**), **#328** (`claude/basic-startup-no-model-proof`,
+  **draft @ `fa840e4`**, test-only off base, review required — executable proof that upload/extract/persist +
+  restart survival work with NO embedding/chat model; 2 passed locally), #316/#317/#318 (passkeys/PWA). Deep
+  cursor/* stack #285–#315 unmerged. (BRANCH_REGISTRY predates #323–#328 — reconciling it is the tracked M1
+  zero-risk docs task, §7.)
 
 ## 5. Genuinely open Founder decisions (block M2; recon §H)
 1. **Designate ONE authorized source** for the first ingestion proof (existing Library/Vault upload, or a
