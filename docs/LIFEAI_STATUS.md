@@ -204,9 +204,30 @@ production credentials / Supabase / STRATO, and tied to the exact candidate SHA.
   small-file upload; immutable original retrieval (`/api/library/:id/original`, the #329
   capability #330's UI depends on); document extraction; persistence across a process restart.
 - **Evidence:** the workflow emits explicit `PASS` / `FAIL` / `BLOCKED` per criterion, tied to
-  the resolved SHA, as a job summary + uploaded artifact.
-- **Status / results:** _to be filled in from the first real run — see Corrections log and the
-  workflow's run summary. Do not record PASS here without a named run URL + SHA._
+  the resolved tree, as a job summary + uploaded artifact.
+- **Reconstruction:** the candidate is not pushed as a ref, so the workflow reconstructs it
+  deterministically from the pinned PR heads (`#323 04b27e9` + `#328 fa840e4` + `#329 830ab4d`
+  + `#327 69cdaf3`) and **asserts the resulting tree == `ebdced820…`** before running — a moved
+  PR branch fails the run instead of silently testing something else.
+
+- **Status / results — [VERIFIED]:** first-start acceptance **PASSED** at the verified
+  candidate tree `ebdced820249b584b69c9d6418e9895cc5c380bf`.
+  Run: <https://github.com/d1n095/LifeAI/actions/runs/41548691356> (2026-11-03, conclusion
+  success). All 7 criteria, 0 FAIL, 0 BLOCKED:
+
+  | Criterion | Result | Note |
+  |-----------|--------|------|
+  | Founder authentication | **PASS** | login 200, session established |
+  | Conversation persistence | **PASS** | `assistant_status=succeeded` (deterministic fake provider) |
+  | Small-file upload | **PASS** | import job accepted |
+  | Document extraction | **PASS** | extraction completed; index status `blocked_provider`, i.e. embedding paused for want of a *verified* AI provider — the correct model-independent outcome, not a failure |
+  | Immutable original retrieval (`/api/library/:id/original`, the #329 capability #330's UI uses) | **PASS** | returned bytes' sha256 == uploaded bytes |
+  | Restart persistence | **PASS** | conversation + source + immutable original all survived a real backend+worker process restart |
+
+  Caveat: this exercises the **model-independent** first-start path with the repo's
+  deterministic in-process fakes (no real/paid provider, no egress). Embedding-dependent
+  retrieval is out of scope here and remains gated on the `embedding_dim`/local-model
+  **[DECISION]** in §7 and §9.
 
 ---
 
@@ -228,9 +249,11 @@ production credentials / Supabase / STRATO, and tied to the exact candidate SHA.
 
 - **Supervised dev boot:** no *code* blocker remains (dev compose is self-contained; no model
   required for basic startup; prod guards are dev-inert). [VERIFIED from repo]
-- **Automated first-start verification:** provided by §8's workflow; the authoritative answer
-  is whatever that workflow's latest run reports at the candidate SHA (see §8 / Corrections
-  log). Until a run is recorded there, treat the answer as **[PENDING]**, not assumed-yes.
+- **Automated first-start verification:** **[VERIFIED] yes, for the model-independent path.**
+  §8's workflow run passed all 7 acceptance criteria (auth, conversation persistence, small-file
+  upload, document extraction, immutable original retrieval, restart persistence) at the
+  verified candidate tree `ebdced820…`. **Embedding-dependent retrieval is NOT yet verified**
+  and remains blocked on the `embedding_dim`/local-model decision.
 
 **Next active implementation:** the §8 first-start verification workflow (in progress). After
 that, no new workstream is opened without Founder direction.
@@ -244,3 +267,10 @@ superseded conclusion silently — supersede it here and in the body.
 
 - _2026-11-03_ — Initial version. Baseline established from verified Git/GitHub state and prior
   session evidence.
+- _2026-11-03_ — §8 filled in with the first real run of the first-start verification workflow
+  (run 41548691356): all 7 acceptance criteria PASS at candidate tree `ebdced820…`,
+  model-independent path. §9's "can it be verified?" updated from PENDING to VERIFIED-yes for
+  that path (embedding-dependent retrieval still blocked). Earlier draft's `document_extraction`
+  was conservatively BLOCKED on an earlier run because `blocked_provider` was unclassified; it
+  is now correctly PASS (extraction completed; embedding paused by design) — see the workflow
+  commit history.
