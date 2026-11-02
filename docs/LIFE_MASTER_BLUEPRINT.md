@@ -408,6 +408,101 @@ independently schedule one without an explicit mandate. Success = every surfaced
 five classes are separated, contradictions are shown rather than resolved away, and what was *not* understood
 is reported explicitly. This is a design, not an implementation — it is gated on §13(a)+(b) and §14.
 
+## 16. Source-to-memory architecture — end-to-end verification (P0–P4, read-only, @ `0a265ba`)
+Evidence-based trace of how originals, derived artifacts, workers and memory actually fit together. No new
+production code; findings only. Classes: **✅ implemented+tested · 🟡 implemented, not E2E-verified · ◑ partial
+· ⬚ missing · ⛔ blocked.** Verified against code (paths cited) and a fresh local run (§16.5).
+
+### 16.1 Verified lifecycle (the real path, with each hop's status)
+```
+Founder upload            ✅  routers/documents.py:40 upload_document · routers/library.py:112 import_package
+ → original stored        ✅  storage/local_fs.py:170 write_stream  (sha256 key, os.link atomic publish,
+   immutably (CA+sha256)      hash-verified dedup+self-repair, dir fsync); owner-isolated via references.py
+ → Founder browses        ✅  routers/library.py:318 list / :340 detail (previews + claims + relationships)
+ → Founder opens ORIGINAL  ◑  ONLY audio/video: routers/library.py:421 /{id}/media. No route serves the
+   bytes                      original bytes of a text/PDF/DOCX source (content_preview + chunks only).
+ → Life retrieves ORIGINAL ⬚  no Life-facing original-retrieval tool exists (open_read is worker/media/
+                              Project-Memory only). Life's retrieval = RAG chunks (retrieve.py:9), derived +
+                              embedding-gated.
+ → durable job            ✅  ImportJob(pending), owner-blind lease, worker.py poll loop, orphan reconcile +
+                              provider requeue; no in-process BackgroundTasks
+ → extract → chunk → embed ✅  library_import.py:611 `extracted` committed BEFORE any model; ingest.py parks at
+                              awaiting_provider when no provider (PR #328)
+ → derived linked to       ✅  KnowledgeVersion(version_number, checksum) · Document.checksum/storage_key ·
+   source version + hash       claim/chunk → source_id+version_id+chunk_id+memory_source_id
+ → specialist workers      ◑  document "analysis" = single-pass claim extraction (claims.py:184). Multi-agent
+   analyze                     workforce broker (workforce/broker.py) is driven by mainai_executive/ (gated
+                              autonomous loop), NOT by the document pipeline.
+ → outputs independently   ◑  objective grounding_score + live assess_claim_confidence (trust.py:168), never
+   checked                     the model's self-report. True independent-verifier (BUILDER_CANNOT_SELF_VERIFY,
+                              broker.py:103) exists but is NOT wired to document analysis.
+ → integrated into memory ✅  MemorySourceUnit/DocumentSourceUnit provenance; atomic dual-write (claims.py:259)
+ → Life revisits original  ⬚  same gap as Life-retrieval above
+ → Life updates provisional ⬚  Blueprint is maintained by hand in docs/; no code path writes it (correct while
+   Blueprint                   first_cycle_go=false)
+```
+
+### 16.2 Source-of-truth boundaries (what is canonical vs derived)
+- **Canonical, write-once:** the original bytes at `Document.storage_key` (content-addressed; `write_stream`
+  never overwrites — identical bytes dedup, wrong bytes at a key are *repaired to* the hash, never accepted).
+  `Document.checksum`/`KnowledgeVersion.checksum` are the integrity anchors. AI never mutates source bytes.
+- **Derived, rebuildable:** `content_preview`, `DocumentChunk` + embeddings, `KnowledgeClaim`,
+  `InterpretationProposal`, `ProjectEntity`. Each links back to source + version + `memory_source_id`.
+- **Immutable provenance:** `MemorySourceUnit` identity fields + lifecycle (`active→revoked→purged`) are
+  trigger-guarded and writable only via two SECURITY DEFINER functions (migration 0019) — never a plain UPDATE.
+
+### 16.3 Founder-vs-Life access matrix (verified)
+| Capability | Founder | Life (today) | Note |
+|---|---|---|---|
+| List/browse sources | ✅ `require_founder` | — | library.py:318 |
+| Download original bytes | 🟡 A/V only | ⬚ | **gap**: no text/PDF/DOCX original route; no Life tool at all |
+| Read derived chunks (retrieval) | ✅ | ◑ model-gated | retrieve.py — embedding required, parks offline |
+| Create source relationships | ✅ API | — | workbench.py / library.py POST /{id}/relationships (manual) |
+| Promote proposal → ProjectEntity | ✅ review | ⬚ never auto | promote_interpretation_proposal only; status defaults `unreviewed`/`proposed` |
+| Delete / revoke / purge source | ✅ confirmed | — | soft-delete + reference-counted purge + durable retry |
+
+Owner isolation holds across storage, dedup and retrieval: blobs are global but the "still referenced?" check
+runs through a `SECURITY DEFINER` function so one owner's delete can never physically destroy another owner's
+still-referenced blob (references.py:255) — RLS alone would have *hidden* the cross-owner reference and caused
+the loss, which this closes.
+
+### 16.4 Worker delegation & trust boundaries
+- **Durable/resumable:** ✅ lease clock + `RESUMABLE_INDEX_STATUSES` + orphan reconcile + provider requeue.
+- **Delegation framework:** 🟡 `workforce/` enforces `BUILDER_CANNOT_SELF_VERIFY`, owner match, kill-switch,
+  cost — but is exercised by the **gated executive loop** (`mainai_executive/`, `workforce_dry_run`), *a
+  working framework, not an operational capability* on the Founder lifecycle.
+- **Decision vs proposal:** ✅ claims default `status=proposed`; `claim_type` separates `decision`/`idea`/…;
+  AI output is **never** silently treated as a Founder-approved decision (human-review promotion gate).
+- **Message→claim (S4):** ⬚ unwired — messages get provenance only via a backfill job, never at write time.
+- **Cross-source reconciliation:** ◑ `concept_reconciliation` wired into project_entities/memory_work_linkage;
+  `SourceRelationship` is Founder-created; **`ClaimRelationship` has no creator anywhere** — trust.py reads
+  `supports`/`contradicts` edges that nothing currently populates.
+
+### 16.5 Demonstrated with synthetic data (P4; real worker/DB/storage, no capability-bypassing mocks)
+Local run @ `0a265ba` (Postgres :5433 + pgvector 0.8.6): storage + library-import + claims + trust +
+interpretation-proposal capture + memory/message source units + durable-upload + project-entities API =
+**278 passed, 1 failed**. The one failure (`test_worker_container_reboot_..._via_docker_entrypoint`) shells out
+to `docker-entrypoint.sh` to assert container privilege-narrowing — an **infrastructure/entrypoint test that
+cannot pass in this Docker-less review clone**, not a lifecycle-logic regression. PR #328 separately proves the
+pre-AI path (upload→store→hash→extract→restart) is **model-independent** (2 passed). First actual blocker on an
+*unsupported* transition: offline retrieval/analysis needs a local embedding+chat model (§13/§14) — a Founder
+decision, not a defect.
+
+### 16.6 Smallest safe next milestone — report + acceptance criteria (NOT built; gated)
+Root cause of the sharpest gap: **the Library preserves originals but cannot hand a whole original back** — to
+the Founder (non-media) or to Life (at all). This blocks "Founder and Life share access to the same originals"
+and "Life revisits the original". Bounded, isolated, review-first fix (one function = one PR):
+1. `GET /api/library/{source_id}/original` → streams `Document.storage_key` bytes with `Content-Disposition`,
+   same RLS-scoped `_visible_document_query`, for every source kind (generalizes the media route).
+   **Accept:** founder downloads a text/PDF/DOCX original byte-identical to upload (sha256 == `Document.checksum`);
+   deleted/other-owner source 404s; no new storage copy created; regression test.
+2. A single authorized, owner-scoped Life tool that reuses (1)'s service to fetch an original for a source Life
+   is already authorized to see. **Accept:** egress-ledgered as `local`; refuses cross-owner; refuses a
+   `revoked`/`purged` memory source; test proving Life cannot read an original the Founder has revoked.
+Each is additive, needs no migration, and must land only after #326/#327/#328 clear independent review (do not
+stack ahead of a dependency). Everything else above (S4, claim-relationship population, wiring the verifier
+into analysis) stays design-only until the Founder confirms scope and a local model — `first_cycle_go=false`.
+
 ---
 **This Blueprint is a traceable synthesis of reachable evidence. It does not invent missing history,
 overstate coverage, rewrite originals, or claim authority. `first_cycle_go=false`.**

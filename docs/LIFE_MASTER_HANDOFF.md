@@ -4,7 +4,7 @@
 knowledge store. When this disagrees with an authoritative doc, the authoritative doc wins — fix this file.
 Keep it short. `first_cycle_go=false` everywhere.
 
-_Rev. 3 — 2026-11-01 — Claude Opus 4.8 (independent). Base: `claude/det-kommer-mer-879lcm` @ `64c07d5b0`._
+_Rev. 4 — 2026-11-02 — Claude Opus 4.8 (independent). Base: `claude/det-kommer-mer-879lcm` @ `64c07d5b0`._
 
 ## 0. Standing invariants (never violate without explicit Founder say-so)
 No merge · no deploy · no DNS/STRATO · no paid/live provider calls · **no paid-provider data egress** · no
@@ -76,6 +76,16 @@ ingestion demo + first blocker: `docs/LIFE_LOCAL_FIRST_INGESTION_DEMO.md` · Gov
 - **Background non-blocking:** two durable lease job systems (`knowledge_import_jobs`/worker.py;
   `mainai_jobs`/jobs service) + `InteractiveIsolation` = built.
 - Autonomy proven on a disposable mirror (#205), NOT the real checkout.
+- **Source-to-memory architecture (Rev. 4, verified read-only @ `0a265ba` — Blueprint §16):** the storage +
+  provenance substrate is genuinely strong and tested (content-addressed write-once originals, hash-verified
+  dedup/self-repair, cross-owner-safe purge via SECURITY DEFINER, immutable MemorySourceUnit lifecycle,
+  decision-vs-proposal gate with human-review-only promotion). Lifecycle test run: **278 passed, 1 fail**
+  (the one fail is a Docker-entrypoint infra test, not a lifecycle regression). The verified gaps are all
+  *missing connections, not broken foundations*: (a) **no original-download route for non-media sources and no
+  Life-facing original-retrieval tool** (Founder+Life cannot fetch a whole text/PDF/DOCX original); (b)
+  message→claim (S4) unwired + `ClaimRelationship` never populated (trust.py reads edges nothing creates); (c)
+  the multi-agent workforce verifier (`BUILDER_CANNOT_SELF_VERIFY`) is a built framework driven by the gated
+  executive loop, not wired into document analysis. Smallest next milestone + acceptance criteria: Blueprint §16.6.
 
 ## 4. Exact PR / commit state (2026-11-01)
 - Default `claude/det-kommer-mer-879lcm` @ `64c07d5b0`; no open PR merged into it yet.
