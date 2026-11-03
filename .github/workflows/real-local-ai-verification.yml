@@ -231,8 +231,16 @@ jobs:
       - name: Cross-owner isolation + no-mixing + identity (real pgvector)
         working-directory: candidate/backend
         env:
-          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_reallocal
+          # MUST be a DEDICATED, separate database: the repo's tests/conftest.py derives the
+          # test-DB name from DATABASE_URL and force-DROPs it at session teardown (it fully
+          # self-manages: create role, grant, migrate, apply RLS, drop). Pointing it at the
+          # app's `lifeos_reallocal` would delete the database the live app then needs. A
+          # dedicated name keeps the app's DB untouched; postgres:postgres is a superuser so
+          # the fixture can CREATE/DROP it.
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_reallocal_pytest
+          APP_DATABASE_URL: postgresql://mainai_app:mainai_app_reallocal_pw@localhost:5432/lifeos_reallocal_pytest
         run: |
+          set -eo pipefail  # a pytest failure must fail the step, not be masked by tee's exit code
           # The model-independent proof of criterion 7 (and the identity/no-mixing invariants of
           # PR #333) against the REAL migrated schema + RLS. Runs before the live app so a
           # schema/RLS regression fails fast.
@@ -482,10 +490,13 @@ jobs:
           echo $! > "$GITHUB_WORKSPACE/backend.pid"
           nohup python -c "import importlib.util as u, asyncio; s=u.spec_from_file_location('rlboot','_real_local_boot.py'); m=u.module_from_spec(s); s.loader.exec_module(m); import app.worker as w; asyncio.run(w._main())" > "$GITHUB_WORKSPACE/worker.pre.log" 2>&1 &
           echo $! > "$GITHUB_WORKSPACE/worker.pid"
-          for i in $(seq 1 40); do
-            curl -sf -o /dev/null "$RL_BASE_URL/api/health" && { echo "backend healthy"; break; }
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null "$RL_BASE_URL/api/health" && { echo "backend healthy"; exit 0; }
             sleep 1
           done
+          echo "::error::backend did not become healthy — see backend.pre.log below"
+          tail -60 "$GITHUB_WORKSPACE/backend.pre.log" || true
+          exit 1
 
       - name: Acceptance — pre-restart (real embed, retrieval, chat)
         env:
@@ -528,10 +539,13 @@ jobs:
           echo $! > "$GITHUB_WORKSPACE/backend.pid"
           nohup python -c "import importlib.util as u, asyncio; s=u.spec_from_file_location('rlboot','_real_local_boot.py'); m=u.module_from_spec(s); s.loader.exec_module(m); import app.worker as w; asyncio.run(w._main())" > "$GITHUB_WORKSPACE/worker.post.log" 2>&1 &
           echo $! > "$GITHUB_WORKSPACE/worker.pid"
-          for i in $(seq 1 40); do
-            curl -sf -o /dev/null "$RL_BASE_URL/api/health" && { echo "backend healthy after restart"; break; }
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null "$RL_BASE_URL/api/health" && { echo "backend healthy after restart"; exit 0; }
             sleep 1
           done
+          echo "::error::backend did not become healthy after restart — see backend.post.log below"
+          tail -60 "$GITHUB_WORKSPACE/backend.post.log" || true
+          exit 1
 
       - name: Acceptance — post-restart persistence + live retrieval
         env:
