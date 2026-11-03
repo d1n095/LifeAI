@@ -133,6 +133,33 @@ def test_founder_approval_boundary_blocks_consequential_action(superuser_db):
     assert dec is not None and dec.founder_approval_ref == "founder-approval:unit-test"
 
 
+def test_blocked_then_approved_completes_without_duplicate_request(superuser_db):
+    owner = _owner(superuser_db)
+    wf = str(uuid.uuid4())
+    # Block (no approval), then approve on the same workflow.
+    run_ecommerce_opportunity_assessment(superuser_db, owner_id=owner.id, approve_publish=False, workflow_id=wf)
+    r2 = run_ecommerce_opportunity_assessment(
+        superuser_db, owner_id=owner.id, approve_publish=True, workflow_id=wf, founder_approval_ref="fa:test"
+    )
+    assert r2.status == "completed"
+    assert r2.final_deliverable is not None
+
+    # Exactly ONE delegation request for the consequential task (the blocked one was reused,
+    # not duplicated) — so the reassembled view is unambiguous and reports completion.
+    pub_reqs = [
+        r for r in superuser_db.execute(
+            select(WorkforceDelegationRequest).where(WorkforceDelegationRequest.owner_id == owner.id)
+        ).scalars()
+        if (r.provenance or {}).get("business_workflow_id") == wf
+        and (r.provenance or {}).get("task_key") == "publish_assessment"
+    ]
+    assert len(pub_reqs) == 1
+    view = assemble_business_project_view(superuser_db, owner_id=owner.id, workflow_id=wf)
+    assert view["status"] == "completed"
+    assert view["final_deliverable"] is not None
+    assert len(view["tasks"]) == len(SPEC.tasks)
+
+
 # ------------------------------------------------------------------- security property 2
 
 def test_agent_privilege_isolation_scoped_authority(superuser_db):

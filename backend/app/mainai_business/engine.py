@@ -345,24 +345,32 @@ def run_business_workflow(
                 {"kind": "excerpt", "excerpt": dep_out, "ref": f"workflow:{workflow_id}:{dep}"}
             )
 
-        req = submit_delegation_request(
-            db,
-            owner_id=owner_id,
-            goal_text=f"[{workflow_id}] {task.title}",
-            required_capability=task.capability,
-            risk=task.risk,
-            data_sensitivity=task.data_sensitivity,
-            cost_ceiling_usd=0.0,
-            verification_requirement="independent_verifier",
-            provenance={
-                WORKFLOW_PROVENANCE_KEY: workflow_id,
-                "task_key": task.task_key,
-                "objective_key": spec.objective_key,
-                "depends_on": list(task.depends_on),
-                "stage": idx,
-                "consequential": task.consequential,
-            },
-        )
+        task_provenance = {
+            WORKFLOW_PROVENANCE_KEY: workflow_id,
+            "task_key": task.task_key,
+            "objective_key": spec.objective_key,
+            "depends_on": list(task.depends_on),
+            "stage": idx,
+            "consequential": task.consequential,
+        }
+        if existing is not None and existing.status == "open":
+            # Reuse the persisted request (e.g. the blocked consequential request now that it is
+            # approved) rather than creating a duplicate for the same (workflow_id, task_key) —
+            # one durable request per task keeps the reassembled view unambiguous.
+            req = existing
+            req.provenance = task_provenance  # clears the prior 'blocked' marker
+        else:
+            req = submit_delegation_request(
+                db,
+                owner_id=owner_id,
+                goal_text=f"[{workflow_id}] {task.title}",
+                required_capability=task.capability,
+                risk=task.risk,
+                data_sensitivity=task.data_sensitivity,
+                cost_ceiling_usd=0.0,
+                verification_requirement="independent_verifier",
+                provenance=task_provenance,
+            )
         authority = TaskScopedAuthority(
             allowed_read_paths=task.allowed_read_paths,
             allowed_write_paths=(),

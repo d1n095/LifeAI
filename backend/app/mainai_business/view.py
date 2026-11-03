@@ -41,6 +41,36 @@ def assemble_business_project_view(db: Session, *, owner_id: uuid.UUID, workflow
     ]
     requests.sort(key=lambda r: (r.provenance or {}).get("stage", 0))
 
+    def _latest_assignment(request_id):
+        return db.execute(
+            select(WorkforceAssignment)
+            .where(
+                WorkforceAssignment.owner_id == owner_id,
+                WorkforceAssignment.delegation_request_id == request_id,
+            )
+            .order_by(WorkforceAssignment.created_at.desc())
+        ).scalars().first()
+
+    # Defensive dedupe: keep ONE request per task_key — the most advanced one (a VERIFIED
+    # assignment beats any assignment, which beats a blocked/pending request). This keeps the
+    # reassembled completion state correct even for legacy workflows that recorded more than one
+    # request for a task (e.g. a blocked request plus its later approved one).
+    def _rank(request):
+        a = _latest_assignment(request.id)
+        if a is not None and a.verification_status == "VERIFIED":
+            return 2
+        if a is not None:
+            return 1
+        return 0
+
+    chosen: dict = {}
+    for r in requests:
+        tk = (r.provenance or {}).get("task_key")
+        cur = chosen.get(tk)
+        if cur is None or _rank(r) > _rank(cur):
+            chosen[tk] = r
+    requests = sorted(chosen.values(), key=lambda r: (r.provenance or {}).get("stage", 0))
+
     tasks: list[dict] = []
     verified_outputs: dict[str, dict] = {}
     objective_key = None
