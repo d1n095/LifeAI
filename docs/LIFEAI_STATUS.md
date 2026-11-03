@@ -326,6 +326,47 @@ pytest PASS — against the verified candidate tree `abeb762322…`.
 
 ---
 
+## 11. Executive business workflow — AI team through the real substrate [VERIFIED — 12/12 tests]
+
+**PR #335** · branch `claude/mainai-executive-business-workflow` @ `aeb0bc3` (base: default
+`claude/det-kommer-mer-879lcm` @ `64c07d5`) · OPEN, independent review required.
+
+A Founder-facing executive layer (`app/mainai_business/`) turns a business objective into a
+verified, persisted assessment produced by a **team of specialist agents**, driven entirely
+through the existing workforce substrate. Composition only — **no new tables, no migration, no
+provider invocation**, so it does **not** touch the pending #333/#326 `0069` alembic head.
+
+- **Path:** objective → persistent plan → team of specialists → per-task scoped delegation →
+  in-process execution → independent verification → dependency-ordered aggregation →
+  Founder-approval gate on consequential actions → one reassembled project view
+  (`/api/mainai/business`, founder-only + RLS).
+- **Persistence without a migration:** each task is a real, RLS-scoped delegation request +
+  assignment stamped with a shared `business_workflow_id`; the whole project is rebuilt from
+  the database alone (proves durability + restart survival).
+- **Honesty:** orchestration is real (registry, evidence-selector, broker, task-scoped
+  authority, disclosure minimisation, independent verification, performance ledger,
+  cancel/restart recovery); **per-task workers are deterministic in-process computations, not
+  model calls** — same posture as `workforce.vertical_slice` / `safe_internal_run` — pending
+  gated provider activation. Wiring #334's verified local model (`all-minilm`/`qwen2.5:0.5b`)
+  in as the real worker inference is the honest **next step**, out of scope here, not claimed.
+- **Founder-approval boundary (fail-closed):** the consequential `publish_assessment` step is
+  never auto-run; without an explicit approval token it is `blocked_awaiting_founder_approval`
+  (no authority minted, no worker run). With the token, the approval ref is persisted on the
+  verification decision.
+- **Reference objective:** synthetic e-commerce opportunity assessment (research + finance +
+  operations → synthesis → Founder-gated publish). Generic/reusable — swap the spec, keep the
+  engine. No real purchases, payments, publications or external operations.
+
+**Executed against real Postgres (Python 3.12, pgvector/pg16, RLS) — all PASS:**
+`test_business_workflow.py` (8) end-to-end + 7 security properties (Founder-approval boundary,
+agent privilege isolation, cross-owner RLS isolation, duplicate prevention, prompt-injection
+resistance, cancellation + restart recovery, audit/provenance) and `test_mainai_business_api.py`
+(4) through the real FastAPI TestClient. Regression: those 12 + `test_workforce_foundation` (7)
++ `test_mainai_execution_api` (23) = **42 passed**; `ruff` clean; app imports with the new
+router. See `docs/MAINAI_EXECUTIVE_BUSINESS_WORKFLOW.md`.
+
+---
+
 ## Corrections log
 
 Append a dated line here whenever a prior conclusion in this file is corrected. Never delete a
@@ -358,3 +399,14 @@ superseded conclusion silently — supersede it here and in the body.
   local-AI retrieval is now VERIFIED; production model choice is a DECISION, not an engineering
   gap. Migration-ancestry finding recorded in §10 (#333 and #326 both branch `0069` from `0068`
   → merge-time rechain of whichever merges second).
+- _2026-11-03_ — §11 added: **executive business workflow** (PR #335, branch
+  `claude/mainai-executive-business-workflow` @ `aeb0bc3`). A Founder-facing AI-team layer
+  (`app/mainai_business/`) composed over the existing workforce substrate — no new tables, no
+  migration (does not touch the pending `0069` head), no provider invocation. Reference
+  synthetic e-commerce opportunity assessment runs end-to-end through real delegation/
+  verification; the consequential publish step is fail-closed behind an explicit Founder
+  approval token. 12/12 tests PASS on real Postgres (8 engine incl. all 7 required security
+  properties + 4 router via the real TestClient); 42 passed with the workforce/execution
+  regression. Per-task workers are honestly labelled deterministic in-process (not model
+  calls) pending gated provider activation; wiring #334's local model in is the stated next
+  step. `first_cycle_go` stays false; independent review required before merge.
