@@ -406,9 +406,11 @@ jobs:
                       reply_len = len((j.get("reply") or ""))
                       provider = j.get("provider")
                       srcs = j.get("sources") or []
-                      # Precise citation check: a source whose document_id matches the uploaded doc.
-                      doc_id = det.get("document_id")
-                      cited = any(str(s.get("document_id")) == str(doc_id) for s in srcs) if doc_id else (len(srcs) > 0)
+                      # Precise citation check: the library source_id IS the Document.id
+                      # (GET /api/library/{id} loads Document.id == id), and SourceRef.document_id
+                      # is that same id — so a real citation of the uploaded doc is a source whose
+                      # document_id == source_id. No len>0 fallback: that would false-positive.
+                      cited = any(str(s.get("document_id")) == str(source_id) for s in srcs)
                       # Real local generation = succeeded AND answered by the ollama provider
                       # (not a silent paid fallback — the fallback chain is empty anyway).
                       gen_ok = asst_status == "succeeded" and reply_len > 0 and provider == "ollama"
@@ -441,7 +443,7 @@ jobs:
 
               with open(STATE, "w") as f:
                   json.dump({"conv_id": conv_id, "source_id": source_id,
-                             "doc_id": det.get("document_id") if source_id else None,
+                             "doc_id": source_id,  # source_id IS the Document.id (see citation note above)
                              "expected_sha": EXPECTED_SHA}, f)
               finalize()
 
