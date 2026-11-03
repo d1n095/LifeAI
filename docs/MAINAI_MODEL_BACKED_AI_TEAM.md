@@ -83,6 +83,30 @@ the real-model run is the CI job. A tiny 0.5B model may fail some roles' JSON; t
 honestly (task failed, dependents blocked) and the acceptance script asserts the integration
 invariants, not model answer quality.
 
+## Completion & bounded recovery (publication stage)
+
+The first real run (run 41701226997) showed the four upstream specialists succeeding while the
+0.5B model's **publication** output was rejected by the deterministic validator (its
+`recommendation` did not reflect the verified synthesis). That is the validator working — but
+the workflow should still be able to *complete*. The fix, without weakening validation:
+
+- **Stronger structured generation** — the publication prompt now hands the model the exact
+  synthesis recommendation to copy verbatim; the validator tolerates only case/whitespace.
+- **Bounded, authorized recovery** — on a validator rejection, the engine re-runs the *same*
+  task with the rejection reason as feedback, up to `correction_attempts` (router/CI use 2).
+  Each attempt is a fresh real inference that is **re-validated from scratch**; it never
+  bypasses validation. If the budget is exhausted the task stays **REJECTED** — no fabricated
+  publication (`test_unrecoverable_invalid_publication_stays_rejected`).
+- **Completion & deliverable** — when every task incl. the consequential publish is VERIFIED,
+  the report/view expose `status: "completed"` and a `final_deliverable` (the verified
+  publication document, durably persisted as that assignment's result). Output-quality failures
+  (`failed` / `rejected_by_validator`) are distinguished from authorization failures
+  (`blocked_awaiting_founder_approval`, `failure_kind="authorization"`).
+
+The Founder API now surfaces the complete workflow state: per-task status, `runtime`,
+`provider_invoked`, `execution_receipt`, `correction_attempts`, `failure_kind`, the approval
+requirements, the workflow `status`, and the `final_deliverable`.
+
 ## Boundaries
 
 No STRATO, no merges of frozen/unreviewed PRs, no paid-provider activation, synthetic data

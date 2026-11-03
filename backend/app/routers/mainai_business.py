@@ -48,7 +48,11 @@ def run_ecommerce_assessment(
 ):
     if payload.mode not in ("in_process", "model_backed"):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="mode must be in_process or model_backed")
-    runner = ModelBackedRunner() if payload.mode == "model_backed" else InProcessRunner()
+    runner = (
+        ModelBackedRunner(attempts=3, correction_attempts=2)
+        if payload.mode == "model_backed"
+        else InProcessRunner()
+    )
     report = run_ecommerce_opportunity_assessment(
         db,
         owner_id=user.id,

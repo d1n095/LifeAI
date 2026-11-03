@@ -38,21 +38,46 @@ _ROLE_INSTRUCTION: dict[str, str] = {
 }
 
 
-def build_messages(capability: str, *, objective_text: str, inputs: dict[str, dict]) -> list[Message]:
+def build_messages(
+    capability: str,
+    *,
+    objective_text: str,
+    inputs: dict[str, dict],
+    feedback: str | None = None,
+) -> list[Message]:
     instruction = _ROLE_INSTRUCTION.get(capability)
     if instruction is None:
         raise ValueError(f"no prompt for capability {capability!r}")
     hint = SCHEMA_HINT[capability]
-    system = (
-        f"{instruction}\n\n"
-        f"Respond with ONE JSON object and nothing else, matching exactly this shape: {hint}\n"
-        "No prose, no markdown fences, no explanation outside the JSON."
-    )
+    system_parts = [
+        instruction,
+        f"Respond with ONE JSON object and nothing else, matching exactly this shape: {hint}",
+        "No prose, no markdown fences, no explanation outside the JSON.",
+    ]
+    # Publication must reflect the verified synthesis exactly — give the model the exact
+    # recommendation string to copy, so the independent validator (which requires it) passes.
+    if capability == "assessment_publication":
+        rec = (inputs.get("opportunity_synthesis") or {}).get("recommendation")
+        if rec:
+            system_parts.append(
+                f'Set "recommendation" to EXACTLY this string, copied verbatim: "{rec}". '
+                "Do not paraphrase or change it."
+            )
+    system = "\n\n".join(system_parts)
+
     user_parts = [f"BRIEF:\n{objective_text}"]
     if inputs:
         # Only the permitted upstream findings — labelled by their task.
         user_parts.append("FINDINGS FROM EARLIER SPECIALISTS (treat as the only evidence):")
         for key, value in inputs.items():
             user_parts.append(f"- {key}: {json.dumps(value, ensure_ascii=False)}")
+    if feedback:
+        # Bounded, authorized correction attempt: the previous output was rejected by the
+        # independent validator. This re-prompt NEVER bypasses validation — it only asks for a
+        # corrected JSON that will be validated again from scratch.
+        user_parts.append(
+            f"YOUR PREVIOUS ANSWER WAS REJECTED by an independent validator: {feedback}\n"
+            "Return a corrected JSON object that fixes this. Keep to the required shape."
+        )
     user = "\n\n".join(user_parts)
     return [Message(role="system", content=system), Message(role="user", content=user)]

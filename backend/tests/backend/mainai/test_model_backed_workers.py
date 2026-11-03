@@ -53,21 +53,32 @@ class StubLocalProvider:
     name = "ollama"
 
     def __init__(self, responses: dict | None = None, *, raise_for: set | None = None):
+        # A response may be a single string or a LIST consumed across successive calls for that
+        # capability (to simulate a correction on a validator-feedback retry).
         self.responses = {**_GOOD, **(responses or {})}
         self.raise_for = raise_for or set()
         self.calls: list[tuple[str, list]] = []
+        self._counts: dict[str, int] = {}
 
     async def chat(self, messages, model, *, timeout=None, **kwargs):
         cap = _capability_of(messages)
         self.calls.append((cap, messages))
         if cap in self.raise_for:
             raise ProviderError("Lokal modell (Ollama) inte nåbar: stub", category="unreachable")
+        resp = self.responses[cap]
+        if isinstance(resp, list):
+            i = min(self._counts.get(cap, 0), len(resp) - 1)
+            self._counts[cap] = self._counts.get(cap, 0) + 1
+            resp = resp[i]
         return ChatResult(
-            content=self.responses[cap],
+            content=resp,
             provider=self.name,
             model=model,
             raw_usage={"prompt_tokens": 12, "completion_tokens": 7},
         )
+
+    def call_count(self, capability: str) -> int:
+        return sum(1 for c, _ in self.calls if c == capability)
 
     async def embed(self, texts, model, *, timeout=None):  # pragma: no cover - not used here
         raise NotImplementedError
@@ -80,8 +91,10 @@ def _owner(db) -> User:
     return user
 
 
-def _runner(stub=None):
-    return ModelBackedRunner(provider=stub or StubLocalProvider(), model="qwen2.5:0.5b")
+def _runner(stub=None, *, correction_attempts=0):
+    return ModelBackedRunner(
+        provider=stub or StubLocalProvider(), model="qwen2.5:0.5b", correction_attempts=correction_attempts
+    )
 
 
 def _assignment(db, owner_id, wf, task_key):
@@ -230,3 +243,48 @@ def test_non_local_provider_is_refused_fail_closed(superuser_db, monkeypatch):
     runner = ModelBackedRunner(require_local=True)
     with pytest.raises(ModelBackedExecutionError):
         run_ecommerce_opportunity_assessment(superuser_db, owner_id=owner.id, approve_publish=False, runner=runner)
+
+
+# ----------------------------------------------------------------- bounded authorized recovery
+
+def test_bounded_recovery_corrects_invalid_publication(superuser_db):
+    owner = _owner(superuser_db)
+    # Publication is INVALID on the first attempt (wrong recommendation) then CORRECTED on the
+    # feedback retry. With one correction attempt the task must recover and complete.
+    stub = StubLocalProvider(responses={
+        "assessment_publication": [
+            '{"title": "E-commerce assessment", "recommendation": "no-go", "summary": "wrong first try"}',
+            '{"title": "E-commerce assessment", "recommendation": "conditional-go", "summary": "corrected"}',
+        ],
+    })
+    report = run_ecommerce_opportunity_assessment(
+        superuser_db, owner_id=owner.id, approve_publish=True, runner=_runner(stub, correction_attempts=1)
+    )
+    pub = next(t for t in report.tasks if t.task_key == "publish_assessment")
+    assert pub.status == "verified", (pub.status, pub.failure_reason)
+    assert pub.correction_attempts == 1  # it took exactly one authorized correction
+    assert stub.call_count("assessment_publication") == 2  # original + one retry (bounded)
+    assert report.status == "completed"
+    assert report.final_deliverable is not None
+    assert report.assessment["published"] is True
+
+
+def test_unrecoverable_invalid_publication_stays_rejected(superuser_db):
+    owner = _owner(superuser_db)
+    # Publication is ALWAYS invalid (recommendation never matches synthesis). Bounded recovery
+    # must give up and leave it REJECTED — never fabricate a successful publication.
+    stub = StubLocalProvider(responses={
+        "assessment_publication": '{"title": "x", "recommendation": "no-go", "summary": "never matches"}',
+    })
+    report = run_ecommerce_opportunity_assessment(
+        superuser_db, owner_id=owner.id, approve_publish=True, runner=_runner(stub, correction_attempts=2)
+    )
+    pub = next(t for t in report.tasks if t.task_key == "publish_assessment")
+    assert pub.status == "rejected_by_validator"
+    assert pub.failure_kind == "output_quality"
+    assert stub.call_count("assessment_publication") == 3  # original + exactly 2 corrections (bounded, not infinite)
+    assert report.status == "failed"
+    assert report.final_deliverable is None
+    assert report.assessment["published"] is False
+    a = _assignment(superuser_db, owner.id, report.workflow_id, "publish_assessment")
+    assert a.verification_status == "REJECTED"

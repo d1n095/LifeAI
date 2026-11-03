@@ -65,7 +65,7 @@ def main() -> int:
         db.add(owner)
         db.flush()
 
-        runner = ModelBackedRunner(attempts=3, timeout=180.0)
+        runner = ModelBackedRunner(attempts=3, correction_attempts=2, timeout=180.0)
         wf = str(uuid.uuid4())
 
         # Phase 1 — no approval: the consequential publish must be blocked.
@@ -80,6 +80,9 @@ def main() -> int:
         check(p1["provider_invoked"] is True, "real local model was invoked (provider_invoked)")
         check("publish_assessment" in p1["blocked_tasks"], "publish blocked without Founder approval")
         check(p1["assessment"]["published"] is False, "nothing published without approval")
+        check(p1["status"] == "awaiting_approval", f"phase-1 status awaiting_approval (got {p1['status']!r})")
+        pub1 = next(t for t in p1["tasks"] if t["task_key"] == "publish_assessment")
+        check(pub1.get("failure_kind") == "authorization", "publish block is an AUTHORIZATION failure, not output-quality")
 
         verified_model_backed = [
             t for t in p1["tasks"]
@@ -113,10 +116,19 @@ def main() -> int:
         reused = [t for t in p2["tasks"] if t["status"] == "verified_reused"]
         check(len(reused) >= 2, f"verified tasks resumed, not re-run (got {len(reused)})")
 
-        # Persistence: the Founder view reassembles from the DB with execution receipts.
+        # End-to-end completion: the approved publish is model-backed, validated (possibly via a
+        # bounded correction attempt), and the final deliverable is produced + persisted.
+        check(pub["status"] == "verified", f"approved publish completed + validated (got {pub['status']!r}; corrections={pub.get('correction_attempts')})")
+        check(p2["status"] == "completed", f"workflow status completed (got {p2['status']!r})")
+        check(bool(p2["final_deliverable"]), "final validated deliverable present on the report")
+        check(p2["assessment"]["published"] is True, "assessment published once validated")
+
+        # Persistence: the Founder view reassembles the COMPLETED project + deliverable from DB.
         view = assemble_business_project_view(db, owner_id=owner.id, workflow_id=wf)
         check(view["exists"] is True, "project view reassembles from the database")
         check(view["provider_invoked"] is True, "view records that a model was invoked")
+        check(view["status"] == "completed", f"view status completed (got {view['status']!r})")
+        check(bool(view["final_deliverable"]), "final deliverable persisted + reassembled from DB")
         receipts = [t for t in view["tasks"] if (t.get("execution_receipt") or {}).get("model")]
         check(len(receipts) >= 2, f"per-task execution receipts persisted (got {len(receipts)})")
 

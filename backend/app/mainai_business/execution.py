@@ -66,8 +66,18 @@ def inputs_from_package(pkg: WorkforceContextPackage | None) -> dict[str, dict]:
 
 class InProcessRunner:
     mode = "in_process"
+    correction_attempts = 0  # deterministic — no validator-feedback retries
 
-    def run(self, db: Session, *, owner_id, assignment: WorkforceAssignment, task, objective_text: str) -> ExecutionResult:
+    def run(
+        self,
+        db: Session,
+        *,
+        owner_id,
+        assignment: WorkforceAssignment,
+        task,
+        objective_text: str,
+        feedback: str | None = None,  # ignored; deterministic output
+    ) -> ExecutionResult:
         pkg = db.get(WorkforceContextPackage, assignment.context_package_id)
         inputs = inputs_from_package(pkg)
         data = inprocess_workers.run_worker(task.capability, objective_text=objective_text, inputs=inputs)
@@ -90,6 +100,7 @@ class ModelBackedRunner:
         timeout: float = 120.0,
         require_local: bool = True,
         attempts: int = 1,
+        correction_attempts: int = 0,
     ):
         # provider/model may be injected (tests); otherwise resolved from the DB config / env.
         self._provider = provider
@@ -99,6 +110,9 @@ class ModelBackedRunner:
         # Small local models occasionally emit unparseable text; retrying the SAME task a few
         # times is legitimate (it never bypasses verification). Default 1 keeps tests exact.
         self._attempts = max(1, int(attempts))
+        # Bounded, authorized validator-feedback correction attempts (engine-driven). 0 keeps
+        # tests exact. Read by the engine via the `correction_attempts` attribute.
+        self.correction_attempts = max(0, int(correction_attempts))
 
     def _resolve(self, db: Session):
         if self._provider is not None:
@@ -115,12 +129,21 @@ class ModelBackedRunner:
             )
         return provider, model
 
-    def run(self, db: Session, *, owner_id, assignment: WorkforceAssignment, task, objective_text: str) -> ExecutionResult:
+    def run(
+        self,
+        db: Session,
+        *,
+        owner_id,
+        assignment: WorkforceAssignment,
+        task,
+        objective_text: str,
+        feedback: str | None = None,
+    ) -> ExecutionResult:
         pkg = db.get(WorkforceContextPackage, assignment.context_package_id)
         inputs = inputs_from_package(pkg)
         provider, model = self._resolve(db)  # may raise ModelBackedExecutionError (fail closed)
 
-        messages = build_messages(task.capability, objective_text=objective_text, inputs=inputs)
+        messages = build_messages(task.capability, objective_text=objective_text, inputs=inputs, feedback=feedback)
         prompt_repr = json.dumps([{"role": m.role, "content": m.content} for m in messages], sort_keys=True)
         receipt: dict = {
             "runtime": "model_backed",

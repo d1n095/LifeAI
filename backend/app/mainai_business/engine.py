@@ -75,6 +75,8 @@ class TaskRecord:
     runtime: str | None = None
     receipt: dict | None = None
     failure_reason: str | None = None
+    failure_kind: str | None = None  # "authorization" | "output_quality" | None
+    correction_attempts: int = 0
 
     def as_dict(self) -> dict:
         return {
@@ -96,6 +98,8 @@ class TaskRecord:
             "runtime": self.runtime,
             "receipt": self.receipt,
             "failure_reason": self.failure_reason,
+            "failure_kind": self.failure_kind,
+            "correction_attempts": self.correction_attempts,
         }
 
 
@@ -111,6 +115,8 @@ class BusinessWorkflowReport:
     approvals_satisfied: list[str] = field(default_factory=list)
     blocked_tasks: list[str] = field(default_factory=list)
     provider_invoked: bool = False
+    status: str = "in_progress"  # completed | awaiting_approval | failed | in_progress
+    final_deliverable: dict | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -124,6 +130,8 @@ class BusinessWorkflowReport:
             "approvals_satisfied": self.approvals_satisfied,
             "blocked_tasks": self.blocked_tasks,
             "provider_invoked": self.provider_invoked,
+            "status": self.status,
+            "final_deliverable": self.final_deliverable,
         }
 
 
@@ -311,6 +319,7 @@ def run_business_workflow(
             record.status = "blocked_awaiting_founder_approval"
             record.request_id = str(req.id)
             record.blocked_reason = "awaiting_founder_approval"
+            record.failure_kind = "authorization"  # NOT an output-quality failure
             report.blocked_tasks.append(task.task_key)
             report.tasks.append(record)
             continue
@@ -388,26 +397,63 @@ def run_business_workflow(
         record.disclosed_kinds = tuple(i.get("kind") for i in (pkg.items or []))
         record.denied_kinds = tuple(pkg.denied_kinds or [])
 
-        # Execute via the configured runner (in-process or real local model).
-        exec_result = runner.run(
-            db, owner_id=owner_id, assignment=assignment, task=task, objective_text=spec.objective_text
-        )
-        if exec_result.receipt.get("provider_invoked"):
-            report.provider_invoked = True
-        record.runtime = exec_result.receipt.get("runtime")
-        record.receipt = exec_result.receipt
-        _stamp_receipt(assignment, exec_result.receipt)
+        # Execute via the configured runner, with BOUNDED, AUTHORIZED validator-feedback
+        # recovery for model-backed output. Each correction attempt is a fresh real inference
+        # re-prompted with the validator's rejection reason — it re-validates from scratch and
+        # never bypasses validation or fabricates success. In-process output has no validator
+        # retries (deterministic). The outcome of the loop is one of: task_failed (unparseable),
+        # task_rejected (validator never satisfied within budget), or accepted (VERIFIED).
+        max_corrections = int(getattr(runner, "correction_attempts", 0) or 0)
+        feedback: str | None = None
+        corrections_used = 0
+        exec_result = None
+        verify_reason = None
+        outcome = None  # "failed" | "rejected" | "accepted"
+        while True:
+            exec_result = runner.run(
+                db, owner_id=owner_id, assignment=assignment, task=task,
+                objective_text=spec.objective_text, feedback=feedback,
+            )
+            if exec_result.receipt.get("provider_invoked"):
+                report.provider_invoked = True
+            record.runtime = exec_result.receipt.get("runtime")
+            record.receipt = exec_result.receipt
+            record.correction_attempts = corrections_used
+            _stamp_receipt(assignment, exec_result.receipt)
 
-        # Honest failure: worker could not produce a valid result — fail the task, never fake it.
-        if not exec_result.ok or exec_result.data is None:
+            if not exec_result.ok or exec_result.data is None:
+                # Worker could not produce a parseable result — a provider/schema failure is
+                # not a validator rejection, so it is not retried with feedback here (the runner
+                # already applied its own bounded schema-parse retries).
+                outcome = "failed"
+                break
+
+            ingest_untrusted_result(db, owner_id=owner_id, assignment=assignment, payload=exec_result.data)
+            stored = (assignment.result_payload or {}).get("data") or {}
+
+            if exec_result.validator_ref is None:
+                verify_reason = f"independent verifier accepted {task.task_key}"
+                outcome = "accepted"
+                break
+
+            ok, reason = validate_output(task.capability, stored, inputs)
+            if ok:
+                verify_reason = f"deterministic validator accepted {task.task_key}: {reason}"
+                outcome = "accepted"
+                break
+            if corrections_used < max_corrections:
+                corrections_used += 1
+                feedback = reason  # authorized, bounded correction attempt
+                continue
+            record.failure_reason = reason
+            outcome = "rejected"
+            break
+
+        if outcome == "failed":
             assignment.result_payload = {"data": None, "execution_failure": exec_result.receipt}
             apply_verification_decision(
-                db,
-                owner_id=owner_id,
-                assignment=assignment,
-                decision="REJECTED",
-                risk=task.risk,
-                verifier_profile_id=verifier.id,
+                db, owner_id=owner_id, assignment=assignment, decision="REJECTED",
+                risk=task.risk, verifier_profile_id=verifier.id,
                 reason=f"worker failed {task.task_key}: {exec_result.failure_reason}",
             )
             record_verified_outcome(
@@ -417,36 +463,26 @@ def run_business_workflow(
             record.status = "failed"
             record.verification_status = assignment.verification_status
             record.failure_reason = exec_result.failure_reason
+            record.failure_kind = "output_quality"
             report.tasks.append(record)
             continue
 
-        # Worker output is DATA until independently verified.
-        ingest_untrusted_result(db, owner_id=owner_id, assignment=assignment, payload=exec_result.data)
-        stored = (assignment.result_payload or {}).get("data") or {}
-
-        # Independent verification. For model-backed output this is a DETERMINISTIC validator
-        # (code) applied by the verifier agent — never the builder model reviewing itself.
-        if exec_result.validator_ref is not None:
-            ok, reason = validate_output(task.capability, stored, inputs)
-            if not ok:
-                apply_verification_decision(
-                    db, owner_id=owner_id, assignment=assignment, decision="REJECTED",
-                    risk=task.risk, verifier_profile_id=verifier.id,
-                    deterministic_validator=exec_result.validator_ref,
-                    reason=f"validator rejected {task.task_key}: {reason}",
-                )
-                record_verified_outcome(
-                    db, owner_id=owner_id, profile_id=assignment.profile_id,
-                    capability_tag=task.capability, success=False,
-                )
-                record.status = "rejected_by_validator"
-                record.verification_status = assignment.verification_status
-                record.failure_reason = reason
-                report.tasks.append(record)
-                continue
-            verify_reason = f"deterministic validator accepted {task.task_key}: {reason}"
-        else:
-            verify_reason = f"independent verifier accepted {task.task_key}"
+        if outcome == "rejected":
+            apply_verification_decision(
+                db, owner_id=owner_id, assignment=assignment, decision="REJECTED",
+                risk=task.risk, verifier_profile_id=verifier.id,
+                deterministic_validator=exec_result.validator_ref,
+                reason=f"validator rejected {task.task_key} after {corrections_used} correction(s): {record.failure_reason}",
+            )
+            record_verified_outcome(
+                db, owner_id=owner_id, profile_id=assignment.profile_id,
+                capability_tag=task.capability, success=False,
+            )
+            record.status = "rejected_by_validator"
+            record.verification_status = assignment.verification_status
+            record.failure_kind = "output_quality"
+            report.tasks.append(record)
+            continue
 
         apply_verification_decision(
             db,
@@ -478,7 +514,42 @@ def run_business_workflow(
 
     # Aggregate the Founder-facing assessment from verified outputs only.
     report.assessment = _aggregate_assessment(spec, verified_outputs)
+    report.status, report.final_deliverable = _derive_status(spec, report, verified_outputs)
     return report
+
+
+def publication_document(pub: dict | None) -> dict | None:
+    """The final deliverable document from a publication output — handling both the in-process
+    shape (`{"document": {...}}`) and the model-backed flat shape (`{title,recommendation,summary}`)."""
+    if not pub:
+        return None
+    doc = pub.get("document")
+    if doc:
+        return doc
+    flat = {k: pub[k] for k in ("title", "recommendation", "summary") if k in pub}
+    return flat or None
+
+
+def _derive_status(
+    spec: BusinessObjectiveSpec, report: BusinessWorkflowReport, verified_outputs: dict[str, dict]
+) -> tuple[str, dict | None]:
+    """Workflow completion state for the Founder. The final deliverable is the verified
+    publication output — present (and durably persisted as that assignment's result) only when
+    every task, including the consequential publish, passed validation."""
+    statuses = {t.task_key: t.status for t in report.tasks}
+    all_done = all(s in ("verified", "verified_reused") for s in statuses.values())
+    any_blocked = any(s == "blocked_awaiting_founder_approval" for s in statuses.values())
+    any_quality_fail = any(
+        s in ("failed", "rejected_by_validator", "blocked_unmet_dependency") for s in statuses.values()
+    )
+    deliverable = publication_document(verified_outputs.get("publish_assessment"))
+    if all_done and deliverable is not None:
+        return "completed", deliverable
+    if any_quality_fail:
+        return "failed", None
+    if any_blocked:
+        return "awaiting_approval", None
+    return "in_progress", None
 
 
 def _aggregate_assessment(spec: BusinessObjectiveSpec, verified_outputs: dict[str, dict]) -> dict:
@@ -491,6 +562,6 @@ def _aggregate_assessment(spec: BusinessObjectiveSpec, verified_outputs: dict[st
         "confidence": (synthesis or {}).get("blended_confidence"),
         "synthesis_available": synthesis is not None,
         "published": publication is not None,
-        "published_document": (publication or {}).get("document"),
+        "published_document": publication_document(publication),
         "contributing_tasks": sorted(verified_outputs.keys()),
     }

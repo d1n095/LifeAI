@@ -65,8 +65,12 @@ def _v_assessment_publication(data: dict, inputs: dict) -> tuple[bool, str]:
             return False, f"missing {field}"
     synthesis = inputs.get("opportunity_synthesis") or {}
     expected = synthesis.get("recommendation")
-    if expected and expected not in str(data.get("recommendation")):
-        return False, "published recommendation does not match the verified synthesis"
+    # Strict (must reflect the verified synthesis) but tolerant of case/whitespace only.
+    if expected and expected.strip().casefold() not in str(data.get("recommendation")).strip().casefold():
+        return False, (
+            f"published recommendation {data.get('recommendation')!r} does not reflect the "
+            f"verified synthesis recommendation {expected!r}"
+        )
     return True, "publication reflects the verified synthesis"
 
 
