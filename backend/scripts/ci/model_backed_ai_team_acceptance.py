@@ -26,13 +26,14 @@ import sys
 import uuid
 from pathlib import Path
 
+from sqlalchemy.orm import sessionmaker
+
 # Running this file by path puts scripts/ci on sys.path, not the backend root — add the
-# backend dir so `import app` resolves regardless of how the script is invoked.
+# backend dir so the `import app...` statements inside main() resolve regardless of the
+# invocation cwd (same self-contained pattern as scripts/security/apply_runtime_privileges.py).
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]
 if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
-
-from sqlalchemy.orm import sessionmaker
 
 
 def main() -> int:
