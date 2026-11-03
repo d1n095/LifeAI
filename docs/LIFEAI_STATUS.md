@@ -367,7 +367,7 @@ router. See `docs/MAINAI_EXECUTIVE_BUSINESS_WORKFLOW.md`.
 
 ---
 
-## 12. Model-backed AI team — real local inference in the specialists [VERIFIED adapter 25/25; real-model run in CI]
+## 12. Model-backed AI team — real local inference in the specialists [VERIFIED — adapter 25/25 + real Ollama run green]
 
 **PR #336** · branch `claude/mainai-model-backed-workers` @ `a802a47` (stacked on #335). OPEN,
 independent review required; merge #335 first.
@@ -403,6 +403,16 @@ multiple roles, the approval boundary, DB reassembly with receipts, and no paid-
 Real model weights run in CI only (no local Ollama on the dev box — same split as #334); full
 local regression incl. existing suites = **55 passed**; `ruff` clean. No new migration (does
 not touch the pending `0069` head). See `docs/MAINAI_MODEL_BACKED_AI_TEAM.md`.
+
+**CI result — run 41701226997 @ `43b465d`, conclusion success (after one fix, below):** the
+deterministic suite passed (25/25 on real Postgres) and the real Ollama acceptance passed all
+15 invariants — all four upstream specialists (research, finance, operations, synthesis) ran
+`model_backed` on real `qwen2.5:0.5b` with ollama receipts + hashes and were independently
+verified (`recommendation = conditional-go`); the publish step was blocked without approval
+and, once approved, the 0.5B model's publication output was **rejected by the deterministic
+validator** (`published=false`) — the honest, designed outcome: the independent check bit on a
+weak real-model output instead of rubber-stamping it; nothing fabricated. Evidence artifact:
+`model-backed-ai-team-evidence`.
 
 ---
 
@@ -457,3 +467,10 @@ superseded conclusion silently — supersede it here and in the body.
   any non-local provider, and honest failure/dependency blocking. Adapter logic 25/25 PASS on
   real Postgres locally (stub local provider); the real Ollama run is a CI job
   (`model-backed-ai-team.yml`). No new migration. first_cycle_go stays false; review required.
+- _2026-11-03_ — §12 real-model run **VERIFIED**: workflow run 41701226997 @ `43b465d` green —
+  deterministic suite 25/25 + all 15 real-Ollama invariants PASS on `qwen2.5:0.5b`. First
+  attempt (run 41700300925) failed only at the acceptance step: running the script by path left
+  `scripts/ci` (not the backend root) on `sys.path` → `import app` ModuleNotFoundError; fixed by
+  inserting the backend root in the script itself (as `apply_runtime_privileges.py` does). Honest
+  detail: the approved publish step's 0.5B output was rejected by the deterministic validator
+  (`published=false`) — the independent check working as designed, not a regression.
