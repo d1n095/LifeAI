@@ -41,6 +41,36 @@ def assemble_business_project_view(db: Session, *, owner_id: uuid.UUID, workflow
     ]
     requests.sort(key=lambda r: (r.provenance or {}).get("stage", 0))
 
+    def _latest_assignment(request_id):
+        return db.execute(
+            select(WorkforceAssignment)
+            .where(
+                WorkforceAssignment.owner_id == owner_id,
+                WorkforceAssignment.delegation_request_id == request_id,
+            )
+            .order_by(WorkforceAssignment.created_at.desc())
+        ).scalars().first()
+
+    # Defensive dedupe: keep ONE request per task_key — the most advanced one (a VERIFIED
+    # assignment beats any assignment, which beats a blocked/pending request). This keeps the
+    # reassembled completion state correct even for legacy workflows that recorded more than one
+    # request for a task (e.g. a blocked request plus its later approved one).
+    def _rank(request):
+        a = _latest_assignment(request.id)
+        if a is not None and a.verification_status == "VERIFIED":
+            return 2
+        if a is not None:
+            return 1
+        return 0
+
+    chosen: dict = {}
+    for r in requests:
+        tk = (r.provenance or {}).get("task_key")
+        cur = chosen.get(tk)
+        if cur is None or _rank(r) > _rank(cur):
+            chosen[tk] = r
+    requests = sorted(chosen.values(), key=lambda r: (r.provenance or {}).get("stage", 0))
+
     tasks: list[dict] = []
     verified_outputs: dict[str, dict] = {}
     objective_key = None
@@ -84,6 +114,7 @@ def assemble_business_project_view(db: Session, *, owner_id: uuid.UUID, workflow
 
         if prov.get("blocked"):
             task_view["status"] = "blocked_awaiting_founder_approval"
+            task_view["failure_kind"] = "authorization"
             blocked.append(task_key)
         elif assignment is None:
             task_view["status"] = "pending"
@@ -102,6 +133,7 @@ def assemble_business_project_view(db: Session, *, owner_id: uuid.UUID, workflow
                 )
                 .order_by(WorkforceVerificationDecision.created_at.asc())
             ).scalars().all()
+            receipt = (assignment.provenance or {}).get("execution_receipt") or {}
             task_view.update(
                 {
                     "status": assignment.status,
@@ -109,6 +141,9 @@ def assemble_business_project_view(db: Session, *, owner_id: uuid.UUID, workflow
                     "selected_agent_key": _agent_key(db, assignment.profile_id),
                     "verifier_agent_key": _agent_key(db, assignment.verifier_profile_id),
                     "verification_status": assignment.verification_status,
+                    "runtime": receipt.get("runtime"),
+                    "provider_invoked": bool(receipt.get("provider_invoked")),
+                    "execution_receipt": receipt,
                     "disclosed_kinds": [i.get("kind") for i in (pkg.items if pkg else [])],
                     "denied_kinds": list(pkg.denied_kinds if pkg else []),
                     "authority": {
@@ -119,10 +154,13 @@ def assemble_business_project_view(db: Session, *, owner_id: uuid.UUID, workflow
                         "revoked_at": assignment.revoked_at.isoformat() if assignment.revoked_at else None,
                     },
                     "output": data,
+                    "correction_attempts": int((receipt.get("correction_attempts") if isinstance(receipt, dict) else 0) or 0),
+                    "failure_kind": "output_quality" if assignment.verification_status in ("REJECTED",) else None,
                     "verification_decisions": [
                         {
                             "decision": d.decision,
                             "verifier_profile_id": str(d.verifier_profile_id) if d.verifier_profile_id else None,
+                            "deterministic_validator": d.deterministic_validator,
                             "founder_approval_ref": d.founder_approval_ref,
                         }
                         for d in decisions
@@ -131,12 +169,33 @@ def assemble_business_project_view(db: Session, *, owner_id: uuid.UUID, workflow
             )
         tasks.append(task_view)
 
+    from app.mainai_business.engine import publication_document
+
     synthesis = verified_outputs.get("opportunity_synthesis")
     publication = verified_outputs.get("publish_assessment")
+    final_deliverable = publication_document(publication)
+
+    # Completion state reassembled from the DB: completed only when every task (including the
+    # consequential publish) is VERIFIED and the deliverable is present.
+    task_statuses = [t.get("status") for t in tasks]
+    all_verified = bool(tasks) and all(s == "completed" for s in task_statuses)
+    any_failed = any(s == "failed" for s in task_statuses)
+    if all_verified and final_deliverable is not None:
+        workflow_status = "completed"
+    elif any_failed:
+        workflow_status = "failed"
+    elif blocked:
+        workflow_status = "awaiting_approval"
+    else:
+        workflow_status = "in_progress"
+
     return {
         "workflow_id": workflow_id,
         "objective_key": objective_key,
         "exists": bool(requests),
+        "status": workflow_status,
+        "final_deliverable": final_deliverable,
+        "provider_invoked": any(t.get("provider_invoked") for t in tasks),
         "tasks": tasks,
         "approvals_required": approvals_required,
         "approvals_satisfied": approvals_satisfied,
@@ -146,7 +205,7 @@ def assemble_business_project_view(db: Session, *, owner_id: uuid.UUID, workflow
             "conditions": (synthesis or {}).get("conditions"),
             "confidence": (synthesis or {}).get("blended_confidence"),
             "published": publication is not None,
-            "published_document": (publication or {}).get("document"),
+            "published_document": final_deliverable,
             "contributing_tasks": sorted(verified_outputs.keys()),
         },
     }

@@ -13,6 +13,12 @@ from app.mainai_business.engine import (
     provision_business_team,
     run_business_workflow,
 )
+from app.mainai_business.execution import (
+    ExecutionResult,
+    InProcessRunner,
+    ModelBackedExecutionError,
+    ModelBackedRunner,
+)
 from app.mainai_business.objective import (
     ECOMMERCE_OPPORTUNITY_ASSESSMENT,
     BusinessObjectiveSpec,
@@ -28,6 +34,10 @@ __all__ = [
     "BusinessWorkflowReport",
     "provision_business_team",
     "run_business_workflow",
+    "ExecutionResult",
+    "InProcessRunner",
+    "ModelBackedRunner",
+    "ModelBackedExecutionError",
     "ECOMMERCE_OPPORTUNITY_ASSESSMENT",
     "BusinessObjectiveSpec",
     "RoleSpec",

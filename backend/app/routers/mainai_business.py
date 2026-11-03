@@ -15,6 +15,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.deps import require_founder
 from app.limiter import limiter
+from app.mainai_business.execution import InProcessRunner, ModelBackedRunner
 from app.mainai_business.reference import run_ecommerce_opportunity_assessment
 from app.mainai_business.view import assemble_business_project_view
 from app.models.user import User
@@ -31,6 +32,10 @@ router = APIRouter(
 class EcommerceAssessmentIn(BaseModel):
     approve_publish: bool = False
     founder_approval_ref: str | None = None
+    # "in_process" (deterministic, default) or "model_backed" (real local inference). The
+    # model-backed path fails closed on a non-local provider and degrades to honest task
+    # failures if the local model is unreachable — it never falls back to a paid provider.
+    mode: str = "in_process"
 
 
 @router.post("/ecommerce-assessment", status_code=status.HTTP_201_CREATED)
@@ -41,11 +46,19 @@ def run_ecommerce_assessment(
     db: Session = Depends(get_db),
     user: User = Depends(require_founder),
 ):
+    if payload.mode not in ("in_process", "model_backed"):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="mode must be in_process or model_backed")
+    runner = (
+        ModelBackedRunner(attempts=3, correction_attempts=2)
+        if payload.mode == "model_backed"
+        else InProcessRunner()
+    )
     report = run_ecommerce_opportunity_assessment(
         db,
         owner_id=user.id,
         approve_publish=payload.approve_publish,
         founder_approval_ref=payload.founder_approval_ref,
+        runner=runner,
     )
     db.commit()
     return report.as_dict()

@@ -21,9 +21,11 @@ def run_ecommerce_opportunity_assessment(
     approve_publish: bool = False,
     founder_approval_ref: str | None = None,
     workflow_id: str | None = None,
+    runner=None,
 ) -> BusinessWorkflowReport:
     """Run the reference assessment. The consequential `publish_assessment` step runs only
-    when `approve_publish` is True (fail-closed otherwise)."""
+    when `approve_publish` is True (fail-closed otherwise). `runner` selects the execution
+    strategy (default in-process; pass a `ModelBackedRunner` for real local-model inference)."""
     approvals: dict[str, str] = {}
     if approve_publish:
         approvals["publish_assessment"] = founder_approval_ref or f"founder-approval:{uuid.uuid4()}"
@@ -33,4 +35,5 @@ def run_ecommerce_opportunity_assessment(
         spec=ECOMMERCE_OPPORTUNITY_ASSESSMENT,
         approvals=approvals,
         workflow_id=workflow_id,
+        runner=runner,
     )
