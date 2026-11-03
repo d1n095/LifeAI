@@ -1,0 +1,408 @@
+"""MainAI executive business-workflow engine.
+
+Composes the EXISTING workforce substrate into one end-to-end path:
+
+  objective → persistent plan → team of specialists → per-task delegation with task-scoped
+  authority → in-process execution → independent verification → performance evidence →
+  dependency-ordered aggregation → Founder-approval gate on consequential actions.
+
+No new tables: every task is a real, persisted, RLS-scoped `WorkforceDelegationRequest` +
+`WorkforceAssignment`, stamped with a shared `workflow_id` in provenance so the whole project
+is reassembled from the database alone (see `app.mainai_business.view`). No provider is
+invoked; no consequential effect is produced without an explicit Founder approval token.
+"""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.mainai_business.objective import BusinessObjectiveSpec, topological_order
+from app.mainai_business.workers import run_worker
+from app.models.workforce import (
+    WorkforceAgentProfile,
+    WorkforceAssignment,
+    WorkforceContextPackage,
+    WorkforceDelegationRequest,
+)
+from app.workforce.authority import TaskScopedAuthority
+from app.workforce.broker import (
+    form_team,
+    ingest_untrusted_result,
+    resolve_delegation,
+    submit_delegation_request,
+)
+from app.workforce.performance import record_verified_outcome
+from app.workforce.registry import register_workforce_agent
+from app.workforce.verification import apply_verification_decision
+
+WORKFLOW_PROVENANCE_KEY = "business_workflow_id"
+
+
+class BusinessWorkflowError(Exception):
+    pass
+
+
+@dataclass
+class TaskRecord:
+    task_key: str
+    title: str
+    capability: str
+    status: str
+    depends_on: tuple[str, ...]
+    consequential: bool
+    request_id: str | None = None
+    assignment_id: str | None = None
+    selected_agent_key: str | None = None
+    verifier_agent_key: str | None = None
+    verification_status: str | None = None
+    disclosed_kinds: tuple[str, ...] = ()
+    denied_kinds: tuple[str, ...] = ()
+    output: dict | None = None
+    blocked_reason: str | None = None
+
+    def as_dict(self) -> dict:
+        return {
+            "task_key": self.task_key,
+            "title": self.title,
+            "capability": self.capability,
+            "status": self.status,
+            "depends_on": list(self.depends_on),
+            "consequential": self.consequential,
+            "request_id": self.request_id,
+            "assignment_id": self.assignment_id,
+            "selected_agent_key": self.selected_agent_key,
+            "verifier_agent_key": self.verifier_agent_key,
+            "verification_status": self.verification_status,
+            "disclosed_kinds": list(self.disclosed_kinds),
+            "denied_kinds": list(self.denied_kinds),
+            "output": self.output,
+            "blocked_reason": self.blocked_reason,
+        }
+
+
+@dataclass
+class BusinessWorkflowReport:
+    workflow_id: str
+    objective_key: str
+    objective_text: str
+    team: list[dict]
+    tasks: list[TaskRecord] = field(default_factory=list)
+    assessment: dict | None = None
+    approvals_required: list[str] = field(default_factory=list)
+    approvals_satisfied: list[str] = field(default_factory=list)
+    blocked_tasks: list[str] = field(default_factory=list)
+    provider_invoked: bool = False
+
+    def as_dict(self) -> dict:
+        return {
+            "workflow_id": self.workflow_id,
+            "objective_key": self.objective_key,
+            "objective_text": self.objective_text,
+            "team": self.team,
+            "tasks": [t.as_dict() for t in self.tasks],
+            "assessment": self.assessment,
+            "approvals_required": self.approvals_required,
+            "approvals_satisfied": self.approvals_satisfied,
+            "blocked_tasks": self.blocked_tasks,
+            "provider_invoked": self.provider_invoked,
+        }
+
+
+def provision_business_team(
+    db: Session, *, owner_id: uuid.UUID, spec: BusinessObjectiveSpec
+) -> dict[str, Any]:
+    """Register the specialist seats + the independent verifier and form a team.
+
+    Registration grants ZERO authority (see registry). Agents start selectable (`active`) but
+    with NO allowed_tool_classes and NO performance evidence — authority is minted per task.
+    """
+    capability_to_profile: dict[str, WorkforceAgentProfile] = {}
+    members: list[uuid.UUID] = []
+    team_view: list[dict] = []
+    for role in spec.roles:
+        profile = register_workforce_agent(
+            db,
+            owner_id=owner_id,
+            agent_key=role.agent_key,
+            name=role.name,
+            role=role.role,
+            agent_type=role.agent_type,
+            provider_type="local",
+            trust_zone=role.trust_zone,
+            capability_tags=[role.capability],
+            allowed_tool_classes=(),  # authority is per-task, never on the profile
+            cost_class="low",
+            status="active",
+            provenance={"business_role": True, "objective_key": spec.objective_key},
+        )
+        capability_to_profile[role.capability] = profile
+        members.append(profile.id)
+        team_view.append(
+            {"agent_key": role.agent_key, "name": role.name, "role": role.role, "capability": role.capability}
+        )
+    verifier = register_workforce_agent(
+        db,
+        owner_id=owner_id,
+        agent_key=spec.verifier.agent_key,
+        name=spec.verifier.name,
+        role=spec.verifier.role,
+        agent_type=spec.verifier.agent_type,
+        provider_type="local",
+        trust_zone=spec.verifier.trust_zone,
+        capability_tags=[spec.verifier.capability],
+        allowed_tool_classes=(),
+        cost_class="low",
+        status="active",
+        provenance={"business_role": True, "verifier": True, "objective_key": spec.objective_key},
+    )
+    members.append(verifier.id)
+    team = form_team(
+        db,
+        owner_id=owner_id,
+        name=f"{spec.objective_key}-team",
+        pattern="executive_departments",
+        member_profile_ids=members,
+    )
+    return {
+        "team_id": team.id,
+        "capability_to_profile": capability_to_profile,
+        "verifier": verifier,
+        "team_view": team_view,
+    }
+
+
+def _find_existing_request(
+    db: Session, *, owner_id: uuid.UUID, workflow_id: str, task_key: str
+) -> WorkforceDelegationRequest | None:
+    rows = db.execute(
+        select(WorkforceDelegationRequest).where(WorkforceDelegationRequest.owner_id == owner_id)
+    ).scalars()
+    for r in rows:
+        prov = r.provenance or {}
+        if prov.get(WORKFLOW_PROVENANCE_KEY) == workflow_id and prov.get("task_key") == task_key:
+            return r
+    return None
+
+
+def _verified_assignment_for_request(
+    db: Session, *, owner_id: uuid.UUID, request_id: uuid.UUID
+) -> WorkforceAssignment | None:
+    return db.execute(
+        select(WorkforceAssignment)
+        .where(
+            WorkforceAssignment.owner_id == owner_id,
+            WorkforceAssignment.delegation_request_id == request_id,
+            WorkforceAssignment.verification_status == "VERIFIED",
+        )
+        .order_by(WorkforceAssignment.created_at.desc())
+    ).scalars().first()
+
+
+def run_business_workflow(
+    db: Session,
+    *,
+    owner_id: uuid.UUID,
+    spec: BusinessObjectiveSpec,
+    approvals: dict[str, str] | None = None,
+    workflow_id: str | None = None,
+) -> BusinessWorkflowReport:
+    """Drive the objective to completion through the real workforce substrate.
+
+    Idempotent per (workflow_id, task_key): a task already carried to VERIFIED is reused, not
+    re-executed — so re-invoking after a restart resumes rather than duplicates. Consequential
+    tasks are fail-closed: without `approvals[task_key]` they are recorded blocked, their
+    authority is never minted and their worker never runs.
+    """
+    spec.validate()
+    approvals = dict(approvals or {})
+    workflow_id = workflow_id or str(uuid.uuid4())
+
+    provisioned = provision_business_team(db, owner_id=owner_id, spec=spec)
+    cap_to_profile = provisioned["capability_to_profile"]
+    verifier = provisioned["verifier"]
+
+    report = BusinessWorkflowReport(
+        workflow_id=workflow_id,
+        objective_key=spec.objective_key,
+        objective_text=spec.objective_text,
+        team=provisioned["team_view"],
+        approvals_required=list(spec.consequential_task_keys()),
+    )
+    verified_outputs: dict[str, dict] = {}
+
+    for idx, task in enumerate(topological_order(spec)):
+        record = TaskRecord(
+            task_key=task.task_key,
+            title=task.title,
+            capability=task.capability,
+            status="pending",
+            depends_on=task.depends_on,
+            consequential=task.consequential,
+        )
+
+        # Resume: reuse an already-verified task (restart / duplicate-run safety).
+        existing = _find_existing_request(db, owner_id=owner_id, workflow_id=workflow_id, task_key=task.task_key)
+        if existing is not None:
+            done = _verified_assignment_for_request(db, owner_id=owner_id, request_id=existing.id)
+            if done is not None:
+                data = (done.result_payload or {}).get("data") or {}
+                verified_outputs[task.task_key] = data
+                record.status = "verified_reused"
+                record.request_id = str(existing.id)
+                record.assignment_id = str(done.id)
+                record.verification_status = done.verification_status
+                record.output = data
+                report.tasks.append(record)
+                continue
+
+        # Founder-approval gate for consequential actions — fail-closed.
+        if task.consequential and not approvals.get(task.task_key):
+            req = existing or submit_delegation_request(
+                db,
+                owner_id=owner_id,
+                goal_text=f"[{workflow_id}] {task.title}",
+                required_capability=task.capability,
+                risk=task.risk,
+                data_sensitivity=task.data_sensitivity,
+                cost_ceiling_usd=0.0,
+                verification_requirement="independent_verifier",
+                provenance={
+                    WORKFLOW_PROVENANCE_KEY: workflow_id,
+                    "task_key": task.task_key,
+                    "objective_key": spec.objective_key,
+                    "depends_on": list(task.depends_on),
+                    "stage": idx,
+                    "consequential": True,
+                    "blocked": True,
+                    "blocked_reason": "awaiting_founder_approval",
+                },
+            )
+            record.status = "blocked_awaiting_founder_approval"
+            record.request_id = str(req.id)
+            record.blocked_reason = "awaiting_founder_approval"
+            report.blocked_tasks.append(task.task_key)
+            report.tasks.append(record)
+            continue
+
+        # Upstream dependency data flows through the broker's context package (as DATA).
+        context_items = []
+        inputs: dict[str, dict] = {}
+        for dep in task.depends_on:
+            dep_out = verified_outputs.get(dep)
+            if dep_out is None:
+                raise BusinessWorkflowError(
+                    f"task {task.task_key!r} dependency {dep!r} not verified before execution"
+                )
+            inputs[dep] = dep_out
+            context_items.append(
+                {"kind": "excerpt", "excerpt": dep_out, "ref": f"workflow:{workflow_id}:{dep}"}
+            )
+
+        req = submit_delegation_request(
+            db,
+            owner_id=owner_id,
+            goal_text=f"[{workflow_id}] {task.title}",
+            required_capability=task.capability,
+            risk=task.risk,
+            data_sensitivity=task.data_sensitivity,
+            cost_ceiling_usd=0.0,
+            verification_requirement="independent_verifier",
+            provenance={
+                WORKFLOW_PROVENANCE_KEY: workflow_id,
+                "task_key": task.task_key,
+                "objective_key": spec.objective_key,
+                "depends_on": list(task.depends_on),
+                "stage": idx,
+                "consequential": task.consequential,
+            },
+        )
+        authority = TaskScopedAuthority(
+            allowed_read_paths=task.allowed_read_paths,
+            allowed_write_paths=(),
+            allowed_tool_classes=task.allowed_tool_classes,
+            allow_execution_effects=False,
+            spend_ceiling_usd=0.0,
+            expires_at=datetime.utcnow() + timedelta(hours=1),
+        )
+        assignment = resolve_delegation(
+            db,
+            owner_id=owner_id,
+            request=req,
+            context_items=context_items,
+            authority=authority,
+            prefer_local_only=True,
+            verifier_profile_id=verifier.id,
+        )
+
+        selected = db.get(WorkforceAgentProfile, assignment.profile_id)
+        expected = cap_to_profile.get(task.capability)
+        if expected is not None and selected.id != expected.id:
+            # Selector must choose the specialist whose capability matches — never a stray seat.
+            raise BusinessWorkflowError(
+                f"selector picked {selected.agent_key!r} for {task.capability!r}; expected {expected.agent_key!r}"
+            )
+
+        # In-process specialist execution (no provider). Output stored as DATA.
+        result = run_worker(task.capability, objective_text=spec.objective_text, inputs=inputs)
+        ingest_untrusted_result(db, owner_id=owner_id, assignment=assignment, payload=result)
+
+        apply_verification_decision(
+            db,
+            owner_id=owner_id,
+            assignment=assignment,
+            decision="VERIFIED",
+            risk=task.risk,
+            verifier_profile_id=verifier.id,
+            founder_approval_ref=approvals.get(task.task_key),
+            reason=f"independent verifier accepted {task.task_key}",
+        )
+        record_verified_outcome(
+            db,
+            owner_id=owner_id,
+            profile_id=assignment.profile_id,
+            capability_tag=task.capability,
+            success=True,
+            quality_score=float(result.get("confidence") or result.get("blended_confidence") or 1.0),
+        )
+
+        stored = (assignment.result_payload or {}).get("data") or {}
+        verified_outputs[task.task_key] = stored
+
+        pkg = db.get(WorkforceContextPackage, assignment.context_package_id)
+        record.status = "verified"
+        record.request_id = str(req.id)
+        record.assignment_id = str(assignment.id)
+        record.selected_agent_key = selected.agent_key
+        record.verifier_agent_key = verifier.agent_key
+        record.verification_status = assignment.verification_status
+        record.disclosed_kinds = tuple(i.get("kind") for i in (pkg.items or []))
+        record.denied_kinds = tuple(pkg.denied_kinds or [])
+        record.output = stored
+        if task.consequential:
+            report.approvals_satisfied.append(task.task_key)
+        report.tasks.append(record)
+
+    # Aggregate the Founder-facing assessment from verified outputs only.
+    report.assessment = _aggregate_assessment(spec, verified_outputs)
+    return report
+
+
+def _aggregate_assessment(spec: BusinessObjectiveSpec, verified_outputs: dict[str, dict]) -> dict:
+    synthesis = verified_outputs.get("opportunity_synthesis")
+    publication = verified_outputs.get("publish_assessment")
+    return {
+        "objective_key": spec.objective_key,
+        "recommendation": (synthesis or {}).get("recommendation"),
+        "conditions": (synthesis or {}).get("conditions"),
+        "confidence": (synthesis or {}).get("blended_confidence"),
+        "synthesis_available": synthesis is not None,
+        "published": publication is not None,
+        "published_document": (publication or {}).get("document"),
+        "contributing_tasks": sorted(verified_outputs.keys()),
+    }
