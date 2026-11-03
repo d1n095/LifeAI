@@ -264,11 +264,65 @@ production credentials / Supabase / STRATO, and tied to the exact candidate SHA.
 - **Automated first-start verification:** **[VERIFIED] yes, for the model-independent path.**
   §8's workflow run passed all 7 acceptance criteria (auth, conversation persistence, small-file
   upload, document extraction, immutable original retrieval, restart persistence) at the
-  verified candidate tree `ebdced820…`. **Embedding-dependent retrieval is NOT yet verified**
-  and remains blocked on the `embedding_dim`/local-model decision.
+  verified candidate tree `ebdced820…`.
+- **Real local-AI retrieval:** **[VERIFIED] yes.** §10's workflow (run 41666998428, tree
+  `abeb762322…`) ran Life on a real local model (Ollama `all-minilm` + `qwen2.5:0.5b`) and passed
+  all 8 criteria — real embed→index, authorized retrieval citation, real model-backed generation,
+  padding+identity on the real chunk, cross-owner isolation, and restart survival. The remaining
+  item is now a **DECISION**, not an engineering gap: which local model(s) Life runs in production.
 
-**Next active implementation:** the §8 first-start verification workflow (in progress). After
-that, no new workstream is opened without Founder direction.
+**Next active implementation:** none opened without Founder direction (this task is complete).
+
+---
+
+## 10. Real local-AI verification — Ollama, isolated [VERIFIED — all criteria PASS]
+
+The §8 workflow proves the **model-independent** first start (repo fakes). This section covers
+the complementary proof the Founder asked for: that Life runs with a **real local AI model**,
+generates model-backed responses, and retrieves from an uploaded document end-to-end.
+
+**Result: Life ran on a real local AI model.** CI run **41666998428** @ `82138cc` (branch
+`claude/real-local-ai-verification`) is **green** — all 8 acceptance criteria PASS (pre-phase
+6/6, post-phase 3/3), the embedding-space identity assertion PASS, and the cross-owner/no-mixing
+pytest PASS — against the verified candidate tree `abeb762322…`.
+
+- **Workflow:** `.github/workflows/real-local-ai-verification.yml` (PR #334, branch
+  `claude/real-local-ai-verification`). Manual `workflow_dispatch` + a bootstrap `push:` on its
+  own branch for the first evidence run.
+- **Integration candidate under test:** `#323 trunk (04b27e9) + #328 (fa840e4) + #329 (830ab4d)
+  + #327 (69cdaf3) + #333 (fdf3647)` ⇒ **tree `abeb762322cd67ff95937ec57fd269fb0c4cc674`**
+  (asserted before any step; single alembic `0069` head asserted too). [VERIFIED locally:
+  reconstruction is conflict-free, `alembic upgrade head` → single head, `test_embedding_space.py`
+  10/10 on real pgvector.]
+- **Models & versions tested (TEMPORARY — not a production decision):** Ollama **0.40.14**;
+  embedding **`all-minilm`** (native 384-dim), chat **`qwen2.5:0.5b`**. Exact pulled digests are
+  in the run's job summary (`ollama list`).
+- **Real, not faked:** the app's own provider abstraction is pointed at a real Ollama runtime on
+  the runner (`DEFAULT_EMBEDDING_PROVIDER=ollama`, `DEFAULT_LLM_PROVIDER=ollama`). Only outbound
+  **email** is faked; there is **no paid key** and `CHAT_FALLBACK_ORDER` is empty, so a paid
+  provider is structurally unreachable — a dead Ollama FAILs the run, never a silent paid fallback.
+- **Acceptance criteria (results tied to the run SHA/tree):**
+
+  | # | Criterion | Result (run 41666998428 @ `82138cc`) |
+  |---|---|---|
+  | 1 | real embed loads + indexes (`status=indexed`, chunks>0) | **PASS** — `index status=indexed, chunk_count=1` (real `all-minilm` embed) |
+  | 2 | vectors padded to 1536 (`vector_dims=1536`) | **PASS** — DB `vector_dims(embedding)=1536` |
+  | 3 | chunk stamped (`embedding_model=all-minilm`, `embedding_native_dim=384`) | **PASS** — DB stamp `all-minilm` / `384` |
+  | 4 | synthetic doc uploaded, extracted, indexed | **PASS** — import job accepted → `indexed` |
+  | 5 | authorized retrieval cites the uploaded doc | **PASS** — `/api/chat` returned the uploaded source (document matched by `source_id`) |
+  | 6 | real local chat generation (`assistant_status=succeeded`, `provider=ollama`) | **PASS** — `assistant_status=succeeded, provider=ollama, reply_len=57` |
+  | 7 | cross-owner isolation + no-mixing on real pgvector | **PASS** — `test_embedding_space.py` 10/10 on the migrated schema + RLS |
+  | 8 | conversation + original + indexed content survive restart | **PASS** — data persistence PASS **and** post-restart live retrieval cited the doc (`provider=ollama`) |
+
+- **Migration-ancestry finding (reviewer action required).** #333's `0069_embedding_space_identity`
+  and #326's `0069_provider_disclosure_local_decision` **both** declare `down_revision = "0068"`.
+  Different revision *ids* (no id collision), but a **shared parent** ⇒ two alembic heads if both
+  are ever present together (`alembic upgrade head` would fail with "Multiple head revisions").
+  They do **not** collide in this candidate (#326 is absent → single head, verified). Per the repo
+  merge rule (`CLAUDE.md`: the second-merged renumbers; no preemptive rebase "för säkerhets skull"),
+  whichever of #326 / #333 merges **second** must re-point its `down_revision` onto the other's
+  revision at merge time. Deliberately **not** pre-rebased here. [VERIFIED finding; fix is a
+  documented merge-time action, not a code change in this PR.]
 
 ---
 
@@ -293,3 +347,14 @@ superseded conclusion silently — supersede it here and in the body.
   was conservatively BLOCKED on an earlier run because `blocked_provider` was unclassified; it
   is now correctly PASS (extraction completed; embedding paused by design) — see the workflow
   commit history.
+- _2026-11-03_ — §10 added and completed: **real local-AI verification** (PR #334, workflow
+  `.github/workflows/real-local-ai-verification.yml`). Candidate `#323+#328+#329+#327+#333` ⇒
+  tree `abeb762322…` (single alembic `0069` head; reconstruction conflict-free). After three
+  diagnosed-and-fixed workflow defects — (a) the embedding_space pytest step shared `DATABASE_URL`
+  with the app so conftest force-dropped the app DB; (b) the post-restart live-chat check lacked
+  diagnostics/retry; (c) the citation match used a non-existent `document_id` detail key (pre
+  false-positive via a len>0 fallback, post false-negative) — run **41666998428** @ `82138cc` is
+  **green**: all 8 criteria PASS on real Ollama `all-minilm` + `qwen2.5:0.5b`. §9 updated: real
+  local-AI retrieval is now VERIFIED; production model choice is a DECISION, not an engineering
+  gap. Migration-ancestry finding recorded in §10 (#333 and #326 both branch `0069` from `0068`
+  → merge-time rechain of whichever merges second).
