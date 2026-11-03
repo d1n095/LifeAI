@@ -367,6 +367,45 @@ router. See `docs/MAINAI_EXECUTIVE_BUSINESS_WORKFLOW.md`.
 
 ---
 
+## 12. Model-backed AI team — real local inference in the specialists [VERIFIED adapter 25/25; real-model run in CI]
+
+**PR #336** · branch `claude/mainai-model-backed-workers` @ `a802a47` (stacked on #335). OPEN,
+independent review required; merge #335 first.
+
+Connects #334's verified local inference to #335's business workflow so the specialist agents
+do real model-backed work. One new seam — a pluggable `WorkerRunner` (`app/mainai_business/
+execution.py`) — not a second framework; the workforce registry, broker, scoped authority,
+verification pipeline, approval gate and persistence are all reused.
+
+- **`ModelBackedRunner`** — real local inference via `providers.resolve_active(db,"chat")` →
+  `OllamaProvider.chat`. Reads inputs from the **assignment's context package only** (context
+  isolation); parses + Pydantic-validates the model's JSON (`schemas.py`) — unparseable output
+  **fails the task**, never coerced; records an execution receipt (provider/model/latency/
+  usage/prompt+output SHA-256/attempts) on provenance and in the view; bounded retry on parse
+  failure.
+- **Independent verification = a deterministic validator** (`validators.py`) run by a verifier
+  agent distinct from the builder — never the builder model reviewing itself, never a second
+  model rating the first; the decision records `deterministic_validator`. Output stays
+  untrusted (REJECTED) until it passes.
+- **Fail-closed, no paid fallback:** refuses any non-local chat provider; never calls
+  `chat_with_fallback`. Provider-unreachable / schema-invalid / validator-rejected → task
+  failed + dependents blocked, nothing fabricated.
+- Founder interface: `POST /api/mainai/business/ecommerce-assessment` gains `mode`
+  (`in_process` | `model_backed`); the `GET` view surfaces `runtime`, `provider_invoked` and
+  the full `execution_receipt`.
+
+**Verified (`.github/workflows/model-backed-ai-team.yml`):** (1) deterministic business pytest
+suite on real Postgres — `test_business_schemas.py` (7) + `test_model_backed_workers.py` (6,
+stub local provider) + `test_business_workflow.py` (8) + `test_mainai_business_api.py` (4) =
+**25 PASS locally**; (2) a **real Ollama** acceptance run (`scripts/ci/
+model_backed_ai_team_acceptance.py`, `qwen2.5:0.5b`) proving actual model-backed execution for
+multiple roles, the approval boundary, DB reassembly with receipts, and no paid-provider use.
+Real model weights run in CI only (no local Ollama on the dev box — same split as #334); full
+local regression incl. existing suites = **55 passed**; `ruff` clean. No new migration (does
+not touch the pending `0069` head). See `docs/MAINAI_MODEL_BACKED_AI_TEAM.md`.
+
+---
+
 ## Corrections log
 
 Append a dated line here whenever a prior conclusion in this file is corrected. Never delete a
@@ -410,3 +449,11 @@ superseded conclusion silently — supersede it here and in the body.
   regression. Per-task workers are honestly labelled deterministic in-process (not model
   calls) pending gated provider activation; wiring #334's local model in is the stated next
   step. `first_cycle_go` stays false; independent review required before merge.
+- _2026-11-03_ — §12 added: **model-backed AI team** (PR #336, branch
+  `claude/mainai-model-backed-workers` @ `a802a47`, stacked on #335). Closes the #335 "next
+  step": the specialists now do REAL local-model inference via a pluggable `ModelBackedRunner`
+  (reuses #334's provider path), with schema-validated outputs, execution receipts, a
+  deterministic independent validator (not the model reviewing itself), fail-closed refusal of
+  any non-local provider, and honest failure/dependency blocking. Adapter logic 25/25 PASS on
+  real Postgres locally (stub local provider); the real Ollama run is a CI job
+  (`model-backed-ai-team.yml`). No new migration. first_cycle_go stays false; review required.
