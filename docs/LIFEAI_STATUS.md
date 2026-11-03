@@ -179,9 +179,18 @@ Distinguishing executed results from discovery is a maintenance rule for this fi
 - **Basic startup is model-independent** (#328): upload → durable original + sha256 →
   extraction (`content_preview`) → restart survival all succeed with **no** embedding/chat
   provider; a doc with no provider parks at `awaiting_provider` (a pause, not a failure).
-- **Offline retrieval is blocked** by a hardwired `embedding_dim=1536` coupled to an HNSW
-  index vs. the only offline embedder's differing dimension — needs a Founder-gated re-embed
-  migration + a local-model choice. **[DECISION]**
+- **Local-model retrieval — embedding-dim limitation now has a solution (PR #333, review
+  pending).** Root cause: `document_chunks.embedding` is a fixed pgvector `vector(1536)` + HNSW
+  `vector_cosine_ops` column, and chunks carried no model/dim identity. Solution (smallest
+  safe, no destructive migration): a local model whose native dim ≤ 1536 is **zero-padded** up
+  to the storage width — cosine-exact — and every chunk is stamped `(embedding_model,
+  embedding_native_dim)` with retrieval filtered strictly to the active space so incompatible
+  models are **never silently mixed**. Additive, reversible migration `0069_embedding_space_identity`;
+  provider abstraction unchanged (`resolve_active(role=...)` stays the selection point). A
+  model *wider* than 1536 still needs a Founder-gated column-dimension migration (not done).
+  **[VERIFIED]** 10/10 targeted tests on real pgvector (incl. the migration); 405/405 rag
+  regression (2 pre-existing environmental fails). The production local-model *choice* and its
+  runtime remain a **[DECISION]**.
 - **Egress invariant** (#326, pending review): local on-host providers ledger
   `decision='local'`, distinct from external-AI disclosure; never relaxes a deny.
 - Production config guards (`_check_no_placeholder_secrets`, `_check_cookies_secure`) only
@@ -237,8 +246,11 @@ production credentials / Supabase / STRATO, and tied to the exact candidate SHA.
 
 1. **Independent review** of #323 (then #327 / #326, and the #329 → #330 Library chain).
    [PENDING]
-2. **Offline retrieval**: `embedding_dim` vs. local embedder — re-embed migration + model
-   choice. [DECISION]
+2. **Local-model retrieval**: the `embedding_dim` limitation is **solved** in PR #333
+   (zero-pad + strict model/dim identity, additive reversible migration; [VERIFIED] 10/10 on
+   real pgvector). Remaining: independent review of #333; the production local-model *choice* +
+   runtime [DECISION]; and a live end-to-end run with a real local model (config-start +
+   model-backed retrieval) — the one verification item not yet executed.
 3. **First supervised runtime boot authorization** and the local embedding-model decision.
    [DECISION]
 4. **STRATO upgrade path**: establish the deployed commit (read-only Q1–Q6), confirm backups,
@@ -267,6 +279,13 @@ superseded conclusion silently — supersede it here and in the body.
 
 - _2026-11-03_ — Initial version. Baseline established from verified Git/GitHub state and prior
   session evidence.
+- _2026-11-03_ — Embedding-dim limitation solved (PR #333, branch
+  `claude/embedding-space-local-model` @ `fdf3647`): zero-pad fitting + strict `(model,
+  native_dim)` identity, additive reversible migration `0069_embedding_space_identity`.
+  [VERIFIED] 10/10 targeted tests on real local pgvector (migration applied via `alembic
+  upgrade head`); 405/405 rag regression (same 2 pre-existing environmental fails). §7 and §9
+  updated from DECISION-only to solution-pending-review. Not yet executed: a live run with a
+  real local model (config-start + model-backed retrieval).
 - _2026-11-03_ — §8 filled in with the first real run of the first-start verification workflow
   (run 41548691356): all 7 acceptance criteria PASS at candidate tree `ebdced820…`,
   model-independent path. §9's "can it be verified?" updated from PENDING to VERIFIED-yes for
