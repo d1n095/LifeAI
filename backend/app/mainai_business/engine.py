@@ -3,13 +3,19 @@
 Composes the EXISTING workforce substrate into one end-to-end path:
 
   objective → persistent plan → team of specialists → per-task delegation with task-scoped
-  authority → in-process execution → independent verification → performance evidence →
+  authority → execution (pluggable runner) → independent verification → performance evidence →
   dependency-ordered aggregation → Founder-approval gate on consequential actions.
+
+Execution is a pluggable `WorkerRunner` (see `app.mainai_business.execution`): the default
+`InProcessRunner` is deterministic and provider-free; `ModelBackedRunner` uses REAL local-model
+inference (#334) with schema-validated outputs and a deterministic independent validator. A
+worker failure (provider unreachable, unparseable output, or a failed validator) fails the
+task honestly and never fabricates a result or bypasses verification.
 
 No new tables: every task is a real, persisted, RLS-scoped `WorkforceDelegationRequest` +
 `WorkforceAssignment`, stamped with a shared `workflow_id` in provenance so the whole project
-is reassembled from the database alone (see `app.mainai_business.view`). No provider is
-invoked; no consequential effect is produced without an explicit Founder approval token.
+is reassembled from the database alone (see `app.mainai_business.view`). No consequential
+effect is produced without an explicit Founder approval token.
 """
 
 from __future__ import annotations
@@ -22,8 +28,9 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.mainai_business.execution import InProcessRunner
 from app.mainai_business.objective import BusinessObjectiveSpec, topological_order
-from app.mainai_business.workers import run_worker
+from app.mainai_business.validators import validate_output
 from app.models.workforce import (
     WorkforceAgentProfile,
     WorkforceAssignment,
@@ -65,6 +72,9 @@ class TaskRecord:
     denied_kinds: tuple[str, ...] = ()
     output: dict | None = None
     blocked_reason: str | None = None
+    runtime: str | None = None
+    receipt: dict | None = None
+    failure_reason: str | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -83,6 +93,9 @@ class TaskRecord:
             "denied_kinds": list(self.denied_kinds),
             "output": self.output,
             "blocked_reason": self.blocked_reason,
+            "runtime": self.runtime,
+            "receipt": self.receipt,
+            "failure_reason": self.failure_reason,
         }
 
 
@@ -190,6 +203,13 @@ def _find_existing_request(
     return None
 
 
+def _stamp_receipt(assignment: WorkforceAssignment, receipt: dict) -> None:
+    """Attach the execution receipt to the assignment's provenance (durable evidence)."""
+    prov = dict(assignment.provenance or {})
+    prov["execution_receipt"] = receipt
+    assignment.provenance = prov
+
+
 def _verified_assignment_for_request(
     db: Session, *, owner_id: uuid.UUID, request_id: uuid.UUID
 ) -> WorkforceAssignment | None:
@@ -211,17 +231,22 @@ def run_business_workflow(
     spec: BusinessObjectiveSpec,
     approvals: dict[str, str] | None = None,
     workflow_id: str | None = None,
+    runner=None,
 ) -> BusinessWorkflowReport:
     """Drive the objective to completion through the real workforce substrate.
 
-    Idempotent per (workflow_id, task_key): a task already carried to VERIFIED is reused, not
-    re-executed — so re-invoking after a restart resumes rather than duplicates. Consequential
-    tasks are fail-closed: without `approvals[task_key]` they are recorded blocked, their
-    authority is never minted and their worker never runs.
+    `runner` selects the execution strategy (default `InProcessRunner`; pass a
+    `ModelBackedRunner` for real local-model inference). Idempotent per (workflow_id,
+    task_key): a task already carried to VERIFIED is reused, not re-executed — so re-invoking
+    after a restart resumes rather than duplicates. Consequential tasks are fail-closed:
+    without `approvals[task_key]` they are recorded blocked, their authority is never minted
+    and their worker never runs. A worker or validator failure fails that task and blocks its
+    dependents — never a fabricated result.
     """
     spec.validate()
     approvals = dict(approvals or {})
     workflow_id = workflow_id or str(uuid.uuid4())
+    runner = runner or InProcessRunner()
 
     provisioned = provision_business_team(db, owner_id=owner_id, spec=spec)
     cap_to_profile = provisioned["capability_to_profile"]
@@ -290,15 +315,22 @@ def run_business_workflow(
             report.tasks.append(record)
             continue
 
+        # Dependency-readiness gate — a failed/blocked upstream task blocks its dependents
+        # honestly; the engine never fabricates a result for an unmet dependency.
+        unmet = [dep for dep in task.depends_on if dep not in verified_outputs]
+        if unmet:
+            record.status = "blocked_unmet_dependency"
+            record.blocked_reason = f"unmet_dependency: {','.join(unmet)}"
+            record.depends_on = task.depends_on
+            report.blocked_tasks.append(task.task_key)
+            report.tasks.append(record)
+            continue
+
         # Upstream dependency data flows through the broker's context package (as DATA).
         context_items = []
         inputs: dict[str, dict] = {}
         for dep in task.depends_on:
-            dep_out = verified_outputs.get(dep)
-            if dep_out is None:
-                raise BusinessWorkflowError(
-                    f"task {task.task_key!r} dependency {dep!r} not verified before execution"
-                )
+            dep_out = verified_outputs[dep]
             inputs[dep] = dep_out
             context_items.append(
                 {"kind": "excerpt", "excerpt": dep_out, "ref": f"workflow:{workflow_id}:{dep}"}
@@ -348,9 +380,73 @@ def run_business_workflow(
                 f"selector picked {selected.agent_key!r} for {task.capability!r}; expected {expected.agent_key!r}"
             )
 
-        # In-process specialist execution (no provider). Output stored as DATA.
-        result = run_worker(task.capability, objective_text=spec.objective_text, inputs=inputs)
-        ingest_untrusted_result(db, owner_id=owner_id, assignment=assignment, payload=result)
+        pkg = db.get(WorkforceContextPackage, assignment.context_package_id)
+        record.request_id = str(req.id)
+        record.assignment_id = str(assignment.id)
+        record.selected_agent_key = selected.agent_key
+        record.verifier_agent_key = verifier.agent_key
+        record.disclosed_kinds = tuple(i.get("kind") for i in (pkg.items or []))
+        record.denied_kinds = tuple(pkg.denied_kinds or [])
+
+        # Execute via the configured runner (in-process or real local model).
+        exec_result = runner.run(
+            db, owner_id=owner_id, assignment=assignment, task=task, objective_text=spec.objective_text
+        )
+        if exec_result.receipt.get("provider_invoked"):
+            report.provider_invoked = True
+        record.runtime = exec_result.receipt.get("runtime")
+        record.receipt = exec_result.receipt
+        _stamp_receipt(assignment, exec_result.receipt)
+
+        # Honest failure: worker could not produce a valid result — fail the task, never fake it.
+        if not exec_result.ok or exec_result.data is None:
+            assignment.result_payload = {"data": None, "execution_failure": exec_result.receipt}
+            apply_verification_decision(
+                db,
+                owner_id=owner_id,
+                assignment=assignment,
+                decision="REJECTED",
+                risk=task.risk,
+                verifier_profile_id=verifier.id,
+                reason=f"worker failed {task.task_key}: {exec_result.failure_reason}",
+            )
+            record_verified_outcome(
+                db, owner_id=owner_id, profile_id=assignment.profile_id,
+                capability_tag=task.capability, success=False,
+            )
+            record.status = "failed"
+            record.verification_status = assignment.verification_status
+            record.failure_reason = exec_result.failure_reason
+            report.tasks.append(record)
+            continue
+
+        # Worker output is DATA until independently verified.
+        ingest_untrusted_result(db, owner_id=owner_id, assignment=assignment, payload=exec_result.data)
+        stored = (assignment.result_payload or {}).get("data") or {}
+
+        # Independent verification. For model-backed output this is a DETERMINISTIC validator
+        # (code) applied by the verifier agent — never the builder model reviewing itself.
+        if exec_result.validator_ref is not None:
+            ok, reason = validate_output(task.capability, stored, inputs)
+            if not ok:
+                apply_verification_decision(
+                    db, owner_id=owner_id, assignment=assignment, decision="REJECTED",
+                    risk=task.risk, verifier_profile_id=verifier.id,
+                    deterministic_validator=exec_result.validator_ref,
+                    reason=f"validator rejected {task.task_key}: {reason}",
+                )
+                record_verified_outcome(
+                    db, owner_id=owner_id, profile_id=assignment.profile_id,
+                    capability_tag=task.capability, success=False,
+                )
+                record.status = "rejected_by_validator"
+                record.verification_status = assignment.verification_status
+                record.failure_reason = reason
+                report.tasks.append(record)
+                continue
+            verify_reason = f"deterministic validator accepted {task.task_key}: {reason}"
+        else:
+            verify_reason = f"independent verifier accepted {task.task_key}"
 
         apply_verification_decision(
             db,
@@ -359,8 +455,9 @@ def run_business_workflow(
             decision="VERIFIED",
             risk=task.risk,
             verifier_profile_id=verifier.id,
+            deterministic_validator=exec_result.validator_ref,
             founder_approval_ref=approvals.get(task.task_key),
-            reason=f"independent verifier accepted {task.task_key}",
+            reason=verify_reason,
         )
         record_verified_outcome(
             db,
@@ -368,21 +465,12 @@ def run_business_workflow(
             profile_id=assignment.profile_id,
             capability_tag=task.capability,
             success=True,
-            quality_score=float(result.get("confidence") or result.get("blended_confidence") or 1.0),
+            quality_score=float(stored.get("confidence") or stored.get("blended_confidence") or 1.0),
         )
 
-        stored = (assignment.result_payload or {}).get("data") or {}
         verified_outputs[task.task_key] = stored
-
-        pkg = db.get(WorkforceContextPackage, assignment.context_package_id)
         record.status = "verified"
-        record.request_id = str(req.id)
-        record.assignment_id = str(assignment.id)
-        record.selected_agent_key = selected.agent_key
-        record.verifier_agent_key = verifier.agent_key
         record.verification_status = assignment.verification_status
-        record.disclosed_kinds = tuple(i.get("kind") for i in (pkg.items or []))
-        record.denied_kinds = tuple(pkg.denied_kinds or [])
         record.output = stored
         if task.consequential:
             report.approvals_satisfied.append(task.task_key)

@@ -1,0 +1,173 @@
+# Model-backed AI team — isolated acceptance that the MainAI executive business workflow
+# (#335) runs its specialist agents on REAL local-model inference (#334's provider path),
+# with schema-validated outputs, independent deterministic verification, Founder-approval
+# gating and honest failure handling — on synthetic data, with no paid provider reachable.
+#
+# Two layers, both executed here:
+#   1. The business pytest suite (deterministic: schema/validator units, model-backed adapter
+#      driven by a stub local provider, the #335 engine + API) — exhaustively covers context
+#      isolation, dependency ordering, duplicate prevention, prompt-injection resistance,
+#      Founder-approval enforcement, cancellation + restart recovery, audit/provenance, and
+#      cross-owner RLS isolation.
+#   2. A REAL local Ollama run of the reference e-commerce workflow via ModelBackedRunner
+#      (scripts/ci/model_backed_ai_team_acceptance.py) — proves actual model-backed execution
+#      for multiple specialist roles and that no paid provider is used.
+#
+# Test chat model (TEMPORARY test config, NOT a production decision): qwen2.5:0.5b (CPU-small).
+# There is no OpenAI/Anthropic/Gemini key and CHAT_FALLBACK_ORDER is empty, so a paid provider
+# is structurally unreachable: a failed local call surfaces as a task failure, never a silent
+# fallback. Nothing here touches STRATO, production data, or any egress beyond pulling the open
+# local model.
+
+name: Model-backed AI team (manual)
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - claude/mainai-model-backed-workers
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  OLLAMA_CHAT_MODEL: "qwen2.5:0.5b"
+
+jobs:
+  model-backed-ai-team:
+    name: Model-backed AI team acceptance (synthetic, isolated, Ollama)
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # Throwaway, synthetic everything. No production values.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_mbteam
+      APP_DATABASE_URL: postgresql://mainai_app:mainai_app_mbteam_pw@localhost:5432/lifeos_mbteam
+      REDIS_URL: redis://localhost:6379/0
+      SECRET_KEY: ci-model-backed-secret-key
+      FOUNDER_EMAIL: founder@lifeos.local
+      FOUNDER_PASSWORD: TestFounderPassword123!
+      FRONTEND_ORIGINS: http://127.0.0.1:3020
+      PUBLIC_APP_URL: http://127.0.0.1:3020
+      ENABLE_SCHEDULED_CLEANUP: "false"
+      # Point the real provider abstraction at the local Ollama runtime.
+      DEFAULT_LLM_PROVIDER: "ollama"
+      DEFAULT_LLM_MODEL: "qwen2.5:0.5b"
+      DEFAULT_EMBEDDING_PROVIDER: "ollama"
+      DEFAULT_EMBEDDING_MODEL: "all-minilm"
+      OLLAMA_BASE_URL: "http://127.0.0.1:11434"
+      # No paid provider to fall back to — a failed local call must surface as an error.
+      CHAT_FALLBACK_ORDER: ""
+      COOKIE_SECURE: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: |
+          set -eo pipefail
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Provision throwaway database + restricted runtime role
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -eo pipefail
+          psql -h localhost -U postgres -d postgres -c "
+            DO \$\$
+            BEGIN
+              IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'mainai_app') THEN
+                CREATE ROLE mainai_app LOGIN PASSWORD 'mainai_app_mbteam_pw';
+              END IF;
+            END
+            \$\$;"
+          psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS lifeos_mbteam;"
+          psql -h localhost -U postgres -d postgres -c "CREATE DATABASE lifeos_mbteam;"
+          psql -h localhost -U postgres -d lifeos_mbteam -c "
+            GRANT USAGE ON SCHEMA public TO mainai_app;
+            GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO mainai_app;
+            GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO mainai_app;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO mainai_app;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO mainai_app;"
+
+      - name: Apply migrations (alembic upgrade head)
+        working-directory: backend
+        run: alembic upgrade head
+
+      - name: Apply S1A runtime privilege policy
+        working-directory: backend
+        run: python scripts/security/apply_runtime_privileges.py
+
+      - name: Business workflow test suite (deterministic — stub provider + in-process)
+        working-directory: backend
+        env:
+          # Dedicated test DB: conftest self-manages (create/migrate/apply-RLS/force-drop) it,
+          # so it must NOT be the app DB above (see the #334 defect: a shared DATABASE_URL made
+          # conftest force-drop the app database).
+          LIFEAI_TEST_DATABASE_NAME: lifeos_mbteam_pytest
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_mbteam_pytest
+          APP_DATABASE_URL: postgresql://mainai_app:mainai_app_mbteam_pw@localhost:5432/lifeos_mbteam_pytest
+        run: |
+          set -eo pipefail
+          python -m pytest -p no:cacheprovider \
+            tests/backend/mainai/test_business_schemas.py \
+            tests/backend/mainai/test_model_backed_workers.py \
+            tests/backend/mainai/test_business_workflow.py \
+            tests/backend/test_mainai_business_api.py \
+            -q | tee "$GITHUB_WORKSPACE/business_pytest.log"
+
+      - name: Install and start Ollama; pull the test chat model
+        run: |
+          set -eo pipefail
+          curl -fsSL https://ollama.com/install.sh | sh
+          nohup ollama serve > "$GITHUB_WORKSPACE/ollama.log" 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null "$OLLAMA_BASE_URL/api/tags" && { echo "ollama up"; break; }
+            sleep 1
+          done
+          ollama pull "$OLLAMA_CHAT_MODEL"
+          echo "### Ollama" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          ollama --version | tee -a "$GITHUB_STEP_SUMMARY"
+          ollama list | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Real local-model AI-team acceptance (Ollama, synthetic)
+        working-directory: backend
+        run: |
+          set -eo pipefail
+          python scripts/ci/model_backed_ai_team_acceptance.py | tee "$GITHUB_WORKSPACE/model_backed_acceptance.log"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-backed-ai-team-evidence
+          path: |
+            ${{ github.workspace }}/business_pytest.log
+            ${{ github.workspace }}/model_backed_acceptance.log
+            ${{ github.workspace }}/ollama.log
+          if-no-files-found: ignore

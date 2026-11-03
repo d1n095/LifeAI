@@ -102,6 +102,7 @@ def assemble_business_project_view(db: Session, *, owner_id: uuid.UUID, workflow
                 )
                 .order_by(WorkforceVerificationDecision.created_at.asc())
             ).scalars().all()
+            receipt = (assignment.provenance or {}).get("execution_receipt") or {}
             task_view.update(
                 {
                     "status": assignment.status,
@@ -109,6 +110,9 @@ def assemble_business_project_view(db: Session, *, owner_id: uuid.UUID, workflow
                     "selected_agent_key": _agent_key(db, assignment.profile_id),
                     "verifier_agent_key": _agent_key(db, assignment.verifier_profile_id),
                     "verification_status": assignment.verification_status,
+                    "runtime": receipt.get("runtime"),
+                    "provider_invoked": bool(receipt.get("provider_invoked")),
+                    "execution_receipt": receipt,
                     "disclosed_kinds": [i.get("kind") for i in (pkg.items if pkg else [])],
                     "denied_kinds": list(pkg.denied_kinds if pkg else []),
                     "authority": {
@@ -137,6 +141,7 @@ def assemble_business_project_view(db: Session, *, owner_id: uuid.UUID, workflow
         "workflow_id": workflow_id,
         "objective_key": objective_key,
         "exists": bool(requests),
+        "provider_invoked": any(t.get("provider_invoked") for t in tasks),
         "tasks": tasks,
         "approvals_required": approvals_required,
         "approvals_satisfied": approvals_satisfied,
