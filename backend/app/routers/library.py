@@ -25,6 +25,7 @@ from app.models.user import User
 from app.egress_policy import EgressDeniedError
 from app.providers.registry import embed_with_policy, resolve_active
 from app.providers.verification import classify_provider_exception
+from app.rag.embedding_space import native_dim_of
 from app.rag.library_import import maybe_purge_blob
 from app.rag.trust import assess_claim_confidence
 from app.rag.vector_store import hybrid_search
@@ -610,6 +611,8 @@ async def search_library(
     # tells the client exactly what happened via semantic_search_available/degraded_reason
     # rather than pretending semantic search ran and just found nothing.
     vector: list[float] | None = None
+    active_model: str | None = None
+    active_native_dim: int | None = None
     degraded_reason: str | None = None
     try:
         provider, model = resolve_active(db, role="embedding")
@@ -623,6 +626,10 @@ async def search_library(
             requested_by="routers.library.search_library",
         )
         vector = vectors[0]
+        # Carry the active embedding space so the semantic channel only ranks chunks embedded
+        # with this same model/dim (app/rag/embedding_space.py); the text channel is unaffected.
+        active_model = model
+        active_native_dim = native_dim_of(vectors)
     except EgressDeniedError as exc:
         # Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V2 query-
         # embedding half): a policy refusal, not a provider outage -- str(exc) is safe to show
@@ -642,6 +649,8 @@ async def search_library(
         project_id=query.project_id,
         classification=query.classification,
         active_truth_status=query.active_truth_status,
+        embedding_model=active_model,
+        embedding_native_dim=active_native_dim,
     )
     return LibrarySearchResponseOut(
         results=results,
