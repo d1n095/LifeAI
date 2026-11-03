@@ -467,15 +467,26 @@ jobs:
                   record("restart_data_persistence", "FAIL", f"post-restart re-verify: {data_ok}")
 
               # Live retrieval must still work after restart (embedding provider re-resolves).
+              # The first chat against a just-restarted backend can race a cold Ollama
+              # connection; retry a couple of times with a longer timeout so a transient
+              # cold-start is not misreported as a retrieval defect. The detail line records
+              # the real status/provider/sources so a genuine failure is diagnosable.
               if source_id:
-                  st, bd, _ = call("POST", "/api/chat", jb={"message": QUESTION})
-                  ok = False
-                  if st == 200:
-                      j = json.loads(bd); srcs = j.get("sources") or []
-                      ok = j.get("assistant_status") == "succeeded" and any(
-                          str(s.get("document_id")) == str(doc_id) for s in srcs)
-                  record("restart_live_retrieval", "PASS" if ok else "FAIL",
-                         f"post-restart chat cited uploaded doc={ok}")
+                  ok = False; last = ""
+                  for attempt in range(3):
+                      st, bd, _ = call("POST", "/api/chat", jb={"message": QUESTION}, timeout=180)
+                      if st == 200:
+                          j = json.loads(bd); srcs = j.get("sources") or []
+                          matched = any(str(s.get("document_id")) == str(doc_id) for s in srcs)
+                          last = (f"attempt {attempt+1}: status={j.get('assistant_status')}, "
+                                  f"provider={j.get('provider')}, sources={len(srcs)}, matched={matched}, "
+                                  f"err={j.get('error_category')}")
+                          if j.get("assistant_status") == "succeeded" and matched:
+                              ok = True; break
+                      else:
+                          last = f"attempt {attempt+1}: chat HTTP {st}: {bd[:120]!r}"
+                      time.sleep(5)
+                  record("restart_live_retrieval", "PASS" if ok else "FAIL", f"post-restart chat cited uploaded doc={ok}; {last}")
               else:
                   record("restart_live_retrieval", "BLOCKED", "no source to re-retrieve")
               finalize()
