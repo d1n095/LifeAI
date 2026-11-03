@@ -414,6 +414,20 @@ validator** (`published=false`) — the honest, designed outcome: the independen
 weak real-model output instead of rubber-stamping it; nothing fabricated. Evidence artifact:
 `model-backed-ai-team-evidence`.
 
+**Publication stage completed — full end-to-end VERIFIED (run 41711441543 @ `019309e`, green,
+all 23 invariants PASS).** The rejection above was then closed without weakening validation:
+the publication prompt hands the model the exact synthesis recommendation to copy verbatim, and
+a **bounded, authorized correction loop** re-prompts the same task with the validator's reason
+(budget 2), re-validating from scratch — exhaustion leaves the task REJECTED (no fabricated
+publication; proven by `test_unrecoverable_invalid_publication_stays_rejected`). In the latest
+real run `qwen2.5:0.5b` produced a valid publication first try (corrections=0): the workflow
+reaches `status="completed"` with a persisted `final_deliverable`, the Founder view reassembles
+the same completion from the DB, and output-quality failures are distinguished from
+authorization (approval) failures (`failure_kind`). The Founder API now exposes the complete
+workflow state (per-task status/runtime/receipt/correction_attempts/failure_kind, approval
+requirements, workflow status, final deliverable). Added commits on the #336 branch:
+`60b48e5` (completion + bounded recovery), `019309e` (no-duplicate-request resume + view dedupe).
+
 ---
 
 ## Corrections log
@@ -474,3 +488,11 @@ superseded conclusion silently — supersede it here and in the body.
   inserting the backend root in the script itself (as `apply_runtime_privileges.py` does). Honest
   detail: the approved publish step's 0.5B output was rejected by the deterministic validator
   (`published=false`) — the independent check working as designed, not a regression.
+- _2026-11-03_ — §12 **publication stage completed**: the earlier validator rejection of the
+  0.5B publication is resolved without weakening validation — verbatim-recommendation prompt +
+  a bounded, authorized correction loop (budget 2; exhaustion stays REJECTED, never fabricated).
+  Full end-to-end real-model run 41711441543 @ `019309e` green (all 23 invariants): the workflow
+  reaches `completed` with a persisted `final_deliverable`, reassembled identically from the DB.
+  Fixed a view bug where a blocked + later-approved request for the same consequential task made
+  the reassembled view read `awaiting_approval` (engine now reuses the open request; view dedupes
+  per task_key). Commits `60b48e5`, `019309e` on the #336 branch. first_cycle_go stays false.
