@@ -825,8 +825,10 @@ run **41903171671 @ `d13efd7` = SUCCESS** — every criterion PASS, including
 `blueprint_new_version`, restart persistence, and `founder_approval` (approved_by set; re-approve
 409). `CI` run **41903171882 @ `d13efd7`**: in-scope jobs green (Backend account-lifecycle, Alembic
 migration check, RLS & session-security, Frontend TypeScript & ESLint, Frontend build vercel +
-docker); backend unit/integration carries the §16 security suite (green at `e4f7c6e`). Only the two
-pre-existing out-of-scope jobs fail (`npm audit` next-pinning; Playwright chromium-install infra).
+docker); **Backend — unit/integration = SUCCESS (terminal, confirmed)** — the §16 adversarial
+security suite + migration-roundtrip + privilege-floor + the generate fix all pass at `d13efd7`.
+Only the two pre-existing out-of-scope jobs fail (`npm audit` next-pinning; Playwright
+chromium-install infra). Net: every in-scope CI check is green at the frozen SHA `d13efd7`.
 
 **3. Founder Alpha boot directive recorded** in the authoritative architecture doc
 (`docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md`): Life's first objective is to become a functioning,
