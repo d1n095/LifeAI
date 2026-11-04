@@ -76,11 +76,12 @@ def test_blueprint_draft_versioned_traceable_and_approval_gated(superuser_db):
 
     # Life never self-approves: d1 is still a draft after generation.
     assert d1.status == "draft"
-    # Only an explicit Founder action approves. Approval now runs through the owner-scoped
-    # SECURITY DEFINER function (migration 0071), which resolves the owner from the session's
-    # app.current_user_id — set it here (the request session sets it via the RLS listener in
-    # production; superuser_db does not).
-    superuser_db.execute(sa_text(f"SET app.current_user_id = '{owner.id}'"))
+    # Only an explicit Founder action approves. Approval runs through the owner-scoped SECURITY
+    # DEFINER function (migrations 0071/0072) on the app's PRIVILEGED connection — the runtime role
+    # is refused by the 0072 session_user guard. Because that runs on a separate connection, the
+    # draft must be committed first (mirroring the real two-request flow: generate commits, then a
+    # later request approves).
+    superuser_db.commit()
     approved = approve_blueprint_draft(superuser_db, owner_id=owner.id, draft_id=d1.id, approved_by="founder")
     assert approved.status == "approved" and approved.approved_by == "founder"
     assert approved.provenance["pending_founder_approval"] is False
