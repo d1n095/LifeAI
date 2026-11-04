@@ -36,6 +36,38 @@ Registry governs merge order; this file records the *current operational state* 
 
 ---
 
+## 0. Active assignments — coordination registry
+
+**Canonical cross-session assignment registry** (Founder decision 2026-11-04: reuse this file,
+no competing registry). Every agent session reads this table first and updates it, or asks the
+coordinator to, when ownership or status changes. Merge order stays in `docs/BRANCH_REGISTRY.md`.
+GitHub comments all post as `d1n095`; agents therefore name their role/session in the comment body.
+
+**Updated:** 2026-11-04 · **Coordinator:** Claude (claude.ai session) · `first_cycle_go=false`
+
+### Agents
+
+| Agent | Role | Current state |
+|-------|------|---------------|
+| Claude Code (builder session) | Builder, #340 | **WAITING** — frozen on #340 until Codex verdict |
+| Claude (claude.ai session) | Coordinator, registry, Founder reporting | **ACTIVE** |
+| Codex | Independent examiner, #340 | **ACTIVE** — handoff relayed; pickup at `db83ab9` **UNCONFIRMED** |
+| ChatGPT | Optional secondary reviewer | Idle |
+| Founder | Owner, approvals, relays to agents | — |
+
+### Assignments
+
+| # | Assignment | Owner | Status | PR | Frozen SHA | Depends on | Evidence | Next authorized action |
+|---|------------|-------|--------|----|------------|------------|----------|------------------------|
+| A1 | P1 GUC-spoof remediation (migration 0072) + P2 version retry | Claude Code (builder) | **WAITING** — frozen, under review | #340 | `db83ab9166a4d31fb88db41f66ea039d4947da4f` | — | CI 41910645963: 9/9 approval-security tests incl. examiner reproducer; real-local 41910646375 SUCCESS **[VERIFIED by coordinator; not certification]** | None until A2 verdict. No push to #340. |
+| A2 | Independent examination of #340 @ `db83ab9` | Codex | **ACTIVE** | #340, probe #342 | `db83ab9…` (#342 still based on `d13efd7`) | A1 | Prior: RETURN_TO_BUILDER @ `d13efd7`, run 41905877642 | PASS / FAIL / BLOCKED per the 6 items in PR #340 comment 6643778446 |
+| A3 | Integration #323/#324/#339 | Codex (impl) | **COMPLETE** — frozen | #341 | `95c32168860b2b8a1ccd4126d4a59ea410a1f4ed` | — | CI 41893411066; Claude review PASS **[REPORTED]**, not fully independent (#339 code partly Claude-authored) | None. No new work without a specific defect. |
+| A4 | Threat model B (compromised app process cannot forge approval) | Unassigned | **BLOCKED** | — | — | A2 verdict; removal of runtime superuser `DATABASE_URL` from backend/worker; founder-signed approval (#316/#318 passkeys) | Not claimed by 0072 | Coordinator defines requirements after A2; Founder decides whether B gates Founder Alpha |
+| A5 | Founder Alpha host | Founder | **[DECISION]** — deferred | — | — | A2 | Not STRATO by default | Coordinator compares minimum hardware after A2 |
+| A6 | E2E Playwright on `ubuntu26.04` runner | Unassigned | **KNOWN FAILURE** (infra) | — | — | — | chromium install unsupported on runner image | Not startup-critical; means no browser-level evidence for approval flow |
+
+---
+
 ## 1. Snapshot
 
 - **Date:** 2026-11-03
