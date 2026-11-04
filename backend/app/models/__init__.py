@@ -80,6 +80,7 @@ from app.models.intelligence_governance import (
     ReviewKind,
 )
 from app.models.knowledge_claim import KnowledgeClaim
+from app.models.blueprint_draft import BlueprintDraft
 from app.models.knowledge_version import KnowledgeVersion
 from app.models.lesson_guard_observations import (
     EngineeringLessonGuardObservation,
@@ -298,6 +299,7 @@ __all__ = [
     "ParticipationMode",
     "ReviewKind",
     "KnowledgeClaim",
+    "BlueprintDraft",
     "KnowledgeVersion",
     "ACTIVE_MAINAI_GOAL_STATUSES",
     "READY_FOR_DISPATCH_MAINAI_TASK_STATUSES",
