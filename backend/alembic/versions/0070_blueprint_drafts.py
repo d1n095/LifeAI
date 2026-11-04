@@ -3,7 +3,10 @@
 Founder Alpha item 8/9. Purely ADDITIVE and NON-DESTRUCTIVE: creates one new owner-scoped table
 `blueprint_drafts` holding versioned, source-traceable, DRAFT-pending-approval Blueprint drafts
 (AI interpretations only — never original bytes). Touches no existing table; fully reversible
-(downgrade drops the table). RLS is applied by app/rls.py (owner_id isolation), not here.
+(downgrade drops the table, which cascades its RLS policy). Owner-scoped RLS is enabled +
+FORCEd here, in the migration (the repo convention — every owner-scoped table enables RLS in its
+own migration; app/rls.py re-asserts the same policy at runtime), so a migration upgrade→
+downgrade→upgrade round-trip restores the table AND its isolation policy identically.
 
 Merge ordering: branches from 0069_embedding_space_identity (this lineage's single head). PR
 #326's own 0069 (provider_disclosure_local_decision) also branches from 0068; whichever of
@@ -45,6 +48,16 @@ def upgrade() -> None:
         "blueprint_drafts",
         ["owner_id", "title", "version"],
         unique=True,
+    )
+    # Owner-scoped RLS, enabled + FORCEd in the migration (same policy app/rls.py re-asserts at
+    # runtime). FORCE so even the table owner is subject to it. Expression matches
+    # POLICY_DEFINITIONS["blueprint_drafts_isolation"] in app/rls.py exactly.
+    op.execute("ALTER TABLE blueprint_drafts ENABLE ROW LEVEL SECURITY")
+    op.execute("ALTER TABLE blueprint_drafts FORCE ROW LEVEL SECURITY")
+    op.execute(
+        "CREATE POLICY blueprint_drafts_isolation ON blueprint_drafts "
+        "USING (owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid) "
+        "WITH CHECK (owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid)"
     )
 
 
