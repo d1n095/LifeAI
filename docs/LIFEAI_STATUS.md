@@ -430,6 +430,41 @@ requirements, workflow status, final deliverable). Added commits on the #336 bra
 
 ---
 
+## 13. Independent certification — coordination PRs #300 / #301 / #303 / #314 [3 PASS, 1 FAIL w/ existing fix]
+
+**PR #337** · `docs/COORDINATION_CERTIFICATION_300_301_303_314.md` + reproducible examiner
+probes in `docs/examiner_probes/`. Founder chose to certify the existing coordination
+infrastructure first (not build a parallel supervisor). Each candidate examined at its exact
+frozen SHA in a detached worktree, Python 3.12, real Postgres + RLS; no frozen candidate
+modified.
+
+- **#300** `2c9dd7e0` **PASS** — read-only GitHub intake: GET-only, rate-limit/forbidden →
+  BLOCKED with named capability, forged/replay/stale/impersonation rejected, idempotent
+  obligations, never claims delivery/publication. 14 candidate tests + 6 examiner probes.
+- **#301** `a786dac9` **FAIL (DEF-1/GH-4)** — cold GitHub discovery (no pre-existing
+  `AgentWorkAssignment`) is not durable (`_persist_ledger` early-returns at zero rows);
+  obligations lost on reload, recreated on refresh. Reproduced executably. 5 own tests pass;
+  the defect is the blocker. **Already remediated by #303** → no new repair warranted.
+- **#303** `74ebda97` (body) **PASS** — `persist.py` adds a synthetic owner-scoped
+  ledger-backing row; cold discovery survives reload, 2nd discovery reuses the same row (no
+  duplicate). 10 own tests + fix-verification. ⚠️ branch head drifted to `296de97f` — re-freeze
+  before merge.
+- **#314** `3aa2bec8` **PASS** — `run_authorized_operating_cycle` = the full dev-management loop;
+  SPEND-STOP at the spend-reservation chokepoint + kill-switch make it fail-closed (0
+  obligations, no spend under STOP); interactive Founder work never starved. 13 own tests + 2
+  probes.
+
+**Integration base (Phase 2):** lineage A (durable coordination / GitHub intake / delivery /
+handover → #303, supersedes #301) + lineage B (provider integration / operating cycle → #314).
+**Single missing integration:** #314's base lacks #303's intake + `persist.py`, so the operating
+cycle's task selection is not yet fed by real GitHub state in one durable ledger. Smallest
+coherent integration = compose #303's intake+persist onto #314's base and wire
+`run_authorized_operating_cycle`'s task selection to it — specified, not performed, because both
+are frozen cursor-owned candidates (no silent modification / no duplicate work). `first_cycle_go`
+stays false.
+
+---
+
 ## Corrections log
 
 Append a dated line here whenever a prior conclusion in this file is corrected. Never delete a
@@ -496,3 +531,10 @@ superseded conclusion silently — supersede it here and in the body.
   Fixed a view bug where a blocked + later-approved request for the same consequential task made
   the reassembled view read `awaiting_approval` (engine now reuses the open request; view dedupes
   per task_key). Commits `60b48e5`, `019309e` on the #336 branch. first_cycle_go stays false.
+- _2026-11-04_ — §13 added: independent certification of coordination PRs (PR #337). Founder
+  chose to certify existing infra first (not build a parallel supervisor). Verdicts from real
+  tests at each frozen SHA: #300 PASS, #301 FAIL (DEF-1/GH-4 reproduced; fixed by #303), #303
+  PASS (DEF-1/GH-4 repair; head drifted past body SHA — re-freeze), #314 PASS (operating cycle +
+  SPEND-STOP fail-closed). Integration base = #303 + #314; single missing integration (compose
+  #303 intake/persist onto #314 operating-cycle base) specified, not performed — both are frozen
+  cursor-owned candidates. first_cycle_go=false.
