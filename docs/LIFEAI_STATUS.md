@@ -671,13 +671,28 @@ branch `claude/founder-alpha-blueprint-draft`.
 - **Frontend static checks (item 3):** `tsc --noEmit` clean, `eslint .` 0 problems, `next build`
   succeeds (`/blueprint` route prerendered). Fixed one real eslint error in the Blueprint page
   (`react-hooks/set-state-in-effect`) by loading await-first in the mount effect.
-- **CI run IDs @ 1b38597:** Founder Alpha verification (real local) = **41844888898**; CI (push) =
-  **41844888832**. (Earlier same-candidate runs: 41843149467 / 41844453292 superseded by pushes.)
-  Results recorded here as they complete.
-- **Items 6–7 (deferred, correctly):** independent review requested at the frozen SHA (no
-  self-cert) — PR #340 review-request comment lists the auth/RLS/concurrency/provenance/source-
-  refs/model-failure/approval dimensions. The executable startup + deployment proposal is produced
-  only after CI is green (item 7's precondition).
+- **CI results — candidate head `8fabade` (PASS on all in-scope checks):**
+  - `Founder Alpha verification (real local)` run **41849139859 = SUCCESS** — the complete chain
+    under REAL Ollama + pgvector + filesystem, every criterion PASS: authentication; real_model_chat
+    (provider=ollama); upload_original; real_embed_and_index (chunks=1); grounded_retrieval (cited
+    the uploaded doc); **blueprint_generate_real_model (v1 draft, refs matched, provider=ollama,
+    model=qwen2.5:0.5b)**; blueprint_inspect_refs; blueprint_new_version (v2); immutable_original
+    (SHA-256 match); restart_persistence (original+draft survived); **founder_approval (approved_by
+    set)**; approval_is_idempotent_guarded (409); plus the embedding-space identity assertion
+    (all-minilm / native 384 / stored 1536). (Prior run 41844888898 failed only because the
+    pre-serve step wrongly ran fake-provider API tests in the Ollama env — fixed in 8fabade.)
+  - `CI` run **41844888832 @ 1b38597** — all in-scope jobs SUCCESS: Backend unit/integration,
+    Backend account-lifecycle, Alembic migration check, RLS & session-security, Frontend
+    TypeScript & ESLint, Frontend build (vercel + docker). The only failing jobs are the two
+    PRE-EXISTING out-of-scope ones: `npm audit` (the `next`-pinning issue, own branch per CLAUDE.md)
+    and the Playwright E2E jobs (chromium does not install on the runner image). Neither is caused
+    by this candidate.
+- **Item 6:** independent review requested at the frozen SHA (no self-cert) — PR #340 review-request
+  comment lists the auth/RLS/concurrency/provenance/source-refs/model-failure/approval dimensions.
+- **Item 7:** all in-scope checks pass → executable startup + deployment proposal delivered in
+  `docs/FOUNDER_ALPHA_STARTUP_AND_DEPLOYMENT.md` (exact SHA, commands, host requirements, storage
+  persistence, backups, restore test, URL strategy, and the honest remaining deployment blockers —
+  chiefly: Ollama is not yet in the VPS topology, and a production model decision is still open).
 - **Known pre-existing (out of scope, flagged):** `npm audit` CI job (the `next`-pinning issue, per
   CLAUDE.md handled on its own branch); Playwright chromium-install fails on the runner image
   (infra); one pre-existing F841 (unused `founder_id`) in an unrelated `test_workbench` function
