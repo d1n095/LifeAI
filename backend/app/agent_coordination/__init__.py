@@ -107,6 +107,7 @@ from app.agent_coordination.runtime_view import (
     assignment_runtime_view,
     work_registry_snapshot,
 )
+from app.agent_coordination.github_fed_cycle import run_github_fed_operating_cycle
 from app.agent_coordination.service import (
     CoordinationError,
     CoordinatorDecision,
@@ -134,6 +135,7 @@ from app.agent_coordination.service import (
 )
 
 __all__ = [
+    "run_github_fed_operating_cycle",
     "ALL_EVENT_KINDS",
     "BLOCKS_FIRST_CYCLE",
     "DISPATCH_LIFECYCLE",
