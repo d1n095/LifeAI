@@ -463,6 +463,22 @@ coherent integration = compose #303's intake+persist onto #314's base and wire
 are frozen cursor-owned candidates (no silent modification / no duplicate work). `first_cycle_go`
 stays false.
 
+
+### Phase 3 — GitHub-fed operating cycle implemented [PR #338, executed 3/3 + 24 regression]
+
+Certification found #314 **descends from #303** (`merge-base(#314,#303)=74ebda97`, #303 0 ahead)
+— so #314 already contains the GitHub intake + `persist.py` AND the operating cycle; **no
+cross-lineage merge is needed**. The only missing wire was that `autonomous_cycle` did not
+consume `github_intake`. PR **#338** (`claude/coordination-operating-cycle-github-fed`, stacked
+on #314) adds `agent_coordination/github_fed_cycle.py::run_github_fed_operating_cycle` — a
+composition of existing PUBLIC primitives (no new framework): `load_owner_ledger →
+GitHubDevelopmentIntake.refresh (read-only) → persist_owner_ledger → load_owner_ledger →
+run_authorized_operating_cycle → founder_coordination_snapshot`. Life now selects its next task
+from real observed PR/CI/review state instead of the Founder hand-copying it. Executed on real
+Postgres: `test_github_fed_operating_cycle.py` 3 passed (end-to-end GitHub-fed selection;
+restart recovery + no duplicate assignment; provider-unavailable pauses only GitHub while the
+cycle continues), 24 on-branch regression, ruff clean. Read-only, `first_cycle_go=false`.
+**Independent review required — author does not self-certify.**
 ---
 
 ## Corrections log
@@ -538,3 +554,8 @@ superseded conclusion silently — supersede it here and in the body.
   SPEND-STOP fail-closed). Integration base = #303 + #314; single missing integration (compose
   #303 intake/persist onto #314 operating-cycle base) specified, not performed — both are frozen
   cursor-owned candidates. first_cycle_go=false.
+- _2026-11-04_ — Phase 3 implemented (PR #338): certification showed #314 descends from #303
+  (no cross-lineage merge needed); added `github_fed_cycle.run_github_fed_operating_cycle`
+  wiring the operating cycle's task selection to read-only GitHub intake (composition of
+  existing public primitives). 3 integration tests + 24 regression pass on real Postgres.
+  Read-only; first_cycle_go=false; independent review required (no self-cert).
