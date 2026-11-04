@@ -907,3 +907,44 @@ evidence from #341's own passing CI run.
 Boundaries: #341 unmodified; no merge/deploy/STRATO; Codex's #340 review untouched; `first_cycle_go=false`.
 
 ---
+
+## 19. P1 GUC-spoof remediation — closed; corrected #340 SHA `db83ab9166a4d31fb88db41f66ea039d4947da4f`
+
+Independent examiner (Codex) returned `d13efd7` RETURN_TO_BUILDER on a real P1: migration 0071's
+`blueprint_approve_draft` derived authority only from `current_setting('app.current_user_id')` — a
+GUC the runtime role sets itself — so a raw `mainai_app` connection could `SET` it to the founder
+uuid and forge an approval (reproducer `test_runtime_role_cannot_spoof_owner_guc_and_forge_approval`,
+examiner PR #342, run 41905877642: 1 failed). Confirmed and fixed.
+
+**Fix (migration 0072, reuse existing architecture):** approval authority is anchored to
+`session_user` (the authenticated DB login role, which `mainai_app` cannot change — no SET ROLE /
+SESSION AUTHORIZATION privilege), not the caller-writable GUC. The function refuses, as its first
+action, to run when `session_user = 'mainai_app'`. Legitimate approval runs on the app's PRIVILEGED
+admin/migration connection (session_user = admin role) with `owner_id` = `require_founder`'s
+authenticated user id (trusted server input, not a caller-writable variable) — the same
+privileged-session pattern app/worker.py uses for storage-deletion claims. Preserved from 0071:
+`FOR UPDATE` + status recheck (concurrency) and the immutable/undeletable guard trigger. Signature
+unchanged; additive + reversible; single head 0072. **P2:** `generate_blueprint_draft` now allocates
+its version under a SAVEPOINT and retries (bounded) on the `(owner_id,title,version)` unique
+violation, raising a clean `version_allocation_conflict` only if it persists.
+
+**Reproducible evidence, verified at the immutable corrected SHA
+`db83ab9166a4d31fb88db41f66ea039d4947da4f`:**
+- The examiner's exact adversarial suite was adopted as the regression test
+  (`backend/tests/backend/test_blueprint_approval_security.py`); the spoof call now RAISES
+  `unauthorized …`. Local: 18 passed (security + blueprint unit + e2e); 16 passed
+  (migration-roundtrip + privilege-floor).
+- **GitHub Actions `CI` run 41910645963 @ `db83ab91`: Backend — unit/integration = SUCCESS** (runs
+  the spoof reproducer + P2 + migration roundtrip + privilege floor), plus Backend RLS &
+  session-security, Alembic migration check, account-lifecycle, Frontend TypeScript & ESLint, and
+  Frontend build (vercel + docker) all success. Only the two pre-existing out-of-scope jobs fail
+  (`npm audit` next-pinning; Playwright chromium-install infra).
+
+**Handed back to Codex for independent re-examination at `db83ab91` — NOT self-certified.** The
+previously-passing boundaries (approved-content immutability, deletion protection, concurrency
+serialization, Founder API gate, cross-owner RLS) are unchanged. Residual: the privileged approval
+runs on the admin/migration connection (narrow, SECURITY-DEFINER + param-scoped + trigger-guarded);
+a dedicated least-privilege approver role is a possible future hardening, flagged not built.
+Boundaries: #341 untouched; no merge/STRATO/paid/deletion; `first_cycle_go=false`.
+
+---
