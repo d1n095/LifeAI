@@ -2,7 +2,18 @@
 with a deterministic fake chat+embedding provider (never a real AI key) and documents/chunks
 inserted directly via the superuser connection (bypasses RLS entirely — see conftest.py's
 superuser_db docstring) so each test controls exactly which sources exist and how well they
-match the query, independent of the real embedding model's behavior."""
+match the query, independent of the real embedding model's behavior.
+
+PR #333 compatibility: retrieval is now scoped to the ACTIVE embedding space — a query embedded
+with (model, native_dim) only ranks chunks stamped with that same (model, native_dim); chunks
+with a different space, or with legacy NULL identity, are deliberately never mixed in
+(app/rag/vector_store.py's active-embedding-space guard). The REAL ingest path stamps every
+chunk it writes with the active space (proven end-to-end in the real-Ollama CI: a chunk lands
+with embedding_model/embedding_native_dim set). These fixtures therefore stamp their chunks the
+same way the real pipeline does, so retrieval finds them for the reason production does — not by
+weakening the guard. `_make_source` stamps with the active embedding space + this fake embed's
+own native dimension (len(MATCHING_VECTOR)); the one legacy-NULL-identity case is covered
+explicitly by `_make_legacy_unstamped_source` below."""
 
 import uuid
 
@@ -12,11 +23,20 @@ from app.config import get_settings
 from app.models.document import ActiveTruthStatus, Document, DocumentSource
 from app.models.document_chunk import DocumentChunk
 from app.models.source_relationship import RelationshipType, SourceRelationship
+from app.providers.registry import resolve_active
 
 FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
 DIM = get_settings().embedding_dim
 MATCHING_VECTOR = [0.5] * DIM  # identical query/chunk vector -> cosine similarity 1.0
+# This fake embed returns a full storage-width vector, so its native dim equals the stored width.
+ACTIVE_NATIVE_DIM = len(MATCHING_VECTOR)
+
+
+def _active_embedding_model(superuser_db) -> str:
+    """The embedding model retrieval will scope to — resolved the same way the app does."""
+    _provider, model = resolve_active(superuser_db, role="embedding")
+    return model
 
 
 @pytest.fixture
@@ -60,7 +80,36 @@ def _make_source(superuser_db, owner_id, title, *, status=ActiveTruthStatus.acti
     superuser_db.add(document)
     superuser_db.commit()
     superuser_db.add(
-        DocumentChunk(document_id=document.id, owner_id=owner_id, chunk_index=0, text=f"Innehall i {title}.", embedding=vector or MATCHING_VECTOR)
+        DocumentChunk(
+            document_id=document.id,
+            owner_id=owner_id,
+            chunk_index=0,
+            text=f"Innehall i {title}.",
+            embedding=vector or MATCHING_VECTOR,
+            # Stamp the active embedding space exactly as the real ingest path does, so #333's
+            # active-space-scoped retrieval ranks this chunk for the same reason production does.
+            embedding_model=_active_embedding_model(superuser_db),
+            embedding_native_dim=ACTIVE_NATIVE_DIM,
+        )
+    )
+    superuser_db.commit()
+    return document
+
+
+def _make_legacy_unstamped_source(superuser_db, owner_id, title) -> Document:
+    """A pre-#333 chunk: NULL embedding-space identity. The active-space guard must NOT rank it
+    against a stamped query — this is the isolation guarantee, not a bug to paper over."""
+    document = Document(
+        title=title,
+        source=DocumentSource.upload,
+        uploaded_by=owner_id,
+        active_truth_status=ActiveTruthStatus.active,
+        checksum=uuid.uuid4().hex,
+    )
+    superuser_db.add(document)
+    superuser_db.commit()
+    superuser_db.add(
+        DocumentChunk(document_id=document.id, owner_id=owner_id, chunk_index=0, text=f"Innehall i {title}.", embedding=MATCHING_VECTOR)
     )
     superuser_db.commit()
     return document
@@ -238,6 +287,10 @@ def test_citation_carries_timestamp_range_for_a_media_chunk(client, superuser_db
             chunk_index=0,
             text="Talaren namner ett specifikt tidsstampat pastaende.",
             embedding=MATCHING_VECTOR,
+            # Stamp the active embedding space, same as the real ingest path (PR #333) — see
+            # _make_source; without it the active-space-scoped query would not rank this chunk.
+            embedding_model=_active_embedding_model(superuser_db),
+            embedding_native_dim=ACTIVE_NATIVE_DIM,
             start_seconds=12.5,
             end_seconds=27.0,
         )
@@ -256,3 +309,32 @@ def test_citation_carries_timestamp_range_for_a_media_chunk(client, superuser_db
     text_source = next(s for s in sources if s["document_id"] == str(text_doc.id))
     assert text_source["start_seconds"] is None
     assert text_source["end_seconds"] is None
+
+
+def test_stamped_active_space_source_is_retrieved(client, superuser_db, _captured_chat_messages):
+    """Regression (PR #333): a chunk stamped with the ACTIVE embedding space is retrieved by a
+    stamped query — i.e. the active-space scoping did not break ordinary source grounding for
+    real (stamped) chunks."""
+    founder_id = _founder_id(superuser_db)
+    doc = _make_source(superuser_db, founder_id, "Stämplad källa")
+    csrf = _login(client)
+
+    res = client.post("/api/chat", json={"message": "Vad säger den stämplade källan?"}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert any(s["document_id"] == str(doc.id) for s in body["sources"])
+
+
+def test_legacy_null_identity_chunk_is_not_mixed_into_active_space(client, superuser_db, _captured_chat_messages):
+    """Isolation guarantee (PR #333), stated explicitly rather than hidden: a legacy chunk with
+    NULL embedding-space identity must NOT be ranked against a query embedded in the active
+    space. The correct remedy for such legacy data is re-indexing under the active model — never
+    silently mixing spaces, which is what the guard prevents."""
+    founder_id = _founder_id(superuser_db)
+    legacy = _make_legacy_unstamped_source(superuser_db, founder_id, "Gammal ostämplad källa")
+    csrf = _login(client)
+
+    res = client.post("/api/chat", json={"message": "Fråga om den gamla källan"}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert all(s["document_id"] != str(legacy.id) for s in body["sources"])
