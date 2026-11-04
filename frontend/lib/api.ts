@@ -736,6 +736,44 @@ export type MainAIGoalReport = {
   generated_at: string;
 };
 
+// Founder Alpha item 8/9 — source-grounded, versioned, approval-gated Blueprint drafts
+// (backend/app/routers/blueprint.py). A draft is always created as `status="draft"`; the
+// approve endpoint is the only path to `approved`.
+export type BlueprintSourceRef = {
+  document_id: string;
+  similarity: number | null;
+  excerpt: string | null;
+};
+
+export type BlueprintDraftSummary = {
+  id: string;
+  title: string;
+  version: number;
+  status: string;
+  source_count: number;
+  model_provider: string | null;
+  model_name: string | null;
+  created_at: string | null;
+  approved_at: string | null;
+};
+
+export type BlueprintDraft = {
+  id: string;
+  title: string;
+  version: number;
+  status: string;
+  body: string;
+  generated_from_query: string | null;
+  source_document_ids: string[];
+  source_refs: BlueprintSourceRef[];
+  model_provider: string | null;
+  model_name: string | null;
+  provenance: Record<string, unknown>;
+  created_at: string | null;
+  approved_at: string | null;
+  approved_by: string | null;
+};
+
 export const api = {
   login: (email: string, password: string) =>
     request<CurrentUser>("/api/auth/login", {
@@ -937,4 +975,16 @@ export const api = {
   mainaiExecutionTaskWaits: (id: string) => request<MainAITaskWait[]>(`/api/mainai/execution/tasks/${id}/waits`),
   mainaiExecutionLessons: (statusFilter?: string) =>
     request<EngineeringLesson[]>(`/api/mainai/execution/lessons${statusFilter ? `?status_filter=${statusFilter}` : ""}`),
+
+  // Blueprint drafts (backend/app/routers/blueprint.py). Sources are derived server-side from
+  // the founder's own indexed documents — the client supplies only a title + optional query.
+  blueprintDrafts: (title?: string) =>
+    request<BlueprintDraftSummary[]>(`/api/blueprint/drafts${title ? `?title=${encodeURIComponent(title)}` : ""}`),
+  blueprintDraft: (id: string) => request<BlueprintDraft>(`/api/blueprint/drafts/${id}`),
+  blueprintGenerate: (payload: { title: string; query?: string; top_k?: number }) =>
+    request<BlueprintDraft>("/api/blueprint/drafts", { method: "POST", body: JSON.stringify(payload) }),
+  blueprintRegenerate: (id: string, payload: { query?: string; top_k?: number }) =>
+    request<BlueprintDraft>(`/api/blueprint/drafts/${id}/regenerate`, { method: "POST", body: JSON.stringify(payload) }),
+  blueprintApprove: (id: string) =>
+    request<BlueprintDraft>(`/api/blueprint/drafts/${id}/approve`, { method: "POST" }),
 };
