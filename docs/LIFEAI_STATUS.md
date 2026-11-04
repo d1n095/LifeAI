@@ -753,3 +753,55 @@ quota/reset-window) is flagged for its existing owner (Codex #324) without creat
 assignment. Security/deployment gates intact; `first_cycle_go=false`.
 
 ---
+
+## 16. Blueprint approval security remediation — two P1 findings closed (DB-enforced) [candidate e4f7c6e; exact-SHA CI verified; independent review required]
+
+Founder correction (2026-11-04): the Founder Alpha #340 report had not demonstrated closure of two
+previously identified P1 security findings. Both are now closed with **database-enforced**
+guarantees (not the Python service alone), reusing the repo's established pattern (guard trigger +
+owner-scoped SECURITY DEFINER function + s1a_privilege_policy grant narrowing). Corrected frozen
+SHA for independent security review: **`e4f7c6e`** (branch `claude/founder-alpha-blueprint-draft`).
+
+**P1-1 — the runtime role (`mainai_app`) could forge approval state / modify approved content /
+delete a protected record.** Closed by migration `0071_blueprint_approval_guard`:
+  * `trg_blueprint_drafts_approval_guard` (BEFORE UPDATE/DELETE, fires for every writer): an
+    approved draft is immutable and undeletable; a draft→approved transition must set
+    approved_at+approved_by and must not alter content; status may only move draft→approved.
+  * approval runs only through `blueprint_approve_draft(uuid,text)` SECURITY DEFINER
+    (search_path=pg_catalog, schema-qualified); `scripts/security/s1a_privilege_policy.py` narrows
+    `blueprint_drafts` to `SELECT,INSERT` for `mainai_app` (no direct UPDATE/DELETE) + EXECUTE on
+    the function — so in production the runtime role cannot write approval state by raw SQL at all.
+
+**P1-2 — concurrent Founder approvals were not transaction-safe.** Closed: the approval function
+takes `SELECT ... FOR UPDATE` then re-checks status inside the lock, so concurrent approvals of the
+same draft serialize and exactly one wins; the loser sees `approved` and is rejected.
+
+**Reproducible security evidence** (`backend/tests/backend/test_blueprint_approval_security.py`):
+approved-row immutable + undeletable (trigger); forgery without audit fields rejected;
+content-tamper-on-approve rejected; concurrent approvals serialized on the row lock (lock_timeout)
++ second rejected; happy-path approval; and — with the real s1a policy applied — `mainai_app` loses
+UPDATE/DELETE and a direct UPDATE/DELETE raises `InsufficientPrivilege` while EXECUTE on the function
+remains. Local: 11 security+unit passed; 20 passed across privilege-floor + migration-roundtrip +
+openapi (no regression); migration 0071 single-head + reversible.
+
+**Exact-SHA GitHub Actions verification @ `e4f7c6e`:** `CI` run **41888768194** — **Backend
+unit/integration = success** (runs the security suite + migration roundtrip + privilege floor at
+this SHA), plus RLS & session-security, Alembic migration check, account-lifecycle, Frontend
+TypeScript & ESLint, Frontend build (vercel + docker) all success. The security pytest also passed
+in the `Founder Alpha verification (real local)` run **41888768153** pre-serve step. (Only the two
+pre-existing out-of-scope CI jobs fail: `npm audit` next-pinning; Playwright chromium-install infra.)
+
+**Non-security follow-up (flagged, scope-disciplined — NOT fixed here):** in run 41888768153 the
+live real-Ollama `blueprint_generate_real_model` step flaked with a 503 (ProviderError: the
+qwen2.5:0.5b synthesis call did not return within the 120s provider timeout on the CPU runner). The
+SAME generate code passed at `8fabade` (run 41849139859), and this commit changed only the approval
+path — so this is a transient real-model robustness characteristic, not a security regression and
+not caused by this change. A bounded-synthesis-prompt / longer-timeout hardening is a reasonable
+follow-up for the Blueprint feature, deliberately deferred here per the directive's "complete the
+security remediation before expanding scope." Security approval does not depend on a real-Ollama
+PASS ("a real-Ollama PASS alone is not security approval").
+
+**Boundaries:** no merge, no deploy, no STRATO, no Codex #324 lane touched, no paid provider.
+`first_cycle_go=false`. Not self-certified — independent security review requested at `e4f7c6e`.
+
+---
