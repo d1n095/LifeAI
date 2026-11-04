@@ -1,0 +1,530 @@
+# Founder Alpha — real-local end-to-end verification (manual + on push to the candidate branch).
+#
+# Extends the #334 real-local-AI workflow to prove the COMPLETE Founder Alpha candidate — the
+# actual #340 head (Blueprint API+UI) composed with the original-download chain (#329/#330) and
+# the #333 embedding-space layer — runs Life end to end with REAL local AI models (Ollama),
+# real PostgreSQL/pgvector and real filesystem storage, with NO paid provider reachable.
+#
+# Candidate = deterministic reconstruction (same recipe family as the #334 workflow), but the
+# final merge is the LIVE #340 head (by branch, not a frozen SHA) so this always tests "the
+# actual #340 head" per the Founder directive:
+#   #323 trunk (04b27e9) + merge #328 (fa840e4) + merge #329 (830ab4d) + merge #327 (69cdaf3)
+#                        + merge origin/claude/founder-alpha-blueprint-draft (live #340 head)
+# Instead of a frozen expected-tree (the #340 head moves as the PR evolves), the reconstruction
+# asserts the integration invariants: exactly one 0069 migration (no #326 multi-head), the
+# Blueprint router present, and the #329 original-download endpoint present.
+#
+# Test models (TEMPORARY test config — NOT a production model decision):
+#   * Embedding: Ollama all-minilm  (native 384-dim; padded to vector(1536) by #333, cosine-exact)
+#   * Chat:      Ollama qwen2.5:0.5b (small instruct model that runs on a CPU CI runner)
+#
+# Full chain proven (API-level + DB-level, tied to the resolved #340 head SHA):
+#   founder login -> real-model chat -> upload original -> extract/index (real embed) ->
+#   grounded retrieval -> generate Blueprint with the REAL model -> inspect source refs ->
+#   regenerate (new version) -> restart backend+worker -> retrieve original + draft ->
+#   Founder approves. Plus: embedding-space identity on the real chunk; cross-owner isolation
+#   (pytest on real pgvector); original bytes immutable (SHA-256) across restart.
+#
+# Never: production credentials/Supabase, the live STRATO environment, paid AI calls, or egress
+# beyond pulling the open local models. Postgres is a throwaway pgvector service container;
+# Ollama runs on the runner; uploads go to a throwaway workspace dir; all torn down with the run.
+name: Founder Alpha verification (real local, manual)
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - claude/founder-alpha-blueprint-draft
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  CAND_TRUNK_BRANCH: claude/frontend-npm-audit-baseline-consolidation   # #323
+  CAND_TRUNK_SHA: "04b27e9585ea9def58d24407f7000a51577c89bf"
+  CAND_MERGE_1_BRANCH: claude/basic-startup-no-model-proof              # #328
+  CAND_MERGE_1_SHA: "fa840e47ae44490777a56e3684cf5c26085b7e5c"
+  CAND_MERGE_2_BRANCH: claude/library-original-retrieval               # #329
+  CAND_MERGE_2_SHA: "830ab4d9cf2edab27c6a91787988f5fbff1593da"
+  CAND_MERGE_3_BRANCH: claude/docx-extraction-completeness             # #327
+  CAND_MERGE_3_SHA: "69cdaf342b6f3adacc6fa18455f14c5ac452a198"
+  CAND_PR_BRANCH: claude/founder-alpha-blueprint-draft                 # #340 head (live)
+  OLLAMA_EMBED_MODEL: "all-minilm"
+  OLLAMA_CHAT_MODEL: "qwen2.5:0.5b"
+  OLLAMA_NATIVE_DIM: "384"
+
+jobs:
+  founder-alpha:
+    name: Founder Alpha real-local acceptance (Ollama + pgvector + filesystem)
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_foundera
+      APP_DATABASE_URL: postgresql://mainai_app:mainai_app_foundera_pw@localhost:5432/lifeos_foundera
+      REDIS_URL: redis://localhost:6379/0
+      SECRET_KEY: ci-founder-alpha-secret-key
+      FOUNDER_EMAIL: founder@lifeos.local
+      FOUNDER_PASSWORD: TestFounderPassword123!
+      FRONTEND_ORIGINS: http://127.0.0.1:3020
+      PUBLIC_APP_URL: http://127.0.0.1:3020
+      ENABLE_SCHEDULED_CLEANUP: "false"
+      DEFAULT_EMBEDDING_PROVIDER: "ollama"
+      DEFAULT_EMBEDDING_MODEL: "all-minilm"
+      DEFAULT_LLM_PROVIDER: "ollama"
+      DEFAULT_LLM_MODEL: "qwen2.5:0.5b"
+      OLLAMA_BASE_URL: "http://127.0.0.1:11434"
+      CHAT_FALLBACK_ORDER: ""
+      COOKIE_SECURE: "false"
+      STORAGE_ROOT: ${{ github.workspace }}/.foundera-uploads
+      E2E_EMAIL_LOG_PATH: ${{ github.workspace }}/candidate/backend/founder_alpha_emails.jsonl
+      FA_BASE_URL: http://127.0.0.1:8010
+      FA_STATE_FILE: ${{ github.workspace }}/founder_alpha_state.json
+    steps:
+      - name: Check out candidate trunk (#323)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CAND_TRUNK_BRANCH }}
+          path: candidate
+          fetch-depth: 0
+
+      - name: Reconstruct the complete Founder Alpha candidate (#323+#328+#329+#327 + live #340 head)
+        id: sha
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          git config user.email "ci@local"
+          git config user.name "founder-alpha-ci"
+          test "$(git rev-parse HEAD)" = "$CAND_TRUNK_SHA" \
+            || { echo "::error::trunk ${CAND_TRUNK_BRANCH} moved: $(git rev-parse HEAD) != ${CAND_TRUNK_SHA}"; exit 1; }
+          replay_pinned() {
+            local branch="$1" sha="$2"
+            git fetch --no-tags origin "$branch"
+            test "$(git rev-parse FETCH_HEAD)" = "$sha" \
+              || { echo "::error::${branch} moved: $(git rev-parse FETCH_HEAD) != ${sha}"; exit 1; }
+            git merge --no-ff --no-edit "$sha" \
+              || { echo "::error::unexpected merge conflict merging ${branch} (${sha})"; exit 1; }
+          }
+          replay_pinned "$CAND_MERGE_1_BRANCH" "$CAND_MERGE_1_SHA"
+          replay_pinned "$CAND_MERGE_2_BRANCH" "$CAND_MERGE_2_SHA"
+          replay_pinned "$CAND_MERGE_3_BRANCH" "$CAND_MERGE_3_SHA"
+          # Live #340 head (the actual candidate under test) — recorded, not pinned.
+          git fetch --no-tags origin "$CAND_PR_BRANCH"
+          PR_HEAD="$(git rev-parse FETCH_HEAD)"
+          git merge --no-ff --no-edit "$PR_HEAD" \
+            || { echo "::error::unexpected merge conflict merging ${CAND_PR_BRANCH} (${PR_HEAD})"; exit 1; }
+          # Integration invariants (instead of a frozen tree, since the #340 head evolves):
+          HEADS="$(ls backend/alembic/versions | grep -c '^0069' || true)"
+          test "$HEADS" = "1" \
+            || { echo "::error::expected exactly one 0069 migration (no #326 multi-head), found $HEADS"; exit 1; }
+          test -f backend/app/routers/blueprint.py \
+            || { echo "::error::blueprint router missing from reconstructed candidate"; exit 1; }
+          grep -q "/original" backend/app/routers/library.py \
+            || { echo "::error::#329 original-download endpoint missing from reconstructed candidate"; exit 1; }
+          echo "Reconstructed candidate head: $(git rev-parse HEAD) (#340 head $PR_HEAD)"
+          {
+            echo "### Founder Alpha candidate reconstructed"
+            echo ""
+            echo "- #340 head under test: \`$PR_HEAD\`"
+            echo "- reconstructed merge commit: \`$(git rev-parse HEAD)\`"
+            echo "- single 0069 migration: yes · blueprint router: yes · #329 /original: yes"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "resolved=$PR_HEAD" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: candidate/backend/requirements.txt
+
+      - name: Install backend dependencies
+        working-directory: candidate/backend
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Install and start Ollama; pull the test models
+        run: |
+          set -euo pipefail
+          curl -fsSL https://ollama.com/install.sh | sh
+          nohup ollama serve > "$GITHUB_WORKSPACE/ollama.log" 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null "$OLLAMA_BASE_URL/api/tags" && { echo "ollama up"; break; }
+            sleep 1
+          done
+          ollama pull "$OLLAMA_EMBED_MODEL"
+          ollama pull "$OLLAMA_CHAT_MODEL"
+          echo "### Ollama models pulled" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          ollama --version | tee -a "$GITHUB_STEP_SUMMARY"
+          ollama list | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Provision throwaway database + restricted runtime role
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -c "
+            DO \$\$
+            BEGIN
+              IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'mainai_app') THEN
+                CREATE ROLE mainai_app LOGIN PASSWORD 'mainai_app_foundera_pw';
+              END IF;
+            END
+            \$\$;"
+          psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS lifeos_foundera;"
+          psql -h localhost -U postgres -d postgres -c "CREATE DATABASE lifeos_foundera;"
+          psql -h localhost -U postgres -d lifeos_foundera -c "
+            GRANT USAGE ON SCHEMA public TO mainai_app;
+            GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO mainai_app;
+            GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO mainai_app;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO mainai_app;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO mainai_app;"
+
+      - name: Apply migrations (alembic upgrade head)
+        working-directory: candidate/backend
+        run: alembic upgrade head
+
+      - name: Apply S1A runtime privilege policy
+        working-directory: candidate/backend
+        run: python scripts/security/apply_runtime_privileges.py
+
+      - name: Cross-owner isolation + no-mixing + identity (real pgvector)
+        working-directory: candidate/backend
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_foundera_pytest
+          APP_DATABASE_URL: postgresql://mainai_app:mainai_app_foundera_pw@localhost:5432/lifeos_foundera_pytest
+        run: |
+          set -eo pipefail
+          python -m pytest tests/backend/rag/test_embedding_space.py \
+                           tests/backend/chat/test_chat_source_grounding.py \
+                           tests/backend/test_blueprint_draft.py \
+                           tests/backend/test_founder_alpha_blueprint_e2e.py -q \
+            | tee "$GITHUB_WORKSPACE/pytest_integration.log"
+
+      - name: Write the real-app bootstrap (real providers; ONLY email faked)
+        run: |
+          cat > "$GITHUB_WORKSPACE/candidate/backend/_fa_boot.py" <<'PY'
+          """Runs the REAL backend with the REAL provider abstraction (Ollama via env). Installs
+          NO AI fakes — embedding and chat execute against the local Ollama runtime for real. The
+          ONLY thing replaced is outbound EMAIL (captured to a JSONL file)."""
+          import json, os, sys
+          BACKEND_ROOT = os.path.dirname(os.path.abspath(__file__))
+          sys.path.insert(0, BACKEND_ROOT)
+          EMAIL_LOG_PATH = os.environ.get("E2E_EMAIL_LOG_PATH", os.path.join(BACKEND_ROOT, "founder_alpha_emails.jsonl"))
+          open(EMAIL_LOG_PATH, "w").close()
+          import app.routers.auth as auth_router
+          def _fake_send_email(to: str, subject: str, body_text: str) -> None:
+              with open(EMAIL_LOG_PATH, "a") as f:
+                  f.write(json.dumps({"to": to, "subject": subject, "body": body_text}) + "\n")
+          auth_router.send_email = _fake_send_email
+          HOST = os.environ.get("E2E_BACKEND_HOST", "127.0.0.1")
+          PORT = int(os.environ.get("E2E_BACKEND_PORT", "8010"))
+          if __name__ == "__main__":
+              import uvicorn
+              uvicorn.run("app.main:app", host=HOST, port=PORT, log_level="warning")
+          PY
+          echo "bootstrap written"
+
+      - name: Write the Founder Alpha acceptance driver
+        run: |
+          cat > "$GITHUB_WORKSPACE/founder_alpha_acceptance.py" <<'PY'
+          """Founder Alpha real-local acceptance driver (stdlib only), extending the #334 driver
+          with the Blueprint chain. Phase 'pre': login, real-model chat, upload a synthetic
+          original, wait for real embed/index, grounded retrieval, then GENERATE a Blueprint with
+          the REAL model, inspect its source refs, and save a second VERSION; records ids. Phase
+          'post' (after backend+worker restart): re-auth, prove the original + draft survived, then
+          the Founder APPROVES. PASS/FAIL/BLOCKED per criterion; exit non-zero only on FAIL."""
+          import json, os, sys, time, uuid, hashlib, http.cookiejar, urllib.request, urllib.error
+
+          BASE = os.environ["FA_BASE_URL"]
+          EMAIL = os.environ["FOUNDER_EMAIL"]; PASSWORD = os.environ["FOUNDER_PASSWORD"]
+          STATE = os.environ["FA_STATE_FILE"]
+          PHASE = sys.argv[1] if len(sys.argv) > 1 else "pre"
+          SHA = os.environ.get("RESOLVED_SHA", "unknown")
+
+          MARKER = "Zephyrine Qualtrough bor pa Vindgatan 4213 i Norrskensstaden."
+          CONTENT = ("Syntetiskt original for Founder Alpha-verifiering.\n" + MARKER + "\n"
+                     "Dessa bytes maste bevaras oforandrade genom hela pipelinen.\n").encode()
+          FILENAME = "founder-alpha-original.txt"
+          EXPECTED_SHA = hashlib.sha256(CONTENT).hexdigest()
+          QUESTION = "Var bor Zephyrine Qualtrough? Svara kortfattat."
+          BP_TITLE = "Founder Alpha Blueprint"
+
+          cj = http.cookiejar.CookieJar()
+          opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+          csrf = {"t": None}
+          results = []
+
+          def record(name, status, detail=""):
+              results.append((name, status, detail)); print(f"[{status}] {name}: {detail}", flush=True)
+
+          def call(method, path, *, jb=None, raw=None, ctype=None, timeout=180):
+              h = {"Accept": "application/json"}; body = None
+              if jb is not None:
+                  body = json.dumps(jb).encode(); h["Content-Type"] = "application/json"
+              elif raw is not None:
+                  body = raw
+                  if ctype: h["Content-Type"] = ctype
+              if method in ("POST", "PUT", "PATCH", "DELETE") and csrf["t"]:
+                  h["X-CSRF-Token"] = csrf["t"]
+              req = urllib.request.Request(BASE + path, data=body, method=method, headers=h)
+              try:
+                  r = opener.open(req, timeout=timeout); return r.status, r.read(), dict(r.headers)
+              except urllib.error.HTTPError as e:
+                  return e.code, e.read(), dict(e.headers)
+
+          def login():
+              st, bd, _ = call("POST", "/api/auth/login", jb={"email": EMAIL, "password": PASSWORD})
+              if st == 200:
+                  try: csrf["t"] = json.loads(bd).get("csrf_token")
+                  except Exception: pass
+              return st, bd
+
+          def finalize():
+              fails = [r for r in results if r[1] == "FAIL"]
+              blocked = [r for r in results if r[1] == "BLOCKED"]
+              summary = os.environ.get("GITHUB_STEP_SUMMARY")
+              if summary:
+                  with open(summary, "a") as f:
+                      f.write(f"\n### Founder Alpha acceptance — phase `{PHASE}` @ `{SHA}`\n\n")
+                      f.write("| Criterion | Result | Detail |\n|---|---|---|\n")
+                      for n, s, d in results:
+                          f.write(f"| {n} | **{s}** | {d} |\n")
+              print(f"\n== phase {PHASE}: {len(results)} checks, {len(fails)} FAIL, {len(blocked)} BLOCKED ==", flush=True)
+              sys.exit(1 if fails else 0)
+
+          st, bd = login()
+          record("authentication", "PASS" if st == 200 else "FAIL", f"founder login {st}")
+          if st != 200: finalize()
+
+          if PHASE == "pre":
+              # real-model chat (no uploaded context required to prove the chat path answers)
+              st, bd, _ = call("POST", "/api/chat", jb={"message": "Hej, ar du redo?"})
+              if st == 200:
+                  j = json.loads(bd)
+                  ok = j.get("assistant_status") == "succeeded" and j.get("provider") == "ollama"
+                  record("real_model_chat", "PASS" if ok else "FAIL",
+                         f"status={j.get('assistant_status')}, provider={j.get('provider')}")
+              else:
+                  record("real_model_chat", "FAIL", f"chat {st}")
+
+              # upload original
+              boundary = "----foundera" + uuid.uuid4().hex
+              body = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{FILENAME}"\r\n'
+                      f"Content-Type: text/plain\r\n\r\n".encode() + CONTENT + f"\r\n--{boundary}--\r\n".encode())
+              st, bd, _ = call("POST", "/api/library/import", raw=body, ctype=f"multipart/form-data; boundary={boundary}")
+              job_id = json.loads(bd).get("id") if st == 200 else None
+              record("upload_original", "PASS" if job_id else "FAIL", f"import job {job_id}" if job_id else f"import {st}")
+
+              # wait for real embed/index
+              source_id = None; final_status = None
+              if job_id:
+                  for _ in range(150):
+                      st, bd, _ = call("GET", f"/api/library/jobs/{job_id}")
+                      if st != 200: time.sleep(2); continue
+                      j = json.loads(bd); final_status = j.get("status")
+                      fr = j.get("file_results") or []
+                      if fr and fr[0].get("source_id"): source_id = fr[0]["source_id"]
+                      if final_status in ("completed", "failed", "partial"): break
+                      time.sleep(2)
+              idx = None; chunks = None
+              if source_id:
+                  st, bd, _ = call("GET", f"/api/library/{source_id}")
+                  det = json.loads(bd) if st == 200 else {}
+                  idx = det.get("status"); chunks = det.get("chunk_count")
+              record("real_embed_and_index", "PASS" if (idx == "indexed" and (chunks or 0) > 0) else "FAIL",
+                     f"status={idx}, chunks={chunks}, job={final_status}")
+
+              # grounded retrieval via chat
+              cited = False
+              if source_id:
+                  st, bd, _ = call("POST", "/api/chat", jb={"message": QUESTION})
+                  if st == 200:
+                      j = json.loads(bd); srcs = j.get("sources") or []
+                      cited = any(str(s.get("document_id")) == str(source_id) for s in srcs)
+                  record("grounded_retrieval", "PASS" if cited else "FAIL", f"chat cited uploaded doc={cited}")
+              else:
+                  record("grounded_retrieval", "BLOCKED", "no indexed source")
+
+              # GENERATE Blueprint with the REAL model
+              draft = None
+              if cited:
+                  st, bd, _ = call("POST", "/api/blueprint/drafts", jb={"title": BP_TITLE, "query": "Var bor Zephyrine?"})
+                  if st == 201:
+                      draft = json.loads(bd)
+                      refs_ok = any(str(r.get("document_id")) == str(source_id) for r in (draft.get("source_refs") or []))
+                      prov = draft.get("provenance") or {}
+                      ok = (draft.get("status") == "draft" and draft.get("version") == 1
+                            and refs_ok and prov.get("originals_mutated") is False
+                            and (draft.get("model_provider") or "").lower().find("ollama") >= 0)
+                      record("blueprint_generate_real_model", "PASS" if ok else "FAIL",
+                             f"v{draft.get('version')} status={draft.get('status')} refs_match={refs_ok} "
+                             f"provider={draft.get('model_provider')} model={draft.get('model_name')}")
+                  else:
+                      record("blueprint_generate_real_model", "FAIL", f"generate {st}: {bd[:150]!r}")
+              else:
+                  record("blueprint_generate_real_model", "BLOCKED", "retrieval did not ground a source")
+
+              # inspect source refs (GET)
+              if draft:
+                  st, bd, _ = call("GET", f"/api/blueprint/drafts/{draft['id']}")
+                  ok = st == 200 and len((json.loads(bd).get("source_refs") or [])) >= 1
+                  record("blueprint_inspect_refs", "PASS" if ok else "FAIL", f"GET {st}, refs present={ok}")
+
+              # save a new VERSION (regenerate)
+              v2 = None
+              if draft:
+                  st, bd, _ = call("POST", f"/api/blueprint/drafts/{draft['id']}/regenerate", jb={"query": "Sammanfatta kort."})
+                  if st == 201:
+                      v2 = json.loads(bd)
+                      record("blueprint_new_version", "PASS" if v2.get("version") == 2 else "FAIL", f"regenerated v{v2.get('version')}")
+                  else:
+                      record("blueprint_new_version", "FAIL", f"regenerate {st}: {bd[:150]!r}")
+
+              # immutable original (the #329 chain)
+              if source_id:
+                  st, bd, _ = call("GET", f"/api/library/{source_id}/original")
+                  got = hashlib.sha256(bd).hexdigest() if st == 200 else None
+                  record("immutable_original", "PASS" if (st == 200 and got == EXPECTED_SHA) else "FAIL",
+                         f"status {st}, sha_match={got == EXPECTED_SHA}")
+
+              with open(STATE, "w") as f:
+                  json.dump({"source_id": source_id, "expected_sha": EXPECTED_SHA,
+                             "draft_v1": (draft or {}).get("id"), "draft_v2": (v2 or {}).get("id")}, f)
+              finalize()
+
+          else:  # post — after restart
+              state = json.load(open(STATE))
+              source_id = state.get("source_id"); exp = state.get("expected_sha")
+              draft_v2 = state.get("draft_v2"); draft_v1 = state.get("draft_v1")
+
+              # original + draft survived the restart
+              surv = []
+              if source_id:
+                  st, bd, _ = call("GET", f"/api/library/{source_id}")
+                  surv.append(st == 200 and json.loads(bd).get("status") == "indexed")
+                  st, bd, _ = call("GET", f"/api/library/{source_id}/original")
+                  surv.append(st == 200 and hashlib.sha256(bd).hexdigest() == exp)
+              if draft_v2:
+                  st, bd, _ = call("GET", f"/api/blueprint/drafts/{draft_v2}")
+                  surv.append(st == 200 and json.loads(bd).get("status") == "draft")
+              record("restart_persistence", "PASS" if (surv and all(surv)) else "FAIL",
+                     f"original+draft survived restart: {surv}")
+
+              # Founder APPROVES the draft (explicit, authenticated)
+              if draft_v2:
+                  st, bd, _ = call("POST", f"/api/blueprint/drafts/{draft_v2}/approve")
+                  if st == 200:
+                      j = json.loads(bd)
+                      ok = j.get("status") == "approved" and j.get("approved_by") and j.get("approved_at")
+                      record("founder_approval", "PASS" if ok else "FAIL",
+                             f"status={j.get('status')}, approved_by set={bool(j.get('approved_by'))}")
+                      # a second approve must be refused (no silent re-approval)
+                      st2, _, _ = call("POST", f"/api/blueprint/drafts/{draft_v2}/approve")
+                      record("approval_is_idempotent_guarded", "PASS" if st2 == 409 else "FAIL", f"second approve HTTP {st2}")
+                  else:
+                      record("founder_approval", "FAIL", f"approve {st}: {bd[:150]!r}")
+              else:
+                  record("founder_approval", "BLOCKED", "no draft to approve")
+              finalize()
+          PY
+          echo "driver written"
+
+      - name: Start real backend + worker (real Ollama providers)
+        working-directory: candidate/backend
+        run: |
+          mkdir -p "$STORAGE_ROOT"
+          nohup python _fa_boot.py > "$GITHUB_WORKSPACE/backend.pre.log" 2>&1 &
+          echo $! > "$GITHUB_WORKSPACE/backend.pid"
+          nohup python -c "import importlib.util as u, asyncio; s=u.spec_from_file_location('faboot','_fa_boot.py'); m=u.module_from_spec(s); s.loader.exec_module(m); import app.worker as w; asyncio.run(w._main())" > "$GITHUB_WORKSPACE/worker.pre.log" 2>&1 &
+          echo $! > "$GITHUB_WORKSPACE/worker.pid"
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null "$FA_BASE_URL/api/health" && { echo "backend healthy"; exit 0; }
+            sleep 1
+          done
+          echo "::error::backend did not become healthy — see backend.pre.log"; tail -60 "$GITHUB_WORKSPACE/backend.pre.log" || true; exit 1
+
+      - name: Acceptance — pre-restart (chat, upload, index, retrieve, generate Blueprint, version)
+        env:
+          RESOLVED_SHA: ${{ steps.sha.outputs.resolved }}
+        run: python "$GITHUB_WORKSPACE/founder_alpha_acceptance.py" pre
+
+      - name: Assert embedding-space identity on the real Ollama-indexed chunk
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          read -r MODEL NATIVE DIM < <(psql -h localhost -U postgres -d lifeos_foundera -tA -F' ' -c \
+            "SELECT embedding_model, embedding_native_dim, vector_dims(embedding)
+               FROM document_chunks WHERE embedding_model IS NOT NULL
+              ORDER BY created_at DESC NULLS LAST LIMIT 1;")
+          {
+            echo "### Embedding-space identity (real Ollama-indexed chunk) @ \`${{ steps.sha.outputs.resolved }}\`"
+            echo ""
+            echo "| Property | Value | Expected |"
+            echo "|---|---|---|"
+            echo "| embedding_model | $MODEL | $OLLAMA_EMBED_MODEL |"
+            echo "| embedding_native_dim | $NATIVE | $OLLAMA_NATIVE_DIM |"
+            echo "| vector_dims(embedding) | $DIM | 1536 |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$MODEL" = "$OLLAMA_EMBED_MODEL" || { echo "::error::embedding_model=$MODEL != $OLLAMA_EMBED_MODEL"; exit 1; }
+          test "$NATIVE" = "$OLLAMA_NATIVE_DIM" || { echo "::error::embedding_native_dim=$NATIVE != $OLLAMA_NATIVE_DIM"; exit 1; }
+          test "$DIM" = "1536" || { echo "::error::stored vector_dims=$DIM != 1536"; exit 1; }
+
+      - name: Restart real backend + worker (prove persistence)
+        working-directory: candidate/backend
+        run: |
+          kill "$(cat "$GITHUB_WORKSPACE/backend.pid")" 2>/dev/null || true
+          kill "$(cat "$GITHUB_WORKSPACE/worker.pid")" 2>/dev/null || true
+          sleep 3
+          nohup python _fa_boot.py > "$GITHUB_WORKSPACE/backend.post.log" 2>&1 &
+          echo $! > "$GITHUB_WORKSPACE/backend.pid"
+          nohup python -c "import importlib.util as u, asyncio; s=u.spec_from_file_location('faboot','_fa_boot.py'); m=u.module_from_spec(s); s.loader.exec_module(m); import app.worker as w; asyncio.run(w._main())" > "$GITHUB_WORKSPACE/worker.post.log" 2>&1 &
+          echo $! > "$GITHUB_WORKSPACE/worker.pid"
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null "$FA_BASE_URL/api/health" && { echo "backend healthy after restart"; exit 0; }
+            sleep 1
+          done
+          echo "::error::backend did not become healthy after restart"; tail -60 "$GITHUB_WORKSPACE/backend.post.log" || true; exit 1
+
+      - name: Acceptance — post-restart (persistence + Founder approval)
+        env:
+          RESOLVED_SHA: ${{ steps.sha.outputs.resolved }}
+        run: python "$GITHUB_WORKSPACE/founder_alpha_acceptance.py" post
+
+      - name: Stop background processes
+        if: always()
+        run: |
+          kill "$(cat "$GITHUB_WORKSPACE/backend.pid")" 2>/dev/null || true
+          kill "$(cat "$GITHUB_WORKSPACE/worker.pid")" 2>/dev/null || true
+
+      - name: Upload logs artifact (no secrets)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: founder-alpha-logs-${{ steps.sha.outputs.resolved }}
+          path: |
+            ${{ github.workspace }}/backend.pre.log
+            ${{ github.workspace }}/backend.post.log
+            ${{ github.workspace }}/worker.pre.log
+            ${{ github.workspace }}/worker.post.log
+            ${{ github.workspace }}/ollama.log
+            ${{ github.workspace }}/pytest_integration.log
+          if-no-files-found: ignore
