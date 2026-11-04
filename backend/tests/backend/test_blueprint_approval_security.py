@@ -252,3 +252,38 @@ def test_runtime_role_direct_write_is_refused_by_privilege(restore_privileges):
                 cur.execute("DELETE FROM blueprint_drafts")
     finally:
         appconn.close()
+
+
+def test_runtime_role_cannot_spoof_owner_guc_and_forge_approval(
+    superuser_db, restore_privileges
+):
+    """A raw mainai_app session must not become Founder authority by setting a custom GUC."""
+    owner_id, draft_id = _make_draft(superuser_db)
+    superuser_db.commit()
+    errors = _apply_policy()
+    assert errors == [], f"privilege policy reported errors: {errors}"
+
+    appconn = psycopg2.connect(get_settings().app_database_url)
+    appconn.autocommit = True
+    try:
+        with appconn.cursor() as cur:
+            cur.execute(
+                "SELECT set_config('app.current_user_id', %s, false)",
+                (str(owner_id),),
+            )
+            with pytest.raises(
+                psycopg2.Error,
+                match="unauthorized|founder|permission|identity",
+            ):
+                cur.execute(
+                    "SELECT blueprint_approve_draft(%s, %s)",
+                    (str(draft_id), "forged-by-runtime-role"),
+                )
+    finally:
+        appconn.close()
+
+    superuser_db.expire_all()
+    row = superuser_db.get(BlueprintDraft, draft_id)
+    assert row.status == "draft"
+    assert row.approved_at is None
+    assert row.approved_by is None
