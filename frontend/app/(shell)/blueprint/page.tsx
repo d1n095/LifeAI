@@ -22,7 +22,7 @@ export default function BlueprintPage() {
   const [selected, setSelected] = useState<BlueprintDraft | null>(null);
   const [title, setTitle] = useState("");
   const [query, setQuery] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -39,9 +39,27 @@ export default function BlueprintPage() {
     }
   }, []);
 
+  // Initial load. Done inline (not via refresh()) and await-first — no setState runs
+  // synchronously in the effect body (react-hooks/set-state-in-effect); `loading` starts true.
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    let active = true;
+    (async () => {
+      try {
+        const d = await api.blueprintDrafts();
+        if (active) {
+          setDrafts(d);
+          setError(null);
+        }
+      } catch (e) {
+        if (active) setError(errorMessage(e));
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   async function open(id: string) {
     setError(null);
