@@ -61,6 +61,17 @@ router = APIRouter(
 _MAX_TOP_K = 20
 _DEFAULT_TOP_K = 8
 
+# Synthesis-prompt bounds. Retrieval may ground a draft in up to _MAX_TOP_K sources (all of
+# which are recorded in source_refs for traceability), but the prompt actually sent to the local
+# model uses only the most-relevant few, each trimmed — a small local model (e.g. a 0.5B on a CPU
+# runner) otherwise takes long enough on a large prompt to exceed the provider timeout. This
+# trims the MODEL INPUT only; it never reduces what is recorded as the draft's sources.
+_SYNTH_PROMPT_MAX_SOURCES = 6
+_SYNTH_EXCERPT_CHARS = 400
+# Generous timeout for one local synthesis call: real local generation on CPU is slow, and a
+# working-but-slow generation must not be cut off and misreported as "model unavailable".
+_SYNTH_TIMEOUT_SECONDS = 240.0
+
 
 class GenerateDraftIn(BaseModel):
     title: str
@@ -208,10 +219,17 @@ def _synthesis_prompt(title: str, query: str | None, hits: list[dict[str, Any]])
         "DRAFT for the founder to review and edit — not a final or approved document."
     )
     lines.append("")
+    # Use only the most-relevant few sources in the prompt (hits arrive best-first from
+    # retrieval), each trimmed — see _SYNTH_PROMPT_MAX_SOURCES/_SYNTH_EXCERPT_CHARS. All grounded
+    # sources are still recorded in the draft's source_refs by the service; this bounds only what
+    # the local model has to read so generation finishes within the timeout.
+    prompt_hits = hits[:_SYNTH_PROMPT_MAX_SOURCES]
+    if len(hits) > len(prompt_hits):
+        lines.append(f"(Showing the {len(prompt_hits)} most relevant of {len(hits)} grounded sources.)")
     lines.append("Sources:")
-    for i, h in enumerate(hits, start=1):
+    for i, h in enumerate(prompt_hits, start=1):
         excerpt = str(h.get("text") or h.get("excerpt") or "").strip().replace("\n", " ")
-        lines.append(f"[{i}] (document {h.get('document_id')}) {excerpt[:800]}")
+        lines.append(f"[{i}] (document {h.get('document_id')}) {excerpt[:_SYNTH_EXCERPT_CHARS]}")
     return "\n".join(lines)
 
 
@@ -244,7 +262,7 @@ async def _synthesize_with_active_model(
         Message(role="user", content=prompt),
     ]
     try:
-        result = await provider.chat(messages, model=model)
+        result = await provider.chat(messages, model=model, timeout=_SYNTH_TIMEOUT_SECONDS)
     except ProviderError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
