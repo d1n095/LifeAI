@@ -223,7 +223,22 @@ def test_no_documents_uploaded(client, _fake_chat_ok):
 def test_successful_retrieval_has_no_context_status(client, superuser_db, _fake_chat_ok):
     founder_id = _founder_id(superuser_db)
     doc = _make_document(superuser_db, founder_id, "Aktuellt dokument", status=IndexStatus.indexed)
-    superuser_db.add(DocumentChunk(document_id=doc.id, owner_id=founder_id, chunk_index=0, text="Relevant innehall.", embedding=MATCHING_VECTOR))
+    # Stamp the active embedding space (PR #333) so this chunk is retrievable exactly as a real
+    # ingested chunk — this is the one scenario in this file that requires a retrieval HIT.
+    from app.providers.registry import resolve_active
+
+    _p, _embed_model = resolve_active(superuser_db, role="embedding")
+    superuser_db.add(
+        DocumentChunk(
+            document_id=doc.id,
+            owner_id=founder_id,
+            chunk_index=0,
+            text="Relevant innehall.",
+            embedding=MATCHING_VECTOR,
+            embedding_model=_embed_model,
+            embedding_native_dim=len(MATCHING_VECTOR),
+        )
+    )
     superuser_db.commit()
     csrf = _login(client)
 
