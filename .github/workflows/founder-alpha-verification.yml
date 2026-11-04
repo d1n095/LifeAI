@@ -220,7 +220,8 @@ jobs:
           # acceptance driver below, not by a fake-provider test. These two exercise the
           # embedding-space guard + the blueprint schema/RLS against the real migrated DB.
           python -m pytest tests/backend/rag/test_embedding_space.py \
-                           tests/backend/test_blueprint_draft.py -q \
+                           tests/backend/test_blueprint_draft.py \
+                           tests/backend/test_blueprint_approval_security.py -q \
             | tee "$GITHUB_WORKSPACE/pytest_integration.log"
 
       - name: Write the real-app bootstrap (real providers; ONLY email faked)

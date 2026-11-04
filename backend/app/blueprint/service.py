@@ -111,24 +111,37 @@ def generate_blueprint_draft(
 def approve_blueprint_draft(
     db: Session, *, owner_id: uuid.UUID, draft_id: uuid.UUID, approved_by: str
 ) -> BlueprintDraft:
-    """Explicit Founder approval — the ONLY path from 'draft' to 'approved'. Separate from
-    generation so an AI-generated draft is never treated as an approved decision."""
-    from datetime import datetime
+    """Explicit Founder approval — the ONLY path from 'draft' to 'approved'.
+
+    Integrity is enforced in the DATABASE, not here: approval runs through the owner-scoped,
+    transaction-safe SECURITY DEFINER function `blueprint_approve_draft` (migration 0071), which
+    takes a row lock (`FOR UPDATE`) and re-checks status inside the lock, so two concurrent
+    approvals of the same draft serialize and exactly one wins. In production the runtime role
+    holds no direct UPDATE on blueprint_drafts (s1a_privilege_policy) and may only EXECUTE this
+    function, so approval state cannot be forged by raw SQL; a BEFORE UPDATE/DELETE guard trigger
+    additionally makes an approved draft immutable and undeletable. owner scoping comes from the
+    session's `app.current_user_id` (set by the request context) and is re-asserted by the
+    function; `owner_id` here is only an early sanity check for a clean error."""
+    from sqlalchemy import text as _sa_text
 
     row = db.get(BlueprintDraft, draft_id)
     if row is None or row.owner_id != owner_id:
         raise BlueprintError(f"blueprint draft {draft_id} not found for owner")
-    if row.status != "draft":
-        raise BlueprintError(f"blueprint draft {draft_id} is not in 'draft' status (is '{row.status}')")
-    row.status = "approved"
-    row.approved_at = datetime.utcnow()
-    row.approved_by = approved_by
-    prov = dict(row.provenance or {})
-    prov["pending_founder_approval"] = False
-    prov["approved_by_founder"] = True
-    row.provenance = prov
-    db.flush()
-    return row
+
+    try:
+        db.execute(
+            _sa_text("SELECT blueprint_approve_draft(:draft_id, :approved_by)"),
+            {"draft_id": str(draft_id), "approved_by": approved_by},
+        )
+    except Exception as exc:  # DB-enforced guard rejected it (not-found / not-draft / integrity)
+        db.rollback()
+        raise BlueprintError(f"blueprint draft {draft_id} could not be approved: {exc}") from exc
+
+    db.expire(row)
+    refreshed = db.get(BlueprintDraft, draft_id)
+    if refreshed is None:  # pragma: no cover - approval just succeeded
+        raise BlueprintError(f"blueprint draft {draft_id} vanished after approval")
+    return refreshed
 
 
 def list_blueprint_drafts(
