@@ -635,4 +635,52 @@ resolution were required (single head confirmed).
   invoke the Blueprint step). Boundaries unchanged: no merge/STRATO/paid/destructive-migration/prod
   data; first_cycle_go=false; independent review required (not self-certified).
 
+### 14b. Founder Alpha final integration verification [candidate @ 1b38597 — real-Ollama CI + full static checks; review required]
+
+The complete, launch-candidate work (extends PR #340 in place; no new PR). All on the candidate
+branch `claude/founder-alpha-blueprint-draft`.
+
+- **Complete candidate (deterministic reconstruction):** `#323 trunk (04b27e9) + #328 (fa840e4) +
+  #329 (830ab4d) + #327 (69cdaf3) + live #340 head`. Merges cleanly (verified locally), single
+  0069 + single 0070 head (no #326 multi-head), blueprint router + #329 `/original` both present.
+- **Migration chain (item 5):** `alembic upgrade head` clean on real Postgres (0066→…→0069→0070);
+  0070 reversible (downgrade→upgrade restores table + unique index); additive, non-destructive,
+  single head. Fixed a real gap: 0070 now applies `blueprint_drafts` RLS **in the migration**
+  (ENABLE+FORCE+policy, matching the 0060 precedent and the exact `app/rls.py` expression), which
+  repairs `test_migration_roundtrip` (previously the policy was only in `app/rls.py`, so a
+  downgrade→upgrade round-trip dropped and did not restore it).
+- **#333 source-grounding regression (item 4):** root cause = the active-embedding-space guard
+  (`app/rag/vector_store.py`) scopes retrieval to the active `(embedding_model, native_dim)`; the
+  real ingest path stamps every chunk (proven by the real-Ollama chunk-identity assertion), but
+  three pre-#333 test fixtures inserted unstamped chunks and then exercised retrieval
+  (`test_chat_source_grounding`, `test_chat_context_status::test_successful_retrieval_has_no_context_status`,
+  `test_workbench` analyze). Fix = stamp those fixtures with the active space as production does —
+  the guard is unchanged; added an explicit test that a legacy NULL-identity chunk is NOT mixed
+  into an active-space query (isolation stated, not hidden; remedy for real legacy data =
+  re-index). Other unstamped-chunk tests that never retrieve (erasure/purge/claims/RLS/memory) are
+  intentionally left unchanged.
+- **New CI (items 1–2):** `.github/workflows/founder-alpha-verification.yml` — reconstructs the
+  complete candidate, stands up **real Ollama (all-minilm + qwen2.5:0.5b) + pgvector + filesystem**,
+  and runs the full chain (founder login → real-model chat → upload → real embed/index → grounded
+  retrieval → **generate Blueprint with the real model** → inspect refs → save v2 → restart →
+  retrieve original + draft → **Founder approves**), plus the chunk embedding-space identity
+  assertion and pre-serve pytest (embedding-space + grounding + blueprint unit + e2e). No paid
+  provider reachable (empty fallback chain).
+- **Local evidence:** 123+ passed on real Postgres/pgvector (migration round-trip, grounding,
+  context_status, workbench, embedding-space isolation, blueprint unit + e2e, openapi).
+- **Frontend static checks (item 3):** `tsc --noEmit` clean, `eslint .` 0 problems, `next build`
+  succeeds (`/blueprint` route prerendered). Fixed one real eslint error in the Blueprint page
+  (`react-hooks/set-state-in-effect`) by loading await-first in the mount effect.
+- **CI run IDs @ 1b38597:** Founder Alpha verification (real local) = **41844888898**; CI (push) =
+  **41844888832**. (Earlier same-candidate runs: 41843149467 / 41844453292 superseded by pushes.)
+  Results recorded here as they complete.
+- **Items 6–7 (deferred, correctly):** independent review requested at the frozen SHA (no
+  self-cert) — PR #340 review-request comment lists the auth/RLS/concurrency/provenance/source-
+  refs/model-failure/approval dimensions. The executable startup + deployment proposal is produced
+  only after CI is green (item 7's precondition).
+- **Known pre-existing (out of scope, flagged):** `npm audit` CI job (the `next`-pinning issue, per
+  CLAUDE.md handled on its own branch); Playwright chromium-install fails on the runner image
+  (infra); one pre-existing F841 (unused `founder_id`) in an unrelated `test_workbench` function
+  (backend ruff is not a CI gate). None are introduced by this candidate.
+
 ---
