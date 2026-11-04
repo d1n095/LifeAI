@@ -1,0 +1,155 @@
+name: Examiner — PR340 db83 security recheck
+
+on:
+  pull_request:
+    branches:
+      - claude/founder-alpha-blueprint-draft
+    paths:
+      - backend/tests/backend/test_blueprint_approval_security.py
+      - backend/tests/backend/test_blueprint_examiner_db83.py
+      - .github/workflows/examiner-pr340-db83.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_test
+  APP_DATABASE_URL: postgresql://mainai_app:mainai_app_test_pw@localhost:5432/lifeos_test
+  REDIS_URL: redis://localhost:6379/1
+  SECRET_KEY: ci-test-secret-key
+  FOUNDER_EMAIL: founder@lifeos.local
+  FOUNDER_PASSWORD: TestFounderPassword123!
+  FRONTEND_ORIGINS: http://127.0.0.1:3020
+  PUBLIC_APP_URL: http://127.0.0.1:3020
+  ENABLE_SCHEDULED_CLEANUP: "false"
+  PGPASSWORD: postgres
+
+jobs:
+  blueprint-authority:
+    name: Examiner — unchanged GUC probe, roles, and 0072 roundtrip
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+        working-directory: backend
+      - name: Run adopted #342 probe unchanged
+        run: python -m pytest tests/backend/test_blueprint_approval_security.py -v
+        working-directory: backend
+      - name: Provision policy-applied examiner database
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_examiner_db83
+          APP_DATABASE_URL: postgresql://mainai_app:mainai_app_test_pw@localhost:5432/lifeos_examiner_db83
+        run: |
+          set -euo pipefail
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 -c "
+            DO \$\$
+            BEGIN
+              IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='mainai_app') THEN
+                CREATE ROLE mainai_app LOGIN PASSWORD 'mainai_app_test_pw';
+              ELSE
+                ALTER ROLE mainai_app LOGIN PASSWORD 'mainai_app_test_pw';
+              END IF;
+            END
+            \$\$;"
+          psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS lifeos_examiner_db83"
+          psql -h localhost -U postgres -d postgres -c "CREATE DATABASE lifeos_examiner_db83"
+          psql -h localhost -U postgres -d lifeos_examiner_db83 -v ON_ERROR_STOP=1 -c "
+            GRANT USAGE ON SCHEMA public TO mainai_app;
+            GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO mainai_app;
+            GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO mainai_app;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO mainai_app;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO mainai_app;"
+          alembic upgrade head
+          python scripts/security/apply_runtime_privileges.py
+      - name: Verify runtime-role attributes and escalation refusal
+        run: |
+          set -euo pipefail
+          ATTRS="$(psql -h localhost -U postgres -d postgres -Atc "SELECT rolsuper||':'||rolcreaterole||':'||rolcanlogin FROM pg_roles WHERE rolname='mainai_app'")"
+          test "$ATTRS" = "false:false:true"
+          test "$(psql -h localhost -U postgres -d postgres -Atc "SELECT count(*) FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.member WHERE r.rolname='mainai_app'")" = "0"
+          if PGPASSWORD=mainai_app_test_pw psql -h localhost -U mainai_app -d lifeos_examiner_db83 -v ON_ERROR_STOP=1 -c "SET ROLE postgres"; then
+            echo "::error::mainai_app unexpectedly SET ROLE postgres"
+            exit 1
+          fi
+          if PGPASSWORD=mainai_app_test_pw psql -h localhost -U mainai_app -d lifeos_examiner_db83 -v ON_ERROR_STOP=1 -c "SET SESSION AUTHORIZATION postgres"; then
+            echo "::error::mainai_app unexpectedly SET SESSION AUTHORIZATION postgres"
+            exit 1
+          fi
+      - name: Enumerate effective function executors
+        run: |
+          set -euo pipefail
+          psql -h localhost -U postgres -d lifeos_examiner_db83 -P pager=off -c "
+            SELECT rolname, rolcanlogin, rolsuper,
+                   has_function_privilege(rolname, 'public.blueprint_approve_draft(uuid,text)', 'EXECUTE') AS can_execute
+              FROM pg_roles
+             WHERE has_function_privilege(rolname, 'public.blueprint_approve_draft(uuid,text)', 'EXECUTE')
+             ORDER BY rolname;"
+          test "$(psql -h localhost -U postgres -d lifeos_examiner_db83 -Atc "SELECT has_function_privilege('public', 'public.blueprint_approve_draft(uuid,text)', 'EXECUTE')")" = "f"
+      - name: Verify 0072 downgrade and upgrade roundtrip
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_examiner_db83
+          APP_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_examiner_db83
+        run: |
+          set -euo pipefail
+          alembic downgrade 0071_blueprint_approval_guard
+          test "$(alembic current | awk '{print $1}')" = "0071_blueprint_approval_guard"
+          alembic upgrade 0072_blueprint_approve_identity
+          test "$(alembic current | awk '{print $1}')" = "0072_blueprint_approve_identity"
+
+  retry-boundary:
+    name: Examiner — non-unique IntegrityError classification
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+        working-directory: backend
+      - name: Verify non-unique errors are not swallowed
+        run: python -m pytest tests/backend/test_blueprint_examiner_db83.py -v
+        working-directory: backend
