@@ -49,7 +49,7 @@ GitHub comments all post as `d1n095`; agents therefore name their role/session i
 
 | Agent | Role | Current state |
 |-------|------|---------------|
-| Claude Code (builder session) | Builder, #340 | **ACTIVE** on W1–W3 (separate branches); frozen on #340 until Codex verdict |
+| Claude Code (builder session) | Builder, #340 | **ACTIVE** on W1–W2, W3 queued (separate branches); frozen on #340 until Codex verdict |
 | Claude (claude.ai session) | Coordinator, registry, Founder reporting | **ACTIVE** |
 | Codex | Independent examiner, #340 | **ACTIVE** — handoff relayed; pickup at `db83ab9` **UNCONFIRMED** |
 | ChatGPT | Optional secondary reviewer | Idle |
@@ -65,7 +65,7 @@ GitHub comments all post as `d1n095`; agents therefore name their role/session i
 | A4 | Threat model B (compromised app process cannot forge approval) | Unassigned | **BLOCKED** | — | — | A2 verdict; W3; removal of runtime superuser `DATABASE_URL` from backend/worker; founder-signed approval (#316/#318 passkeys) | Not claimed by 0072 | Coordinator defines requirements after A2; Founder decides whether B gates Founder Alpha |
 | A5 | Founder Alpha host | Founder | **[DECISION]** — deferred | — | — | A2 | Not STRATO by default | Coordinator compares minimum hardware after A2 |
 | W1 | Pin Playwright jobs (`e2e-tests`, `same-origin-proxy-test`, `combined-container-verify`) to `ubuntu-24.04` | Claude Code (builder) | **ACTIVE** | new branch `claude/ci-e2e-runner-pin` → base #340 branch (no merge) | base `db83ab9` | — | `ubuntu-latest` = 26.04, chromium install unsupported | Push branch, report E2E job IDs + whether approval flow is exercised |
-| W2 | Local-only provider guarantee at `db83ab9` (defaults `openai`, fallback `openai,anthropic,gemini`, admin/DB runtime override) | Claude Code (builder) | **ACTIVE** — read-only | — | `db83ab9` | — | — | Findings with file:line to coordinator; no code until approved |
+| W2 | **Ollama service in the VPS topology** (Founder Alpha blocker #1, `FOUNDER_ALPHA_STARTUP_AND_DEPLOYMENT.md` §7): add to `docker-compose.vps.yml` on the internal network, no ports, models via env, healthcheck + limits; extend `vps-compose-verify` to boot with it | Claude Code (builder) | **ACTIVE** | new branch `claude/vps-ollama-runtime` from `db83ab9` (no merge) | base `db83ab9` | — | Local-only/no-paid-fallback already VERIFIED by founder-alpha-verification (empty `CHAT_FALLBACK_ORDER`) — do not redo | CI job IDs proving the VPS topology boots with Ollama + a real model call; production model stays a Founder [DECISION] |
 | W3 | Runtime privilege-separation design (remove superuser `DATABASE_URL` from backend/worker runtime) — prerequisite for A-proper and B | Claude Code (builder) | **PENDING** — after W1/W2 | — | `db83ab9` | — | Every `migration_engine` use inventoried | One-page design to coordinator; no code until Codex verdict + approval |
 
 ---
