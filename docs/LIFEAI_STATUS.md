@@ -559,3 +559,14 @@ superseded conclusion silently — supersede it here and in the body.
   wiring the operating cycle's task selection to read-only GitHub intake (composition of
   existing public primitives). 3 integration tests + 24 regression pass on real Postgres.
   Read-only; first_cycle_go=false; independent review required (no self-cert).
+- _2026-11-04_ — Priority 1/2 (PR #339, `claude/coordination-authorized-dispatch`, stacked on
+  #338): added `agent_coordination/authorized_dispatch_step.py::dispatch_or_wait` — the dispatch
+  step after task selection, composing existing public primitives (evaluate_dispatch_readiness +
+  get_real_adapter + dispatch_assignment) into: real dispatch when a provider is founder-enabled,
+  else durable WAITING_FOR_PROVIDER (ready→blocked, named capability) + resume. HONEST: no
+  supported agent (claude-code/cursor-agent/codex) is enabled/installed here, so a real external
+  round-trip is unavailable and never simulated; even an "enabled" provider without an argv
+  template fails closed to REAL_PROVIDER_NOT_CONFIGURED via NotConfiguredAdapter. 4 tests + 14
+  regression pass on real Postgres (no injected adapter). Blocker: real round-trip needs a
+  separately-reviewed Agent Runtime + founder-enabled installed CLI. Independent review required;
+  first_cycle_go=false.
