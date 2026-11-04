@@ -30,9 +30,23 @@ class MainAITaskWorktreeRecoveryState(str, enum.Enum):
     claimed_for_takeover = "claimed_for_takeover"
 
 
+# The Founder-supervised activation integration branch (see docs/BRANCH_REGISTRY.md and the
+# activation readiness package). Every `mainai/` branch is an integration/release branch and is
+# protected by prefix; this exact name is also listed explicitly.
+ACTIVATION_INTEGRATION_BRANCH = "mainai/integration-founder-supervised-v1"
+PROTECTED_BRANCH_PREFIXES = ("mainai/",)
+
 # A working branch must never be one of these -- enforced both here (defense in depth) and by
-# migration 0033's ck_mainai_task_worktrees_branch_not_protected CHECK constraint.
-PROTECTED_BRANCHES = frozenset({"main", "master", "claude/det-kommer-mer-879lcm"})
+# the ck_mainai_task_worktrees_branch_not_protected CHECK constraint (migration 0033, widened
+# by 0089 to the activation branch and the `mainai/` prefix).
+PROTECTED_BRANCHES = frozenset({"main", "master", "claude/det-kommer-mer-879lcm", ACTIVATION_INTEGRATION_BRANCH})
+
+
+def is_protected_branch(name: str | None) -> bool:
+    """True for every branch a task worktree must never write to directly."""
+    if not isinstance(name, str) or not name:
+        return False
+    return name in PROTECTED_BRANCHES or name.startswith(PROTECTED_BRANCH_PREFIXES)
 
 
 class MainAIRecoveryStatus(str, enum.Enum):

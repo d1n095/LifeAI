@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, FetchedValue, ForeignKey, Integer, String, Text
+from sqlalchemy import BigInteger, DateTime, Enum, FetchedValue, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -72,3 +72,4 @@ class Message(Base):
     # `ORDER BY sequence_number` becomes correct for a conversation only once
     # `count_unsequenced_messages()` reports 0 for it.
     sequence_number: Mapped[int | None] = mapped_column(Integer, nullable=True, server_default=FetchedValue())
+    recall_generation: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)

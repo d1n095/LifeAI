@@ -12,6 +12,9 @@ GitHub write access is real (app/integrations/github_client.py) but gated hard:
   - `settings.github_write_enabled=False` (the default): prepare_github_pr() only ever
     PROPOSES an exact branch/commit/PR — it never calls GitHub. This is the "read/analyze/
     propose" phase CLAUDE.md's section 7 asks to start with.
+  - `settings.mainai_legacy_prepare_pr_writes_enabled=False` (the default): even when
+    github_write_enabled is on, this legacy Contents-API route refuses to open a non-draft
+    PR. Path A draft PRs are the write path that may be enabled later.
   - Even with write enabled, a task must have an approved review AND recorded test results
     before a PR can be prepared — see _require_approved_with_tests().
   - attempt_auto_merge() ALWAYS reports blocked in this slice: there is no merge method in
@@ -44,6 +47,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.mainai_founder_ops.assignment_guard import DuplicateWorkError, assert_agent_dispatch_allowed
 from app.integrations.github_client import GitHubClientError, get_github_client
 from app.models.agent_task import AgentRole, AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
 from app.project_memory import ingest_github_status
@@ -120,6 +124,19 @@ def get_task(db: Session, task_id: uuid.UUID) -> AgentTask:
     return task
 
 
+def _lock_agent_task(db: Session, task_id: uuid.UUID) -> AgentTask:
+    """Serialize paid dispatch on the AgentTask row (D2)."""
+    task = db.execute(
+        select(AgentTask)
+        .where(AgentTask.id == task_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if task is None:
+        raise ValueError(f"Ingen AgentTask med id={task_id}")
+    return task
+
+
 def list_tasks(db: Session, *, status: AgentTaskStatus | None = None) -> list[AgentTask]:
     stmt = select(AgentTask).order_by(AgentTask.created_at.desc())
     if status is not None:
@@ -183,10 +200,29 @@ async def dispatch_task(db: Session, task_id: uuid.UUID, *, dispatched_by: str) 
     """Sends the task to the code agent (a chat_with_fallback() call, same provider chain as
     ordinary chat) and records the raw response as an event. Does not parse/apply the diff —
     that is a deliberately separate, later increment (see module docstring's scope note); this
-    slice proves the dispatch -> record -> review -> propose chain end to end."""
-    task = get_task(db, task_id)
+    slice proves the dispatch -> record -> review -> propose chain end to end.
+
+    Ownership is taken atomically (FOR UPDATE + status → dispatched) BEFORE the paid
+    provider call so concurrent HTTP dispatch cannot buy two prompts for one task (D2).
+    A failed paid call reverts `dispatched` → `created` so a later retry is recoverable
+    (R3) without opening a second in-flight prompt.
+    """
+    task = _lock_agent_task(db, task_id)
+    assert_agent_dispatch_allowed(task)
+    task.status = AgentTaskStatus.dispatched
+    task.updated_at = datetime.utcnow()
+    db.commit()
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=_build_task_prompt(task))]
-    result, attempted = await chat_with_fallback(db, messages)
+    try:
+        result, attempted = await chat_with_fallback(db, messages)
+    except Exception:
+        failed = _lock_agent_task(db, task_id)
+        if failed.status == AgentTaskStatus.dispatched:
+            failed.status = AgentTaskStatus.created
+            failed.updated_at = datetime.utcnow()
+            db.commit()
+        raise
+    task = get_task(db, task_id)
     return _record_event(
         db,
         task,
@@ -311,6 +347,13 @@ async def prepare_github_pr(db: Session, task_id: uuid.UUID, *, branch_name: str
     )
 
     settings = get_settings()
+    if settings.github_write_enabled and not settings.mainai_legacy_prepare_pr_writes_enabled:
+        raise ValueError(
+            "Legacy non-draft prepare-pr GitHub writes are gated off until an explicit "
+            "Founder decision (MAINAI_LEGACY_PREPARE_PR_WRITES_ENABLED). GITHUB_WRITE_ENABLED "
+            "alone must not open this Contents-API route. Path A draft PRs are the write path "
+            "that may be enabled later. This call stays proposal-only."
+        )
     if not settings.github_write_enabled:
         proposal = {"branch_name": branch_name, "base_branch": base_branch, "pr_title": pr_title, "pr_body": pr_body, "diff": diff_response}
         _record_event(
@@ -337,7 +380,9 @@ async def prepare_github_pr(db: Session, task_id: uuid.UUID, *, branch_name: str
         )
         _record_event(db, task, event_type=AgentTaskEventType.github_commit_pushed, payload={"branch": branch_name, "commit": commit_result.get("commit", {}).get("sha")}, created_by=prepared_by)
 
-        pr = await client.create_pull_request(title=pr_title, body=pr_body, head=branch_name, base=base_branch)
+        pr = await client.create_pull_request(
+            title=pr_title, body=pr_body, head=branch_name, base=base_branch, draft=True
+        )
         _record_event(
             db,
             task,

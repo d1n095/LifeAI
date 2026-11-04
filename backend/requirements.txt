@@ -18,3 +18,4 @@ slowapi==0.1.9
 redis==5.2.1
 alembic==1.13.3
 apscheduler==3.10.4
+cryptography==43.0.3

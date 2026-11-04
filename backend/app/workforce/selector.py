@@ -40,6 +40,7 @@ def score_candidates(
     data_sensitivity: str = "internal",
     prefer_local_only: bool = False,
     cost_ceiling_usd: float | None = None,
+    required_provider_type: str | None = None,
 ) -> list[CandidateScore]:
     profiles = list(
         db.execute(
@@ -56,6 +57,8 @@ def score_candidates(
         except Exception:
             continue
         caps = list(profile.capability_tags or [])
+        if required_provider_type is not None and profile.provider_type != required_provider_type:
+            continue
         if required_capability not in caps and caps:
             # Allow empty-tag profiles only as weak fallbacks.
             continue
@@ -121,6 +124,8 @@ def score_candidates(
             "status": profile.status,
             "capability_reality_status": reality_status,
             "capability_reality_factor": reality_factor,
+            "required_provider_type": required_provider_type,
+            "provider_type": profile.provider_type,
             # Explicit: no self-reported confidence enters this score.
             "used_agent_self_confidence": False,
             "capability_reality_is_not_authority": True,

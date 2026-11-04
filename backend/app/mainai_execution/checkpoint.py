@@ -59,3 +59,20 @@ def latest_checkpoint_for_step(db: Session, *, task_id: uuid.UUID, job_id: uuid.
         if row.executor_state.get("job_id") == job_id_str and row.executor_state.get("step") == step:
             return row
     return None
+
+
+def latest_task_checkpoint_for_step(db: Session, *, task_id: uuid.UUID, step: str) -> MainAICheckpoint | None:
+    """Most recent checkpoint for this task+step across attempts.
+
+    Publication and paid work_result must be reused after an ambiguous crash so a
+    later job cannot buy a second provider call or a second remote effect.
+    """
+    rows = (
+        db.execute(select(MainAICheckpoint).where(MainAICheckpoint.task_id == task_id).order_by(MainAICheckpoint.created_at.desc()))
+        .scalars()
+        .all()
+    )
+    for row in rows:
+        if row.executor_state.get("step") == step:
+            return row
+    return None

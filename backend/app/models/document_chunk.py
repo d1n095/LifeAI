@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, Integer, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -49,5 +49,6 @@ class DocumentChunk(Base):
     # NULL for every ordinary text chunk (app/rag/ingest.py never sets these).
     start_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     end_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    recall_generation: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
 
     document = relationship("Document", viewonly=True)

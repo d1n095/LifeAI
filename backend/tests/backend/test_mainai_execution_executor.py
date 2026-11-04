@@ -90,6 +90,8 @@ def _single_task_plan(db_session, goal, **spec_kwargs) -> MainAITask:
     create_plan()'s own call to recompute_task_readiness() (it has no dependencies)."""
     spec_kwargs.setdefault("description", "do the work")
     spec_kwargs.setdefault("task_type", "read_only_audit")
+    if spec_kwargs.get("task_type") == "repo_edit":
+        spec_kwargs.setdefault("target_files", ["backend/tests/backend/test_ok.py"])
     planner.create_plan(db_session, goal=goal, rationale="single task", tasks=[PlannedTaskSpec(**spec_kwargs)], created_by="test")
     db_session.commit()
     return db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
@@ -1076,7 +1078,9 @@ async def test_run_task_execution_job_repo_edit_proposes_only_with_real_local_ve
     task = _single_task_plan(
         db_session,
         goal,
+        description="Add backend/tests/test_scratch_edit.py",
         task_type="repo_edit",
+        target_files=["backend/tests/test_scratch_edit.py"],
         verification_plan=[{"kind": "targeted_tests", "target": "tests/test_scratch_edit.py"}],
     )
 
@@ -1151,7 +1155,7 @@ async def test_run_task_execution_job_repo_edit_with_an_absolute_ai_proposed_pat
     )
 
     goal = _goal(db_session, owner_id)
-    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[])
+    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}])
 
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
@@ -1193,7 +1197,7 @@ async def test_run_task_execution_job_repo_edit_with_a_symlink_escape_never_writ
     )
 
     goal = _goal(db_session, owner_id)
-    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[])
+    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}])
 
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
@@ -1235,7 +1239,7 @@ async def test_mutation_disabling_the_syntactic_path_guard_alone_is_still_caught
     )
 
     goal = _goal(db_session, owner_id)
-    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[])
+    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}])
 
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
@@ -1365,7 +1369,9 @@ async def test_finalize_repo_edit_resumes_correctly_when_the_branch_already_exis
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat('{"files": [{"path": "x.py", "content": "x = 1\\n"}], "commit_message": "test edit"}'))
 
     goal = _goal(db_session, owner_id)
-    task = _single_task_plan(db_session, goal, task_type="repo_edit")
+    task = _single_task_plan(
+        db_session, goal, task_type="repo_edit", description="edit x.py", target_files=["x.py"]
+    )
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
 
@@ -1419,13 +1425,14 @@ async def test_handle_open_pr_resumes_correctly_without_creating_a_duplicate_pr(
     created_prs: list[dict] = []
     create_calls = {"n": 0}
 
-    async def _fake_create_pull_request(self, *, title, body, head, base):
+    async def _fake_create_pull_request(self, *, title, body, head, base, draft=False):
         # Mirrors a real GitHub quirk this fix relies on: create_pull_request()'s own `head`
         # is a bare branch name (same-repo PR), but the pulls-LIST endpoint's `head` filter
         # requires the owner-prefixed `owner:branch` form -- so the stored/comparable value
         # here is intentionally owner-prefixed even though the create call itself wasn't.
         create_calls["n"] += 1
-        pr = {"number": 42, "html_url": "https://github.com/d1n095/LifeAI/pull/42", "head": f"d1n095:{head}", "base": base, "state": "open"}
+        create_calls["draft"] = draft
+        pr = {"number": 42, "html_url": "https://github.com/d1n095/LifeAI/pull/42", "head": f"d1n095:{head}", "base": base, "state": "open", "draft": draft}
         created_prs.append(pr)
         return pr
 
@@ -1460,6 +1467,7 @@ async def test_handle_open_pr_resumes_correctly_without_creating_a_duplicate_pr(
     assert second["pull_request_number"] == 42
 
     assert create_calls["n"] == 1, "create_pull_request() must never be called twice for the same head/base"
+    assert create_calls["draft"] is True, "Path A must open draft PRs only"
 
 
 def test_record_engineering_lesson_for_the_mark_completed_mark_failed_finalize_ordering_fix(db_session, owner_id):
@@ -1817,7 +1825,7 @@ async def test_run_task_execution_job_repo_edit_real_worktree_with_a_symlink_esc
     monkeypatch.setattr(OpenAIProvider, "chat", _symlink_planting_chat)
 
     goal = _goal(db_session, owner_id)
-    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[])
+    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}])
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
 
@@ -1851,7 +1859,7 @@ async def test_handle_repo_edit_refuses_to_reuse_a_worktree_whose_ownership_does
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat('{"files": [{"path": "x.py", "content": "x = 1\\n"}], "commit_message": "x"}'))
 
     goal = _goal(db_session, owner_id)
-    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[])
+    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}])
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
 

@@ -277,9 +277,14 @@ mot riktade botattacker fortfarande inte implementerat (se ovan, oförändrat). 
 protection för CI måste aktiveras manuellt i GitHub-inställningarna — se
 `docs/OPERATIONS.md`.
 
-## 3. `brace-expansion` (GHSA-mh99-v99m-4gvg) — inget kompatibelt fix ännu
+## 3. [LÖST 2026-10-15] `brace-expansion` (GHSA-mh99-v99m-4gvg)
 
-**Status: dokumenterad, avsiktligt allowlistad undantag i CI, inte löst.** `npm audit`
+**Nuvarande status: löst genom patchade, major-kompatibla transitive overrides.**
+Historiken nedan beskriver varför det tidigare undantaget behövdes. Från 2026-10-15
+används `brace-expansion@1.1.21` respektive `5.0.12`; advisory-id:na `1124334`,
+`1130588` och `1130591` har tagits bort ur CI-undantaget.
+
+**Tidigare status:** `npm audit`
 flaggar 9 höga fynd som alla härrör från EN advisory: `brace-expansion` <=5.0.7 (DoS via
 obegränsad expansion → OOM-krasch), nådd transitivt via `eslint`/`minimatch`s hela
 dev-verktygskedja (`@eslint/config-array`, `@eslint/eslintrc`, `eslint-plugin-import`,
@@ -328,6 +333,50 @@ ID-specifika allowlistan att sluta matcha och `npm audit`-jobbet att falla rött
 (`claude/frontend-npm-audit-ghsa-mh99-source-ids`, grenad från huvudgrenen — INTE från PR
 #31:s branch), enligt samma mönster som PR #8/#9-fallet ovan i `CLAUDE.md`. Alla tre id:n
 behålls i allowlistan ifall samma churn upprepas.
+
+## 3a. `braces` (GHSA-vfj7-8cjw-p6xm) — tidsbegränsat dev-only-undantag
+
+**Godkänt 2026-10-15; nästa obligatoriska granskning senast 2027-01-15.** Efter att
+alla kompatibelt patchbara produktions- och dev-fynd åtgärdats återstår advisory source
+`1240992` för `braces<=3.0.3`. `3.0.3` är den senaste publicerade versionen och ingen
+patchad kompatibel release finns. Kedjorna är uteslutande utvecklingsverktyg:
+
+- `tailwindcss@3.4.4` -> `chokidar`/`fast-glob`/`micromatch` -> `braces@3.0.3`;
+- `eslint-config-next@16.3.8` -> `@next/eslint-plugin-next` -> `fast-glob` ->
+  `micromatch` -> `braces@3.0.3`.
+
+`npm audit --omit=dev` är helt rent. Paketet skickas inte i produktionsberoendena eller
+klientbundeln; exponeringen är stack-exhaustion från djupt nästlade globmönster under
+lint/build mot repositoryts egna filer.
+
+Undantaget i `frontend/scripts/check-npm-audit.js` matchar samtidigt exakt paketnamn,
+source-id, GHSA-URL, titel, severity och sårbart range, och bär maskinläsbar
+`expires: "2027-01-15"`. Ändras någon egenskap, saknas/är expiry ogiltig, eller har
+klockan nått `2027-01-15T00:00:00.000Z`, blir CI rött. Policyn kör dessutom en separat
+production-audit där inga undantag tillåts, blockerar alla andra höga/kritiska
+dev-advisories och blockerar ny dev-skuld med en kompatibel icke-major fix.
+
+Undantaget slutar automatiskt gälla om en kompatibel icke-major-fix finns på `braces`
+självt eller på ett paket som bara propagerar denna advisory (`fixAvailable: true`,
+objekt med `isSemVerMajor === false`, eller ofullständig/okänd fixmetadata —
+fail-closed). Propagerade paketnamn tillåts endast om deras advisory-rot exakt är
+detta fynd. En high-via-braces-wrapper som också bär en självständig, kompatibelt
+lagbar moderate-advisory blockeras (A10); undantaget får inte dölja den.
+
+**Smal, bevisad A11-undantagsregel (npm 10 vs npm 11):** npm 10 rapporterar
+`postcss-nested.fixAvailable === true` medan npm 11 rapporterar det parent-major-objektet
+`{ name: "tailwindcss", version: "4.3.3", isSemVerMajor: true }`. Boolean `true` på en
+propagation-only wrapper (alla `via` är strängar) är därför inte självständigt
+actionable; rotpaketets fixbarhet avgör. Ett objektformat `{ isSemVerMajor: false }`
+på wrappern själv ÄR självständigt actionable och failar CI. Regeln är medvetet
+snäv: den breddas inte till high-fynd och den döljer inte objektformade moderate-vias.
+
+**Ta bort undantaget** om `braces` publicerar en patchad kompatibel release, när
+Next/Tailwind inte längre drar in `braces<=3.0.3`, eller senast vid review-deadline
+2027-01-15. En framtida annan advisory i samma paket matchar inte undantaget. Tailwind 4
+är en separat major-migration och krävs inte för denna smala remediation; den
+befintliga dev-only moderate `postcss-selector-parser`-advisoryn kräver samma major
+och är fortsatt synlig men inte high/critical-gatande enligt nuvarande policy.
 
 ## 4. Kostnadsdata i adminpanelen är uppskattad, inte fakturagrundande
 

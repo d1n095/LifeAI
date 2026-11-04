@@ -68,10 +68,12 @@ def bare_remote(tmp_path) -> Path:
     seed_path = tmp_path / "seed-clone"
     subprocess.run(["git", "clone", "-q", str(remote_path), str(seed_path)], check=True)
     (seed_path / "README.md").write_text("seed\n", encoding="utf-8")
+    (seed_path / "backend" / "tests").mkdir(parents=True)
+    (seed_path / "backend" / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(seed_path), "config", "user.email", "seed@test.local"], check=True)
     subprocess.run(["git", "-C", str(seed_path), "config", "user.name", "Seed"], check=True)
     subprocess.run(["git", "-C", str(seed_path), "checkout", "-q", "-b", BASE_BRANCH], check=True)
-    subprocess.run(["git", "-C", str(seed_path), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(seed_path), "add", "README.md", "backend/tests/test_ok.py"], check=True)
     subprocess.run(["git", "-C", str(seed_path), "commit", "-q", "-m", "seed"], check=True)
     subprocess.run(["git", "-C", str(seed_path), "push", "-q", "origin", BASE_BRANCH], check=True)
     return remote_path
@@ -116,7 +118,15 @@ def _goal(db_session, owner_id):
     return planner.create_goal(db_session, owner_id=owner_id, title="Recovery demo goal", original_instruction="Edit a file.", created_by="test")
 
 
-def _dispatch_and_claim(db_session, superuser_db, owner_id, *, task_type: str) -> tuple[MainAITask, MainAIGoal, MainAIJob]:
+def _dispatch_and_claim(
+    db_session,
+    superuser_db,
+    owner_id,
+    *,
+    task_type: str,
+    description: str = "do it",
+    target_files: list[str] | None = None,
+) -> tuple[MainAITask, MainAIGoal, MainAIJob]:
     """The real mechanism every demo below starts from: a genuine dispatch, then a genuine
     claim (so the job is really `running`, not merely `queued`) -- the exact state a worker
     process is in right before it does its real work and then dies. No shortcut ever sets
@@ -124,8 +134,17 @@ def _dispatch_and_claim(db_session, superuser_db, owner_id, *, task_type: str) -
     happens SEPARATELY, after each demo does whatever real work the dead worker is meant to
     have completed first -- a worker dies AFTER acting, never before its own claim."""
     goal = _goal(db_session, owner_id)
+    verification_plan = (
+        [{"kind": "targeted_tests", "target": "tests/test_ok.py"}] if task_type == "repo_edit" else []
+    )
+    spec_kwargs: dict = {"description": description, "task_type": task_type, "verification_plan": verification_plan}
+    if task_type == "repo_edit":
+        spec_kwargs["target_files"] = target_files or ["backend/tests/test_ok.py"]
     planner.create_plan(
-        db_session, goal=goal, rationale="single task", tasks=[PlannedTaskSpec(description="do it", task_type=task_type, verification_plan=[])],
+        db_session,
+        goal=goal,
+        rationale="single task",
+        tasks=[PlannedTaskSpec(**spec_kwargs)],
         created_by="test",
     )
     db_session.commit()
@@ -250,7 +269,14 @@ async def test_demo_2_dead_after_local_edit_recovers_via_local_uncommitted_work(
 
     monkeypatch.setattr(execution_job, "commit_worktree_changes", _commit_that_crashes_on_first_call)
 
-    task, goal, dead_job = _dispatch_and_claim(db_session, superuser_db, owner_id, task_type="repo_edit")
+    task, goal, dead_job = _dispatch_and_claim(
+        db_session,
+        superuser_db,
+        owner_id,
+        task_type="repo_edit",
+        description="add draft.txt",
+        target_files=["draft.txt"],
+    )
     dead_job_id = dead_job.id
 
     with pytest.raises(RuntimeError, match="simulated worker crash after local edit"):
@@ -337,7 +363,14 @@ async def test_demo_3_dead_after_local_commit_recovers_via_local_committed_not_p
 
     monkeypatch.setattr(execution_job, "push_worktree_branch", _push_that_crashes_on_first_call)
 
-    task, goal, dead_job = _dispatch_and_claim(db_session, superuser_db, owner_id, task_type="repo_edit")
+    task, goal, dead_job = _dispatch_and_claim(
+        db_session,
+        superuser_db,
+        owner_id,
+        task_type="repo_edit",
+        description="add committed.txt",
+        target_files=["committed.txt"],
+    )
     dead_job_id = dead_job.id
 
     with pytest.raises(RuntimeError, match="simulated worker crash after local commit"):
@@ -398,7 +431,14 @@ async def test_demo_4_dead_after_push_recovers_via_pushed_no_pr_with_founder_app
     commit_worktree_changes(db_session, wt, message="pushed.txt")
     db_session.commit()
     pushed_sha = await push_worktree_branch(wt)
-    record_checkpoint(db_session, task=task, goal=goal, job_id=dead_job.id, step="work_result", data={"work_result": {"files": ["pushed.txt"]}})
+    record_checkpoint(
+        db_session,
+        task=task,
+        goal=goal,
+        job_id=dead_job.id,
+        step="work_result",
+        data={"work_result": {"files": ["pushed.txt"], "worktree_path": wt.path, "worktree_id": str(wt.id)}},
+    )
     db_session.commit()
     _kill_lease(superuser_db, db_session, owner_id, dead_job.id)
 
@@ -454,7 +494,14 @@ async def test_demo_5_dead_after_pr_recovers_via_pr_exists_with_founder_approval
     db_session.commit()
     await push_worktree_branch(wt)
     patched_github["prs"][f"test-owner:{wt.branch}"] = [{"number": 7, "html_url": "https://example.invalid/pull/7"}]
-    record_checkpoint(db_session, task=task, goal=goal, job_id=dead_job.id, step="work_result", data={"work_result": {"files": ["pr.txt"]}})
+    record_checkpoint(
+        db_session,
+        task=task,
+        goal=goal,
+        job_id=dead_job.id,
+        step="work_result",
+        data={"work_result": {"files": ["pr.txt"], "worktree_path": wt.path, "worktree_id": str(wt.id)}},
+    )
     db_session.commit()
     _kill_lease(superuser_db, db_session, owner_id, dead_job.id)
 

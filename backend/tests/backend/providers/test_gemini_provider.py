@@ -57,6 +57,67 @@ async def test_chat_sends_key_in_header_never_in_url(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_chat_forwards_max_output_tokens_and_counts_thoughts(monkeypatch):
+    from app.providers.base import Message
+
+    monkeypatch.setattr(get_settings(), "google_api_key", FAKE_KEY)
+    calls = []
+
+    async def _fake_post(self, url, **kwargs):
+        calls.append(kwargs.get("json"))
+        request = httpx.Request("POST", url)
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "candidates": [{"content": {"parts": [{"text": "ok"}]}}],
+                "usageMetadata": {
+                    "promptTokenCount": 10,
+                    "candidatesTokenCount": 9_000,
+                    "thoughtsTokenCount": 6_000,
+                },
+            },
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", _fake_post)
+    result = await GeminiProvider().chat(
+        [Message(role="user", content="Hej")], model="gemini-2.5-flash", max_tokens=4000
+    )
+    payload = calls[0]
+    cap = (payload.get("generationConfig") or {}).get("maxOutputTokens")
+    thinking = (payload.get("generationConfig") or {}).get("thinkingConfig") or {}
+    assert cap == 4000
+    assert thinking.get("thinkingBudget") == 0
+    assert result.raw_usage["completion_tokens"] == 15_000
+    assert result.raw_usage["thoughts_tokens"] == 6_000
+
+
+@pytest.mark.asyncio
+async def test_chat_omits_token_keys_when_usage_metadata_is_missing(monkeypatch):
+    from app.providers.base import Message
+
+    monkeypatch.setattr(get_settings(), "google_api_key", FAKE_KEY)
+    calls = []
+
+    async def _fake_post(self, url, **kwargs):
+        calls.append(kwargs.get("json"))
+        request = httpx.Request("POST", url)
+        return httpx.Response(
+            200,
+            request=request,
+            json={"candidates": [{"content": {"parts": [{"text": "ok"}]}}]},
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", _fake_post)
+    result = await GeminiProvider().chat(
+        [Message(role="user", content="Hej")], model="gemini-2.5-flash", max_tokens=16
+    )
+    assert calls[0]["generationConfig"]["maxOutputTokens"] == 16
+    assert "prompt_tokens" not in result.raw_usage
+    assert "completion_tokens" not in result.raw_usage
+
+
+@pytest.mark.asyncio
 async def test_embed_sends_key_in_header_never_in_url(monkeypatch):
     async def _fake_post(self, url, **kwargs):
         request = httpx.Request("POST", url)

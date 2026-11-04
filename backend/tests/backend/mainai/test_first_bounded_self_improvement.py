@@ -387,8 +387,7 @@ async def _bootstrap_self_improvement_goal(db):
                 risk_level="low",
                 verification_plan=[
                     {"kind": "targeted_tests", "target": AUTHORIZED_TEST_PATH}
-                ],
-            )
+                ], target_files=["backend/tests/backend/test_ok.py"])
         ],
         created_by="founder",
     )

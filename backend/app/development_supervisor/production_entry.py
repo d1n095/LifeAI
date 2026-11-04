@@ -64,7 +64,7 @@ import logging
 import subprocess
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import not_, select
 from sqlalchemy.orm import Session
 
 from app.development_operator.service import COMMAND_PROFILES, OperatorContext
@@ -88,6 +88,7 @@ from app.development_supervisor.service import (
     run_supervisor,
 )
 from app.execution_envelopes import get_current_execution_envelope
+from app.mainai_execution.envelope_scope import PATH_A_CAPABILITY, envelope_authorizes_path_a
 from app.intelligence_governance import record_execution
 from app.jobs.mainai_job_lease import claim_specific_mainai_job
 from app.models.execution_envelope import ExecutionAuthorizationEnvelope
@@ -124,7 +125,12 @@ def eligible_authorized_goals(db: Session, *, limit: int = 20) -> list[tuple[Mai
     `blocked`/terminal goal has nothing a Supervisor tick could usefully do right now) AND have
     a CURRENTLY ACTIVE authorization envelope for the SAME owner. A goal that has never been
     authorized, or whose envelope was superseded/rejected and never re-authorized, simply never
-    appears here -- fail closed by construction, not by an extra check someone could forget."""
+    appears here -- fail closed by construction, not by an extra check someone could forget.
+
+    Path A exception (FC-1): an active envelope that explicitly authorizes Path A (`path_a`)
+    is excluded here so the same goal cannot be captured by Supervisor while Path A's worker
+    tick is supposed to dispatch it. Those goals are not ungoverned -- they remain under the
+    envelope, just on the Path A executor."""
     rows = db.execute(
         select(MainAIGoal, ExecutionAuthorizationEnvelope)
         .join(
@@ -133,11 +139,14 @@ def eligible_authorized_goals(db: Session, *, limit: int = 20) -> list[tuple[Mai
             & (ExecutionAuthorizationEnvelope.owner_id == MainAIGoal.owner_id)
             & (ExecutionAuthorizationEnvelope.status == "active"),
         )
-        .where(MainAIGoal.status == MainAIGoalStatus.running)
+        .where(
+            MainAIGoal.status == MainAIGoalStatus.running,
+            not_(ExecutionAuthorizationEnvelope.authorized_capabilities.contains([PATH_A_CAPABILITY])),
+        )
         .order_by(MainAIGoal.created_at.asc())
         .limit(limit)
     ).all()
-    return [(goal, envelope) for goal, envelope in rows]
+    return [(goal, envelope) for goal, envelope in rows if not envelope_authorizes_path_a(envelope)]
 
 
 async def run_authorized_goal_supervisor_tick(

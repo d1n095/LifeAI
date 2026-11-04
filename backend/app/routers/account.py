@@ -3,8 +3,6 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 
-logger = logging.getLogger("mainai.account")
-
 from app.audit import record_audit
 from app.cookies import clear_session_cookies
 from app.db import get_db
@@ -12,9 +10,11 @@ from app.deps import get_current_user
 from app.limiter import limiter
 from app.models.user import User
 from app.account.erasure import AccountErasureBlockedError, erase_account_data
+from app.account.reauth import AccountErasureReauthError, create_account_erasure_reauth_receipt
 from app.account.export import export_account_data
 from app.schemas import DeleteAccountIn
-from app.security import verify_password
+
+logger = logging.getLogger("mainai.account")
 
 router = APIRouter(prefix="/api/account", tags=["account"])
 
@@ -48,14 +48,27 @@ def delete_account(
     storage-deletion tasks, the atomic transaction, the best-effort blob-deletion attempt) is
     app/account/erasure.py's erase_account_data(). No duplicated erasure logic lives in
     this router."""
-    if not verify_password(payload.password, user.password_hash):
+    try:
+        receipt = create_account_erasure_reauth_receipt(
+            db,
+            user=user,
+            password=payload.password,
+            access_jti=getattr(request.state, "access_jti", None),
+        )
+    except AccountErasureReauthError:
         record_audit(db, user_id=user.id, action="account_deletion_failed_password", request=request)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Fel lösenord. Kontot har inte raderats.")
 
     client_ip = request.client.host if request.client else None
     user_id = user.id
     try:
-        erase_account_data(db, user, client_ip=client_ip)
+        erase_account_data(
+            db,
+            user,
+            reauth_receipt_id=receipt.receipt_id,
+            reauth_access_jti=receipt.access_jti,
+            client_ip=client_ip,
+        )
     except AccountErasureBlockedError as exc:
         # Not a failure -- nothing was changed (see erase_account_data's own docstring, the
         # blob-write-path audit). A distinct, actionable response rather than a generic 500.

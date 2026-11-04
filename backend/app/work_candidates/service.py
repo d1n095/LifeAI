@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.development_operator.service import DEVELOPMENT_CAPABILITIES, LOCAL_EXECUTION, LOCAL_WRITE, READ_ONLY
@@ -154,9 +155,25 @@ def record_work_candidate(
         return _same(existing, values)
 
     row = WorkCandidate(owner_id=owner_id, idempotency_key=idempotency_key, status="unreviewed", **values)
-    db.add(row)
-    db.flush()
-    return row
+    savepoint = db.begin_nested()
+    try:
+        db.add(row)
+        db.flush()
+        savepoint.commit()
+        return row
+    except IntegrityError as exc:
+        constraint_name = getattr(getattr(getattr(exc, "orig", None), "diag", None), "constraint_name", None)
+        savepoint.rollback()
+        if constraint_name != "uq_work_candidates_idem":
+            raise
+        existing = db.execute(
+            select(WorkCandidate).where(
+                WorkCandidate.owner_id == owner_id, WorkCandidate.idempotency_key == idempotency_key
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            raise
+        return _same(existing, values)
 
 
 def dismiss_work_candidate(db: Session, *, owner_id: uuid.UUID, candidate_id: uuid.UUID, reason: str) -> WorkCandidate:

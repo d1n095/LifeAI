@@ -30,7 +30,7 @@ import socket
 import uuid
 from datetime import datetime
 
-from sqlalchemy import text
+from sqlalchemy import or_, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.account.erasure import attempt_storage_deletion_task, claim_storage_deletion_tasks
@@ -47,14 +47,22 @@ from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.jobs.service import mark_failed, record_claimed
 from app.mainai_execution.approval import ApprovalRequiredError
-from app.mainai_execution.execution_job import _finalize_task_outcome, resume_waiting_ci_task, run_task_execution_job
+from app.mainai_execution.first_cycle_stop import FirstCycleGoalStoppedError, goal_is_autonomous_terminal
+from app.mainai_execution.checkpoint import latest_task_checkpoint_for_step
+from app.mainai_execution.execution_job import (
+    _finalize_cancelled_task,
+    _finalize_task_outcome,
+    resume_waiting_ci_task,
+    run_task_execution_job,
+)
 from app.mainai_execution.executor import dispatch_ready_task, retry_task, task_for_job
+from app.mainai_execution.envelope_scope import PATH_A_CAPABILITY, path_a_dispatch_is_authorized
 from app.mainai_execution.final_report import record_final_report
 from app.mainai_execution.lesson_conflicts import resolve_conflicts_among
 from app.mainai_execution.recovery_approval import RecoveryApprovalRequiredError
 from app.mainai_execution.recovery_classifier import classify_recovery_record
 from app.mainai_execution.recovery_inspector import get_or_create_recovery_record, inspect_recovery_record
-from app.mainai_execution.recovery_takeover import TakeoverError, execute_takeover
+from app.mainai_execution.recovery_takeover import TakeoverCapExhaustedError, TakeoverError, execute_takeover
 from app.mainai_execution.replan import find_replan_trigger, trigger_replan
 from app.mainai_runtime_contract import CapabilityUnavailableError, require_capability
 from app.models.document import Document, RESUMABLE_INDEX_STATUSES
@@ -71,7 +79,7 @@ from app.models.mainai_execution import (
     MainAITaskStatus,
 )
 from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory, MainAIJobStatus
-from app.models.mainai_recovery import AUTO_SALVAGEABLE_CLASSIFICATIONS, MainAIRecoveryStatus
+from app.models.mainai_recovery import AUTO_SALVAGEABLE_CLASSIFICATIONS, MainAIRecoveryRecord, MainAIRecoveryStatus
 from app.models.mainai_wait import MainAITaskWait, MainAITaskWaitStatus
 from app.models.provider_verification import VerificationResult
 from app.models.storage_deletion_task import StorageDeletionTask
@@ -230,6 +238,45 @@ async def process_claimed_mainai_job(
                 mark_failed(db, job, worker_id=worker_id, lease_generation=lease_generation, error_category=MainAIJobErrorCategory.unexpected)
             except JobLeaseLostError:
                 logger.warning("Worker %s: lease already lost for mainai_job %s -- could not record the failure.", worker_id, job_id)
+                return
+            # Ambiguous worker crashes must not leave task_execution silently `running`
+            # (FO-6). Recovery may reclaim a terminal job, but a stuck running task is
+            # treated as live work and can trigger another paid attempt.
+            if job.job_type == "task_execution":
+                task = task_for_job(db, job)
+                job = db.get(MainAIJob, job_id, populate_existing=True)
+                if task is None:
+                    pass
+                elif task.status == MainAITaskStatus.cancelled or (job is not None and job.cancel_requested):
+                    if task.status != MainAITaskStatus.cancelled:
+                        _finalize_cancelled_task(db, task, reason="founder_cancel_survives_worker_crash")
+                    db.commit()
+                elif task.status == MainAITaskStatus.running:
+                    publication = latest_task_checkpoint_for_step(db, task_id=task.id, step="finalized")
+                    attempt = latest_task_checkpoint_for_step(db, task_id=task.id, step="publication_attempt")
+                    work = latest_task_checkpoint_for_step(db, task_id=task.id, step="work_result")
+                    evidence = {
+                        "error": "unexpected_worker_crash",
+                        "failure_class": "unexpected",
+                        "job_type": job.job_type,
+                        "mainai_job_id": str(job.id),
+                        "origin": "unknown",
+                        "first_cycle_state": "external_boundary_failed",
+                    }
+                    if publication is not None or attempt is not None or work is not None:
+                        evidence["reconcilable"] = True
+                        evidence["publication_ambiguous"] = publication is None
+                        state = (publication or attempt or work).executor_state if (publication or attempt or work) else {}
+                        identity = state.get("publication_identity") or state.get("worktree_id") or state.get("work_result", {}).get("worktree_id")
+                        if identity:
+                            evidence["publication_identity"] = identity
+                    _finalize_task_outcome(
+                        db,
+                        task,
+                        passed=False,
+                        evidence=evidence,
+                    )
+                    db.commit()
 
 
 class Worker:
@@ -406,8 +453,8 @@ class Worker:
         logged, and never stops the rest of this batch or this poll cycle, exactly like
         _retry_storage_deletion_tasks' own per-task isolation above.
 
-        EXCLUDES any task whose goal has EVER had an ExecutionAuthorizationEnvelope row
-        (migration 0057/0058/0059) -- ANY status, not only `active`. Once a goal enters
+        EXCLUDES envelope-governed goals UNLESS the current active envelope explicitly
+        authorizes Path A (`path_a` in authorized_capabilities). Once a goal enters
         execution-envelope governance it must never implicitly fall back to this blanket,
         envelope-blind approval-policy-only dispatch just because its current envelope is
         absent/superseded/revoked -- authority must never increase as a side effect of
@@ -416,37 +463,48 @@ class Worker:
         `execution_authorization_envelopes` rows are NEVER deleted (only superseded -- see
         migration 0057's own "never mutate, always supersede" discipline), the mere EXISTENCE
         of any row for a goal_id, regardless of status, is itself the durable "this goal has
-        been envelope-governed" fact -- no separate governance-state column needed. A goal
-        that currently has an active envelope remains excluded exactly as before (governed by
-        `app.development_supervisor.production_entry`'s bounded, envelope-scoped
-        `run_supervisor()` path instead -- see `_advance_authorized_supervisor_goals` below); a
-        goal whose envelope was superseded/revoked with no replacement is now ALSO excluded --
-        fail closed (no autonomous dispatch at all), never a silent reopening of the wider,
-        envelope-blind path. Found and pinned as a latent gap by Cursor's own adversarial
-        attack (PR #152) immediately after PR #148 merged; goals that have NEVER had any
-        envelope row are completely unaffected -- this tick's existing behavior for genuinely
-        ordinary, non-autonomous goals is unchanged.
+        been envelope-governed" fact -- no separate governance-state column needed.
+
+        Path A exception (FC-1): an ACTIVE envelope that explicitly lists `path_a` is the
+        Founder's authorization to run this tick, not the Supervisor. Those goals are
+        dispatched here and excluded from `_advance_authorized_supervisor_goals`. Active
+        envelopes without `path_a` remain Supervisor-only. Missing, superseded, revoked, or
+        otherwise inactive envelopes fail closed for BOTH autonomous paths. Goals that have
+        NEVER had any envelope row are completely unaffected -- this tick's existing behavior
+        for genuinely ordinary, non-autonomous goals is unchanged.
 
         Re-verified per task, immediately before dispatch (not only once in the batch query
         above), closing the narrow TOCTOU window between this tick's own SELECT and the actual
-        `dispatch_ready_task()` call: a revoke landing in that gap must still prevent dispatch,
-        not just the next tick's."""
+        `dispatch_ready_task()` call: a revoke or capability narrowing landing in that gap
+        must still prevent Path A dispatch, not just the next tick's."""
         ever_envelope_governed_goal_ids = db.query(ExecutionAuthorizationEnvelope.goal_id)
+        path_a_active_goal_ids = db.query(ExecutionAuthorizationEnvelope.goal_id).filter(
+            ExecutionAuthorizationEnvelope.status == "active",
+            ExecutionAuthorizationEnvelope.authorized_capabilities.contains([PATH_A_CAPABILITY]),
+        )
         ready_tasks = (
             db.query(MainAITask)
-            .filter(MainAITask.status == MainAITaskStatus.ready, MainAITask.goal_id.notin_(ever_envelope_governed_goal_ids))
+            .filter(
+                MainAITask.status == MainAITaskStatus.ready,
+                or_(
+                    MainAITask.goal_id.notin_(ever_envelope_governed_goal_ids),
+                    MainAITask.goal_id.in_(path_a_active_goal_ids),
+                ),
+            )
             .all()
         )
         for task in ready_tasks:
             goal = db.get(MainAIGoal, task.goal_id)
             if goal is None:
                 continue
-            if db.query(ExecutionAuthorizationEnvelope.id).filter(ExecutionAuthorizationEnvelope.goal_id == goal.id).first() is not None:
-                continue  # became envelope-governed in the gap between the batch query and here
+            if goal_is_autonomous_terminal(db, goal):
+                continue  # first-cycle STOP / schema-terminal: no further autonomous dispatch
+            if not path_a_dispatch_is_authorized(db, owner_id=goal.owner_id, goal_id=goal.id):
+                continue  # never-governed became governed, or Path A authorization vanished in the gap
             try:
                 dispatch_ready_task(db, task=task, goal=goal, dispatched_by="mainai_worker_auto_advance")
                 db.commit()
-            except ApprovalRequiredError:
+            except (ApprovalRequiredError, FirstCycleGoalStoppedError):
                 db.rollback()
             except Exception:
                 db.rollback()
@@ -477,6 +535,11 @@ class Worker:
             .all()
         )
         for wait in due_waits:
+            task = db.get(MainAITask, wait.task_id)
+            if task is not None:
+                goal = db.get(MainAIGoal, task.goal_id)
+                if goal_is_autonomous_terminal(db, goal) and task.status != MainAITaskStatus.waiting_ci:
+                    continue
             try:
                 await resume_waiting_ci_task(db, wait)
                 db.commit()
@@ -502,6 +565,21 @@ class Worker:
             .all()
         )
         for task in due_tasks:
+            goal = db.get(MainAIGoal, task.goal_id)
+            if goal_is_autonomous_terminal(db, goal):
+                from app.mainai_execution.first_cycle_stop import park_retryable_task_on_stopped_goal
+
+                try:
+                    park_retryable_task_on_stopped_goal(db, task, goal=goal)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    logger.exception(
+                        "Worker %s: failed to park retryable MainAITask %s after STOP.",
+                        self.worker_id,
+                        task.id,
+                    )
+                continue
             try:
                 retry_task(db, task=task)
                 db.commit()
@@ -622,6 +700,36 @@ class Worker:
             goal = db.get(MainAIGoal, task.goal_id)
             if goal is None:
                 continue
+            if goal_is_autonomous_terminal(db, goal):
+                from app.mainai_execution.first_cycle_stop import abandon_running_task_after_stop
+
+                try:
+                    abandon_running_task_after_stop(db, task, goal=goal)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    logger.exception(
+                        "Worker %s: failed to abandon running task %s after first-cycle STOP.",
+                        self.worker_id,
+                        task.id,
+                    )
+                continue
+            from app.mainai_execution.first_cycle_stop import job_has_founder_cancel
+
+            if job_has_founder_cancel(job):
+                from app.mainai_execution.first_cycle_stop import finalize_interrupted_job_after_founder_cancel
+
+                try:
+                    finalize_interrupted_job_after_founder_cancel(db, task=task, job=job)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    logger.exception(
+                        "Worker %s: failed to finalize cancelled dead job %s without takeover.",
+                        self.worker_id,
+                        job.id,
+                    )
+                continue
             try:
                 record = get_or_create_recovery_record(db, task=task, job=job)
                 db.commit()
@@ -630,6 +738,31 @@ class Worker:
                 record = classify_recovery_record(db, record=record)
                 db.commit()
                 if record.status == MainAIRecoveryStatus.classified and record.classification in AUTO_SALVAGEABLE_CLASSIFICATIONS:
+                    from app.mainai_execution.recovery_takeover import (
+                        MAX_AUTO_RECOVERY_TAKEOVERS_PER_TASK,
+                        count_completed_takeovers,
+                    )
+
+                    if count_completed_takeovers(db, task_id=task.id) >= MAX_AUTO_RECOVERY_TAKEOVERS_PER_TASK:
+                        record.status = MainAIRecoveryStatus.blocked
+                        record.manual_review_required = True
+                        record.blocker = "auto-recovery takeover cap exhausted"
+                        task.status = MainAITaskStatus.blocked
+                        task.next_retry_at = None
+                        db.add(
+                            MainAITaskEvent(
+                                task_id=task.id,
+                                owner_id=task.owner_id,
+                                event_type=MainAITaskEventType.blocked,
+                                detail={
+                                    "reason": "auto-recovery takeover cap exhausted",
+                                    "recovery_loop": True,
+                                    "merged": False,
+                                },
+                            )
+                        )
+                        db.commit()
+                        continue
                     db.add(
                         MainAITaskEvent(
                             task_id=task.id,
@@ -642,6 +775,32 @@ class Worker:
                     try:
                         record, _new_job = await execute_takeover(db, task=task, goal=goal, record=record, dispatched_by="mainai_worker_auto_recovery")
                         db.commit()
+                    except TakeoverCapExhaustedError:
+                        record_id = record.id
+                        task_id = task.id
+                        owner_id = task.owner_id
+                        db.rollback()
+                        record = db.get(MainAIRecoveryRecord, record_id)
+                        task = db.get(MainAITask, task_id)
+                        if record is not None and task is not None:
+                            record.status = MainAIRecoveryStatus.blocked
+                            record.manual_review_required = True
+                            record.blocker = "auto-recovery takeover cap exhausted"
+                            task.status = MainAITaskStatus.blocked
+                            task.next_retry_at = None
+                            db.add(
+                                MainAITaskEvent(
+                                    task_id=task.id,
+                                    owner_id=owner_id,
+                                    event_type=MainAITaskEventType.blocked,
+                                    detail={
+                                        "reason": "auto-recovery takeover cap exhausted",
+                                        "recovery_loop": True,
+                                        "merged": False,
+                                    },
+                                )
+                            )
+                            db.commit()
                     except (RecoveryApprovalRequiredError, TakeoverError):
                         db.rollback()
             except Exception:
@@ -763,6 +922,32 @@ class Worker:
             db.rollback()
             logger.exception("Worker %s: failed to expire stale agent scope leases.", self.worker_id)
 
+    def _reconcile_durable_coordination(self, db: Session) -> None:
+        """Replay persisted assignment/GitHub observations into the durable ledger.
+
+        Founder does not have to trigger every refresh. Never writes to GitHub, never
+        claims Cursor/Claude/Codex vendor delivery, never sets first-cycle GO. Local
+        authorized bridge transmission is attempted only when a Founder-issued credential exists.
+        """
+        try:
+            from app.agent_coordination.lifecycle import reconcile_pending_owners
+
+            n = reconcile_pending_owners(db, limit=20)
+            from app.agent_coordination.delivery import reconcile_pending_deliveries
+
+            delivered = reconcile_pending_deliveries(db, limit=20)
+            db.commit()
+            if n or delivered:
+                logger.info(
+                    "Worker %s: reconciled durable coordination for %d owner(s), delivery for %d.",
+                    self.worker_id,
+                    n,
+                    delivered,
+                )
+        except Exception:
+            db.rollback()
+            logger.exception("Worker %s: failed durable coordination reconcile.", self.worker_id)
+
     # Bounded per-tick fan-out: how many eligible authorized goals this worker attempts a
     # Supervisor call for per poll cycle -- matches the same small, deliberately conservative
     # batch-size precedent as _MAX_CI_WAITS_PER_TICK above, not an unbounded scan.
@@ -818,16 +1003,52 @@ class Worker:
             self._finalize_mainai_execution_goals(claim_db)
             await self._resolve_engineering_lesson_conflicts(claim_db)
             self._expire_stale_agent_scope_leases(claim_db)
+            self._reconcile_durable_coordination(claim_db)
             await self._advance_authorized_supervisor_goals(claim_db)
             # Reconcile again after Supervisor/Driver may have completed the last task in
             # this same tick. Primary rollup is now inside `_finalize_task_outcome`; this
             # second scan covers crash/retry graphs that became terminal without that gate.
             self._finalize_mainai_execution_goals(claim_db)
             self._advance_mainai_execution_tasks(claim_db)
-            claimed = claim_next_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
-            mainai_claimed = None if claimed is not None else claim_next_mainai_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
+            cycle_claimed = None
+            if self.settings.authorized_cycle_worker_enabled:
+                from app.agent_coordination.operating_cycle_runtime import claim_next_cycle
+
+                cycle_claimed = claim_next_cycle(
+                    claim_db,
+                    worker_id=self.worker_id,
+                    lease_seconds=self.settings.worker_lease_seconds,
+                )
+            claimed = None if cycle_claimed is not None else claim_next_job(
+                claim_db, self.worker_id, self.settings.worker_lease_seconds
+            )
+            mainai_claimed = None if cycle_claimed is not None or claimed is not None else claim_next_mainai_job(
+                claim_db, self.worker_id, self.settings.worker_lease_seconds
+            )
         finally:
             claim_db.close()
+
+        if cycle_claimed is not None:
+            cycle_id, owner_id, generation = cycle_claimed
+            db = SessionLocal()
+            try:
+                _set_mainai_job_rls_owner(db, owner_id)
+                from app.agent_coordination.operating_cycle_runtime import run_claimed_cycle_step
+
+                result = run_claimed_cycle_step(
+                    db,
+                    cycle_id=cycle_id,
+                    owner_id=owner_id,
+                    worker_id=self.worker_id,
+                    generation=generation,
+                )
+                logger.info("Worker %s: RT3 cycle %s -> %s.", self.worker_id, cycle_id, result.get("state"))
+            except Exception:
+                db.rollback()
+                logger.exception("Worker %s: failed RT3 cycle %s.", self.worker_id, cycle_id)
+            finally:
+                db.close()
+            return True
 
         if claimed is not None:
             job_id, owner_id = claimed

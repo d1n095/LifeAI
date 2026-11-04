@@ -140,6 +140,10 @@ CONFIG_MATRIX: dict[str, dict] = {
     "worker_poll_interval_seconds": {"required_in_production": False, "secret": False, "default": 2.0, "validates": "none — used as-is by app/worker.py's poll loop"},
     "worker_lease_seconds": {"required_in_production": False, "secret": False, "default": 120, "validates": "none — used as-is by app/jobs/lease.py's claim/renew queries"},
     "worker_concurrency": {"required_in_production": False, "secret": False, "default": 1, "validates": "none — not yet enforced as a hard cap, see app/worker.py's known limitations"},
+    "authorized_cycle_worker_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "fail-closed worker gate; a live Founder cycle, current envelope, STOP epoch and broker assignment remain mandatory"},
+    "cursor_cloud_webhook_secret": {"required_in_production": False, "secret": True, "default": None, "validates": "provider ingress returns 503 when unset; HMAC is verified over the exact raw request body"},
+    "provider_webhook_max_body_bytes": {"required_in_production": False, "secret": False, "default": 65536, "validates": "provider webhook router rejects Content-Length or received bodies above this bound"},
+    "provider_webhook_max_age_seconds": {"required_in_production": False, "secret": False, "default": 300, "validates": "authenticated provider events outside this timestamp window are rejected"},
     "worker_id": {"required_in_production": False, "secret": False, "default": None, "validates": "none — falls back to socket.gethostname() when unset, see app/worker.py's _worker_id"},
     "provider_verification_cache_seconds": {"required_in_production": False, "secret": False, "default": 300, "validates": "none — used as-is by app/providers/verification.py's ensure_verified"},
     "provider_verification_timeout_seconds": {"required_in_production": False, "secret": False, "default": 10.0, "validates": "none — passed as-is to provider.chat()/embed()'s timeout kwarg"},
@@ -147,6 +151,14 @@ CONFIG_MATRIX: dict[str, dict] = {
     "github_repo": {"required_in_production": False, "secret": False, "default": None, "validates": "none — 'owner/repo' format, checked at call time by app/integrations/github_client.py, not at startup"},
     "github_write_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "none — a plain bool gate; off by default so MainAI only proposes PRs until explicitly turned on"},
     "github_auto_merge_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "none — gates a merge capability that has no implementation yet (see app/integrations/github_client.py's docstring); always off in this slice"},
+    "github_worktree_base_branch": {"required_in_production": False, "secret": False, "default": "claude/det-kommer-mer-879lcm", "validates": "none — Path A worktree fetch base; empty falls back to the historical default"},
+    "github_pr_base_branch": {"required_in_production": False, "secret": False, "default": "", "validates": "none — Path A PR target; empty means same as github_worktree_base_branch"},
+    "mainai_activation_mode": {"required_in_production": False, "secret": False, "default": False, "validates": "activation_base() — when true, worktree/PR base must be an explicit protected integration branch (no legacy fallback) and the approved base SHA must be set; any gap raises ActivationBaseConfigurationError"},
+    "mainai_activation_approved_base_sha": {"required_in_production": False, "secret": False, "default": "", "validates": "activation_base() — 40 lowercase hex; worktrees are built from exactly this SHA and the integration branch tip must still equal it"},
+    "mainai_execution_require_provider_spend": {"required_in_production": False, "secret": False, "default": True, "validates": "none — Path A AI calls fail closed without a live provider_spend grant; default true so fallback/unbilled calls cannot bypass the Founder grant"},
+    "mainai_execution_goal_spend_cap_usd": {"required_in_production": False, "secret": False, "default": 5.0, "validates": "none — additional Path A hard ceiling on a live provider_spend grant's max_cost_usd"},
+    "mainai_legacy_prepare_pr_writes_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "none — gates the legacy non-draft /prepare-pr Contents-API write; off until an explicit Founder decision, even if GITHUB_WRITE_ENABLED is true"},
+    "mainai_allow_live_checkout_writes": {"required_in_production": False, "secret": False, "default": False, "validates": "none — Founder-approved live-checkout mutation; default off so code-agent writes stay in isolated workspaces"},
 }
 
 

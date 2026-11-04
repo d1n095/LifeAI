@@ -155,8 +155,7 @@ async def _bootstrap_path_a_goal(db):
             PlannedTaskSpec(
                 description="add multiply helper and focused test",
                 task_type="repo_edit",
-                risk_level="low",
-            )
+                risk_level="low", target_files=["backend/tests/backend/test_ok.py"])
         ],
         created_by="founder",
     )

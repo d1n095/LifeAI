@@ -66,6 +66,8 @@ def _goal(db_session, owner_id):
 def _single_task_plan(db_session, goal, **spec_kwargs) -> MainAITask:
     spec_kwargs.setdefault("description", "do the work")
     spec_kwargs.setdefault("task_type", "read_only_audit")
+    if spec_kwargs.get("task_type") == "repo_edit":
+        spec_kwargs.setdefault("target_files", ["backend/tests/backend/test_ok.py"])
     planner.create_plan(db_session, goal=goal, rationale="single task", tasks=[PlannedTaskSpec(**spec_kwargs)], created_by="test")
     db_session.commit()
     return db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
@@ -127,7 +129,7 @@ def test_cancel_task_on_waiting_ci_cancels_the_wait_and_finalizes_the_task(db_se
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
 
-    start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="deadbeef")
+    start_ci_wait(db_session, task=task, job_id=job.id, repo="d1n095/LifeAI", sha="deadbeef", head_branch="claude/mainai-task-abc", base_branch="mainai/integration-founder-supervised-v1")
     task.status = MainAITaskStatus.waiting_ci
     db_session.commit()
 
@@ -282,7 +284,14 @@ async def test_demo_cancel_arriving_mid_flight_preserves_the_already_made_local_
     monkeypatch.setattr(GitHubClient, "is_configured", lambda self: True)
 
     goal = _goal(db_session, owner_id)
-    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[])
+    task = _single_task_plan(
+        db_session,
+        goal,
+        description="edit x.py",
+        task_type="repo_edit",
+        target_files=["x.py"],
+        verification_plan=[{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}],
+    )
     job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
     db_session.commit()
 

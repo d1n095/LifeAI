@@ -20,35 +20,24 @@ test.describe("shell pages: empty states and mutation error handling", () => {
     await page.waitForURL(FRONTEND_URL + "/", { timeout: 5000 });
   });
 
-  test("documents: empty state renders, and a failed delete shows a visible error instead of silently doing nothing", async ({
+  test("documents route redirects to the consolidated Life Library, which renders its empty state", async ({
     page,
   }) => {
+    // The Life Library upload-consolidation package made /library the sole upload location;
+    // /documents is now purely a redirect to it (see app/(shell)/documents/page.tsx — both
+    // routers still read the same underlying `documents` table). This test previously drove
+    // the old standalone /documents page (empty-state text "Inga dokument uppladdade ännu." +
+    // its own file input) which no longer exists, so it asserted a removed surface. Updated to
+    // the current contract: /documents must redirect to /library and the Library empty state
+    // must render. The "failed delete surfaces a visible error instead of silently doing
+    // nothing" behavior for library rows is covered end-to-end by
+    // library-upload-queue.spec.ts's unified-delete test against the real /library UI, so it
+    // is not duplicated here.
     await page.goto(`${FRONTEND_URL}/documents`, { waitUntil: "networkidle" });
+    await page.waitForURL(`${FRONTEND_URL}/library`, { timeout: 5000 });
 
     // Empty state (a fresh founder account before any upload) — real backend, no mock.
-    await expect(page.locator("text=Inga dokument uppladdade ännu.")).toBeVisible();
-
-    // Upload one real document so there's a row with a delete button to fail on.
-    await page.setInputFiles('input[type="file"]', {
-      name: "e2e-error-handling-test.txt",
-      mimeType: "text/plain",
-      buffer: Buffer.from("Innehall for PRIO 4-felhanteringstestet."),
-    });
-    await expect(page.locator("text=e2e-error-handling-test.txt")).toBeVisible({ timeout: 8000 });
-
-    // Force the DELETE call to fail server-side (a real HTTP 500 response reaching the
-    // browser) and confirm the UI surfaces it via role="alert" rather than staying silent.
-    await page.route("**/api/documents/**", (route) => {
-      if (route.request().method() === "DELETE") {
-        route.fulfill({ status: 500, contentType: "application/json", body: '{"detail":"Simulerat serverfel"}' });
-      } else {
-        route.continue();
-      }
-    });
-    await page.getByRole("button", { name: /Ta bort dokumentet/ }).first().click();
-    await expect(page.getByRole("alert").filter({ hasText: "Simulerat serverfel" })).toBeVisible({ timeout: 5000 });
-    // The row must still be there — a failed delete must not have been assumed to succeed.
-    await expect(page.locator("text=e2e-error-handling-test.txt")).toBeVisible();
+    await expect(page.locator("text=Inget material importerat ännu.")).toBeVisible();
   });
 
   test("projects: empty states render, and a failed create shows a visible error instead of silently doing nothing", async ({
@@ -90,7 +79,197 @@ test.describe("shell pages: empty states and mutation error handling", () => {
     });
     await page.goto(`${FRONTEND_URL}/`, { waitUntil: "networkidle" });
     await expect(page.getByRole("alert").filter({ hasText: "Simulerat serverfel" })).toBeVisible({ timeout: 5000 });
-    // The page must not claim "allt system operationellt" is actually true while also
-    // showing the error — both render, screen-reader users get the alert either way.
+    await expect(page.getByTestId("dashboard-health")).not.toContainText("Allt system operationellt");
+    await expect(page.getByTestId("dashboard-health")).not.toContainText("delvis otillgänglig");
+  });
+
+  test("dashboard drops stale reachable status after a later failed snapshot poll", async ({ page }) => {
+    let calls = 0;
+    await page.route("**/api/mainai/founder-ops/snapshot", (route) => {
+      calls += 1;
+      if (calls === 1) {
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            generated_at: "2026-10-22T00:00:00Z",
+            evidence_basis: "durable_rows_only",
+            fabricated_progress: false,
+            first_cycle_go: false,
+            health: { status: "ok", worker: "alive", backend_reachable: true, evidence_available: true },
+            startup_readiness: { level: "READY_FOR_SAFE_INTERNAL_RUN", blocking: [] },
+            stop: { blocked: false, code: null, observability_failed: false },
+            spend: {
+              spend_live: true,
+              usage_request_count: 0,
+              usage_cost_usd: 0,
+              usage_cost_unknown_count: 0,
+              active_grant_count: 0,
+              active_grant_spent_usd: 0,
+              active_grant_reserved_usd: 0,
+            },
+            safe_launch: {
+              github_write_enabled: false,
+              github_auto_merge_enabled: false,
+              mainai_activation_mode: false,
+              recall_http_mounted: false,
+              privileged_remote_effects_enabled: false,
+            },
+            conversation_count_today: 0,
+            goals: [],
+            agents: [],
+            dependencies: [],
+            circular_dependencies: [],
+            independent_ready_work: [],
+            next_actions: [],
+            work_items: [],
+            work_item_counts: {},
+            blockers: [],
+            authorization_requests: [],
+            review_results: [],
+          }),
+        });
+        return;
+      }
+      route.fulfill({ status: 500, contentType: "application/json", body: '{"detail":"Simulerat serverfel"}' });
+    });
+    await page.goto(`${FRONTEND_URL}/`, { waitUntil: "networkidle" });
+    await expect(page.getByTestId("dashboard-health")).toContainText("Backend nåbar");
+    await expect(page.getByTestId("dashboard-health")).not.toContainText("Backend nåbar", { timeout: 8000 });
+    await expect(page.getByTestId("dashboard-health")).toContainText("otillgänglig");
+    await expect(page.getByRole("alert").filter({ hasText: "Simulerat serverfel" })).toBeVisible();
+  });
+
+  test("dashboard does not treat a failed Founder-ops snapshot as operational", async ({ page }) => {
+    await page.route("**/api/mainai/founder-ops/snapshot", (route) => {
+      route.fulfill({ status: 500, contentType: "application/json", body: '{"detail":"Simulerat serverfel"}' });
+    });
+    await page.goto(`${FRONTEND_URL}/`, { waitUntil: "networkidle" });
+    await expect(page.getByRole("alert").filter({ hasText: "Simulerat serverfel" })).toBeVisible({ timeout: 5000 });
+    await expect(page.getByTestId("dashboard-health")).not.toContainText("Backend nåbar");
+    await expect(page.getByTestId("dashboard-health")).toContainText("otillgänglig");
+    await expect(page.getByTestId("dashboard-health")).not.toContainText("GO");
+  });
+
+  test("dashboard does not claim reachable or STOP inactive when evidence is missing", async ({ page }) => {
+    await page.route("**/api/mainai/founder-ops/snapshot", (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          generated_at: "2026-10-21T00:00:00Z",
+          evidence_basis: "durable_rows_only",
+          fabricated_progress: false,
+          first_cycle_go: false,
+          health: { status: "unknown", worker: "unknown", backend_reachable: false, evidence_available: false },
+          startup_readiness: { level: "BLOCKED", blocking: [], unknown_fail_closed: true },
+          stop: { blocked: false, code: null },
+          spend: {
+            spend_live: true,
+            usage_request_count: 0,
+            usage_cost_usd: 0,
+            usage_cost_unknown_count: 0,
+            active_grant_count: 0,
+            active_grant_spent_usd: 0,
+            active_grant_reserved_usd: 0,
+          },
+          safe_launch: {
+            github_write_enabled: false,
+            github_auto_merge_enabled: false,
+            mainai_activation_mode: false,
+            recall_http_mounted: false,
+            privileged_remote_effects_enabled: false,
+          },
+          conversation_count_today: 0,
+          goals: [],
+          agents: [],
+          dependencies: [],
+          circular_dependencies: [],
+          independent_ready_work: [],
+          next_actions: [],
+          work_items: [],
+          work_item_counts: {},
+          blockers: [],
+          authorization_requests: [],
+          review_results: [],
+        }),
+      });
+    });
+    await page.goto(`${FRONTEND_URL}/`, { waitUntil: "networkidle" });
+    await expect(page.getByTestId("dashboard-health")).not.toContainText("Backend nåbar");
+    await expect(page.getByTestId("dashboard-health")).not.toContainText("STOP inaktiv");
+    await expect(page.getByTestId("dashboard-health")).toContainText("STOP-status okänd");
+    await expect(page.getByTestId("dashboard-health")).toContainText("beredskap okänd");
+    await expect(page.getByTestId("dashboard-health")).not.toContainText("GO");
+  });
+
+  test("dashboard does not claim STOP inactive when observability failed", async ({ page }) => {
+    await page.route("**/api/mainai/founder-ops/snapshot", (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          generated_at: "2026-10-21T00:00:00Z",
+          evidence_basis: "durable_rows_only",
+          fabricated_progress: false,
+          first_cycle_go: false,
+          health: { status: "ok", worker: "unknown", backend_reachable: true },
+          startup_readiness: { level: "UNKNOWN", unknown_fail_closed: true, blocking: ["startup_readiness_unavailable"] },
+          stop: { blocked: true, code: "STOP_STATUS_UNKNOWN", observability_failed: true },
+          spend: {
+            spend_live: true,
+            usage_request_count: 0,
+            usage_cost_usd: 0,
+            usage_cost_unknown_count: 0,
+            active_grant_count: 0,
+            active_grant_spent_usd: 0,
+            active_grant_reserved_usd: 0,
+          },
+          safe_launch: {
+            github_write_enabled: false,
+            github_auto_merge_enabled: false,
+            mainai_activation_mode: false,
+            recall_http_mounted: false,
+            privileged_remote_effects_enabled: false,
+          },
+          conversation_count_today: 0,
+          goals: [],
+          agents: [],
+          dependencies: [],
+          circular_dependencies: [],
+          independent_ready_work: [],
+          next_actions: [],
+          work_items: [],
+          work_item_counts: {},
+          blockers: [],
+          authorization_requests: [],
+          review_results: [],
+        }),
+      });
+    });
+    await page.goto(`${FRONTEND_URL}/`, { waitUntil: "networkidle" });
+    await expect(page.getByTestId("dashboard-health")).toContainText("STOP-status okänd");
+    await expect(page.getByTestId("dashboard-health")).toContainText("beredskap okänd");
+    await expect(page.getByTestId("dashboard-health")).not.toContainText("STOP inaktiv");
+    await expect(page.getByTestId("dashboard-health")).not.toContainText("GO");
+  });
+
+  test("founder-ops page shows durable STOP/readiness rather than a fabricated GO", async ({ page }) => {
+    await page.goto(`${FRONTEND_URL}/admin/founder-ops`, { waitUntil: "networkidle" });
+    await expect(page.getByRole("heading", { name: "Founder-status" })).toBeVisible();
+    await expect(page.getByTestId("readiness-level")).toBeVisible({ timeout: 8000 });
+    await expect(page.getByText("Första cykelns GO = false").first()).toBeVisible();
+    await expect(page.getByText("Recall HTTP inte monterad")).toBeVisible();
+    await expect(page.getByTestId("founder-authority")).toBeVisible();
+    await expect(page.getByText("Policy är transparent")).toBeVisible();
+    await expect(page.getByText("Känsliga inställningar kräver Founder-godkännande")).toBeVisible();
+  });
+
+  test("security page shows diagnostics without a fabricated first-cycle GO", async ({ page }) => {
+    await page.goto(`${FRONTEND_URL}/admin/security`, { waitUntil: "networkidle" });
+    await expect(page.getByRole("heading", { name: "Säkerhetsöversikt" })).toBeVisible();
+    await expect(page.getByTestId("security-first-cycle")).toContainText("Första cykelns GO = false");
+    await expect(page.getByTestId("security-restrictions")).toBeVisible();
+    await expect(page.getByTestId("security-findings")).toBeVisible();
   });
 });

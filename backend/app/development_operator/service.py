@@ -34,6 +34,7 @@ from app.mainai_execution.checkpoint import (
     latest_checkpoint_for_step,
     record_checkpoint,
 )
+from app.mainai_execution.publication_errors import ExternalBoundaryError
 from app.mainai_execution.worktree import (
     WorktreeOwnershipError,
     fetch_remote_branch,
@@ -1332,7 +1333,12 @@ async def push_branch(db, context: OperatorContext, *, idempotency_key: str):
         return replay
     if worktree.branch != context.expected_branch or not worktree.current_commit:
         raise OperatorAuthorizationError("branch/commit identity is not ready for push")
-    remote_sha = fetch_remote_branch(worktree)
+    try:
+        remote_sha = fetch_remote_branch(worktree)
+    except ExternalBoundaryError as exc:
+        raise OperatorAuthorityTransitionError(
+            "remote branch state could not be verified"
+        ) from exc
     if remote_sha != context.expected_remote_sha:
         raise OperatorAuthorityTransitionError("remote branch state changed unexpectedly")
     sha = await push_worktree_branch(worktree)

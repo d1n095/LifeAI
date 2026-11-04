@@ -2,41 +2,95 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { api, DocumentItem, ProjectItem, TaskItem } from "@/lib/api";
+import { api, AuthError, DocumentItem, FounderOpsSnapshot, NetworkError, ProjectItem, TaskItem } from "@/lib/api";
+import { statusLine as formatStatusLine } from "@/lib/founderHealth";
+
+function errorMessage(reason: unknown, fallback: string): string {
+  if (reason instanceof Error && reason.message) return reason.message;
+  return fallback;
+}
+
+const SNAPSHOT_POLL_MS = 5000;
 
 export default function DashboardPage() {
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [projects, setProjects] = useState<ProjectItem[]>([]);
   const [tasks, setTasks] = useState<TaskItem[]>([]);
+  const [snapshot, setSnapshot] = useState<FounderOpsSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [snapshotError, setSnapshotError] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
-    Promise.all([api.listDocuments(), api.listProjects(), api.listTasks()])
-      .then(([d, p, t]) => {
-        setDocuments(d);
-        setProjects(p);
-        setTasks(t);
-      })
-      .catch((e) => setError(e.message));
+    let cancelled = false;
+
+    Promise.allSettled([api.listDocuments(), api.listProjects(), api.listTasks()]).then((results) => {
+      if (cancelled) return;
+      const messages: string[] = [];
+      if (results[0].status === "fulfilled") setDocuments(results[0].value);
+      else messages.push(errorMessage(results[0].reason, "dokument"));
+      if (results[1].status === "fulfilled") setProjects(results[1].value);
+      else messages.push(errorMessage(results[1].reason, "projekt"));
+      if (results[2].status === "fulfilled") setTasks(results[2].value);
+      else messages.push(errorMessage(results[2].reason, "uppgifter"));
+      if (messages.length) setError(messages.join(" · "));
+    });
+
+    async function refreshSnapshot() {
+      try {
+        const next = await api.founderOpsSnapshot();
+        if (cancelled) return;
+        setSnapshot(next);
+        setSnapshotError(null);
+      } catch (reason: unknown) {
+        if (cancelled) return;
+        // D4: a failed poll must drop the previous reachable copy. Stale "Backend nåbar" is a defect.
+        setSnapshot(null);
+        if (!(reason instanceof AuthError)) {
+          setSnapshotError(reason instanceof NetworkError ? reason.message : errorMessage(reason, "Founder-status"));
+        }
+      } finally {
+        if (!cancelled) setLoaded(true);
+      }
+    }
+
+    refreshSnapshot();
+    const interval = setInterval(refreshSnapshot, SNAPSHOT_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }, []);
 
   const indexed = documents.filter((d) => d.status === "indexed").length;
   const pendingTasks = tasks.filter((t) => t.status !== "done").length;
   const activeProjects = projects.filter((p) => p.status === "active").length;
+  const conversationsToday = snapshot ? snapshot.conversation_count_today : null;
+
+  const healthLine = statusLine(snapshot, snapshotError, loaded);
 
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-2xl font-semibold">God kväll, Dennis</h1>
-        <p className="text-white/50 text-sm mt-1">Allt system operationellt — anslutet till backend.</p>
+        <h1 className="text-2xl font-semibold">God kväll</h1>
+        <p className="text-white/50 text-sm mt-1" data-testid="dashboard-health">
+          {healthLine}
+        </p>
       </div>
 
-      {error && (
+      {(error || snapshotError) && (
         <div
           role="alert"
           className="rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300"
         >
-          Kunde inte nå backend: {error}. Kontrollera att API:et körs (se README).
+          Kunde inte nå backend: {[error, snapshotError].filter(Boolean).join(" · ")}. Kontrollera att API:et körs
+          (se README).
+        </div>
+      )}
+
+      {snapshot?.stop?.blocked && (
+        <div role="alert" className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-200">
+          STOP aktiv{snapshot.stop.code ? ` (${snapshot.stop.code})` : ""}. Inget arbete ska behandlas som framåtskridande.
         </div>
       )}
 
@@ -44,8 +98,39 @@ export default function DashboardPage() {
         <StatCard label="Indexerade dokument" value={indexed} total={documents.length} />
         <StatCard label="Aktiva projekt" value={activeProjects} total={projects.length} />
         <StatCard label="Öppna uppgifter" value={pendingTasks} total={tasks.length} />
-        <StatCard label="Konversationer idag" value={0} total={0} hideTotal />
+        <StatCard
+          label="Konversationer idag"
+          value={conversationsToday}
+          total={conversationsToday ?? 0}
+          hideTotal
+          unknown={conversationsToday === null}
+        />
       </div>
+
+      {snapshot && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <Panel title="Aktiva agenter">
+            {(snapshot.agents || []).slice(0, 5).map((agent) => (
+              <div key={agent.id} className="flex justify-between text-sm py-2 border-b border-border/60 last:border-0">
+                <span className="text-white/80">{agent.name}</span>
+                <span className="text-white/40">
+                  {agent.founder_status === "running" ? "Kör" : agent.founder_status}
+                </span>
+              </div>
+            ))}
+            {(snapshot.agents || []).length === 0 && <EmptyRow />}
+          </Panel>
+          <Panel title="Nästa åtgärder">
+            {(snapshot.next_actions || []).slice(0, 5).map((action, i) => (
+              <div key={`${action.kind}-${i}`} className="text-sm py-2 border-b border-border/60 last:border-0">
+                <span className="text-white/80">{action.kind}</span>
+                {action.description ? <span className="text-white/40"> — {action.description}</span> : null}
+              </div>
+            ))}
+            {(snapshot.next_actions || []).length === 0 && <EmptyRow />}
+          </Panel>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <Panel title="Senaste dokument">
@@ -73,6 +158,9 @@ export default function DashboardPage() {
         <Link href="/chat" className="rounded-lg bg-accent px-4 py-2 text-sm font-medium">
           Öppna chat
         </Link>
+        <Link href="/admin/founder-ops" className="rounded-lg border border-border px-4 py-2 text-sm">
+          Founder-status
+        </Link>
         <Link href="/documents" className="rounded-lg border border-border px-4 py-2 text-sm">
           Ladda upp dokument
         </Link>
@@ -81,13 +169,29 @@ export default function DashboardPage() {
   );
 }
 
-function StatCard({ label, value, total, hideTotal }: { label: string; value: number; total: number; hideTotal?: boolean }) {
+export function statusLine(snapshot: FounderOpsSnapshot | null, error: string | null, loaded: boolean): string {
+  return formatStatusLine(snapshot, error, loaded);
+}
+
+function StatCard({
+  label,
+  value,
+  total,
+  hideTotal,
+  unknown,
+}: {
+  label: string;
+  value: number | null;
+  total: number;
+  hideTotal?: boolean;
+  unknown?: boolean;
+}) {
   return (
     <div className="rounded-xl border border-border bg-panel p-4">
       <div className="text-xs uppercase tracking-wide text-white/40">{label}</div>
       <div className="mt-2 text-2xl font-semibold">
-        {value}
-        {!hideTotal && <span className="text-white/30 text-base"> / {total}</span>}
+        {unknown || value === null ? "—" : value}
+        {!hideTotal && !unknown && value !== null && <span className="text-white/30 text-base"> / {total}</span>}
       </div>
     </div>
   );

@@ -22,7 +22,6 @@ import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -42,8 +41,15 @@ from app.models.mainai_execution import (
     MainAITaskEventType,
     MainAITaskStatus,
 )
+from app.mainai_execution.billed_chat import ExecutionSpendError, billed_execution_chat
+from app.mainai_execution.envelope_scope import (
+    TARGET_SOURCE_PLANNER,
+    TargetAuthorityError,
+    TargetPathError,
+    persistable_target_authority,
+    validate_target_path,
+)
 from app.providers.base import Message
-from app.providers.registry import chat_with_fallback
 
 
 class PlannerError(Exception):
@@ -93,9 +99,22 @@ class PlannedTaskSpec:
     depends_on: list[int] = field(default_factory=list)
     risk_level: MainAIGoalRiskLevel = MainAIGoalRiskLevel.low
     approval_required: bool = False
-    verification_plan: list[dict] = field(default_factory=list)
+    # None means "omitted". repo_edit omitted plans get a concrete default in __post_init__;
+    # an explicit empty list is still rejected by create_plan() (Claude TEST-1).
+    verification_plan: list[dict] | None = None
     priority: int = 0
     max_attempts: int = 3
+    # Planner-named edit targets. Persisted on the append-only created event
+    # (`target_files` / `verify_only_tests` / `target_source`). Task.description is
+    # never a carrier of edit authority and is never parsed back into targets.
+    target_files: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.verification_plan is None:
+            if self.task_type == "repo_edit":
+                self.verification_plan = [{"kind": "targeted_tests", "target": "tests/backend/test_ok.py"}]
+            else:
+                self.verification_plan = []
 
 
 def create_goal(
@@ -210,6 +229,11 @@ def create_plan(
                     validate_targeted_tests_target(step.get("target"))
                 except VerificationStepError as exc:
                     raise PlanValidationError(str(exc)) from exc
+        for path in spec.target_files:
+            try:
+                validate_target_path(path)
+            except TargetPathError as exc:
+                raise PlanValidationError(str(exc)) from exc
 
     edges = [(i, dep_idx) for i, spec in enumerate(tasks) for dep_idx in spec.depends_on]
     cycle = _detect_cycle(len(tasks), edges)
@@ -283,14 +307,35 @@ def create_plan(
 
     persisted: list[MainAITask] = []
     applied_lessons_by_task: list[list[uuid.UUID]] = []
+    authority_by_task: list[dict] = []
     for spec in tasks:
         # Engineering-lesson influence (app/mainai_execution/lessons.py): a previously recorded
         # lesson tagged for this task_type can add a targeted_tests step the spec itself didn't
         # already have -- real influence on what gets verified, not a loose suggestion. Only
         # ever ADDS to verification_plan, never removes a step the planner/founder specified.
+        pre_lesson_plan = list(spec.verification_plan or [])
         verification_plan, applied_lesson_ids = apply_lessons_to_verification_plan(
-            db, task_type=spec.task_type, verification_plan=spec.verification_plan
+            db, task_type=spec.task_type, verification_plan=pre_lesson_plan
         )
+        # Claude TEST-1: reject repo_edit without targeted_tests at plan time, before any
+        # paid editing. Lessons may still inject the required step; check the post-lesson plan.
+        if spec.task_type == "repo_edit" and not any(
+            isinstance(step, dict) and step.get("kind") == "targeted_tests" for step in verification_plan
+        ):
+            raise PlanValidationError(
+                "repo_edit tasks require at least one verification_plan step of kind "
+                "targeted_tests before any paid editing can begin."
+            )
+        try:
+            authority = persistable_target_authority(
+                declared_target_files=spec.target_files,
+                pre_lesson_verification_plan=pre_lesson_plan,
+                post_lesson_verification_plan=verification_plan,
+                task_type=spec.task_type,
+                target_source=TARGET_SOURCE_PLANNER,
+            )
+        except (TargetPathError, TargetAuthorityError) as exc:
+            raise PlanValidationError(str(exc)) from exc
         task = MainAITask(
             goal_id=goal.id,
             plan_id=plan.id,
@@ -307,6 +352,7 @@ def create_plan(
         db.add(task)
         persisted.append(task)
         applied_lessons_by_task.append(applied_lesson_ids)
+        authority_by_task.append(authority)
     db.flush()
 
     for i, spec in enumerate(tasks):
@@ -319,8 +365,8 @@ def create_plan(
                 )
             )
 
-    for task, applied_lesson_ids in zip(persisted, applied_lessons_by_task):
-        detail = {"plan_version": next_version}
+    for task, applied_lesson_ids, authority in zip(persisted, applied_lessons_by_task, authority_by_task):
+        detail = {"plan_version": next_version, **authority}
         if applied_lesson_ids:
             detail["lessons_applied"] = [str(lesson_id) for lesson_id in applied_lesson_ids]
         db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.created, detail=detail))
@@ -342,17 +388,26 @@ PLANNER_SYSTEM_PROMPT = (
     "i en sekvens av konkreta, avgränsade tasks. Svara ENDAST med ett JSON-objekt på formen "
     '{"tasks": [{"description": "...", "task_type": "read_only_audit|repo_edit|run_tests|'
     'open_pr", "depends_on": [0, 1], "risk_level": "low|medium|high", "approval_required": '
-    'true|false, "verification_plan": [{"kind": "targeted_tests", "target": "..."}]}]} -- '
+    'true|false, "target_files": ["backend/app/foo.py", "backend/tests/test_foo.py"], '
+    '"verification_plan": [{"kind": "targeted_tests", "target": "tests/test_foo.py"}]}]} -- '
     "inget annat, ingen markdown-kodblocksmarkering, ingen förklarande text före eller efter. "
     "depends_on är 0-baserade index in i samma tasks-lista. Håll planen minimal: bara de "
-    "tasks som faktiskt krävs för målet, aldrig spekulativa extra steg. En task som ändrar "
-    "kod (repo_edit) eller öppnar en PR (open_pr) ska nästan alltid ha approval_required=false "
-    "(godkännande krävs bara för merge/deploy, inte för att föreslå en ändring som PR) -- men "
-    "en task märkt risk_level=high ska nästan alltid ha approval_required=true."
+    "tasks som faktiskt krävs för målet, aldrig spekulativa extra steg. En repo_edit-task "
+    "MÅSTE ha minst ett verification_plan-steg kind=targeted_tests mot en konkret pytest-fil "
+    "relativ till backend/ (t.ex. tests/test_foo.py). En repo_edit-task MÅSTE också sätta "
+    "target_files till VARJE fil som ska skapas eller skrivas, inklusive nya fokuserade "
+    "testfiler, som sökvägar från repo-roten (backend/tests/test_foo.py för den pytest-filen). "
+    "Förlita dig INTE på att filnamn nämns i description -- target_files är det enda "
+    "auktoritativa fältet. En task som ändrar kod (repo_edit) eller öppnar en PR (open_pr) "
+    "ska nästan alltid ha approval_required=false (godkännande krävs bara för merge/deploy, "
+    "inte för att föreslå en ändring som PR) -- men en task märkt risk_level=high ska nästan "
+    "alltid ha approval_required=true."
 )
 
 
-async def propose_plan_via_ai(db: Session, *, goal: MainAIGoal) -> tuple[list[PlannedTaskSpec], str, str]:
+async def propose_plan_via_ai(
+    db: Session, *, goal: MainAIGoal, failure_context: str | None = None
+) -> tuple[list[PlannedTaskSpec], str, str]:
     """The one genuinely non-deterministic planning step -- a single chat_with_fallback() call
     (same provider chain app/agent_orchestration.py's dispatch_task() already uses) asked to
     produce a structured JSON task breakdown for `goal`. Returns (tasks, provider, model) so
@@ -363,10 +418,24 @@ async def propose_plan_via_ai(db: Session, *, goal: MainAIGoal) -> tuple[list[Pl
     never falls back to guessing a plan from free text, and never itself writes anything to
     the database (see create_plan() for the separate, deterministic persist step this feeds)."""
     user_prompt = f"## Mål\n{goal.title}\n\n## Fullständig instruktion\n{goal.original_instruction}"
+    if failure_context:
+        user_prompt += (
+            "\n\n## Föregående verifieringsfel (använd detta vid omplanering; "
+            "repo_edit måste ha targeted_tests som täcker felet)\n"
+            f"{failure_context}"
+        )
     messages = [Message(role="system", content=PLANNER_SYSTEM_PROMPT), Message(role="user", content=user_prompt)]
-    result, _attempted = await chat_with_fallback(
-        db, messages, owner_id=goal.owner_id, purpose="mainai_planning", requested_by="mainai_execution.planner.propose_plan_via_ai", goal_id=goal.id
-    )
+    try:
+        result, _attempted = await billed_execution_chat(
+            db,
+            messages,
+            owner_id=goal.owner_id,
+            goal_id=goal.id,
+            purpose="mainai_planning",
+            requested_by="mainai_execution.planner.propose_plan_via_ai",
+        )
+    except ExecutionSpendError as exc:
+        raise PlanValidationError(str(exc)) from exc
 
     raw = result.content.strip()
     if raw.startswith("```"):
@@ -407,6 +476,23 @@ async def propose_plan_via_ai(db: Session, *, goal: MainAIGoal) -> tuple[list[Pl
         if not isinstance(verification_plan, list):
             raise PlanValidationError(f"tasks[{i}].verification_plan must be a list.")
 
+        raw_targets = raw_task.get("target_files", [])
+        if raw_targets is None:
+            raw_targets = []
+        if not isinstance(raw_targets, list) or not all(isinstance(path, str) and path for path in raw_targets):
+            raise PlanValidationError(f"tasks[{i}].target_files must be a list of non-empty strings.")
+        try:
+            target_files = [validate_target_path(path) for path in raw_targets]
+            if task_type == "repo_edit" and not target_files:
+                raise PlanValidationError(
+                    f"tasks[{i}] repo_edit must name target_files (every file to create or "
+                    "edit) rather than only mentioning filenames in prose. Listing a focused "
+                    "test in verification_plan does not grant edit authority over an existing "
+                    "repository test."
+                )
+        except TargetPathError as exc:
+            raise PlanValidationError(f"tasks[{i}].target_files: {exc}") from exc
+
         specs.append(
             PlannedTaskSpec(
                 description=description,
@@ -416,6 +502,7 @@ async def propose_plan_via_ai(db: Session, *, goal: MainAIGoal) -> tuple[list[Pl
                 approval_required=bool(raw_task.get("approval_required", False)),
                 verification_plan=verification_plan,
                 priority=int(raw_task.get("priority", 0)),
+                target_files=target_files,
             )
         )
 

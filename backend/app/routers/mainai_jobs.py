@@ -80,6 +80,24 @@ def list_jobs(limit: int = 50, offset: int = 0, db: Session = Depends(get_db), u
     return service.list_jobs(db, limit=limit, offset=offset)
 
 
+@router.get("/admin/all", response_model=list[MainAIJobOut])
+def list_all_jobs_admin(limit: int = 100, offset: int = 0, user: User = Depends(require_founder)):
+    """Deliberately bypasses per-owner RLS scoping (see module docstring) — runs on the
+    superuser/migration connection, exactly like app/worker.py's claim step, since it must see
+    jobs across every owner. `require_founder` is the only gate available in this founder-only
+    system; a future multi-tenant system would need a REAL admin role check here, not just
+    this same dependency, before this endpoint could safely stay this way — see
+    docs/MAINAI_JOB_RUNTIME.md's threat model."""
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    with migration_engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT * FROM mainai_jobs ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset"),
+            {"limit": limit, "offset": offset},
+        ).mappings().all()
+    return [MainAIJobOut(**dict(row)) for row in rows]
+
+
 @router.get("/{job_id}", response_model=MainAIJobDetailOut)
 def get_job(job_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_founder)):
     try:
@@ -144,21 +162,3 @@ def retry_job(job_id: uuid.UUID, request: Request, db: Session = Depends(get_db)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.") from exc
     except service.InvalidJobTransitionError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-
-
-@router.get("/admin/all", response_model=list[MainAIJobOut])
-def list_all_jobs_admin(limit: int = 100, offset: int = 0, user: User = Depends(require_founder)):
-    """Deliberately bypasses per-owner RLS scoping (see module docstring) — runs on the
-    superuser/migration connection, exactly like app/worker.py's claim step, since it must see
-    jobs across every owner. `require_founder` is the only gate available in this founder-only
-    system; a future multi-tenant system would need a REAL admin role check here, not just
-    this same dependency, before this endpoint could safely stay this way — see
-    docs/MAINAI_JOB_RUNTIME.md's threat model."""
-    limit = max(1, min(limit, 500))
-    offset = max(0, offset)
-    with migration_engine.connect() as conn:
-        rows = conn.execute(
-            text("SELECT * FROM mainai_jobs ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset"),
-            {"limit": limit, "offset": offset},
-        ).mappings().all()
-    return [MainAIJobOut(**dict(row)) for row in rows]

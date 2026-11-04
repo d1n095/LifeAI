@@ -167,6 +167,12 @@ class Settings(BaseSettings):
     worker_poll_interval_seconds: float = 2.0
     worker_lease_seconds: int = 120
     worker_concurrency: int = 1
+    # RT3 is shipped dark. A Founder must both create an explicit authorized cycle and
+    # enable this worker gate; absence/silence never starts background provider work.
+    authorized_cycle_worker_enabled: bool = False
+    cursor_cloud_webhook_secret: str | None = None
+    provider_webhook_max_body_bytes: int = 65536
+    provider_webhook_max_age_seconds: int = 300
     # Identifies which worker process/container claimed a job (GET /api/library/ops/status,
     # troubleshooting) — defaults to the container's own hostname (stable per-container,
     # unique per replica) rather than a random id, so a founder reading ops status or logs
@@ -199,6 +205,27 @@ class Settings(BaseSettings):
     github_repo: str | None = None  # "owner/repo", e.g. "d1n095/LifeAI"
     github_write_enabled: bool = False
     github_auto_merge_enabled: bool = False
+    # Path A worktree fetch + PR target. Empty PR base means "same as the worktree base".
+    github_worktree_base_branch: str = "claude/det-kommer-mer-879lcm"
+    github_pr_base_branch: str = ""
+    # Activation mode (first Founder-supervised cycle and later): the worktree/PR base must be
+    # an explicitly configured protected integration branch (never the legacy default above),
+    # and the Founder-approved base SHA must be set. Any gap is a typed fail-closed error;
+    # nothing silently falls back to another branch or to a moving branch tip.
+    mainai_activation_mode: bool = False
+    mainai_activation_approved_base_sha: str = ""
+    # Per-goal AI spend for Path A. Existing provider_spend grants remain the live ceiling;
+    # this setting is an additional hard cap. Default True: Path A AI calls fail closed
+    # without a live grant (Claude exam SPEND-1). Set false only for explicit unbilled tests.
+    mainai_execution_require_provider_spend: bool = True
+    mainai_execution_goal_spend_cap_usd: float = 5.0
+    # Legacy agent-orchestration prepare-pr writes a NON-draft PR via the Contents API
+    # whenever GITHUB_WRITE_ENABLED=true. Keep that route proposal-only until an explicit
+    # Founder decision — Path A draft PRs are the write path that may be enabled later.
+    mainai_legacy_prepare_pr_writes_enabled: bool = False
+    # Safe mode: code-agent proposal writes stay in an isolated workspace unless the
+    # Founder explicitly authorizes mutating the running server checkout.
+    mainai_allow_live_checkout_writes: bool = False
 
     @property
     def frontend_origin_list(self) -> list[str]:
