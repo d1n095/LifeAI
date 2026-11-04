@@ -600,4 +600,39 @@ Postgres). Remaining: assemble ONE Founder Alpha candidate (this + #334 lineage 
 run the whole workflow once under real Ollama end-to-end. Independent review required (no
 self-cert); first_cycle_go=false.
 
+### 14a. Blueprint API + UI wired into ONE integrated candidate [PR #340 @ e3f4e3c — 6/6 e2e on real Postgres; review required]
+
+Per the Founder directive to stop accumulating disconnected PRs and assemble one executable
+candidate, PR #340 was EXTENDED in place (no new PR) with the missing Blueprint API + UI and an
+end-to-end verification. Why this branch already is the candidate: its Alembic chain is linear
+(`0069_embedding_space_identity` #333 → `0070_blueprint_drafts`) and it already carries
+`ollama_provider`, the RAG ingest/retrieve/vector_store, and the library router incl. Founder-only
+original retrieval (`get_source_media`) — so no cross-lineage merge and no Alembic-conflict
+resolution were required (single head confirmed).
+
+- **Added:** `backend/app/routers/blueprint.py` (5 routes, registered in `app/main.py`) reusing
+  `app.rag.retrieve.retrieve_context` + `resolve_active(db,"chat")`; `frontend/app/(shell)/blueprint/page.tsx`
+  + `lib/api.ts` types/methods + Sidebar link.
+- **Trust boundary (router-enforced):** whole router `require_founder`-gated; source identity never
+  client-supplied (derived from retrieval over the founder's own docs); approval identity =
+  authenticated founder, never the body; ungrounded → 422; provider failure → 503 with no partial row.
+- **Verified** `tests/backend/test_founder_alpha_blueprint_e2e.py` (6) on REAL Postgres/pgvector +
+  RLS + real storage records: full chain (auth→chat→indexed sources→retrieval→generate→inspect
+  refs→new version→durable re-read/restart→retrieve draft+original→explicit approve; v1 immutable;
+  originals' checksums unchanged), ungrounded-refused, cross-owner isolation + founder-only 403,
+  forge-protection, synthesis-failure rollback, DB-enforced `(owner,title,version)` uniqueness.
+  Full local run 15 passed (+#340's 3, openapi-schema, smoke); ruff clean.
+- **Honest model-leg scope:** chat/embedding provider is the repo's sanctioned deterministic fake
+  (monkeypatched `OpenAIProvider`, never a real key), identical to `test_chat_source_grounding.py`
+  and the #334/#336 split; real local model (Ollama) proven in the model-backed CI, not on this box
+  (no Ollama). No real-model PASS is claimed here.
+- **Incidental finding:** the #333/0069 active-embedding-space guard excludes chunks lacking an
+  `(embedding_model, native_dim)` stamp, which silently breaks the pre-#333
+  `tests/backend/chat/test_chat_source_grounding.py` — to be updated separately; this e2e suite
+  stamps chunks as the real ingest path does.
+- **Frontend note:** no local `node_modules`, so tsc/eslint run in CI; page follows repo conventions.
+- **Remaining:** run this candidate once under real Ollama end-to-end (extend #334's workflow to
+  invoke the Blueprint step). Boundaries unchanged: no merge/STRATO/paid/destructive-migration/prod
+  data; first_cycle_go=false; independent review required (not self-certified).
+
 ---
