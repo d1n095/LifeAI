@@ -699,3 +699,57 @@ branch `claude/founder-alpha-blueprint-draft`.
   (backend ruff is not a CI gate). None are introduced by this candidate.
 
 ---
+
+## 15. Anti-coordination-failure requirements — acceptance-criteria mapping [code-grounded; reuse, not rebuild]
+
+Founder directive (2026-11-04): Life must structurally prevent the coordination failures that force
+the Founder to re-remind/re-correct/re-coordinate — system-wide, all capabilities. Per the
+directive's own items 5–6 this is handled by **reusing the established architecture** (security
+kernel, persistent memory, owner ledger, scheduling, `agent_coordination`, `mainai_execution`
+lessons/recovery, `rag/trust`) — **no new orchestration framework, no duplication, ownership
+preserved**. These requirements are recorded here as **acceptance criteria for existing work**.
+Each row was verified against the actual code (not inferred from conversation), with the owner of
+any gap named rather than reassigned.
+
+**Fresh executable re-verification (candidate `8fabade`, real Postgres): 87 passed** across
+`test_mainai_lesson_from_founder_correction`, `test_lesson_from_verification`,
+`test_lesson_guard_observations`, `test_mainai_execution_recovery[_dedup|_takeover]`,
+`test_provider_spend_api`, `test_founder_alpha_blueprint_e2e`, `test_chat_source_grounding`. The
+pure coordination-ledger properties were certified earlier (§13 + PRs #337/#339) on Codex #324's
+lineage and are cited, not re-run here (not this candidate's tree; not my lane).
+
+### Item 7 — the nine required properties
+| Required property | Existing implementation (verified) | Evidence | Owner / status |
+|---|---|---|---|
+| Does **not reassign** an active task | `agent_coordination` DB-fenced leases + `DuplicateWorkError`/`canonical_work_key` | §13 (#303/#314 PASS); examiner probes | Codex #324 — COVERED |
+| Does **not repeat** a completed task | owner-ledger obligation idempotency; `create_work_assignment` dup-guard. Founder-Alpha analog: Blueprint regenerate = new immutable version, approve idempotent-guarded (409) | §13; `test_founder_alpha_blueprint_e2e` | Codex #324 + #340 — COVERED |
+| **Preserves state across restart** | execution reconciliation/recovery; Blueprint + original durable | real-Ollama run 41849139859 (restart_persistence PASS); `test_mainai_execution_recovery*` | #340 + Codex — COVERED |
+| **Detects stale / contradictory** info | `rag/trust.py` active_truth_status capping + `detect_conflicts` (`contradicts`) | `test_chat_source_grounding` (historical/disputed capping, conflicts_detected) | #340 lane — COVERED |
+| Handles **unavailable providers** without losing assignments | `authorized_dispatch_step` → durable `WAITING_FOR_PROVIDER` + `resume_waiting_for_provider`; `provider_spend` SPEND-STOP | PR #339 (4 tests); `test_provider_spend_api` | Codex #324 — COVERED |
+| **Schedules** authorized work using real availability | `adapter_config.adapter_availability` + `evaluate_dispatch_readiness(require_adapter_enabled=True)` + `github_fed_cycle` | PRs #338/#339 | Codex #324 — COVERED (see PARTIAL note below) |
+| **Remembers Founder corrections** | `mainai_execution/lessons.record_lesson_from_founder_correction` (durable verbatim quote + root_cause/fix/general_rule/applies_to/regression_test) | `test_mainai_lesson_from_founder_correction` | #340 lineage — COVERED |
+| **Prevents recurrence** of fixed errors | `lessons.apply_lessons_to_verification_plan` injects a lesson's `regression_test` into the matching task_type's verification plan | `test_lesson_from_verification`, `test_lesson_guard_observations` | #340 lineage — COVERED |
+| **Requires approval** for sensitive actions | Blueprint approve-only draft→approved (`approved_by` = authenticated founder); `provider_spend` authorization; `recovery_approval` | `test_founder_alpha_blueprint_e2e`, `test_provider_spend_api`, `test_mainai_execution_recovery*` | #340 + Codex — COVERED |
+
+### Items 1–4 (structural) — status
+- **Persistent awareness/continuity (1):** owner ledger + obligations + `founder_coordination_snapshot`
+  + execution state machine + GitHub-fed status — COVERED (Codex #324; §13).
+- **Prevent repeated mistakes (2):** the 7 pre-assignment checks map to lease/dup-guard/ledger +
+  the lesson loop above — COVERED; "durable corrective record + regression test" = `EngineeringLesson`.
+- **Time-aware scheduling (3):** dispatch-readiness + adapter availability COVERED; **PARTIAL —**
+  explicit provider *quota / reset-window* modeling ("known reset times", "unknown stays unknown")
+  is not a first-class persisted concept yet. **Gap for the owner of `provider_spend` / coordination
+  (Codex #324)** — recorded here, NOT reassigned, NOT implemented by me (outside my scope; would
+  duplicate active work).
+- **Continuous improvement (4):** lessons + versioned migrations + rollback + reproducible CI —
+  COVERED; no uncontrolled changes (gates intact).
+
+### Conclusion for my authorized scope (#340 Founder Alpha + security remediation)
+Every acceptance criterion that applies to Founder Alpha is already met and freshly re-proven
+(approval, restart persistence, no-silent-repeat via versioning, RLS isolation, stale/contradiction
+detection). **No genuinely-uncovered behavior exists within my scope**, so — per the directive —
+no new code was written here; this is the required evidence record. The one PARTIAL (provider
+quota/reset-window) is flagged for its existing owner (Codex #324) without creating a duplicate
+assignment. Security/deployment gates intact; `first_cycle_go=false`.
+
+---
