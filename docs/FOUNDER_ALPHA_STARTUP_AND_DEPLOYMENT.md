@@ -9,7 +9,7 @@ before any merge or deploy.
 
 ## 1. Exact candidate
 
-- **Candidate branch head (reviewable SHA):** `8fabade` on `claude/founder-alpha-blueprint-draft`
+- **Candidate branch head (reviewable SHA):** `d13efd7` on `claude/founder-alpha-blueprint-draft`
   (PR #340).
 - **What runs in production is a deterministic composition** (verified in CI, merges cleanly, one
   Alembic head):
@@ -85,7 +85,7 @@ stays true in production — it is only disabled for the synthetic localhost CI 
    explicitly *not* a production choice. Pick production chat + embedding models and the host RAM to
    match; re-indexing is required if the embedding model/native-dim changes (the embedding-space
    guard will not mix spaces).
-3. **Independent review of PR #340 at `8fabade` is required** (auth, RLS, concurrency, provenance,
+3. **Independent review of PR #340 at `d13efd7` is required** (auth, RLS, concurrency, provenance,
    source refs, model failures, approval authorization) — not self-certified; no merge until then.
 4. **Original-archive backup/restore/integrity cycle must pass** before authorizing any local-file
    deletion (see §5).

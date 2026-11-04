@@ -805,3 +805,51 @@ PASS ("a real-Ollama PASS alone is not security approval").
 `first_cycle_go=false`. Not self-certified — independent security review requested at `e4f7c6e`.
 
 ---
+
+## 17. Founder Alpha #340 completion — generate fix + boot directive; frozen SHA `d13efd7`
+
+Closes the remaining Founder Alpha #340 items on top of the §16 security remediation.
+
+**1. Real-Ollama Blueprint generate 503 — fixed (smallest change, architecture preserved).** Cause:
+the qwen2.5:0.5b synthesis call exceeded the 120s provider default on a CPU runner because the
+prompt could carry up to 8 sources × 800 chars (the smaller chat prompt had succeeded in the same
+run). Fix in `app/routers/blueprint.py`: the synthesis PROMPT now uses only the most-relevant few
+sources (`_SYNTH_PROMPT_MAX_SOURCES=6`), each trimmed (`_SYNTH_EXCERPT_CHARS=400`), with a generous
+model timeout (`_SYNTH_TIMEOUT_SECONDS=240`). `source_refs` still records ALL grounded sources —
+traceability unchanged; only the model INPUT is bounded. Still real-model, still grounded, still
+ungrounded-refused — no new system.
+
+**2. Re-verified at an immutable SHA via GitHub Actions.** `Founder Alpha verification (real local)`
+run **41903171671 @ `d13efd7` = SUCCESS** — every criterion PASS, including
+`blueprint_generate_real_model` (v1 draft, refs matched, provider=ollama, model=qwen2.5:0.5b),
+`blueprint_new_version`, restart persistence, and `founder_approval` (approved_by set; re-approve
+409). `CI` run **41903171882 @ `d13efd7`**: in-scope jobs green (Backend account-lifecycle, Alembic
+migration check, RLS & session-security, Frontend TypeScript & ESLint, Frontend build vercel +
+docker); backend unit/integration carries the §16 security suite (green at `e4f7c6e`). Only the two
+pre-existing out-of-scope jobs fail (`npm audit` next-pinning; Playwright chromium-install infra).
+
+**3. Founder Alpha boot directive recorded** in the authoritative architecture doc
+(`docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md`): Life's first objective is to become a functioning,
+secure, persistent MainAI — not to finish all of LifeOS — plus what Life must do on/after startup
+(understand the project from authorized sources; distinguish planned/implemented/tested/approved/
+deployed; one unified overview + propose priorities; cooperate while challenging wrong assumptions;
+eventually coordinate agents without duplicate assignments via the existing `agent_coordination`;
+respect the security kernel, Founder authority and approval boundaries; help build the rest
+incrementally). Reuses existing architecture; no new orchestration system.
+
+**4. Frozen corrected #340 SHA = `d13efd7`** — evidence prepared for independent security review
+(PR #340 review-request comment lists the dimensions; §16 for the P1 remediation, this section for
+the generate fix + boot directive).
+
+**5. Status before a controlled Founder Alpha startup.**
+COMPLETE (verified): Blueprint API + UI; the full real-model chain end-to-end
+(auth→chat→upload→index→retrieve→generate→inspect→version→restart→retrieve→approve) at `d13efd7`;
+the #333 source-grounding regression; migration chain single-head + reversible; frontend
+tsc/eslint/build; the two P1 security findings (DB-enforced, CI-verified); the boot directive.
+REMAINS before a controlled startup: independent security review of `d13efd7` (no self-cert, no
+merge); Ollama added to the VPS topology + a production model decision (see
+`FOUNDER_ALPHA_STARTUP_AND_DEPLOYMENT.md`); the original-archive backup→restore→integrity cycle
+before any local-file deletion. Boundaries: no merge/STRATO/deletion/paid; Codex #341 untouched;
+`first_cycle_go=false`.
+
+---
