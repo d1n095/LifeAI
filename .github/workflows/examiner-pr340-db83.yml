@@ -13,9 +13,21 @@ on:
 permissions:
   contents: read
 
+env:
+  DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_test
+  APP_DATABASE_URL: postgresql://mainai_app:mainai_app_test_pw@localhost:5432/lifeos_test
+  REDIS_URL: redis://localhost:6379/1
+  SECRET_KEY: ci-test-secret-key
+  FOUNDER_EMAIL: founder@lifeos.local
+  FOUNDER_PASSWORD: TestFounderPassword123!
+  FRONTEND_ORIGINS: http://127.0.0.1:3020
+  PUBLIC_APP_URL: http://127.0.0.1:3020
+  ENABLE_SCHEDULED_CLEANUP: "false"
+  PGPASSWORD: postgres
+
 jobs:
-  blueprint-security:
-    name: Examiner — Blueprint authority and retry boundaries
+  blueprint-authority:
+    name: Examiner — unchanged GUC probe, roles, and 0072 roundtrip
     runs-on: ubuntu-24.04
     services:
       postgres:
@@ -24,33 +36,16 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
+        ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+          --health-interval 5s --health-timeout 5s --health-retries 10
       redis:
         image: redis:7-alpine
-        ports:
-          - 6379:6379
+        ports: ["6379:6379"]
         options: >-
           --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_test
-      APP_DATABASE_URL: postgresql://mainai_app:mainai_app_test_pw@localhost:5432/lifeos_test
-      REDIS_URL: redis://localhost:6379/1
-      SECRET_KEY: ci-test-secret-key
-      FOUNDER_EMAIL: founder@lifeos.local
-      FOUNDER_PASSWORD: TestFounderPassword123!
-      FRONTEND_ORIGINS: http://127.0.0.1:3020
-      PUBLIC_APP_URL: http://127.0.0.1:3020
-      ENABLE_SCHEDULED_CLEANUP: "false"
-      PGPASSWORD: postgres
+          --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -60,12 +55,8 @@ jobs:
           cache-dependency-path: backend/requirements-dev.txt
       - run: pip install -r requirements-dev.txt
         working-directory: backend
-      - name: Run adopted #342 probe unchanged plus retry probe
-        run: >-
-          python -m pytest
-          tests/backend/test_blueprint_approval_security.py
-          tests/backend/test_blueprint_examiner_db83.py
-          -v
+      - name: Run adopted #342 probe unchanged
+        run: python -m pytest tests/backend/test_blueprint_approval_security.py -v
         working-directory: backend
       - name: Verify runtime-role attributes and escalation refusal
         run: |
@@ -102,3 +93,36 @@ jobs:
           test "$(alembic current | awk '{print $1}')" = "0071_blueprint_approval_guard"
           alembic upgrade 0072_blueprint_approve_identity
           test "$(alembic current | awk '{print $1}')" = "0072_blueprint_approve_identity"
+
+  retry-boundary:
+    name: Examiner — non-unique IntegrityError classification
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+        working-directory: backend
+      - name: Verify non-unique errors are not swallowed
+        run: python -m pytest tests/backend/test_blueprint_examiner_db83.py -v
+        working-directory: backend
