@@ -853,3 +853,55 @@ before any local-file deletion. Boundaries: no merge/STRATO/deletion/paid; Codex
 `first_cycle_go=false`.
 
 ---
+
+## 18. Independent security review — PR #341 / #324 coordination integration [PASS, SHA-bound]
+
+Independent examination (not self-certification for the #324 content — I did not author it; I did
+author #339's authorized_dispatch_step, noted below) of **PR #341** "Integrate #324/#339 with the
+frontend CI baseline", frozen SHA **`95c32168860b2b8a1ccd4126d4a59ea410a1f4ed`**, head
+`codex/coordination-324-339-ci-integration`, base `claude/frontend-npm-audit-baseline-consolidation`.
+
+Method (GitHub-first; no clone/worktree/broad local suite): git blob-SHA equality vs the already-
+certified #303/#314/#339; targeted reads of changed + new files at the frozen SHA; reproducible CI
+evidence from #341's own passing CI run.
+
+**VERDICT: PASS** at `95c32168`.
+
+1. **Preserved by construction (byte-identical blob SHAs vs certified #339/#314/#303):**
+   `agent_coordination/{authorized_dispatch_step,dispatch,lifecycle,github_intake,__init__}.py` —
+   fail-closed dispatch gate + durable WAITING_FOR_PROVIDER, recovery/reconciliation, read-only
+   GitHub intake — carried unchanged. (authorized_dispatch_step/dispatch/github_fed were my #339
+   work; byte-identical, examined earlier.)
+2. **Changed (integrated from #324): `durable.py` `persist.py` `autonomous_cycle.py` `rls.py`** —
+   owner-scoping intact (17/21/14 owner_id references; owner-ledger + ledger-backing semantics
+   retained); no cross-owner path introduced; rls.py keeps every existing isolation policy.
+3. **New owner-scoped tables (migration 0100 `authorized_operating_cycles`, `provider_webhook_events`)
+   — DB-enforced isolation correct:** ENABLE + FORCE RLS + owner policies (USING + WITH CHECK on
+   `owner_id = current_setting('app.current_user_id')`); composite-FK owner integrity on every FK;
+   `provider_webhook_events` is append-only (BEFORE UPDATE/DELETE deny trigger; `mainai_app` gets
+   only SELECT,INSERT); REVOKE ALL FROM PUBLIC + minimal grants.
+4. **New external-input boundary (Cursor webhook: `provider_webhook_ingress.py` +
+   `external_connectivity/cursor_cloud.py` + router `/cursor/{owner_id}`) — authenticated,
+   replay-safe, binding-scoped, untrusted-until-verified:** HMAC-SHA256 over raw bytes with
+   `hmac.compare_digest` (constant-time) + user-agent + `sha256=` format; rejects missing-secret/
+   mismatch. Path `owner_id` is "lookup scope only — HMAC + durable assignment binding remains
+   authority". Row-locked (`with_for_update`) owned-cycle lookup (concurrency-safe); replay/forgery
+   detection (delivery_id + body-hash mismatch rejected); status allowlist + timestamp window
+   (stale/future rejected); result ingested as UNTRUSTED via the broker + independent verification.
+5. **Adversarial evidence present + GREEN at the frozen SHA:** `test_rt3_persistent_cycle_webhook.py`
+   (single-fenced worker claim + restart-reclaim; concurrent-claim serialization;
+   authenticated-event-never-bypasses-independent-verification; replay_ignored) passed in #341's own
+   **CI run 41893411066** (Backend unit/integration + RLS & session-security + Alembic migration
+   check + account-lifecycle all success).
+
+**Residual boundaries flagged for the owner (not blockers):**
+- Single global `cursor_cloud_webhook_secret` (not per-owner); authority rests on HMAC + the durable
+  owned-cycle binding + untrusted-until-verified. Adequate for a single-founder deployment; revisit
+  per-owner secrets if multi-owner webhooks are ever enabled.
+- `operating_cycle_runtime.py`, `external_connectivity/`, `transports/`: the webhook path and the
+  cycle-authority assert were examined; an exhaustive line-by-line of all runtime/transport
+  internals was bounded by the GitHub-first/targeted mandate. No defect found on the examined paths.
+
+Boundaries: #341 unmodified; no merge/deploy/STRATO; Codex's #340 review untouched; `first_cycle_go=false`.
+
+---
