@@ -108,6 +108,12 @@ from app.agent_coordination.runtime_view import (
     work_registry_snapshot,
 )
 from app.agent_coordination.github_fed_cycle import run_github_fed_operating_cycle
+from app.agent_coordination.authorized_dispatch_step import (
+    WAITING_FOR_PROVIDER,
+    DispatchStepResult,
+    dispatch_or_wait,
+    resume_waiting_for_provider,
+)
 from app.agent_coordination.service import (
     CoordinationError,
     CoordinatorDecision,
@@ -136,6 +142,10 @@ from app.agent_coordination.service import (
 
 __all__ = [
     "run_github_fed_operating_cycle",
+    "dispatch_or_wait",
+    "resume_waiting_for_provider",
+    "DispatchStepResult",
+    "WAITING_FOR_PROVIDER",
     "ALL_EVENT_KINDS",
     "BLOCKS_FIRST_CYCLE",
     "DISPATCH_LIFECYCLE",
