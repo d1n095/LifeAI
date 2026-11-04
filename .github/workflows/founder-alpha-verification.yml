@@ -205,17 +205,22 @@ jobs:
         working-directory: candidate/backend
         run: python scripts/security/apply_runtime_privileges.py
 
-      - name: Cross-owner isolation + no-mixing + identity (real pgvector)
+      - name: Model-independent schema/RLS/identity checks (real pgvector)
         working-directory: candidate/backend
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_foundera_pytest
           APP_DATABASE_URL: postgresql://mainai_app:mainai_app_foundera_pw@localhost:5432/lifeos_foundera_pytest
         run: |
           set -eo pipefail
+          # Only MODEL-INDEPENDENT tests here: this job's active provider is Ollama, so
+          # API-level tests that monkeypatch OpenAIProvider and assume deterministic fake
+          # embeddings (test_chat_source_grounding, test_founder_alpha_blueprint_e2e) do NOT
+          # apply — they belong to the default OpenAI-fake env in ci.yml and pass there. The
+          # REAL-Ollama Blueprint generate→inspect→version→approve path is proven live by the
+          # acceptance driver below, not by a fake-provider test. These two exercise the
+          # embedding-space guard + the blueprint schema/RLS against the real migrated DB.
           python -m pytest tests/backend/rag/test_embedding_space.py \
-                           tests/backend/chat/test_chat_source_grounding.py \
-                           tests/backend/test_blueprint_draft.py \
-                           tests/backend/test_founder_alpha_blueprint_e2e.py -q \
+                           tests/backend/test_blueprint_draft.py -q \
             | tee "$GITHUB_WORKSPACE/pytest_integration.log"
 
       - name: Write the real-app bootstrap (real providers; ONLY email faked)
