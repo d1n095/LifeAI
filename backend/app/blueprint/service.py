@@ -81,31 +81,49 @@ def generate_blueprint_draft(
         {"document_id": str(h["document_id"]), "similarity": h.get("similarity"), "excerpt": _excerpt(h)}
         for h in hits
     ]
-    version = latest_version(db, owner_id=owner_id, title=title) + 1
+    provenance = {
+        "ai_generated": True,
+        "originals_mutated": False,
+        "draft": True,
+        "pending_founder_approval": True,
+        "grounded_in_sources": True,
+        "source_count": len(source_document_ids),
+    }
 
-    row = BlueprintDraft(
-        owner_id=owner_id,
-        title=title,
-        version=version,
-        status="draft",
-        body=body,
-        generated_from_query=query,
-        source_document_ids=source_document_ids,
-        source_refs=source_refs,
-        model_provider=model_provider,
-        model_name=model_name,
-        provenance={
-            "ai_generated": True,
-            "originals_mutated": False,
-            "draft": True,
-            "pending_founder_approval": True,
-            "grounded_in_sources": True,
-            "source_count": len(source_document_ids),
-        },
-    )
-    db.add(row)
-    db.flush()
-    return row
+    # P2 — version allocation is max(version)+1 guarded by the unique index
+    # (owner_id, title, version). Two concurrent generations for the same title can compute the
+    # same next version; one commits, the other hits a unique violation. Rather than surface a
+    # raw 500, retry with a recomputed next version (a SAVEPOINT isolates each attempt so the
+    # caller's transaction stays usable). Bounded so a genuine persistent conflict still errors.
+    from sqlalchemy.exc import IntegrityError
+
+    last_exc: IntegrityError | None = None
+    for _attempt in range(5):
+        version = latest_version(db, owner_id=owner_id, title=title) + 1
+        row = BlueprintDraft(
+            owner_id=owner_id,
+            title=title,
+            version=version,
+            status="draft",
+            body=body,
+            generated_from_query=query,
+            source_document_ids=source_document_ids,
+            source_refs=source_refs,
+            model_provider=model_provider,
+            model_name=model_name,
+            provenance=provenance,
+        )
+        try:
+            with db.begin_nested():  # SAVEPOINT: a failed insert rolls back only this attempt
+                db.add(row)
+                db.flush()
+            return row
+        except IntegrityError as exc:  # concurrent same-version insert — recompute and retry
+            last_exc = exc
+            continue
+    raise BlueprintError(
+        "version_allocation_conflict: could not allocate a unique Blueprint version after retries"
+    ) from last_exc
 
 
 def approve_blueprint_draft(
@@ -114,27 +132,46 @@ def approve_blueprint_draft(
     """Explicit Founder approval — the ONLY path from 'draft' to 'approved'.
 
     Integrity is enforced in the DATABASE, not here: approval runs through the owner-scoped,
-    transaction-safe SECURITY DEFINER function `blueprint_approve_draft` (migration 0071), which
-    takes a row lock (`FOR UPDATE`) and re-checks status inside the lock, so two concurrent
-    approvals of the same draft serialize and exactly one wins. In production the runtime role
-    holds no direct UPDATE on blueprint_drafts (s1a_privilege_policy) and may only EXECUTE this
-    function, so approval state cannot be forged by raw SQL; a BEFORE UPDATE/DELETE guard trigger
-    additionally makes an approved draft immutable and undeletable. owner scoping comes from the
-    session's `app.current_user_id` (set by the request context) and is re-asserted by the
-    function; `owner_id` here is only an early sanity check for a clean error."""
+    transaction-safe SECURITY DEFINER function `blueprint_approve_draft` (migrations 0071/0072),
+    which takes a row lock (`FOR UPDATE`) and re-checks status inside the lock (concurrent
+    approvals serialize), with a BEFORE UPDATE/DELETE guard trigger making an approved draft
+    immutable and undeletable.
+
+    Authority boundary (migration 0072, closing the GUC-spoofing P1): the function refuses to run
+    when the caller's `session_user` is the runtime role `mainai_app`. `session_user` is the
+    authenticated login role, which the runtime role cannot change (no SET ROLE/SESSION
+    AUTHORIZATION privilege) — unlike the `app.current_user_id` GUC, which it CAN set. So a raw
+    `mainai_app` connection, even controlling every custom GUC, cannot forge an approval. The
+    legitimate approval must therefore run on a PRIVILEGED connection whose login role is not
+    `mainai_app` — the app's admin/migration connection (`migration_engine`), the same privileged-
+    session pattern app/worker.py uses for storage-deletion claims. `owner_id` is the authenticated
+    Founder's id (the router passes `require_founder`'s `user.id`) — supplied by trusted server code
+    on that privileged connection, never read from a caller-writable variable.
+
+    The caller's `db` session (the ordinary request/runtime session) is used only to check
+    existence for a clean 404 and to re-read the result."""
     from sqlalchemy import text as _sa_text
+
+    from app.db import migration_engine
 
     row = db.get(BlueprintDraft, draft_id)
     if row is None or row.owner_id != owner_id:
         raise BlueprintError(f"blueprint draft {draft_id} not found for owner")
 
     try:
-        db.execute(
-            _sa_text("SELECT blueprint_approve_draft(:draft_id, :approved_by)"),
-            {"draft_id": str(draft_id), "approved_by": approved_by},
-        )
+        # Privileged connection: session_user is the admin/migration role, not mainai_app, so the
+        # function's authority guard admits it. set_config(..., true) scopes the owner GUC to this
+        # one transaction only; owner_id is the server-authenticated Founder id, not caller input.
+        with migration_engine.begin() as conn:
+            conn.execute(
+                _sa_text("SELECT set_config('app.current_user_id', :uid, true)"),
+                {"uid": str(owner_id)},
+            )
+            conn.execute(
+                _sa_text("SELECT blueprint_approve_draft(:draft_id, :approved_by)"),
+                {"draft_id": str(draft_id), "approved_by": approved_by},
+            )
     except Exception as exc:  # DB-enforced guard rejected it (not-found / not-draft / integrity)
-        db.rollback()
         raise BlueprintError(f"blueprint draft {draft_id} could not be approved: {exc}") from exc
 
     db.expire(row)
