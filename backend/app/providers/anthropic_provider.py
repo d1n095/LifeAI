@@ -9,6 +9,8 @@ ANTHROPIC_VERSION = "2023-06-01"
 
 class AnthropicProvider(LLMProvider):
     name = "anthropic"
+    enforces_hard_output_token_cap = True
+    reports_authoritative_billable_usage = True
 
     def __init__(self):
         self.settings = get_settings()
@@ -39,13 +41,17 @@ class AnthropicProvider(LLMProvider):
             resp.raise_for_status()
             data = resp.json()
         content = "".join(block.get("text", "") for block in data.get("content", []))
-        usage = data.get("usage", {})
+        usage = data.get("usage")
         # Normalized to prompt_tokens/completion_tokens like every other provider (Anthropic
         # calls them input_tokens/output_tokens) so usage logging doesn't need per-provider cases.
-        normalized_usage = {
-            "prompt_tokens": usage.get("input_tokens", 0),
-            "completion_tokens": usage.get("output_tokens", 0),
-        }
+        # Incomplete usage is left without both keys so Path A can fail closed.
+        if not isinstance(usage, dict) or "input_tokens" not in usage or "output_tokens" not in usage:
+            normalized_usage = {}
+        else:
+            normalized_usage = {
+                "prompt_tokens": int(usage["input_tokens"] or 0),
+                "completion_tokens": int(usage["output_tokens"] or 0),
+            }
         return ChatResult(content=content, provider=self.name, model=model, raw_usage=normalized_usage)
 
     async def embed(self, texts: list[str], model: str, *, timeout: float | None = None) -> list[list[float]]:

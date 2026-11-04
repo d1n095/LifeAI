@@ -303,3 +303,27 @@ appens egen uppstart. Se `docs/RENDER_DEPLOY.md`s avsnitt "Databasrollerna" ("Et
 separat pooler-fel"), `backend/tests/backend/test_ensure_app_role.py`,
 `backend/tests/backend/test_db_retry.py`, och Container E i
 `.github/workflows/ci.yml`s `combined-container-verify`.
+
+
+## Personal Recall KEK operations
+
+Personal Recall production data is encrypted with AES-256-GCM through an owner-key hierarchy.
+Recall remains behind its security gate until a separate activation review authorizes it, but
+operators must understand the required secret before enabling any production Recall path.
+
+Required environment:
+
+- `PERSONAL_RECALL_SYSTEM_KEK_B64`: base64 for exactly 32 random bytes, for example generated with `openssl rand -base64 32`.
+- `PERSONAL_RECALL_SYSTEM_KEK_VERSION`: an operator-managed version label such as `prod-v1`.
+
+The real KEK must live only in the deployment secret store, never in Git, logs, database rows,
+or diagnostics. Missing, malformed, wrong-version, or wrong-key values fail closed: Recall
+payloads cannot be encrypted/decrypted and export/retrieval must report that honestly rather
+than falling back to plaintext.
+
+Backup and restore must treat the database and matching KEK/version as a pair. Losing the KEK
+makes existing encrypted Recall payloads unrecoverable by design. Rotation is versioned; a
+future production rotation runbook must keep old versions available until every still-needed
+record is migrated or deliberately erased. This release candidate documents the requirement
+and exercises rotation mechanics in tests, but it does not claim a full production key-custody
+or disaster-recovery drill has been completed.

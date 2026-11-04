@@ -56,6 +56,16 @@ from app.models.diagnosis import (
 )
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
+from app.models.personal_recall_outbox import PersonalRecallOutbox, RecallOutboxEventType
+from app.models.resource_intelligence import AgentResourceTelemetrySample
+from app.models.personal_recall_outbox_delivery import PersonalRecallOutboxDelivery
+from app.models.personal_recall_production import (
+    PersonalRecallChunk,
+    PersonalRecallExtraction,
+    PersonalRecallGrant,
+    PersonalRecallOwnerKey,
+    PersonalRecallSource,
+)
 from app.models.email_verification_token import EmailVerificationToken
 from app.models.execution_envelope import ExecutionAuthorizationEnvelope, ExecutionScopeProposal
 from app.models.founder_memory import (
@@ -66,6 +76,7 @@ from app.models.founder_memory import (
     FounderMemoryNote,
 )
 from app.models.import_job import ImportJob
+from app.models.operating_cycle import AuthorizedOperatingCycle, ProviderWebhookEvent
 from app.models.intelligence_governance import (
     ClassificationBasis,
     ExecutionRole,
@@ -138,6 +149,20 @@ from app.models.mainai_job import (
     MainAIJobProposal,
     MainAIJobProposalStatus,
     MainAIJobStatus,
+)
+from app.models.mainai_level2 import MainAILevel2Event, MainAILevel2Program
+from app.models.mainai_verification import MainAIVerificationRecord
+from app.models.mainai_founder_boot import (
+    MainAIFounderBoot,
+    MainAIFounderBootEvent,
+    MainAIFounderBootStatus,
+    MainAIFounderCovenant,
+)
+from app.models.mainai_supervision import (
+    MainAIBudgetReservation,
+    MainAISupervisionAgent,
+    MainAISupervisionMessage,
+    MainAISupervisionTelemetry,
 )
 from app.models.mainai_wait import (
     TERMINAL_MAINAI_TASK_WAIT_STATUSES,
@@ -273,6 +298,14 @@ __all__ = [
     "DiagnosisRecord",
     "Document",
     "DocumentChunk",
+    "PersonalRecallOutbox",
+    "RecallOutboxEventType",
+    "PersonalRecallOutboxDelivery",
+    "PersonalRecallSource",
+    "PersonalRecallOwnerKey",
+    "PersonalRecallGrant",
+    "PersonalRecallExtraction",
+    "PersonalRecallChunk",
     "EmailVerificationToken",
     "ExecutionScopeProposal",
     "ExecutionAuthorizationEnvelope",
@@ -346,6 +379,9 @@ __all__ = [
     "MainAIJobProposal",
     "MainAIJobProposalStatus",
     "MainAIJobStatus",
+    "MainAILevel2Event",
+    "MainAILevel2Program",
+    "MainAIVerificationRecord",
     "TERMINAL_MAINAI_TASK_WAIT_STATUSES",
     "MainAITaskWait",
     "MainAITaskWaitSourceType",
@@ -449,4 +485,13 @@ __all__ = [
     "StrategySynthesisInput",
     "StrategySynthesisLessonLink",
     "StrategySynthesisMaterialization",
+    "AgentResourceTelemetrySample",
+    "MainAIBudgetReservation",
+    "MainAISupervisionTelemetry",
+    "MainAISupervisionMessage",
+    "MainAISupervisionAgent",
+    "MainAIFounderBoot",
+    "MainAIFounderBootEvent",
+    "MainAIFounderBootStatus",
+    "MainAIFounderCovenant",
 ]

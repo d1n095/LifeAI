@@ -7,6 +7,48 @@ from app.agent_coordination.adapter_config import (
     resolve_adapter_env,
 )
 from app.agent_coordination.bootstrap import KNOWN_AGENT_DEFAULTS, bootstrap_known_agents
+from app.agent_coordination.lifecycle import (
+    ingest_lifecycle_event,
+    reconcile_owner,
+    reconcile_pending_owners,
+)
+from app.agent_coordination.delivery import (
+    claim_message,
+    issue_bridge_credential,
+    reconcile_owner_delivery,
+    reconcile_pending_deliveries,
+    submit_receipt,
+)
+from app.agent_coordination.persist import (
+    ensure_owner_ledger_backing,
+    persist_owner_ledger,
+    repair_misclassified_backing,
+)
+from app.agent_coordination.connect import (
+    founder_setup_requirements,
+    operational_handover_view,
+    run_authorized_receiver,
+)
+from app.agent_coordination.local_bridge import LocalAuthorizedBridge
+from app.agent_coordination.agent_side import run_agent_side
+from app.agent_coordination.transport import capability_matrix
+from app.agent_coordination.github_intake import (
+    DEFAULT_PUBLIC_REPO,
+    GitHubDevelopmentIntake,
+    GitHubReadClient,
+    GitHubReadError,
+)
+from app.agent_coordination.durable import (
+    BLOCKS_FIRST_CYCLE,
+    FIRST_CYCLE_GO,
+    DurableCoordinationService,
+    HandoffStatus,
+    ObligationStatus,
+    TransferTransport,
+    founder_coordination_snapshot,
+    load_owner_ledger,
+    persist_to_assignment,
+)
 from app.agent_coordination.dispatch import (
     DISPATCH_LIFECYCLE,
     DispatchDecision,
@@ -93,7 +135,9 @@ from app.agent_coordination.service import (
 
 __all__ = [
     "ALL_EVENT_KINDS",
+    "BLOCKS_FIRST_CYCLE",
     "DISPATCH_LIFECYCLE",
+    "FIRST_CYCLE_GO",
     "DURABLE_EVENT_KINDS",
     "EPHEMERAL_EVENT_KINDS",
     "OUTCOME_OK",
@@ -115,6 +159,12 @@ __all__ = [
     "DispatchDecision",
     "DispatchResult",
     "DuplicateWorkError",
+    "DEFAULT_PUBLIC_REPO",
+    "DurableCoordinationService",
+    "GitHubDevelopmentIntake",
+    "GitHubReadClient",
+    "GitHubReadError",
+    "HandoffStatus",
     "ExecutionEvent",
     "IdleAgentNextWork",
     "KNOWN_AGENT_DEFAULTS",
@@ -122,10 +172,12 @@ __all__ = [
     "LeaseFencingError",
     "LeaseStillLiveError",
     "NextAssignmentDecision",
+    "ObligationStatus",
     "ReconciliationDecision",
     "RoutingDecision",
     "RuntimeStatus",
     "ScopeExpansionError",
+    "TransferTransport",
     "acquire_lease",
     "adapter_availability",
     "agent_runtime_snapshot",
@@ -145,7 +197,15 @@ __all__ = [
     "evaluate_assignment_readiness",
     "evaluate_dispatch_readiness",
     "expire_stale_active_leases",
+    "founder_coordination_snapshot",
     "idle_agents_with_next_assignment",
+    "LocalAuthorizedBridge",
+    "ensure_owner_ledger_backing",
+    "founder_setup_requirements",
+    "claim_message",
+    "ingest_lifecycle_event",
+    "issue_bridge_credential",
+    "load_owner_ledger",
     "mark_execution_cancelled",
     "mark_execution_exited",
     "mark_execution_lost",
@@ -156,8 +216,20 @@ __all__ = [
     "next_feasible_assignment_for_agent",
     "paths_conflict",
     "paths_conflict_any",
+    "operational_handover_view",
+    "persist_owner_ledger",
+    "repair_misclassified_backing",
+    "persist_to_assignment",
+    "run_agent_side",
+    "run_authorized_receiver",
+    "capability_matrix",
     "real_adapter_config",
     "reconcile_execution_state",
+    "reconcile_owner",
+    "reconcile_owner_delivery",
+    "reconcile_pending_deliveries",
+    "reconcile_pending_owners",
+    "submit_receipt",
     "record_assignment_execution",
     "record_assignment_outcome",
     "record_execution_event",

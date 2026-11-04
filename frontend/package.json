@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "audit:policy:test": "node --test scripts/check-npm-audit.test.js",
+    "proxy:safety:test": "node --experimental-strip-types --test scripts/proxy-path-safety.test.mjs"
   },
   "dependencies": {
     "next": "16.4.3",

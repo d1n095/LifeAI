@@ -10,11 +10,15 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta
 
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from app.mainai_founder_ops.assignment_guard import DuplicateWorkError, assert_no_duplicate_task_assignment
+from app.models.mainai_execution import MainAITask
 from app.models.workforce import WorkforceAssignment, WorkforceDelegationRequest, WorkforceTeam
 from app.workforce.authority import TaskScopedAuthority, revoke_assignment_authority
 from app.workforce.context import create_context_package
+from app.workforce.kill_switch import assert_grant_allowed
 from app.workforce.performance import record_job_attempt
 from app.workforce.registry import assert_agent_selectable, get_workforce_agent
 from app.workforce.selector import select_best_candidate
@@ -27,6 +31,29 @@ class DelegationBrokerError(Exception):
 
 class VerificationError(DelegationBrokerError):
     pass
+
+
+def _lock_delegation_slot(
+    db: Session,
+    *,
+    owner_id: uuid.UUID,
+    task_id: uuid.UUID | None,
+    goal_text: str,
+    required_capability: str,
+) -> None:
+    """Serialize concurrent duplicate delegations without a new unique-index migration (D3)."""
+    key = f"workforce-delegation:{owner_id}:{task_id or ''}:{goal_text}:{required_capability}"
+    db.execute(
+        text("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(:key, 5))"),
+        {"key": key},
+    )
+    if task_id is not None:
+        db.execute(
+            select(MainAITask)
+            .where(MainAITask.id == task_id, MainAITask.owner_id == owner_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
 
 
 def submit_delegation_request(
@@ -44,6 +71,17 @@ def submit_delegation_request(
     verification_requirement: str = "independent_verifier",
     provenance: dict | None = None,
 ) -> WorkforceDelegationRequest:
+    _lock_delegation_slot(
+        db,
+        owner_id=owner_id,
+        task_id=task_id,
+        goal_text=goal_text,
+        required_capability=required_capability,
+    )
+    try:
+        assert_no_duplicate_task_assignment(db, owner_id=owner_id, task_id=task_id)
+    except DuplicateWorkError as exc:
+        raise DelegationBrokerError(str(exc)) from exc
     row = WorkforceDelegationRequest(
         owner_id=owner_id,
         goal_id=goal_id,
@@ -73,6 +111,7 @@ def resolve_delegation(
     prefer_local_only: bool = False,
     ttl_hours: int = 24,
     verifier_profile_id: uuid.UUID | None = None,
+    required_provider_type: str | None = None,
 ) -> WorkforceAssignment:
     """Broker: select agent → package context → mint task-scoped assignment.
 
@@ -82,8 +121,18 @@ def resolve_delegation(
         raise DelegationBrokerError("owner mismatch on delegation request")
     if request.status != "open":
         raise DelegationBrokerError(f"request status={request.status} is not open")
+    try:
+        assert_no_duplicate_task_assignment(
+            db,
+            owner_id=owner_id,
+            task_id=request.task_id,
+            excluding_request_id=request.id,
+        )
+    except DuplicateWorkError as exc:
+        raise DelegationBrokerError(str(exc)) from exc
 
     prefer_local = prefer_local_only or request.data_sensitivity in ("vault", "secret", "high")
+
     best = select_best_candidate(
         db,
         owner_id=owner_id,
@@ -92,6 +141,7 @@ def resolve_delegation(
         data_sensitivity=request.data_sensitivity,
         prefer_local_only=prefer_local,
         cost_ceiling_usd=request.cost_ceiling_usd,
+        required_provider_type=required_provider_type,
     )
     profile = get_workforce_agent(db, owner_id=owner_id, agent_id=best.profile_id)
     assert_agent_selectable(profile)
@@ -121,6 +171,14 @@ def resolve_delegation(
         provenance={"delegation_request_id": str(request.id), "profile_id": str(profile.id)},
     )
 
+    # Grant-time kill-switch gate — THE fix for the authority-widening kill-switch race
+    # (see app/workforce/kill_switch.py's module docstring). Must run, in this same
+    # transaction, immediately before the WorkforceAssignment insert below: it takes a row
+    # lock that a concurrent activate_kill_switch()/activate_global_kill_switch() call
+    # contends for as part of its own commit, so the database enforces one strict ordering
+    # between this grant and any concurrent stop — no application-level timing assumption.
+    grant_fence = assert_grant_allowed(db, owner_id=owner_id)
+
     assignment = WorkforceAssignment(
         owner_id=owner_id,
         delegation_request_id=request.id,
@@ -146,6 +204,7 @@ def resolve_delegation(
                 "EXTERNAL_MODEL_OUTPUT_NE_TRUSTED_FACT",
             ],
             "authority_granted_extra": False,
+            "authority_fence": grant_fence,
         },
     )
     db.add(assignment)
@@ -195,11 +254,22 @@ def mark_verification(
     assignment: WorkforceAssignment,
     status: str,
     verifier_profile_id: uuid.UUID,
+    risk: str = "low",
 ) -> WorkforceAssignment:
+    """Raw, LOW-RISK-ONLY verification setter. HIGH_RISK != NORMAL_RISK: this function has
+    no evidence/founder-approval/two-agent-agreement policy of its own -- it must never be
+    reachable as a bypass around apply_verification_decision()'s real policy gate for
+    anything above low risk. Callers with risk != "low" must use apply_verification_decision()
+    instead, which enforces the shared app.evidence_claim evidence gate."""
     if status not in VERIFICATION_STATUSES:
         raise VerificationError(f"invalid verification status: {status}")
     if assignment.owner_id != owner_id:
         raise DelegationBrokerError("owner mismatch")
+    if (risk or "low").lower() != "low" and status == "VERIFIED":
+        raise VerificationError(
+            f"mark_verification() cannot VERIFY risk={risk!r} work -- use apply_verification_decision() "
+            "for anything above low risk, it enforces the real evidence/approval policy"
+        )
     if status == "VERIFIED":
         if verifier_profile_id == assignment.profile_id:
             raise VerificationError("BUILDER_CANNOT_SELF_VERIFY")

@@ -375,6 +375,191 @@ def test_subordinate_insert_requires_authority_and_does_not_run_without_it(db_se
     assert new_task.id != task.id
 
 
+def test_replay_with_park_candidate_is_idempotent_on_created_candidate_ids(db_session, make_verified_user):
+    """P1 bug (memory_work_linkage, PR #211, live on integration tip):
+    apply_memory_work_linkage(note_id=X) with park_candidate=True (the default) is NOT
+    idempotent. First call: no similar unreviewed candidate exists, so one is created via
+    record_work_candidate(); result includes CANDIDATE_RECORDED and
+    created_candidate_ids=[wc_id]. Second identical call (a retry): _find_similar_unreviewed_
+    candidate() now finds the candidate the FIRST call just created (same title/text,
+    classifier_strategy="memory_work_linkage_v1") and takes the NOOP_SAME branch instead,
+    returning created_candidate_ids=[] -- a caller keying off that field for
+    notification/tracking silently loses it on retry."""
+    user, _ = make_verified_user()
+    _set_rls_user(db_session, user.id)
+    _promote_entity(
+        db_session, owner_id=user.id, title="Weekly cadence for the newsletter digest", key="t-retry-park-ent"
+    )
+    note, _ = founder_add_memory_note(
+        db_session,
+        owner_id=user.id,
+        content="Founder wants weekly cadence for the newsletter digest",
+        note_type="preference",
+        idempotency_key="t-retry-park",
+        link_to_work=False,
+    )
+    db_session.commit()
+
+    first = apply_memory_work_linkage(db_session, owner_id=user.id, note_id=note.id, park_candidate=True)
+    db_session.commit()
+    assert first.created_candidate_ids, "expected a parked candidate on the first call"
+    first_wc_id = first.created_candidate_ids[0]
+    assert LinkageAction.CANDIDATE_RECORDED in first.actions
+
+    # Retry: identical call, same note_id -- must be idempotent, not a SAME-collapse NOOP.
+    second = apply_memory_work_linkage(db_session, owner_id=user.id, note_id=note.id, park_candidate=True)
+    db_session.commit()
+
+    assert second.created_candidate_ids == [first_wc_id], (
+        f"retry lost the candidate id: expected [{first_wc_id}], got {second.created_candidate_ids} "
+        f"(actions={second.actions})"
+    )
+    assert LinkageAction.NOOP_SAME not in second.actions
+    # No duplicate candidate must have been created for this note.
+    unreviewed = list_work_candidates(db_session, owner_id=user.id, status="unreviewed")
+    memory_parked = [c for c in unreviewed if (c.title or "").startswith("[memory]")]
+    assert len(memory_parked) == 1
+
+
+def test_concurrent_similar_notes_do_not_double_park_same_collapse_candidate(db_session, make_verified_user, monkeypatch):
+    """P1 race (memory_work_linkage, PR #211, live on integration tip):
+    _find_similar_unreviewed_candidate() reads work_candidates with no locking before
+    deciding whether to create a new one. Two genuinely concurrent calls for
+    differently-worded-but-similar notes can both read before either commits and both create
+    parked candidates, defeating the SAME-collapse guarantee
+    docs/MAINAI_MEMORY_WORK_LINKAGE.md promises. Real two-thread/two-session test, not a
+    simulated one: a threading.Barrier forces both sessions past the read into the
+    create-or-collapse decision concurrently.
+
+    IMPORTANT, found empirically while writing this test: apply_memory_work_linkage() calls
+    ensure_linkage_thread() -> memory_threads.service.create_thread() FIRST, and that
+    function takes `SELECT ... FOR UPDATE` on the OWNER's own users row ("Serialize first
+    creation by owner so concurrent replay converges before the unique constraint is
+    reached" -- its own comment) and holds it until the caller's own commit. That
+    incidentally serializes the ENTIRE apply_memory_work_linkage() call per owner, masking
+    this specific race end-to-end for any two calls sharing an owner_id -- confirmed via a
+    debug trace showing thread 2 never even entering _find_similar_unreviewed_candidate
+    until thread 1 had already left it. So this test bypasses ONLY that incidental lock
+    (monkeypatching ensure_linkage_thread to do the same work without the owner-row lock),
+    to isolate whether _find_similar_unreviewed_candidate's own missing locking is itself
+    race-safe, independent of that unrelated mechanism -- exactly the gap
+    docs/MAINAI_MEMORY_WORK_LINKAGE.md's SAME-collapse guarantee must not silently depend on
+    a lock in a different module for its own correctness. A short sleep is injected between
+    the read and its return to widen the window deterministically."""
+    import threading
+    import time
+
+    from sqlalchemy import select as sa_select
+    from sqlalchemy.orm import sessionmaker
+
+    import app.memory_work_linkage.service as mwl_service
+    from app.memory_threads.service import add_member as _add_member
+    from app.models.memory_thread import MemoryThread
+
+    def _lockless_ensure_linkage_thread(db, *, owner_id, note_id):
+        idem = f"memory-work-link:{note_id}"
+        existing = db.execute(
+            sa_select(MemoryThread).where(
+                MemoryThread.owner_id == owner_id, MemoryThread.idempotency_key == idem
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            existing = MemoryThread(
+                owner_id=owner_id,
+                idempotency_key=idem,
+                system_label=f"memory_work_linkage:{note_id}",
+                classification_basis="deterministic",
+            )
+            db.add(existing)
+            db.flush()
+        _add_member(
+            db,
+            owner_id=owner_id,
+            thread_id=existing.id,
+            member_kind="founder_memory_note",
+            member_ref_id=note_id,
+            membership_basis="founder_added",
+            classification_basis="deterministic",
+            provenance={"stage": "C", "role": "source_note"},
+            idempotency_key=f"mem-link-note:{note_id}",
+            actor_type="system",
+        )
+        return existing.id
+
+    monkeypatch.setattr(mwl_service, "ensure_linkage_thread", _lockless_ensure_linkage_thread)
+
+    _orig_find_similar = mwl_service._find_similar_unreviewed_candidate
+
+    def _slow_find_similar(db, *, owner_id, text):
+        result = _orig_find_similar(db, owner_id=owner_id, text=text)
+        time.sleep(0.2)
+        return result
+
+    monkeypatch.setattr(mwl_service, "_find_similar_unreviewed_candidate", _slow_find_similar)
+
+    user, _ = make_verified_user()
+    _set_rls_user(db_session, user.id)
+    _promote_entity(db_session, owner_id=user.id, title="Weekly digest ships on Mondays", key="t-race-ent")
+    note_a, _ = founder_add_memory_note(
+        db_session,
+        owner_id=user.id,
+        content="Founder wants the weekly digest to ship on Mondays",
+        note_type="preference",
+        idempotency_key="t-race-a",
+        link_to_work=False,
+    )
+    note_b, _ = founder_add_memory_note(
+        db_session,
+        owner_id=user.id,
+        content="Founder wants the weekly digest to ship on Mondays!",
+        note_type="preference",
+        idempotency_key="t-race-b",
+        link_to_work=False,
+    )
+    db_session.commit()
+    owner_id = user.id
+    note_a_id = note_a.id
+    note_b_id = note_b.id
+
+    bind = db_session.get_bind()
+    Session = sessionmaker(bind=bind)
+    barrier = threading.Barrier(2)
+    results: list[tuple] = []
+
+    def _attempt(label: str, note_id):
+        session = Session()
+        try:
+            _set_rls_user(session, owner_id)
+            barrier.wait(timeout=5)
+            result = apply_memory_work_linkage(session, owner_id=owner_id, note_id=note_id, park_candidate=True)
+            session.commit()
+            results.append(("ok", label, result))
+        except Exception as exc:  # noqa: BLE001
+            session.rollback()
+            results.append(("error", label, repr(exc)))
+        finally:
+            session.close()
+
+    t1 = threading.Thread(target=_attempt, args=("a", note_a_id))
+    t2 = threading.Thread(target=_attempt, args=("b", note_b_id))
+    t1.start()
+    t2.start()
+    t1.join(timeout=20)
+    t2.join(timeout=20)
+
+    errors = [r for r in results if r[0] == "error"]
+    assert errors == [], f"expected zero unhandled errors, got: {errors}"
+    assert len(results) == 2
+
+    db_session.expire_all()
+    unreviewed = list_work_candidates(db_session, owner_id=owner_id, status="unreviewed")
+    memory_parked = [c for c in unreviewed if (c.title or "").startswith("[memory]")]
+    assert len(memory_parked) == 1, (
+        f"SAME-collapse must serialize to exactly one parked candidate for two concurrent, "
+        f"similar notes -- got {len(memory_parked)}: {[c.title for c in memory_parked]}"
+    )
+
+
 def test_replay_is_idempotent_on_thread_membership(db_session, make_verified_user):
     user, _ = make_verified_user()
     _set_rls_user(db_session, user.id)

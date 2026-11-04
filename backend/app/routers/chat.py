@@ -10,6 +10,7 @@ one assistant `MessageModel` row (enforced by migration 0016's partial unique in
 import logging
 import uuid
 from datetime import datetime
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -29,7 +30,8 @@ from app.deps import require_founder
 from app.egress_policy import EgressDeniedError
 from app.founder_memory_signals import record_candidate_signal
 from app.limiter import limiter
-from app.mainai_runtime_contract import build_answer_response, sanitize_unverified_execution_claims
+from app.mainai_founder_ops.communication import MAINAI_COMMUNICATION_POLICY, apply_communication_policy
+from app.mainai_runtime_contract import build_answer_response
 from app.models.conversation import Conversation, Message as MessageModel, MessageRole, MessageStatus
 from app.models.usage import UsageLog
 from app.models.user import User
@@ -56,16 +58,17 @@ _SIGNAL_WORTHY_INTENTS = {
 }
 
 SYSTEM_PROMPT = (
-    "Du är MainAI, grundarens Founder AI — inte en delad eller allmän assistent. Svara "
-    "utifrån den kontext som ges nedan från kunskapsbiblioteket. Svara på samma språk som "
-    "grundaren skriver på.\n\n"
+    "Du är MainAI, grundarens Founder AI — inte en delad eller allmän assistent och inte ett "
+    "kundvänt AI-system. Svara utifrån den kontext som ges nedan från kunskapsbiblioteket. "
+    "Svara på samma språk som grundaren skriver på.\n\n"
     "VIKTIGT om vad du faktiskt kan göra: det här svaret är ditt HELA arbete med frågan — det "
     "finns inget bakgrundsjobb, ingen pågående körning och ingen separat process som fortsätter "
     "efter att du svarat. Du får ALDRIG påstå att du 'arbetar med det i bakgrunden', att 'jobbet "
     "har startat', att du 'kommer återkomma' eller liknande — det skulle vara osant. Om något du "
     "beskriver kräver en riktig, varaktig körning (t.ex. en granskning av flera dokument) ska du "
     "säga att grundaren själv kan starta ett sådant jobb via Jobb & Aktivitet — aldrig låtsas att "
-    "du redan gör det."
+    "du redan gör det.\n\n"
+    f"{MAINAI_COMMUNICATION_POLICY}"
 )
 
 settings = get_settings()
@@ -105,7 +108,40 @@ def _record_candidate_signal_if_worth_noticing(
         logger.warning("failed to record candidate learning signal for message %s (non-fatal)", user_message.id, exc_info=True)
 
 
-async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, user_message: MessageModel, user: User) -> ChatMessageOut:
+def _live_communication_evidence(db: Session, user: User, app: Any | None) -> dict:
+    """Evidence for Founder communication must come from the live snapshot, never hard-coded."""
+    from app.mainai_founder_ops.snapshot import build_founder_ops_snapshot, recall_http_mounted
+
+    evidence = {
+        "first_cycle_go": False,
+        "github_write_enabled": bool(get_settings().github_write_enabled),
+        "recall_http_mounted": False,
+        "independently_verified": None,
+        "evidence_unavailable": False,
+    }
+    try:
+        mounted = bool(app is not None and recall_http_mounted(app))
+        evidence["recall_http_mounted"] = mounted
+        snap = build_founder_ops_snapshot(db, owner_id=user.id, recall_http_mounted=mounted)
+        evidence["github_write_enabled"] = bool((snap.get("safe_launch") or {}).get("github_write_enabled"))
+        evidence["independently_verified"] = any(
+            bool(item.get("independently_verified")) for item in snap.get("work_items") or []
+        )
+        evidence["first_cycle_go"] = False
+    except Exception:  # noqa: BLE001 — communication must fail closed, not invent status
+        evidence["evidence_unavailable"] = True
+        evidence["independently_verified"] = None
+    return evidence
+
+
+async def _attempt_assistant_reply(
+    db: Session,
+    *,
+    conversation: Conversation,
+    user_message: MessageModel,
+    user: User,
+    app: Any | None = None,
+) -> ChatMessageOut:
     """Generates the assistant's reply for `user_message` (already committed). Used by both
     the initial send and the retry endpoint — a retry runs this exact same path, not a
     parallel one, so its behavior can never drift from the first attempt's."""
@@ -276,15 +312,20 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
         )
     )
 
-    # Founder re-review round (PR #36): the runtime truthfulness contract (app/
-    # mainai_runtime_contract.py) existed but was never actually wired into a live surface --
-    # this is that wiring. sanitize_unverified_execution_claims() is the secondary,
-    # defense-in-depth check for the one channel the SYSTEM_PROMPT instruction above can't
-    # structurally guarantee (the model's own free text); build_answer_response()'s own
-    # Pydantic validation is the structural guarantee that this reply is shaped as a plain
-    # `answer` with `job_id=None` -- this endpoint has no background-job concept at all, so
-    # that is the only mode a chat reply could ever truthfully be.
-    safe_content = sanitize_unverified_execution_claims(result.content)
+    # Founder re-review round (PR #36) plus founder-workflow communication policy: sanitize
+    # unverified execution claims, drop redundant copies, disagree when evidence contradicts
+    # the Founder, and keep simple answers short. build_answer_response() still guarantees a
+    # plain `answer` with `job_id=None`.
+    prior_assistant = next(
+        (m.content for m in reversed(history) if m.role == MessageRole.assistant and m.content),
+        None,
+    )
+    safe_content = apply_communication_policy(
+        result.content,
+        founder_message=user_message.content,
+        prior_assistant=prior_assistant,
+        evidence=_live_communication_evidence(db, user, app),
+    )
     build_answer_response(safe_content)  # raises on a contract violation; never actually can for mode=answer/job_id=None, but every call site goes through this the same way
 
     if assistant_row is None:
@@ -367,7 +408,9 @@ async def chat(
     db.commit()
     db.refresh(user_message)
 
-    return await _attempt_assistant_reply(db, conversation=conversation, user_message=user_message, user=user)
+    return await _attempt_assistant_reply(
+        db, conversation=conversation, user_message=user_message, user=user, app=request.app
+    )
 
 
 @router.post("/messages/{message_id}/retry", response_model=ChatMessageOut)
@@ -402,4 +445,6 @@ async def retry_assistant_reply(
             model=existing.model,
         )
 
-    return await _attempt_assistant_reply(db, conversation=conversation, user_message=user_message, user=user)
+    return await _attempt_assistant_reply(
+        db, conversation=conversation, user_message=user_message, user=user, app=request.app
+    )

@@ -10,6 +10,8 @@ class DeepSeekProvider(LLMProvider):
     """DeepSeek exposes an OpenAI-compatible chat API."""
 
     name = "deepseek"
+    enforces_hard_output_token_cap = True
+    reports_authoritative_billable_usage = True
 
     def __init__(self):
         self.settings = get_settings()
@@ -28,6 +30,8 @@ class DeepSeekProvider(LLMProvider):
             "messages": [{"role": m.role, "content": m.content} for m in messages],
             "temperature": kwargs.get("temperature", 0.4),
         }
+        if kwargs.get("max_tokens") is not None:
+            payload["max_tokens"] = int(kwargs["max_tokens"])
         async with httpx.AsyncClient(timeout=timeout or 60) as client:
             resp = await client.post(f"{BASE_URL}/chat/completions", headers=self._headers(), json=payload)
             resp.raise_for_status()

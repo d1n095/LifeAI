@@ -14,7 +14,7 @@ from app.concept_reconciliation import (
 )
 from app.models.document import ActiveTruthStatus, Document, DocumentSource
 from app.models.knowledge_claim import KnowledgeClaim
-from app.models.project_entities import ProjectEntity, ProjectEntityAlias
+from app.models.project_entities import ProjectEntity, ProjectEntityAlias, ProjectEntityRelationship
 from app.models.user import User
 from app.project_entities import promote_interpretation_proposal, record_interpretation_proposal
 from app.project_entities.service import list_current_project_entities
@@ -185,6 +185,62 @@ def test_contradicts_never_collapses(superuser_db):
             to_entity_id=result_b.canonical_entity_id,
             relationship_type="same",
         )
+
+
+def test_database_accepts_complete_concept_vision_and_legacy_relationship_vocabulary(superuser_db):
+    owner, _, proposal_a = _owner_claim_proposal(superuser_db, text="Relationship vocabulary source")
+    result_a = reconcile_and_promote_idea(
+        superuser_db,
+        owner_id=owner.id,
+        proposal_id=proposal_a.id,
+        title="Relationship vocabulary source",
+        entity_idempotency_key="vocabulary-source",
+    )
+    _, proposal_b = _second_proposal(superuser_db, owner=owner, text="Relationship vocabulary target")
+    result_b = reconcile_and_promote_idea(
+        superuser_db,
+        owner_id=owner.id,
+        proposal_id=proposal_b.id,
+        title="Relationship vocabulary target",
+        entity_idempotency_key="vocabulary-target",
+    )
+
+    relationship_types = {
+        "same",
+        "partial_overlap",
+        "related",
+        "depends_on",
+        "contradicts",
+        "supersedes",
+        "extends",
+        "alternative",
+        "reuses",
+        "relates_to",
+        "blocks",
+        "answers",
+        "duplicates",
+        "derived_from",
+        "implies",
+        "verifies",
+        "satisfies",
+        "mitigates",
+    }
+    superuser_db.add_all(
+        ProjectEntityRelationship(
+            owner_id=owner.id,
+            from_entity_id=result_a.canonical_entity_id,
+            to_entity_id=result_b.canonical_entity_id,
+            relationship_type=relationship_type,
+        )
+        for relationship_type in relationship_types
+    )
+    superuser_db.commit()
+
+    stored = {
+        row.relationship_type
+        for row in superuser_db.query(ProjectEntityRelationship).filter_by(owner_id=owner.id).all()
+    }
+    assert stored == relationship_types
 
 
 def test_unique_fingerprint_enforced_at_db(superuser_db):

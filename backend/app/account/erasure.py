@@ -197,6 +197,7 @@ from app.models.source_relationship import SourceRelationship
 from app.models.storage_deletion_task import StorageDeletionStatus, StorageDeletionTask
 from app.models.usage import UsageLog
 from app.models.user import User
+from app.personal_recall.production_lifecycle import erase_personal_recall_data
 from app.storage import StorageError, get_storage
 from app.storage.references import acquire_owner_erasure_lock, acquire_storage_key_lock, storage_key_still_referenced
 
@@ -442,18 +443,27 @@ def attempt_pending_storage_deletions_for_operation(operation_id: uuid.UUID) -> 
     return result
 
 
-def erase_account_data(db: Session, user: User, *, client_ip: str | None = None) -> AccountErasureResult:
+def erase_account_data(
+    db: Session,
+    user: User,
+    *,
+    reauth_receipt_id: uuid.UUID,
+    reauth_access_jti: str,
+    client_ip: str | None = None,
+) -> AccountErasureResult:
     """Permanent, irreversible account erasure — one atomic DB transaction (see module
     docstring), followed by a best-effort blob-deletion attempt that never rolls the DB phase
-    back regardless of outcome. Password verification is the ROUTER's responsibility (see
-    app/routers/account.py) — this function assumes the caller has already authenticated the
-    request as genuinely coming from `user` themselves; it never re-checks a password.
+    back regardless of outcome. Password verification and receipt creation are the ROUTER's
+    responsibility (see app/routers/account.py and app/account/reauth.py); this function binds
+    the destructive DB operation to the supplied durable, one-time reauthentication receipt.
 
     `client_ip` is a plain string, not a fastapi.Request — the router extracts it (same
     convention as app/storage/purge.py) so this domain-layer module never imports fastapi.
     """
     owner_id = user.id
-    operation_id = uuid.uuid4()
+    operation_id: uuid.UUID | None = None
+    if not reauth_access_jti:
+        raise PermissionError("account erasure requires a reauthenticated access session")
 
     try:
         # Pass 28: acquires the owner-erasure advisory lock BEFORE taking any row-level lock
@@ -482,6 +492,14 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         locked_user = db.query(User).filter_by(id=owner_id).with_for_update().first()
         if locked_user is None:
             raise LookupError(f"user {owner_id} not found (already erased?)")
+        db.execute(
+            sa_text("SET LOCAL app.current_access_jti = :jti"),
+            {"jti": reauth_access_jti},
+        )
+        operation_id = db.execute(
+            sa_text("SELECT account_erasure_begin_operation(:owner_id, :receipt_id)"),
+            {"owner_id": str(owner_id), "receipt_id": str(reauth_receipt_id)},
+        ).scalar_one()
 
         # Pass 26: the owner-erasure lock acquired above (now BEFORE the User row lock, see
         # Pass 28's comment there) is what closes the erasure/upload race — a concurrent
@@ -553,11 +571,33 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         # moment any memory_source_units row exists for this account (see module docstring).
         db.execute(sa_text("SELECT erase_owner_memory(:owner_id)"), {"owner_id": str(owner_id)})
 
+        # --- Personal Recall production activation data: content/key material must become
+        # unretrievable through the governed account-erasure path before the User row can
+        # cascade. personal_recall_owner_keys/grants deliberately reject ordinary DELETE;
+        # erase_personal_recall_data() binds its narrow erasure GUC to this exact durable
+        # account_erasure_operations row and records only counts below, never raw content or
+        # key material.
+        db.execute(
+            sa_text("SELECT account_erasure_set_phase(:operation_id, :owner_id, 'personal_recall_erasure')"),
+            {"operation_id": str(operation_id), "owner_id": str(owner_id)},
+        )
+        recall_erasure = erase_personal_recall_data(db, owner_id=owner_id, operation_id=operation_id)
+        db.execute(
+            sa_text("SELECT account_erasure_set_phase(:operation_id, :owner_id, 'personal_data_erasure')"),
+            {"operation_id": str(operation_id), "owner_id": str(owner_id)},
+        )
+
         # --- Personal data: deleted outright, not anonymized. ---
         conversation_ids = [row.id for row in db.query(Conversation.id).filter_by(user_id=owner_id).all()]
         if conversation_ids:
             db.query(Message).filter(Message.conversation_id.in_(conversation_ids)).delete(synchronize_session=False)
             db.query(Conversation).filter_by(user_id=owner_id).delete(synchronize_session=False)
+        # Session rows below are needed to validate the receipt while closing the operation.
+        # Both this transition and the remaining erasure are part of the same transaction.
+        db.execute(
+            sa_text("SELECT account_erasure_complete_operation(:operation_id, :owner_id)"),
+            {"operation_id": str(operation_id), "owner_id": str(owner_id)},
+        )
         db.query(RefreshToken).filter_by(user_id=owner_id).delete(synchronize_session=False)
         db.query(EmailVerificationToken).filter_by(user_id=owner_id).delete(synchronize_session=False)
         db.query(PasswordResetToken).filter_by(user_id=owner_id).delete(synchronize_session=False)
@@ -749,10 +789,17 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
             action="account_deleted",
             entity_type="account",
             entity_id=str(operation_id),
+            detail=(
+                "personal_recall_erased="
+                f"sources:{recall_erasure.sources_scrubbed},"
+                f"chunks:{recall_erasure.chunks_deleted},"
+                f"extractions:{recall_erasure.extractions_deleted},"
+                f"grants:{recall_erasure.grants_deleted},"
+                f"owner_keys:{recall_erasure.owner_keys_deleted}"
+            ),
             ip_address=client_ip,
             commit=False,
         )
-
         db.commit()
     except AccountErasureBlockedError:
         # Not a failure -- a deliberate refusal, nothing was changed. Rolled back the same as

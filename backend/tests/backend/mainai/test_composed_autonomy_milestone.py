@@ -176,8 +176,7 @@ async def _bootstrap_authorized_goal(db):
             PlannedTaskSpec(
                 description="add multiply helper and focused test",
                 task_type="repo_edit",
-                risk_level="low",
-            )
+                risk_level="low", target_files=["backend/tests/backend/test_ok.py"])
         ],
         created_by="founder",
     )
@@ -573,14 +572,12 @@ async def _bootstrap_two_task_goal(db):
             PlannedTaskSpec(
                 description="add multiply helper and focused test",
                 task_type="repo_edit",
-                risk_level="low",
-            ),
+                risk_level="low", target_files=["backend/tests/backend/test_ok.py"]),
             PlannedTaskSpec(
                 description="add divide helper and update focused test",
                 task_type="repo_edit",
                 risk_level="low",
-                depends_on=[0],
-            ),
+                depends_on=[0], target_files=["backend/tests/backend/test_ok.py"]),
         ],
         created_by="founder",
     )

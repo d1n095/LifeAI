@@ -150,6 +150,19 @@ def _test_database():
         env={**os.environ},
     )
 
+    # Alembic creates tables after the initial bootstrap grants above. PostgreSQL does not
+    # retroactively apply ordinary table grants to objects created by a different owner, so
+    # re-apply the runtime role's baseline grants after migrations and before the exact
+    # job-table narrowing below. Without this second phase, fresh databases report empty
+    # effective privileges for mainai_job_events/proposals even though the fixture intended
+    # to model the production app role.
+    db_conn = psycopg2.connect(settings.database_url)
+    db_conn.autocommit = True
+    with db_conn.cursor() as cur:
+        cur.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {app_role}")
+        cur.execute(f"GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO {app_role}")
+    db_conn.close()
+
     # Mirrors app/main.py's on_startup() exactly (same three functions, same order, same
     # migration_engine) -- see this fixture's own docstring for the bug this closes.
     from app.db import migration_engine
@@ -186,6 +199,26 @@ def _clean_tables(_test_database):
             conn.execute(text(f"TRUNCATE TABLE {', '.join(tables)} RESTART IDENTITY CASCADE"))
     engine.dispose()
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_request_context():
+    """Prevent simulated request identity from leaking between tests.
+
+    Several integration tests deliberately drive request-bound database behavior through
+    the same ContextVars used by production request middleware.  ContextVars persist in the
+    pytest task unless explicitly cleared, so a later raw-session RLS test could otherwise
+    inherit an unrelated owner's identity after starting a new transaction.
+    """
+    from app.request_context import current_access_jti, current_user_id
+
+    current_user_id.set(None)
+    current_access_jti.set(None)
+    try:
+        yield
+    finally:
+        current_user_id.set(None)
+        current_access_jti.set(None)
 
 
 @pytest.fixture(autouse=True)
@@ -272,6 +305,27 @@ def superuser_db():
     session = sessionmaker(bind=migration_engine)()
     yield session
     session.close()
+
+
+@pytest.fixture(autouse=True)
+def _legacy_suites_may_run_unbilled_path_a_ai(request, monkeypatch):
+    """Path A now requires a live provider-spend grant by default (Claude SPEND-1). Existing
+    executor/recovery fixtures were written against unbilled fake providers. Keep those
+    suites runnable without a grant, but never disable the gate for the examiner probes or
+    the P1 remediation regressions — those must see the real default."""
+    module_name = getattr(request.module, "__name__", "")
+    if module_name.endswith(
+        (
+            "test_path_a_exam",
+            "test_mainai_execution_path_a_p1_remediation",
+            "test_path_routing",
+            "test_mainai_execution_path_a_first_cycle",
+        )
+    ):
+        return
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "mainai_execution_require_provider_spend", False)
 
 
 @pytest.fixture

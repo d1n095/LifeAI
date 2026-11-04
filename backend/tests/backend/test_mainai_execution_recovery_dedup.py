@@ -86,7 +86,7 @@ def patched_github(monkeypatch, bare_remote):
 def _task_and_job(db_session, owner_id):
     goal = planner.create_goal(db_session, owner_id=owner_id, title="Dedup test goal", original_instruction="x", created_by="test")
     planner.create_plan(
-        db_session, goal=goal, rationale="single task", tasks=[planner.PlannedTaskSpec(description="edit", task_type="repo_edit")], created_by="test"
+        db_session, goal=goal, rationale="single task", tasks=[planner.PlannedTaskSpec(description="edit", task_type="repo_edit", target_files=["backend/tests/backend/test_ok.py"])], created_by="test"
     )
     db_session.commit()
     task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()

@@ -398,6 +398,8 @@ def reserve_provider_spend_call(
     task_id: uuid.UUID | None = None,
     job_id: uuid.UUID | None = None,
     evidence: dict[str, Any] | None = None,
+    hold_prompt_tokens: int | None = None,
+    hold_completion_tokens: int | None = None,
 ) -> tuple[ProviderSpendUsageEvent, bool]:
     """Atomically hold request/token/cost budget BEFORE any provider invocation.
 
@@ -428,6 +430,16 @@ def reserve_provider_spend_call(
         # reserved or settled: idempotent return without increasing holds.
         return prior, False
 
+    from app.workforce.kill_switch import KillSwitchError, assert_grant_allowed, assert_not_killed
+
+    try:
+        assert_not_killed(db, owner_id)
+        assert_grant_allowed(db, owner_id=owner_id)
+    except KillSwitchError as exc:
+        raise ProviderSpendError(f"STOP/authority refused spend reservation: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 — refuse when authority cannot be established
+        raise ProviderSpendError(f"spend reservation authority unestablished: {type(exc).__name__}") from exc
+
     row = get_current_provider_spend_authorization(db, owner_id=owner_id, goal_id=goal_id)
     if row is None:
         raise ProviderSpendError("no live provider spend authorization for this goal")
@@ -440,6 +452,20 @@ def reserve_provider_spend_call(
         raise ProviderSpendError("provider spend request ceiling exhausted")
 
     prompt, completion, cost = _bound_reservation(row, provider=provider, model=model)
+    if hold_prompt_tokens is not None:
+        if hold_prompt_tokens < 0 or hold_prompt_tokens > prompt:
+            raise ProviderSpendError("requested prompt hold exceeds the bounded reservation")
+        prompt = hold_prompt_tokens
+    if hold_completion_tokens is not None:
+        if hold_completion_tokens < 0 or hold_completion_tokens > completion:
+            raise ProviderSpendError("requested completion hold exceeds the bounded reservation")
+        completion = hold_completion_tokens
+    priced = estimate_cost(provider, model, prompt, completion)
+    if priced is not None and priced > cost:
+        raise ProviderSpendError(
+            "reserved token quantities exceed the dollar hold "
+            f"(priced=${priced}/hold=${cost})"
+        )
     if cost <= 0 and row.max_cost_usd > 0 and _committed_cost(row) >= row.max_cost_usd:
         row.status = ProviderSpendAuthorizationStatus.exhausted.value
         db.flush()

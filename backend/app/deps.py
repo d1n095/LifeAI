@@ -12,6 +12,7 @@ from app.db import get_db
 from app.founder import FOUNDER_USER_ID
 from app.models.refresh_token import RefreshToken
 from app.models.user import User, UserRole
+from app.request_context import current_access_jti as current_access_jti_var
 from app.request_context import current_user_id as current_user_id_var
 from app.security import decode_access_token
 from app.token_revocation import is_access_token_revoked
@@ -98,7 +99,9 @@ async def get_current_user(
     # the explicit SET LOCAL below covers the transaction that's already open right now,
     # since after_begin already fired for it before we knew who the user was.
     current_user_id_var.set(str(user.id))
+    current_access_jti_var.set(str(jti))
     db.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user.id)})
+    db.execute(text("SET LOCAL app.current_access_jti = :jti"), {"jti": str(jti)})
 
     # Lets the rate limiter key on the authenticated user instead of just IP (app/limiter.py).
     request.state.user_id = user.id

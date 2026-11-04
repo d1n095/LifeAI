@@ -209,6 +209,9 @@ export type ConversationMessage = {
   provider: string | null;
   model: string | null;
   created_at: string;
+  status?: "succeeded" | "failed";
+  error_category?: string | null;
+  in_reply_to_id?: string | null;
 };
 
 export type ConversationDetail = ConversationItem & {
@@ -552,7 +555,235 @@ export type AgentTaskDetail = AgentTask & { events: AgentTaskEvent[] };
 // founder can observe/cancel/retry independently of whatever MainAI claims about its own
 // state. `owner_id` is only ever populated by the admin listing (RLS already scopes every
 // other endpoint to exactly one owner).
-export type MainAIJobStatus = "queued" | "running" | "paused" | "completed" | "failed" | "cancelled";
+export type MainAIJobStatus = "queued" | "running" | "paused" | "completed" | "failed" | "cancelled" | "superseded";
+
+export type FounderWorkStatus =
+  | "queued"
+  | "assigned"
+  | "acknowledged"
+  | "running"
+  | "waiting_on_dependency"
+  | "failed"
+  | "completed"
+  | "independently_verified"
+  | "cancelled";
+
+export type FounderWorkItem = {
+  founder_status: FounderWorkStatus;
+  source: string;
+  source_status: string;
+  independently_verified: boolean;
+  task_id?: string;
+  job_id?: string;
+  assignment_id?: string;
+  title?: string;
+  description?: string;
+  blocker_reason?: string | null;
+  liveness?: string;
+  failure_class?: string;
+  error_category?: string | null;
+  goal_id?: string;
+  locked_by?: string | null;
+};
+
+export type FounderAgent = {
+  id: string;
+  agent_key: string;
+  name: string;
+  role: string;
+  status: string;
+  current_assignment_id: string | null;
+  current_assignment_status: string | null;
+  founder_status: string;
+  running: boolean;
+};
+
+export type FounderNextAction = {
+  kind: string;
+  priority?: number;
+  detail?: string;
+  task_id?: string;
+  description?: string;
+  task_ids?: string[];
+  invented_activity?: boolean;
+};
+
+export type FounderOpsSnapshot = {
+  generated_at: string;
+  evidence_basis: string;
+  fabricated_progress: boolean;
+  first_cycle_go: boolean;
+  authority?: {
+    policy_transparent: boolean;
+    sensitive_changes_require_founder_approval: boolean;
+    independent_security_enforcement: boolean;
+    operational_status_source: string;
+    first_cycle_go: boolean;
+    live_checkout_writes_authorized: boolean;
+    restrictions: { code: string; explain: string }[];
+  };
+  health: {
+    status: string;
+    worker: string;
+    backend_reachable: boolean;
+    evidence_available?: boolean;
+  };
+  startup_readiness: {
+    level: string;
+    blocking?: string[];
+    notes?: string;
+    unknown_fail_closed?: boolean;
+    evidence_unavailable?: boolean;
+  };
+  stop: {
+    blocked: boolean;
+    code: string | null;
+    observability_failed?: boolean;
+    global?: { active: boolean | null; reason: string | null };
+    owner?: { active: boolean | null; reason: string | null } | null;
+  };
+  spend: {
+    spend_live: boolean;
+    usage_request_count: number;
+    usage_cost_usd: number | null;
+    usage_cost_unknown_count: number;
+    active_grant_count: number;
+    active_grant_spent_usd: number;
+    active_grant_reserved_usd: number;
+  };
+  safe_launch: {
+    github_write_enabled: boolean;
+    github_auto_merge_enabled: boolean;
+    mainai_activation_mode: boolean;
+    recall_http_mounted: boolean;
+    privileged_remote_effects_enabled: boolean;
+  };
+  conversation_count_today: number;
+  goals: { id: string; title: string; status: string; final_outcome: string | null }[];
+  agents: FounderAgent[];
+  dependencies: Record<string, unknown>[];
+  circular_dependencies: string[][];
+  independent_ready_work: Record<string, unknown>[];
+  next_actions: FounderNextAction[];
+  work_items: FounderWorkItem[];
+  work_item_counts: Record<string, number>;
+  blocker_counts?: {
+    operational: number;
+    startup_readiness: number;
+    stop: number;
+  };
+  blockers: Record<string, unknown>[];
+  authorization_requests: Record<string, unknown>[];
+  review_results: FounderWorkItem[];
+  security?: {
+    available: boolean;
+    finding_count: number;
+    confirmed_incident_count: number;
+    first_cycle_go: boolean;
+    blocks_first_cycle: boolean;
+    dashboard_path: string;
+  };
+  durable_coordination?: {
+    available?: boolean;
+    capability: string;
+    first_cycle_go: boolean;
+    blocks_first_cycle: boolean;
+    queue_empty?: boolean;
+    obligations: Record<string, unknown>[];
+    active: Record<string, unknown>[];
+    finished: Record<string, unknown>[];
+    independently_certified: Record<string, unknown>[];
+    blocked: Record<string, unknown>[];
+    stalled: Record<string, unknown>[];
+    handoffs: Record<string, unknown>[];
+    owners: Record<string, string>;
+    needed_work?: {
+      items: Record<string, unknown>[];
+      idle_agents: string[];
+      founder_must_forward_reports: boolean;
+    };
+    github_intake?: {
+      access?: string;
+      missing_capability?: string | null;
+      repo?: string | null;
+      write_attempted?: boolean;
+      delivery_claimed?: boolean;
+      first_cycle_go?: boolean;
+      candidates?: Record<string, unknown>[];
+      stale_rejected?: Record<string, unknown>[];
+      needed_review?: Record<string, unknown>[];
+    };
+    lifecycle?: {
+      delivery_claimed?: boolean;
+      first_cycle_go?: boolean;
+      builder_eligible?: Record<string, unknown>[];
+      decisions?: Record<string, unknown>[];
+      founder_approval_required?: Record<string, unknown>[];
+      github_green_is_independent_certification?: boolean;
+      adapters?: Record<string, unknown>[];
+      needed_work?: Record<string, unknown>;
+    };
+    delivery?: {
+      vendor_delivery_claimed?: boolean;
+      first_cycle_go?: boolean;
+      inbox_created_is_not_delivered?: boolean;
+      messages?: Record<string, unknown>[];
+      bridges?: Record<string, unknown>[];
+      blockers?: Record<string, unknown>[];
+      adapters?: Record<string, unknown>[];
+    };
+    operational_handover?: {
+      question?: string;
+      answer?: string;
+      founder_must_forward_messages?: boolean;
+      vendor_delivery_claimed?: boolean;
+      first_cycle_go?: boolean;
+      internal_coordination?: Record<string, unknown>;
+      local_authorized_bridge?: Record<string, unknown>;
+      external_vendor_operations?: Record<string, unknown>;
+      agent_side_bridge?: Record<string, unknown>;
+      capability_matrix?: Record<string, unknown>[];
+      remaining_permissions?: Record<string, unknown>[];
+    };
+  };
+};
+
+export type SecurityFinding = {
+  id: string;
+  kind: string;
+  category?: string;
+  severity: string;
+  confidence: string;
+  source: string;
+  component: string;
+  evidence: Record<string, unknown>;
+  recommended_action: string;
+  status: string;
+};
+
+export type SecurityRestriction = {
+  code: string;
+  setting?: string;
+  source: string | null;
+  value?: unknown;
+  explain: string;
+  invented: boolean;
+};
+
+export type SecurityDashboard = {
+  first_cycle_go: boolean;
+  blocks_first_cycle: boolean;
+  invented_policy: boolean;
+  customer_isolation: string;
+  findings: SecurityFinding[];
+  incidents: Record<string, unknown>[];
+  preserved_incidents: Record<string, unknown>[];
+  restrictions: SecurityRestriction[];
+  remediation: Record<string, unknown>[];
+  severity_counts: Record<string, number>;
+  confidence_counts: Record<string, number>;
+  limitations: string[];
+};
 
 export type MainAIJob = {
   id: string;
@@ -651,6 +882,7 @@ export type MainAITask = {
   max_attempts: number;
   blocker_reason: string | null;
   mainai_job_id: string | null;
+  independently_verified?: boolean;
   // V0.3: when this task becomes eligible for the worker's automatic retry-with-backoff scan
   // -- null means no automatic retry is currently scheduled.
   next_retry_at: string | null;
@@ -937,4 +1169,28 @@ export const api = {
   mainaiExecutionTaskWaits: (id: string) => request<MainAITaskWait[]>(`/api/mainai/execution/tasks/${id}/waits`),
   mainaiExecutionLessons: (statusFilter?: string) =>
     request<EngineeringLesson[]>(`/api/mainai/execution/lessons${statusFilter ? `?status_filter=${statusFilter}` : ""}`),
+
+  founderOpsSnapshot: () => request<FounderOpsSnapshot>("/api/mainai/founder-ops/snapshot"),
+  founderOpsStop: () => request<FounderOpsSnapshot["stop"]>("/api/mainai/founder-ops/stop"),
+  founderOpsActivateStop: (reason: string) =>
+    request<{ stop: Record<string, unknown>; query: FounderOpsSnapshot["stop"] }>("/api/mainai/founder-ops/stop", {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    }),
+  securityDashboard: () => request<SecurityDashboard>("/api/mainai/security/dashboard"),
+  securityRestrictions: (capability?: string) =>
+    request<{ invented: boolean; first_cycle_go: boolean; restrictions: SecurityRestriction[] }>(
+      `/api/mainai/security/restrictions${capability ? `?capability=${encodeURIComponent(capability)}` : ""}`,
+    ),
+  securityPropose: (payload: {
+    finding_id: string;
+    change_class: string;
+    title: string;
+    summary: string;
+    isolated_test_plan?: string;
+  }) => request<Record<string, unknown>>("/api/mainai/security/remediation/propose", { method: "POST", body: JSON.stringify(payload) }),
+  securityApprove: (proposalId: string) =>
+    request<Record<string, unknown>>(`/api/mainai/security/remediation/${proposalId}/approve`, { method: "POST" }),
+  securityPreserveIncident: (payload: { kind: string; confidence: string; severity: string; evidence?: Record<string, unknown> }) =>
+    request<Record<string, unknown>>("/api/mainai/security/incidents/preserve", { method: "POST", body: JSON.stringify(payload) }),
 };

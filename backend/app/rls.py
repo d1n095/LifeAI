@@ -80,6 +80,16 @@ RLS_STATEMENTS = [
     "ALTER TABLE source_import_batch_failures FORCE ROW LEVEL SECURITY",
     "ALTER TABLE message_source_units ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE message_source_units FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE personal_recall_owner_keys ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE personal_recall_owner_keys FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE personal_recall_sources ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE personal_recall_sources FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE personal_recall_chunks ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE personal_recall_chunks FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE personal_recall_grants ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE personal_recall_grants FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE personal_recall_extractions ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE personal_recall_extractions FORCE ROW LEVEL SECURITY",
     # Life Intelligence Governance & Meta-Learning (migration 0038): immutable observations
     # linked to the existing MainAI execution runtime; never a parallel job system.
     *[
@@ -233,6 +243,31 @@ POLICY_DEFINITIONS = [
     {
         "table": "mainai_job_proposals",
         "name": "mainai_job_proposals_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "personal_recall_owner_keys",
+        "name": "personal_recall_owner_keys_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "personal_recall_sources",
+        "name": "personal_recall_sources_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "personal_recall_chunks",
+        "name": "personal_recall_chunks_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "personal_recall_grants",
+        "name": "personal_recall_grants_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "personal_recall_extractions",
+        "name": "personal_recall_extractions_isolation",
         "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
     {
@@ -577,6 +612,15 @@ _MAINAI_EXECUTION_TABLES = (
     "workforce_lifecycle_events",
     "workforce_cost_budgets",
     "workforce_verification_decisions",
+    "workforce_authority_epoch",
+    # Migration 0100 (RT3): mutable lease-fenced cycle state plus append-only provider
+    # evidence. Neither table may regain DELETE from bootstrap's blanket role grant.
+    "authorized_operating_cycles",
+    "provider_webhook_events",
+    # Migration 0102 (coordination ledger authority): mutable serialized owner
+    # snapshot plus append-only cross-process event receipts.
+    "coordination_owner_ledgers",
+    "coordination_event_receipts",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
@@ -601,6 +645,11 @@ _MAINAI_EXECUTION_FUNCTION_SPECS = [
     {"name": "provider_spend_usage_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
     {"name": "erase_own_provider_disclosure_events", "identity_args": "", "return_type": "void", "mainai_app_execute": True},
     {"name": "provider_disclosure_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
+    {"name": "provider_webhook_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False, "security_definer": False},
+    {"name": "coordination_event_receipts_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False, "security_definer": False},
+    {"name": "enforce_workforce_assignment_status_transition", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False, "security_definer": False},
+    {"name": "enforce_agent_work_assignment_canonical_exclusivity", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False, "security_definer": False},
+    {"name": "enforce_agent_work_assignment_status_transition", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False, "security_definer": False},
     {"name": "mainai_task_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
     {"name": "mainai_checkpoints_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
     {"name": "mainai_recovery_events_deny_mutation", "identity_args": "", "return_type": "trigger", "mainai_app_execute": False},
@@ -1005,6 +1054,10 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         )
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON provider_disclosure_events FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_provider_disclosure_events() TO mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON authorized_operating_cycles FROM mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON provider_webhook_events FROM mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON coordination_owner_ledgers FROM mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON coordination_event_receipts FROM mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -1075,6 +1128,10 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("provider_spend_authorizations", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("provider_spend_usage_events", frozenset({"SELECT", "INSERT"})),
             ("provider_disclosure_events", frozenset({"SELECT", "INSERT"})),
+            ("authorized_operating_cycles", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("provider_webhook_events", frozenset({"SELECT", "INSERT"})),
+            ("coordination_owner_ledgers", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("coordination_event_receipts", frozenset({"SELECT", "INSERT"})),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:

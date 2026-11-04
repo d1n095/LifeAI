@@ -40,7 +40,7 @@ def _goal_with_ready_task(db, owner_id):
         db,
         goal=goal,
         rationale="one",
-        tasks=[PlannedTaskSpec(description="edit", task_type="repo_edit", risk_level="low")],
+        tasks=[PlannedTaskSpec(description="edit", task_type="repo_edit", risk_level="low", target_files=["backend/tests/backend/test_ok.py"])],
         created_by="test",
     )
     db.flush()

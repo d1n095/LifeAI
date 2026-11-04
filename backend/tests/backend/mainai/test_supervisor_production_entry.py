@@ -61,7 +61,7 @@ def _goal_with_ready_task(db, owner_id, *, task_risk="low", task_type="repo_edit
     goal = planner.create_goal(db, owner_id=owner_id, title="production entry test", original_instruction="edit a file", created_by="test")
     planner.create_plan(
         db, goal=goal, rationale="single task",
-        tasks=[PlannedTaskSpec(description="edit a file", task_type=task_type, risk_level=task_risk)],
+        tasks=[PlannedTaskSpec(description="edit a file", task_type=task_type, risk_level=task_risk, target_files=["backend/tests/backend/test_ok.py"] if task_type == "repo_edit" else [])],
         created_by="test",
     )
     db.flush()
