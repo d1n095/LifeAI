@@ -570,3 +570,34 @@ superseded conclusion silently — supersede it here and in the body.
   regression pass on real Postgres (no injected adapter). Blocker: real round-trip needs a
   separately-reviewed Agent Runtime + founder-enabled installed CLI. Independent review required;
   first_cycle_go=false.
+
+## 14. Founder Alpha — Blueprint draft (items 8/9) [PR #340, 3/3 on real Postgres]
+
+Founder decision: make Life usable by the Founder. Items 1–7 of the Founder Alpha workflow are
+already verified end-to-end by #334's real-Ollama run (41666998428 @ 82138cc): sign-in,
+model-backed chat, conversation persistence across restart, upload + immutable-original
+preservation, index + retrieval with source refs, cross-owner isolation. Founder-only original
+download = #329/#330. The remaining gap — items 8/9 (Blueprint draft) — is delivered by PR #340
+(`claude/founder-alpha-blueprint-draft`, stacked on #333 @ fdf3647).
+
+`app/blueprint/service.py::generate_blueprint_draft` composes RAG retrieval (source-grounding) +
+the active local model (synthesis) + a new owner-scoped `blueprint_drafts` store — no new
+retrieval/model/archive system. The draft is versioned (immutable version per regeneration),
+source-traceable (`source_document_ids`/`source_refs` → immutable originals; ungrounded refused),
+an AI interpretation separated from originals (`provenance.originals_mutated=False`), and always
+`status="draft"` — only an explicit `approve_blueprint_draft` (Founder action) promotes it; Life
+never self-approves. Migration `0070_blueprint_drafts` is additive/reversible, single head off
+`0069` (merge-note for #326's own 0069 included); RLS owner-isolation in app/rls.py.
+
+Executed on real Postgres (`test_blueprint_draft.py`, 3 passed; migration 0070 applied + RLS):
+versioning, source-traceability, draft-pending-approval + explicit approval, originals-not-mutated,
+ungrounded-refused, cross-owner RLS; migration single-head + reversible (upgrade→downgrade→upgrade).
+Real-local-model synthesis runs in the #334-style Ollama CI; a stub synthesizer is used for the
+local composition tests (same split as #336), never claimed as the real-model PASS.
+
+**Founder Alpha status:** items 1–7 PASS (#334; download #329/#330); items 8/9 PASS (PR #340, real
+Postgres). Remaining: assemble ONE Founder Alpha candidate (this + #334 lineage + #329/#330) and
+run the whole workflow once under real Ollama end-to-end. Independent review required (no
+self-cert); first_cycle_go=false.
+
+---
