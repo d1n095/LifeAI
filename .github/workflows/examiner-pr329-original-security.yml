@@ -62,8 +62,12 @@ jobs:
         run: >-
           python -m pytest -v
           tests/backend/rag/test_original_retrieval.py::test_original_download_rejects_unauthenticated_session
+          tests/backend/rag/test_original_retrieval.py::test_download_requires_founder
+          tests/backend/rag/test_original_retrieval.py::test_cross_owner_retrieval_is_denied
           tests/backend/rag/test_original_retrieval.py::test_database_storage_key_cannot_traverse_storage_root
           tests/backend/rag/test_original_retrieval.py::test_http_content_disposition_rejects_header_injection
+          tests/backend/rag/test_original_retrieval.py::test_corrupted_checksum_is_integrity_error
+          tests/backend/rag/test_original_retrieval.py::test_retrieval_writes_an_audit_row
         working-directory: backend
 
   original-retrieval-integrity-anchor:
