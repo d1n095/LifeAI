@@ -27,9 +27,14 @@ import uuid
 from typing import Any, Callable
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.blueprint_draft import BlueprintDraft
+
+# The unique index that enforces one row per (owner_id, title, version). A 23505 violation of
+# THIS specific constraint is the only IntegrityError the version-allocation loop may retry.
+_VERSION_UNIQUE_CONSTRAINT = "ix_blueprint_drafts_owner_title_version"
 
 Synthesizer = Callable[[str, str | None, list[dict[str, Any]]], str]
 
@@ -95,8 +100,11 @@ def generate_blueprint_draft(
     # same next version; one commits, the other hits a unique violation. Rather than surface a
     # raw 500, retry with a recomputed next version (a SAVEPOINT isolates each attempt so the
     # caller's transaction stays usable). Bounded so a genuine persistent conflict still errors.
-    from sqlalchemy.exc import IntegrityError
-
+    #
+    # The retry is NARROW by design (examiner P2): it fires ONLY for a 23505 unique violation of
+    # _VERSION_UNIQUE_CONSTRAINT. Any other IntegrityError — e.g. a missing-owner FK violation —
+    # is a real error, not a version race; it is re-raised unchanged (never retried, never
+    # relabelled as version_allocation_conflict), so it is never masked.
     last_exc: IntegrityError | None = None
     for _attempt in range(5):
         version = latest_version(db, owner_id=owner_id, title=title) + 1
@@ -118,9 +126,14 @@ def generate_blueprint_draft(
                 db.add(row)
                 db.flush()
             return row
-        except IntegrityError as exc:  # concurrent same-version insert — recompute and retry
-            last_exc = exc
-            continue
+        except IntegrityError as exc:
+            orig = getattr(exc, "orig", None)
+            pgcode = getattr(orig, "pgcode", None)
+            constraint = getattr(getattr(orig, "diag", None), "constraint_name", None)
+            if pgcode == "23505" and constraint == _VERSION_UNIQUE_CONSTRAINT:
+                last_exc = exc  # concurrent same-version insert — recompute and retry
+                continue
+            raise  # any other IntegrityError is a real error, surfaced unchanged
     raise BlueprintError(
         "version_allocation_conflict: could not allocate a unique Blueprint version after retries"
     ) from last_exc

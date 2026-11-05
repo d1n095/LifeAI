@@ -14,6 +14,7 @@ import uuid
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy import text as sa_text
+from sqlalchemy.exc import IntegrityError
 
 from app.blueprint.service import (
     BlueprintError,
@@ -120,3 +121,56 @@ def test_cross_owner_isolation_rls(superuser_db, db_session):
     current_user_id_var.set(str(owner_a.id))
     db_session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_a.id)})
     assert db_session.execute(select(func.count()).select_from(BlueprintDraft)).scalar_one() >= 1
+
+
+def test_non_unique_integrity_error_is_not_relabelled_as_version_conflict(superuser_db):
+    """Examiner P2 (PR #343 probe, adopted unmodified): a missing owner is an FK error, never a
+    retryable version uniqueness race — it must surface as IntegrityError, not be swallowed and
+    relabelled as version_allocation_conflict."""
+    missing_owner = uuid.uuid4()
+    with pytest.raises(IntegrityError):
+        generate_blueprint_draft(
+            superuser_db,
+            owner_id=missing_owner,
+            title="examiner-non-unique-integrity",
+            source_hits=[
+                {
+                    "document_id": str(uuid.uuid4()),
+                    "text": "examiner source",
+                    "similarity": 1.0,
+                }
+            ],
+            synthesizer=lambda _title, _query, _hits: "examiner body",
+        )
+
+
+def test_version_collision_retries_to_next_version(superuser_db, monkeypatch):
+    """Positive side of P2: a genuine (owner,title,version) unique collision IS retried, and the
+    retry allocates the next free version rather than failing."""
+    import app.blueprint.service as svc
+
+    owner = _user(superuser_db)
+    doc = _doc(superuser_db, owner.id, title="src", checksum="c" * 64)
+    hits = [{"document_id": doc.id, "text": "decision", "similarity": 0.9}]
+
+    d1 = generate_blueprint_draft(superuser_db, owner_id=owner.id, title="Plan", source_hits=hits, synthesizer=_synth)
+    superuser_db.commit()
+    assert d1.version == 1
+
+    # Force the first allocation attempt to recompute version 1 (collides with the committed
+    # d1 → 23505 on ix_blueprint_drafts_owner_title_version → retry), then fall back to the real
+    # max on the retry so it allocates version 2.
+    real_latest = svc.latest_version
+    calls = {"n": 0}
+
+    def fake_latest(db, *, owner_id, title):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return 0  # -> attempt version 1, which already exists
+        return real_latest(db, owner_id=owner_id, title=title)
+
+    monkeypatch.setattr(svc, "latest_version", fake_latest)
+
+    d2 = generate_blueprint_draft(superuser_db, owner_id=owner.id, title="Plan", source_hits=hits, synthesizer=_synth)
+    assert d2.version == 2
+    assert calls["n"] >= 2  # it actually retried after the collision
