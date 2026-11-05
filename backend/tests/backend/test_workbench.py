@@ -15,6 +15,7 @@ from app.models.user import User
 FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
 DIM = get_settings().embedding_dim
+EMBEDDING_MODEL = get_settings().default_embedding_model
 MATCHING_VECTOR = [0.5] * DIM
 
 FAKE_ANSWER = "SLUTSATS: Detta ar den grundade slutsatsen.\nKRITIK/ALTERNATIV: Men det finns en alternativ tolkning att overvaga."
@@ -57,7 +58,15 @@ def _make_source(superuser_db, owner_id, title, *, project_id=None, status=Activ
     superuser_db.add(document)
     superuser_db.commit()
     superuser_db.add(
-        DocumentChunk(document_id=document.id, owner_id=owner_id, chunk_index=0, text=f"Innehall i {title}.", embedding=MATCHING_VECTOR)
+        DocumentChunk(
+            document_id=document.id,
+            owner_id=owner_id,
+            chunk_index=0,
+            text=f"Innehall i {title}.",
+            embedding=MATCHING_VECTOR,
+            embedding_model=EMBEDDING_MODEL,
+            embedding_native_dim=DIM,
+        )
     )
     superuser_db.commit()
     return document

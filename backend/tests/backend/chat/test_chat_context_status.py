@@ -223,7 +223,18 @@ def test_no_documents_uploaded(client, _fake_chat_ok):
 def test_successful_retrieval_has_no_context_status(client, superuser_db, _fake_chat_ok):
     founder_id = _founder_id(superuser_db)
     doc = _make_document(superuser_db, founder_id, "Aktuellt dokument", status=IndexStatus.indexed)
-    superuser_db.add(DocumentChunk(document_id=doc.id, owner_id=founder_id, chunk_index=0, text="Relevant innehall.", embedding=MATCHING_VECTOR))
+    settings = get_settings()
+    superuser_db.add(
+        DocumentChunk(
+            document_id=doc.id,
+            owner_id=founder_id,
+            chunk_index=0,
+            text="Relevant innehall.",
+            embedding=MATCHING_VECTOR,
+            embedding_model=settings.default_embedding_model,
+            embedding_native_dim=settings.embedding_dim,
+        )
+    )
     superuser_db.commit()
     csrf = _login(client)
 

@@ -16,6 +16,7 @@ from app.models.source_relationship import RelationshipType, SourceRelationship
 FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
 DIM = get_settings().embedding_dim
+EMBEDDING_MODEL = get_settings().default_embedding_model
 MATCHING_VECTOR = [0.5] * DIM  # identical query/chunk vector -> cosine similarity 1.0
 
 
@@ -60,7 +61,15 @@ def _make_source(superuser_db, owner_id, title, *, status=ActiveTruthStatus.acti
     superuser_db.add(document)
     superuser_db.commit()
     superuser_db.add(
-        DocumentChunk(document_id=document.id, owner_id=owner_id, chunk_index=0, text=f"Innehall i {title}.", embedding=vector or MATCHING_VECTOR)
+        DocumentChunk(
+            document_id=document.id,
+            owner_id=owner_id,
+            chunk_index=0,
+            text=f"Innehall i {title}.",
+            embedding=vector or MATCHING_VECTOR,
+            embedding_model=EMBEDDING_MODEL,
+            embedding_native_dim=DIM,
+        )
     )
     superuser_db.commit()
     return document
@@ -238,6 +247,8 @@ def test_citation_carries_timestamp_range_for_a_media_chunk(client, superuser_db
             chunk_index=0,
             text="Talaren namner ett specifikt tidsstampat pastaende.",
             embedding=MATCHING_VECTOR,
+            embedding_model=EMBEDDING_MODEL,
+            embedding_native_dim=DIM,
             start_seconds=12.5,
             end_seconds=27.0,
         )
