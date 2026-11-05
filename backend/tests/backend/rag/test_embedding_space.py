@@ -135,12 +135,14 @@ def test_search_is_scoped_to_active_space_and_never_mixes_models(db_session, mak
     assert [h["text"] for h in hits_a] == ["chunk from model a"]
 
     # Query in model-b's space: only model-b's chunk.
-    hits_b = search(db_session, user.id, query_native, top_k=10,
+    query_native_b = [1.0] + [0.0] * 1023
+    hits_b = search(db_session, user.id, query_native_b, top_k=10,
                     embedding_model="model-b", embedding_native_dim=1024)
     assert [h["text"] for h in hits_b] == ["chunk from model b"]
 
     # A space that stamped nothing returns nothing (not the nearest foreign-space vector).
-    hits_none = search(db_session, user.id, query_native, top_k=10,
+    query_native_c = [1.0] + [0.0] * 383
+    hits_none = search(db_session, user.id, query_native_c, top_k=10,
                        embedding_model="model-c", embedding_native_dim=384)
     assert hits_none == []
 
