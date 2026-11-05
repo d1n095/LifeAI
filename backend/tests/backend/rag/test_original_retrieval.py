@@ -33,6 +33,7 @@ from app.library.originals import (
     safe_filename,
 )
 from app.models.document import Document, IndexStatus
+from app.models.user import User
 from app.storage import get_storage
 
 FOUNDER_EMAIL = "founder@lifeos.local"
@@ -189,6 +190,13 @@ def test_download_requires_founder(client, make_verified_user):
     assert res.status_code in (401, 403)
 
 
+def test_original_download_rejects_unauthenticated_session(client):
+    """Authentication must fail before source lookup, even for a syntactically valid id."""
+    client.cookies.clear()
+    res = client.get(f"/api/library/{uuid.uuid4()}/original")
+    assert res.status_code in (401, 403)
+
+
 def test_concurrent_downloads_are_all_byte_identical(client):
     csrf = _login(client)
     raw = ("concurrent-läsning " * 500).encode("utf-8")
@@ -320,6 +328,64 @@ def test_corrupted_checksum_is_integrity_error(db_session, superuser_db, make_ve
             db_session, owner_id=owner.id, source_id=source_id,
             actor_type="founder", actor_id=owner.id, access_label="x",
         )
+
+
+def test_database_storage_key_cannot_traverse_storage_root(db_session, superuser_db, make_verified_user):
+    """A tampered database row must not turn the server-side storage key into a file read."""
+    owner, _ = make_verified_user()
+    source_id = _make_document(superuser_db, owner_id=owner.id, content=b"real original")
+    superuser_db.execute(
+        sa_text("UPDATE documents SET storage_key = '../../etc/passwd' WHERE id = :id"),
+        {"id": str(source_id)},
+    )
+    superuser_db.commit()
+
+    _as_owner(db_session, owner.id)
+    with pytest.raises(OriginalIntegrityError):
+        load_original(
+            db_session, owner_id=owner.id, source_id=source_id,
+            actor_type="founder", actor_id=owner.id, access_label="path-probe",
+        )
+
+
+def test_checksumless_legacy_original_fails_closed(db_session, superuser_db, make_verified_user):
+    """The endpoint promises verified bytes; absence of an integrity anchor must not pass."""
+    owner, _ = make_verified_user()
+    source_id = _make_document(
+        superuser_db,
+        owner_id=owner.id,
+        content=b"legacy bytes without a stored digest",
+        with_checksum=False,
+    )
+
+    _as_owner(db_session, owner.id)
+    with pytest.raises(OriginalIntegrityError):
+        load_original(
+            db_session, owner_id=owner.id, source_id=source_id,
+            actor_type="founder", actor_id=owner.id, access_label="legacy-integrity-probe",
+        )
+
+
+def test_http_content_disposition_rejects_header_injection(client, superuser_db):
+    """Exercise the real Response constructor, not only the pure filename sanitizer."""
+    _login(client)
+    founder = superuser_db.query(User).filter(User.email == FOUNDER_EMAIL).one()
+    source_id = _make_document(
+        superuser_db,
+        owner_id=founder.id,
+        content=b"header probe",
+        filename='../../evil\"\r\nSet-Cookie: owned=1.html',
+        media_type="text/html",
+    )
+
+    res = client.get(f"/api/library/{source_id}/original")
+    assert res.status_code == 200, res.text
+    disposition = res.headers["content-disposition"]
+    assert "\r" not in disposition and "\n" not in disposition
+    assert "Set-Cookie" not in disposition
+    assert "../" not in disposition and "..\\" not in disposition
+    assert res.headers["content-type"] == "application/octet-stream"
+    assert res.headers["x-content-type-options"] == "nosniff"
 
 
 def test_retrieval_performs_no_provider_call_or_egress(db_session, superuser_db, make_verified_user, monkeypatch):
