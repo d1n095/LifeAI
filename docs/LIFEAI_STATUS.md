@@ -49,9 +49,9 @@ GitHub comments all post as `d1n095`; agents therefore name their role/session i
 
 | Agent | Role | Current state |
 |-------|------|---------------|
-| Claude Code (builder session) | Builder, #340 | **ACTIVE** — A1b P2 fix on #340 (priority); W1/W2 paused at clean commits |
+| Claude Code (builder session) | Builder, #340 | **ACTIVE** — A1b pushed `add0da83` (CI running); in parallel W2 `vps-ollama-verify` on #345 |
 | Claude (claude.ai session) | Coordinator, registry, Founder reporting | **ACTIVE** |
-| Codex | Independent examiner, #340 | **WAITING** — verdict delivered (FAIL, P2 only); re-exam on next frozen SHA |
+| Codex | Independent examiner | **ACTIVE** — R1 (#329) then R2 (#333) while #340 CI runs; #340 re-exam on builder hand-back |
 | ChatGPT | Optional secondary reviewer | Idle |
 | Founder | Owner, approvals, relays to agents | — |
 
@@ -61,7 +61,9 @@ GitHub comments all post as `d1n095`; agents therefore name their role/session i
 |---|------------|-------|--------|----|------------|------------|----------|------------------------|
 | A1 | P1 GUC-spoof remediation (migration 0072) | Claude Code (builder) | **CLOSED by examiner** — P1 PASS @ `db83ab9` | #340 | `db83ab9166a4d31fb88db41f66ea039d4947da4f` | — | Codex re-exam items 1,2,3,4(A only),6 PASS: PR #340 comment 6644107063, review 5776993179, run 41927871420 job 126916940418 **[VERIFIED]** | None. Threat model B NOT certified. |
 | A2 | Independent examination of #340 @ `db83ab9` | Codex | **COMPLETE — FAIL / RETURN_TO_BUILDER** (P2 only) | #340, probes #342, #343 | `db83ab9…` | A1 | Item 5 FAIL: run 41927871420 job 126916939924 — FK violation retried 5× and relabelled `version_allocation_conflict` | Re-examine A1b's frozen SHA: item 5 + #343 probe + regression of items 1–4,6 |
-| A1b | P2: retry ONLY on unique index `ix_blueprint_drafts_owner_title_version`; every other IntegrityError propagates unchanged | Claude Code (builder) | **ACTIVE** | #340 | pending | A2 verdict | Probe: `test_non_unique_integrity_error_is_not_relabelled_as_version_conflict` (#343) | Push one commit to #340, publish new frozen SHA + CI on PR #340, hand to Codex |
+| A1b | P2: retry ONLY on `ix_blueprint_drafts_owner_title_version` (23505); other IntegrityErrors propagate | Claude Code (builder) | **ACTIVE** — pushed, CI running | #340 | `add0da831c101af7061b7cf6309ce8041ed969aa` (pending hand-back) | A2 verdict | CI 41983523917, real-local 41983523983 (pending) | Builder posts hand-back on #340 when green; then Codex re-exam item 5 + regression 1–4,6 |
+| R1 | Independent security review of #329 — Founder original-retrieval endpoint (`GET /api/library/:id/original`); in Founder Alpha composition | Codex | **ACTIVE** | #329 | `830ab4d` | — | No prior review on PR | PASS/FAIL/BLOCKED on PR #329 |
+| R2 | Independent review of #333 — embedding-space migration, direct base of #340; in composition | Codex | **QUEUED** after R1 | #333 | `fdf3647` | — | No prior review on PR | PASS/FAIL/BLOCKED on PR #333 |
 | A3 | Integration #323/#324/#339 | Codex (impl) | **COMPLETE** — frozen | #341 | `95c32168860b2b8a1ccd4126d4a59ea410a1f4ed` | — | CI 41893411066; Claude review PASS **[REPORTED]**, not fully independent (#339 code partly Claude-authored) | None. No new work without a specific defect. |
 | A4 | Threat model B (compromised app process cannot forge approval) | Unassigned | **BLOCKED** | — | — | A2 verdict; W3; removal of runtime superuser `DATABASE_URL` from backend/worker; founder-signed approval (#316/#318 passkeys) | Not claimed by 0072 | Coordinator defines requirements after A2; Founder decides whether B gates Founder Alpha |
 | A5 | Founder Alpha host | Founder | **[DECISION]** — deferred | — | — | A2 | Not STRATO by default | Coordinator compares minimum hardware after A2 |
