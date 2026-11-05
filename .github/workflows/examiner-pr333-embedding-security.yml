@@ -30,9 +30,19 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env: &test_env
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_test
       APP_DATABASE_URL: postgresql://mainai_app:mainai_app_test_pw@localhost:5432/lifeos_test
+      REDIS_URL: redis://localhost:6379/1
       SECRET_KEY: ci-test-secret-key
       FOUNDER_EMAIL: founder@lifeos.local
       FOUNDER_PASSWORD: TestFounderPassword123!
@@ -73,6 +83,15 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env: *test_env
     steps:
       - uses: actions/checkout@v4
@@ -103,6 +122,15 @@ jobs:
           - 5432:5432
         options: >-
           --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
