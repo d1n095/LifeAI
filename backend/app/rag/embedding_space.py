@@ -37,6 +37,44 @@ class EmbeddingSpaceError(ValueError):
     never store or compare vectors that would silently corrupt the space."""
 
 
+def validate_embedding_space(
+    embedding_model: str | None,
+    embedding_native_dim: int | None,
+    vector: Sequence[float],
+    storage: int | None = None,
+) -> None:
+    """Validate the complete identity of a semantic query before comparison.
+
+    A model name without a dimension (or vice versa) is not an embedding space.  More
+    importantly, a caller must not be able to relabel a vector from one native width as a
+    different space merely by supplying different metadata.  Unknown or inconsistent
+    identity therefore fails closed instead of falling back to an unscoped vector query.
+    """
+    storage = storage_dim() if storage is None else storage
+    if not isinstance(embedding_model, str) or not embedding_model.strip():
+        raise EmbeddingSpaceError(
+            "Semantic retrieval requires a non-empty embedding model identity."
+        )
+    if (
+        not isinstance(embedding_native_dim, int)
+        or isinstance(embedding_native_dim, bool)
+        or embedding_native_dim <= 0
+    ):
+        raise EmbeddingSpaceError(
+            "Semantic retrieval requires a positive embedding native dimension."
+        )
+    if embedding_native_dim > storage:
+        raise EmbeddingSpaceError(
+            f"Embedding native dimension {embedding_native_dim} exceeds the storage "
+            f"dimension {storage}."
+        )
+    if len(vector) != embedding_native_dim:
+        raise EmbeddingSpaceError(
+            f"Query vector dimension {len(vector)} does not match the declared embedding "
+            f"space dimension {embedding_native_dim}."
+        )
+
+
 def storage_dim() -> int:
     """The physical pgvector column width (document_chunks.embedding)."""
     return get_settings().embedding_dim
