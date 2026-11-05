@@ -28,6 +28,7 @@ from app.models.provider_verification import VerificationResult
 from app.providers.registry import embed_with_policy, resolve_active
 from app.providers.transcription import TranscriptSegment, resolve_transcription_provider
 from app.providers.verification import classify_provider_exception, ensure_verified
+from app.rag.embedding_space import fit_vectors
 
 logger = logging.getLogger("mainai.rag.media_import")
 
@@ -228,6 +229,11 @@ async def index_media_document(db: Session, document: Document, raw: bytes, file
             db.commit()
             return
 
+        # Fit native vectors into the fixed storage column (zero-pad, cosine-preserving) and
+        # stamp the active embedding space, exactly as app/rag/ingest.py does — so media
+        # chunks live in the same searchable space and a local model whose native dim != the
+        # storage width does not blow up the pgvector insert (app/rag/embedding_space.py).
+        padded, native_dim = fit_vectors(vectors)
         rows = [
             DocumentChunk(
                 document_id=document.id,
@@ -235,10 +241,12 @@ async def index_media_document(db: Session, document: Document, raw: bytes, file
                 chunk_index=idx,
                 text=chunk.text,
                 embedding=vector,
+                embedding_model=model,
+                embedding_native_dim=native_dim,
                 start_seconds=chunk.start_seconds,
                 end_seconds=chunk.end_seconds,
             )
-            for idx, (chunk, vector) in enumerate(zip(timed_chunks, vectors))
+            for idx, (chunk, vector) in enumerate(zip(timed_chunks, padded))
         ]
         db.add_all(rows)
         db.flush()
