@@ -49,9 +49,9 @@ GitHub comments all post as `d1n095`; agents therefore name their role/session i
 
 | Agent | Role | Current state |
 |-------|------|---------------|
-| Claude Code (builder session) | Builder, #340 | **ACTIVE** on W1–W2, W3 queued (separate branches); frozen on #340 until Codex verdict |
+| Claude Code (builder session) | Builder, #340 | **ACTIVE** — A1b P2 fix on #340 (priority); W1/W2 paused at clean commits |
 | Claude (claude.ai session) | Coordinator, registry, Founder reporting | **ACTIVE** |
-| Codex | Independent examiner, #340 | **ACTIVE** — handoff relayed; pickup at `db83ab9` **UNCONFIRMED** |
+| Codex | Independent examiner, #340 | **WAITING** — verdict delivered (FAIL, P2 only); re-exam on next frozen SHA |
 | ChatGPT | Optional secondary reviewer | Idle |
 | Founder | Owner, approvals, relays to agents | — |
 
@@ -59,8 +59,9 @@ GitHub comments all post as `d1n095`; agents therefore name their role/session i
 
 | # | Assignment | Owner | Status | PR | Frozen SHA | Depends on | Evidence | Next authorized action |
 |---|------------|-------|--------|----|------------|------------|----------|------------------------|
-| A1 | P1 GUC-spoof remediation (migration 0072) + P2 version retry | Claude Code (builder) | **WAITING** — frozen, under review | #340 | `db83ab9166a4d31fb88db41f66ea039d4947da4f` | — | CI 41910645963: 9/9 approval-security tests incl. examiner reproducer; real-local 41910646375 SUCCESS **[VERIFIED by coordinator; not certification]** | None until A2 verdict. No push to #340. |
-| A2 | Independent examination of #340 @ `db83ab9` | Codex | **ACTIVE** | #340, probe #342 | `db83ab9…` (#342 still based on `d13efd7`) | A1 | Prior: RETURN_TO_BUILDER @ `d13efd7`, run 41905877642 | PASS / FAIL / BLOCKED per the 6 items in PR #340 comment 6643778446 |
+| A1 | P1 GUC-spoof remediation (migration 0072) | Claude Code (builder) | **CLOSED by examiner** — P1 PASS @ `db83ab9` | #340 | `db83ab9166a4d31fb88db41f66ea039d4947da4f` | — | Codex re-exam items 1,2,3,4(A only),6 PASS: PR #340 comment 6644107063, review 5776993179, run 41927871420 job 126916940418 **[VERIFIED]** | None. Threat model B NOT certified. |
+| A2 | Independent examination of #340 @ `db83ab9` | Codex | **COMPLETE — FAIL / RETURN_TO_BUILDER** (P2 only) | #340, probes #342, #343 | `db83ab9…` | A1 | Item 5 FAIL: run 41927871420 job 126916939924 — FK violation retried 5× and relabelled `version_allocation_conflict` | Re-examine A1b's frozen SHA: item 5 + #343 probe + regression of items 1–4,6 |
+| A1b | P2: retry ONLY on unique index `ix_blueprint_drafts_owner_title_version`; every other IntegrityError propagates unchanged | Claude Code (builder) | **ACTIVE** | #340 | pending | A2 verdict | Probe: `test_non_unique_integrity_error_is_not_relabelled_as_version_conflict` (#343) | Push one commit to #340, publish new frozen SHA + CI on PR #340, hand to Codex |
 | A3 | Integration #323/#324/#339 | Codex (impl) | **COMPLETE** — frozen | #341 | `95c32168860b2b8a1ccd4126d4a59ea410a1f4ed` | — | CI 41893411066; Claude review PASS **[REPORTED]**, not fully independent (#339 code partly Claude-authored) | None. No new work without a specific defect. |
 | A4 | Threat model B (compromised app process cannot forge approval) | Unassigned | **BLOCKED** | — | — | A2 verdict; W3; removal of runtime superuser `DATABASE_URL` from backend/worker; founder-signed approval (#316/#318 passkeys) | Not claimed by 0072 | Coordinator defines requirements after A2; Founder decides whether B gates Founder Alpha |
 | A5 | Founder Alpha host | Founder | **[DECISION]** — deferred | — | — | A2 | Not STRATO by default | Coordinator compares minimum hardware after A2 |
