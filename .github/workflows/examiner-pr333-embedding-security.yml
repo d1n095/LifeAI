@@ -1,0 +1,123 @@
+name: Examiner — PR333 embedding-space security
+
+on:
+  pull_request:
+    branches:
+      - claude/det-kommer-mer-879lcm
+    paths:
+      - backend/tests/backend/rag/test_embedding_space.py
+      - .github/workflows/examiner-pr333-embedding-security.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scoped-retrieval-and-owner-isolation:
+    name: Examiner — scoped retrieval and RLS
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env: &test_env
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_test
+      APP_DATABASE_URL: postgresql://mainai_app:mainai_app_test_pw@localhost:5432/lifeos_test
+      SECRET_KEY: ci-test-secret-key
+      FOUNDER_EMAIL: founder@lifeos.local
+      FOUNDER_PASSWORD: TestFounderPassword123!
+      FRONTEND_ORIGINS: http://127.0.0.1:3020
+      PUBLIC_APP_URL: http://127.0.0.1:3020
+      ENABLE_SCHEDULED_CLEANUP: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+        working-directory: backend
+      - name: Run active-space and owner-isolation controls
+        run: >-
+          python -m pytest -v
+          tests/backend/rag/test_embedding_space.py::test_search_is_scoped_to_active_space_and_never_mixes_models
+          tests/backend/rag/test_embedding_space.py::test_active_space_search_keeps_cross_owner_isolation
+          tests/backend/rag/test_embedding_space.py::test_legacy_null_identity_chunk_invisible_to_scoped_query_but_reachable_unscoped
+        working-directory: backend
+
+  missing-space-identity:
+    name: Examiner — missing identity must fail closed
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env: *test_env
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+        working-directory: backend
+      - name: Run missing and partial identity probes
+        run: >-
+          python -m pytest -v
+          tests/backend/rag/test_embedding_space.py::test_retrieval_refuses_missing_or_partial_embedding_space_identity
+        working-directory: backend
+
+  migration-data-preservation:
+    name: Examiner — 0069 downgrade preserves identity provenance
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env: *test_env
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+        working-directory: backend
+      - name: Run migration provenance roundtrip probe
+        run: >-
+          python -m pytest -v
+          tests/backend/rag/test_embedding_space.py::test_0069_downgrade_upgrade_preserves_embedding_space_identity
+        working-directory: backend

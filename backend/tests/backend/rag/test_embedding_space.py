@@ -7,12 +7,17 @@ still holds, and that legacy NULL-identity rows are invisible to a scoped query 
 reachable unscoped (backward compatibility)."""
 
 import math
+import os
+import subprocess
+import sys
 import uuid
+from pathlib import Path
 
 import pytest
 from sqlalchemy import text as sa_text
 
 from app.config import get_settings
+from app.db import migration_engine
 from app.models.document import Document, IndexStatus
 from app.rag.embedding_space import (
     EmbeddingSpaceError,
@@ -178,3 +183,102 @@ def test_legacy_null_identity_chunk_invisible_to_scoped_query_but_reachable_unsc
     # that has not adopted the identity arguments.
     unscoped = search(db_session, user.id, query, top_k=10)
     assert [h["text"] for h in unscoped] == ["legacy unstamped chunk"]
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {},
+        {"embedding_model": "model-a"},
+        {"embedding_native_dim": 768},
+    ],
+)
+def test_retrieval_refuses_missing_or_partial_embedding_space_identity(
+    db_session, make_verified_user, identity
+):
+    """No public semantic-search call may silently fall back to cross-space ranking."""
+    user, _ = make_verified_user()
+    _set_rls_user(db_session, user.id)
+    doc_a = _make_doc(db_session, user.id, "space-a.txt")
+    doc_b = _make_doc(db_session, user.id, "space-b.txt")
+    padded_a, native_a = fit_vectors([[1.0] + [0.0] * 767], STORAGE)
+    padded_b, native_b = fit_vectors([[1.0] + [0.0] * 1023], STORAGE)
+    upsert_chunks(
+        db_session,
+        doc_a.id,
+        user.id,
+        ["model-a chunk"],
+        padded_a,
+        embedding_model="model-a",
+        embedding_native_dim=native_a,
+    )
+    upsert_chunks(
+        db_session,
+        doc_b.id,
+        user.id,
+        ["model-b chunk"],
+        padded_b,
+        embedding_model="model-b",
+        embedding_native_dim=native_b,
+    )
+    db_session.commit()
+
+    with pytest.raises(EmbeddingSpaceError):
+        search(
+            db_session,
+            user.id,
+            [1.0] + [0.0] * 767,
+            top_k=10,
+            **identity,
+        )
+
+
+def test_0069_downgrade_upgrade_preserves_embedding_space_identity(superuser_db, make_verified_user):
+    """A claimed data-safe rollback must not erase the provenance needed for safe retrieval."""
+    user, _ = make_verified_user()
+    doc = _make_doc(superuser_db, user.id, "migration-provenance.txt")
+    padded, native = fit_vectors([[1.0] + [0.0] * 767], STORAGE)
+    upsert_chunks(
+        superuser_db,
+        doc.id,
+        user.id,
+        ["identity must survive rollback"],
+        padded,
+        embedding_model="model-a",
+        embedding_native_dim=native,
+    )
+    superuser_db.commit()
+    chunk_id = superuser_db.execute(
+        sa_text("SELECT id FROM document_chunks WHERE document_id = :doc_id"),
+        {"doc_id": str(doc.id)},
+    ).scalar_one()
+    superuser_db.close()
+    migration_engine.dispose()
+
+    backend_root = Path(__file__).resolve().parents[3]
+    env = {**os.environ}
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "0068"],
+            cwd=backend_root,
+            env=env,
+            check=True,
+        )
+    finally:
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "0069_embedding_space_identity"],
+            cwd=backend_root,
+            env=env,
+            check=True,
+        )
+
+    migration_engine.dispose()
+    with migration_engine.connect() as conn:
+        row = conn.execute(
+            sa_text(
+                "SELECT embedding_model, embedding_native_dim "
+                "FROM document_chunks WHERE id = :chunk_id"
+            ),
+            {"chunk_id": str(chunk_id)},
+        ).one()
+    assert row == ("model-a", 768)
