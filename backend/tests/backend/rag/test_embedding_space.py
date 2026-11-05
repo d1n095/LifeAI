@@ -233,6 +233,34 @@ def test_retrieval_refuses_missing_or_partial_embedding_space_identity(
         )
 
 
+def test_query_dimension_must_match_declared_embedding_space(db_session, make_verified_user):
+    """A caller must not relabel a 768-dimensional query as belonging to a 1024-d space."""
+    user, _ = make_verified_user()
+    _set_rls_user(db_session, user.id)
+    doc = _make_doc(db_session, user.id, "space-1024.txt")
+    padded, native = fit_vectors([[1.0] + [0.0] * 1023], STORAGE)
+    upsert_chunks(
+        db_session,
+        doc.id,
+        user.id,
+        ["1024-dimensional chunk"],
+        padded,
+        embedding_model="model-b",
+        embedding_native_dim=native,
+    )
+    db_session.commit()
+
+    with pytest.raises(EmbeddingSpaceError):
+        search(
+            db_session,
+            user.id,
+            [1.0] + [0.0] * 767,
+            top_k=10,
+            embedding_model="model-b",
+            embedding_native_dim=1024,
+        )
+
+
 def test_0069_downgrade_upgrade_preserves_embedding_space_identity(superuser_db, make_verified_user):
     """A claimed data-safe rollback must not erase the provenance needed for safe retrieval."""
     user, _ = make_verified_user()

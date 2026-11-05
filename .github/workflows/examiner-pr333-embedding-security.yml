@@ -106,6 +106,7 @@ jobs:
         run: >-
           python -m pytest -v
           tests/backend/rag/test_embedding_space.py::test_retrieval_refuses_missing_or_partial_embedding_space_identity
+          tests/backend/rag/test_embedding_space.py::test_query_dimension_must_match_declared_embedding_space
         working-directory: backend
 
   migration-data-preservation:
