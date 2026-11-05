@@ -333,12 +333,23 @@ def test_corrupted_checksum_is_integrity_error(db_session, superuser_db, make_ve
 def test_database_storage_key_cannot_traverse_storage_root(db_session, superuser_db, make_verified_user):
     """A tampered database row must not turn the server-side storage key into a file read."""
     owner, _ = make_verified_user()
-    source_id = _make_document(superuser_db, owner_id=owner.id, content=b"real original")
-    superuser_db.execute(
-        sa_text("UPDATE documents SET storage_key = '../../etc/passwd' WHERE id = :id"),
-        {"id": str(source_id)},
+    raw = b"real original"
+    doc = Document(
+        uploaded_by=owner.id,
+        title="tampered storage key",
+        status=IndexStatus.indexed,
+        original_filename="original.txt",
+        media_type="text/plain",
+        # Insert a malicious legacy/corrupt row directly: storage_key is immutable after
+        # insertion, which is itself a useful defense but does not replace read-time checks.
+        storage_key="../../etc/passwd",
+        checksum=hashlib.sha256(raw).hexdigest(),
+        size_bytes=len(raw),
+        stored_at=datetime.utcnow(),
     )
+    superuser_db.add(doc)
     superuser_db.commit()
+    source_id = doc.id
 
     _as_owner(db_session, owner.id)
     with pytest.raises(OriginalIntegrityError):
@@ -382,7 +393,9 @@ def test_http_content_disposition_rejects_header_injection(client, superuser_db)
     assert res.status_code == 200, res.text
     disposition = res.headers["content-disposition"]
     assert "\r" not in disposition and "\n" not in disposition
-    assert "Set-Cookie" not in disposition
+    # The harmless literal filename text may survive sanitization; it must never create an
+    # actual second response header.
+    assert res.headers.get("set-cookie") is None
     assert "../" not in disposition and "..\\" not in disposition
     assert res.headers["content-type"] == "application/octet-stream"
     assert res.headers["x-content-type-options"] == "nosniff"
