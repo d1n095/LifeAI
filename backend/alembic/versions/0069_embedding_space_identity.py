@@ -69,14 +69,15 @@ def upgrade() -> None:
 def downgrade() -> None:
     # Dropping the identity columns without retaining their values makes a subsequent upgrade
     # silently relabel known vectors as unknown. Keep the exact values in a migration-owned
-    # table that the runtime role cannot read or mutate. A foreign key removes backup rows when
-    # their source chunk is legitimately deleted while the database is on 0068.
+    # table that the runtime role cannot read or mutate. The table deliberately has no foreign
+    # key: the repository's supported full downgrade removes document_chunks at migration 0004.
+    # Re-upgrade restores with an inner join, so provenance for a legitimately deleted chunk is
+    # ignored while the remaining rows are preserved exactly.
     op.create_table(
         _PROVENANCE_BACKUP,
         sa.Column(
             "document_chunk_id",
             sa.Uuid(),
-            sa.ForeignKey("document_chunks.id", ondelete="CASCADE"),
             primary_key=True,
         ),
         sa.Column("embedding_model", sa.Text(), nullable=True),
