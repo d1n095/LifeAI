@@ -342,7 +342,16 @@ jobs:
               # GENERATE Blueprint with the REAL model
               draft = None
               if cited:
-                  st, bd, _ = call("POST", "/api/blueprint/drafts", jb={"title": BP_TITLE, "query": "Var bor Zephyrine?"})
+                  # The production synthesis boundary is 240s so a slow local CPU model can
+                  # finish or return its own fail-closed 503. The acceptance client must wait
+                  # longer than that boundary; 180s previously produced a false client timeout
+                  # before the API could report the authoritative provider outcome.
+                  st, bd, _ = call(
+                      "POST",
+                      "/api/blueprint/drafts",
+                      jb={"title": BP_TITLE, "query": "Var bor Zephyrine?"},
+                      timeout=300,
+                  )
                   if st == 201:
                       draft = json.loads(bd)
                       refs_ok = any(str(r.get("document_id")) == str(source_id) for r in (draft.get("source_refs") or []))
@@ -367,7 +376,12 @@ jobs:
               # save a new VERSION (regenerate)
               v2 = None
               if draft:
-                  st, bd, _ = call("POST", f"/api/blueprint/drafts/{draft['id']}/regenerate", jb={"query": "Sammanfatta kort."})
+                  st, bd, _ = call(
+                      "POST",
+                      f"/api/blueprint/drafts/{draft['id']}/regenerate",
+                      jb={"query": "Sammanfatta kort."},
+                      timeout=300,
+                  )
                   if st == 201:
                       v2 = json.loads(bd)
                       record("blueprint_new_version", "PASS" if v2.get("version") == 2 else "FAIL", f"regenerated v{v2.get('version')}")
