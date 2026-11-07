@@ -170,7 +170,7 @@ test.describe("Founder Alpha: source-grounded Blueprint approval", () => {
     await page.getByRole("button", { name: "Godkänn utkast" }).click();
     await expect(page.getByRole("status")).toHaveText("Utkastet är godkänt.");
     await expect(article.locator("span").getByText("Godkänd", { exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Godkänd" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Godkänd", exact: true })).toBeDisabled();
     expect(approvalRequests).toBe(1);
   });
 
