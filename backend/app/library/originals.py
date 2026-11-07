@@ -71,8 +71,8 @@ class OriginalNotAvailable(OriginalAccessError):
 
 
 class OriginalIntegrityError(OriginalAccessError):
-    """The stored object is missing or no longer hashes to the Document's recorded sha256 —
-    fail closed rather than return bytes that don't match their own integrity anchor."""
+    """The stored object has no trustworthy anchor, is missing, or no longer hashes to its
+    verified identity — fail closed rather than return unproven bytes."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -140,14 +140,28 @@ def load_original(
 
     storage = get_storage()
 
-    # Integrity gate. When the Document carries its sha256 (every new upload does), the stored
-    # blob MUST still verify against it — a missing file, a size change or a content change all
-    # fail here. A legacy row with no recorded checksum can only be existence-checked.
-    if document.checksum:
-        if not storage.verify(document.storage_key, expected_sha256=document.checksum, expected_size=document.size_bytes):
-            raise OriginalIntegrityError("Originalets integritet kunde inte verifieras.")
-    elif not storage.exists(document.storage_key):
-        raise OriginalNotAvailable("Originalet är inte tillgängligt för den här källan.")
+    # Establish an integrity identity before touching the bytes. New rows carry the same
+    # sha256 both in Document.checksum and in the content-addressed storage key. Some legacy
+    # rows predate the separate checksum column; for those, the backend may attest the exact
+    # canonical key it generated. A filename, an arbitrary database value, mere existence, or
+    # any backend that cannot attest its key is never an anchor. Conflicting identities are
+    # corruption/provenance failure, not a reason to pick whichever value happens to verify.
+    key_checksum = storage.trusted_sha256_for_key(document.storage_key)
+    recorded_checksum = document.checksum
+    if recorded_checksum is not None and not re.fullmatch(r"[0-9a-f]{64}", recorded_checksum):
+        raise OriginalIntegrityError("Originalets integritetsidentitet är ogiltig.")
+    if recorded_checksum is not None and key_checksum is not None and recorded_checksum != key_checksum:
+        raise OriginalIntegrityError("Originalets integritetsidentiteter motsäger varandra.")
+
+    verified_checksum = recorded_checksum or key_checksum
+    if verified_checksum is None:
+        raise OriginalIntegrityError("Originalet saknar ett verifierbart integritetsankare.")
+    if not storage.verify(
+        document.storage_key,
+        expected_sha256=verified_checksum,
+        expected_size=document.size_bytes,
+    ):
+        raise OriginalIntegrityError("Originalets integritet kunde inte verifieras.")
 
     try:
         with storage.open_read(document.storage_key) as handle:
@@ -159,9 +173,8 @@ def load_original(
 
     # Re-check the bytes we actually read, closing the verify()->open() TOCTOU window: the file
     # could have been repaired/replaced in between. Cheap for the <=60 MB Library cap.
-    if document.checksum:
-        if hashlib.sha256(content).hexdigest() != document.checksum:
-            raise OriginalIntegrityError("Originalets innehåll matchar inte dess kontrollsumma.")
+    if hashlib.sha256(content).hexdigest() != verified_checksum:
+        raise OriginalIntegrityError("Originalets innehåll matchar inte dess verifierade identitet.")
 
     # Auditable: one row per retrieval, attributed to the real actor (never inferred), with no
     # storage_key in the detail. commit=True so the trail survives even a read-only request.
@@ -179,7 +192,10 @@ def load_original(
     return LoadedOriginal(
         content=content,
         filename=safe_filename(document.original_filename, source_id=source_id),
-        checksum=document.checksum,
+        # Return the identity that was actually verified. For a checksumless legacy row this
+        # comes from the backend-attested content address, but is deliberately NOT written
+        # back to the Document: retrieval must never manufacture historical provenance.
+        checksum=verified_checksum,
         size_bytes=len(content),
         declared_media_type=document.media_type,
     )

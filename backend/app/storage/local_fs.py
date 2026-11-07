@@ -167,6 +167,21 @@ class LocalFilesystemStorage(StorageBackend):
             raise InvalidStorageKey("Storage-nyckeln pekar på en symbolisk länk, vilket inte är tillåtet.")
         return candidate
 
+    def trusted_sha256_for_key(self, storage_key: str) -> str | None:
+        """Extract the integrity anchor only from this backend's exact canonical key shape.
+
+        ``write_stream`` is the only producer of storage keys and always uses
+        ``{digest[:2]}/{digest}``.  Requiring the shard to agree with the digest is important:
+        a merely regex-shaped database value is not evidence that the backend produced it.
+        No filesystem path is resolved and no user-controlled filename participates.
+        """
+        if not _KEY_PATTERN.fullmatch(storage_key):
+            return None
+        shard, digest = storage_key.split("/", 1)
+        if shard != digest[:2]:
+            return None
+        return digest
+
     def write_stream(self, read_chunk: Callable[[], bytes], *, max_bytes: int, chunk_size: int = 1 << 20) -> StoredBlob:
         tmp_dir = self.root / "tmp"
         fd, tmp_name = tempfile.mkstemp(dir=tmp_dir, prefix="upload-")
