@@ -31,6 +31,16 @@ WAITING_PROVIDER_BLOCKER = "provider planning is unavailable"
 WAITING_PROVIDER_MAX_BACKOFFS = 8
 WAITING_PROVIDER_BACKOFF_BASE_SECONDS = 30.0
 WAITING_PROVIDER_BACKOFF_CAP_SECONDS = 900.0
+# Minimum gap before a parked WAITING_PROVIDER task is eligible to retry. The park's whole
+# purpose (see _release_provider_wait_midflight) is "blocked, not immediate ready" — do NOT
+# hot-loop against a provider that is still down. compute_backoff_seconds uses *full* jitter
+# (a draw in [0, ceiling]), whose low tail can be ~0s and would schedule a retry essentially
+# now — reintroducing the very hot loop the park exists to prevent, and intermittently
+# scheduling next_retry_at at/behind wall-clock now. This floor clamps that low tail so the
+# retry is always a meaningful, strictly-future instant, while the full-jitter spread above
+# the floor (up to the ceiling, growing exponentially per attempt) still breaks lockstep
+# re-collision when a provider recovers.
+WAITING_PROVIDER_BACKOFF_MIN_SECONDS = 5.0
 
 
 def _latest_block_or_retry_reason(db: Session, *, task: MainAITask) -> str | None:
@@ -97,6 +107,8 @@ def compute_waiting_provider_retry_at(*, prior_backoffs: int, now: datetime | No
         base=WAITING_PROVIDER_BACKOFF_BASE_SECONDS,
         cap=WAITING_PROVIDER_BACKOFF_CAP_SECONDS,
     )
+    # Clamp the full-jitter low tail: never schedule a near-now retry (see the constant's note).
+    delay = max(delay, WAITING_PROVIDER_BACKOFF_MIN_SECONDS)
     return now + timedelta(seconds=delay)
 
 
