@@ -60,7 +60,6 @@ class StoredBlob:
 
 
 class StorageBackend(ABC):
-    @abstractmethod
     def trusted_sha256_for_key(self, storage_key: str) -> str | None:
         """Return the SHA-256 integrity anchor encoded by a canonical, server-generated
         content-addressed key, or ``None`` when this backend cannot prove that the key carries
@@ -70,8 +69,11 @@ class StorageBackend(ABC):
         Implementations must not derive this value from a user filename or other mutable
         metadata.  This lets legacy rows whose separate checksum column is absent still be
         verified against the storage system's own immutable content identity without
-        inventing or persisting historical provenance.
+        inventing or persisting historical provenance. The safe default is ``None`` so an
+        existing or future backend cannot accidentally claim content-addressed semantics by
+        omission; it must override this method explicitly to make legacy retrieval possible.
         """
+        return None
 
     @abstractmethod
     def write_stream(self, read_chunk: Callable[[], bytes], *, max_bytes: int, chunk_size: int = 1 << 20) -> StoredBlob:
