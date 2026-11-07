@@ -57,5 +57,19 @@ services:
       - ./scripts/vps/ci_provider_stub.py:/stub/ci_provider_stub.py:ro
     networks:
       - lifeai_internal
+    # This CI override keeps `ollama` as the egress-free fake provider stub for the existing
+    # vps-compose-verify job. It must neutralize the fields docker-compose.vps.yml's REAL ollama
+    # service sets, which do not apply to the python stub:
+    #   - healthcheck: the base uses `ollama list` (no such binary on python:3.11-alpine). Replace
+    #     with a plain TCP check on the stub's HTTP port so the service reaches `healthy` and the
+    #     backend/worker `depends_on: ollama: service_healthy` is satisfied (otherwise: deadlock).
+    #   - read_only: the base runs ollama read-only; keep the stub writable to avoid any surprise.
+    read_only: false
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 11434), 2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
     # Deliberately no `ports:` — only worker/backend (same network) ever need to reach this,
     # never the host, matching every other internal-only service in this topology.
