@@ -15,6 +15,7 @@ from app.models.user import User
 FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
 DIM = get_settings().embedding_dim
+EMBEDDING_MODEL = get_settings().default_embedding_model
 MATCHING_VECTOR = [0.5] * DIM
 
 FAKE_ANSWER = "SLUTSATS: Detta ar den grundade slutsatsen.\nKRITIK/ALTERNATIV: Men det finns en alternativ tolkning att overvaga."

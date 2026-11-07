@@ -70,6 +70,11 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("""
+        -- Migration 0069 may preserve exact embedding provenance here across its supported
+        -- one-step downgrade/re-upgrade. Once this migration is being removed as part of a
+        -- full downgrade, document_chunks and the vectors themselves are intentionally
+        -- destroyed, so no provenance object may truthfully or usefully survive them.
+        DROP TABLE IF EXISTS _alembic_0069_embedding_space_identity_backup;
         DROP TABLE document_chunks;
     """)
     # Deliberately not DROP EXTENSION vector — other databases/schemas on the same Postgres
