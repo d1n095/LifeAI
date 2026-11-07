@@ -42,6 +42,13 @@ Only the model seam is deterministic in the ordinary backend suite. The integrat
 also runs the existing real-local Ollama acceptance with real PostgreSQL, pgvector and filesystem
 storage, then restarts backend and worker before approval.
 
+`frontend/e2e/founder-alpha-blueprint.spec.ts` exercises the matching Founder-facing browser
+journey. It verifies that the browser supplies no source identity or approval authority, that a
+new version remains a draft until a distinct approval request succeeds, and that an ungrounded
+generation failure stays visible instead of being presented as approved. Authentication remains
+real; only the Blueprint API is made deterministic in this browser test. The backend journey above
+is the production-boundary proof for persistence, source bytes and database approval enforcement.
+
 ## Migration composition
 
 The two source branches independently used the 0069 slot. This integration serializes them:
