@@ -408,10 +408,11 @@ jobs:
       - run: npx next build
         working-directory: frontend
 
-      # First pass: functional suites (auth, session-security, account lifecycle) run with
-      # a generous login/register rate limit — they are not what's exercising that control
-      # (rate-limit.spec.ts is, below) and must not be flaky because of it purely as a side
-      # effect of how many /api/auth/login calls the suite happens to make in one window.
+      # First pass: functional suites (auth, session-security, account lifecycle and the
+      # Founder Alpha Blueprint browser boundary) run with a generous login/register rate
+      # limit — they are not what's exercising that control (rate-limit.spec.ts is, below)
+      # and must not be flaky because of it purely as a side effect of how many
+      # /api/auth/login calls the suite happens to make in one window.
       - name: Start backend (functional test mode — generous rate limits)
         working-directory: backend
         env:
@@ -427,7 +428,13 @@ jobs:
             curl -sf -o /dev/null http://127.0.0.1:8010/api/health && break
             sleep 1
           done
-      - run: npx playwright test e2e/auth.spec.ts e2e/security.spec.ts e2e/account.spec.ts --project=chromium
+      - run: >-
+          npx playwright test
+          e2e/auth.spec.ts
+          e2e/security.spec.ts
+          e2e/account.spec.ts
+          e2e/founder-alpha-blueprint.spec.ts
+          --project=chromium
         working-directory: frontend
       - name: Stop backend
         if: always()
