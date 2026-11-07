@@ -468,9 +468,11 @@ services:
   # the service itself only runs `ollama serve`. CI pulls the test models via a separate,
   # egress-permitted override (docker-compose.vps.ollama-ci.yml) — never this file.
   ollama:
-    # TODO(before merge): re-pin to an exact digest (ollama/ollama@sha256:...), same discipline
-    # as redis/BACKEND_IMAGE — a floating minor tag must never be trusted on the real VPS.
-    image: ollama/ollama:0.12.3
+    # Pinned by exact version AND multi-arch index digest (same discipline as redis/
+    # BACKEND_IMAGE). Re-pin deliberately on upgrade (new version → re-verify → new digest),
+    # never let it drift. Digest resolved from Docker Hub for tag 0.40.15 — re-verify
+    # independently before merge (it was read over an unauthenticated API).
+    image: ollama/ollama:0.40.15@sha256:0e59999e0e8f9fd4e704bd788a89b7e4cad399367fb1365f8c102ac662288761
     restart: unless-stopped
     init: true
     security_opt:

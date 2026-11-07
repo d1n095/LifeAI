@@ -2255,6 +2255,165 @@ jobs:
           echo "Confirmed: clean shutdown, no orphan containers/networks/volumes left behind."
 
   # ---------------------------------------------------------------------------------------
+  # Founder Alpha deployment blocker #1: prove the REAL production VPS topology
+  # (docker-compose.vps.yml) boots with the REAL, NO-EGRESS `ollama` service and serves a real
+  # chat + a real embedding through the backend. Distinct from vps-compose-verify (which keeps
+  # the egress-free fake stub + tests the unconfigured path — untouched here). Models are
+  # PRE-SEEDED into the ollama_models volume by a throwaway egress-permitted `ollama pull`, so
+  # the running `ollama` service never needs egress — exactly the out-of-band host provisioning
+  # the Founder performs (documented in the PR). CI test models only (qwen2.5:0.5b / all-minilm);
+  # NOT a production model choice.
+  # ---------------------------------------------------------------------------------------
+  vps-ollama-verify:
+    name: Founder Alpha — real Ollama through the VPS topology
+    runs-on: ubuntu-24.04
+    if: github.ref == 'refs/heads/claude/vps-ollama-runtime'
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      CI_DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:5432/lifeos_ollama_ci
+      BACKEND_IMAGE: lifeai-vps-backend:ci
+      FRONTEND_IMAGE: lifeai-vps-frontend:ci
+      DOMAIN: ":80"
+      REDIS_PASSWORD: ci-vps-ollama-verify-redis-password-1234567890
+      LIFEAI_ENV_FILE: ${{ github.workspace }}/ci-ollama-secrets.env
+      COMPOSE_PROJECT: lifeai_ollama_ci
+      OLLAMA_IMAGE: ollama/ollama:0.40.15@sha256:0e59999e0e8f9fd4e704bd788a89b7e4cad399367fb1365f8c102ac662288761
+      # Compose-level interpolation for docker-compose.vps.yml's provider defaults + the REQUIRED
+      # ${DEFAULT_*_MODEL:?...} (same mechanism as BACKEND_IMAGE/REDIS_PASSWORD). CI test models.
+      DEFAULT_LLM_PROVIDER: ollama
+      DEFAULT_EMBEDDING_PROVIDER: ollama
+      DEFAULT_LLM_MODEL: "qwen2.5:0.5b"
+      DEFAULT_EMBEDDING_MODEL: all-minilm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create database for the real-Ollama VPS run
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS lifeos_ollama_ci;"
+          psql -h localhost -U postgres -d postgres -c "CREATE DATABASE lifeos_ollama_ci;"
+
+      - name: Build the real backend and frontend images
+        run: |
+          docker build -t lifeai-vps-backend:ci ./backend
+          docker build -t lifeai-vps-frontend:ci ./frontend
+
+      - name: Write the CI-only secrets file (never used on the real VPS)
+        run: |
+          cat > "${{ github.workspace }}/ci-ollama-secrets.env" <<EOF
+          SECRET_KEY=ci-vps-ollama-secret-key
+          MAINAI_APP_PASSWORD=ci_vps_ollama_app_pw
+          FOUNDER_EMAIL=ci-founder@lifeai-vps-ci.invalid
+          FOUNDER_PASSWORD=TestFounderPassword123!
+          DATABASE_URL=$CI_DATABASE_URL
+          FRONTEND_ORIGINS=http://localhost:80
+          PUBLIC_APP_URL=http://localhost:80
+          SMTP_HOST=ci-smtp-placeholder.invalid
+          SMTP_PORT=587
+          SMTP_USERNAME=ci
+          SMTP_PASSWORD=ci
+          SMTP_FROM_EMAIL=no-reply@lifeos.local
+          EOF
+
+      - name: Pre-seed the ollama_models volume (egress-permitted; mirrors host provisioning)
+        run: |
+          set -euo pipefail
+          # The real `ollama` service has NO egress. This throwaway container (default bridge =
+          # egress) pulls the CI test models into the SAME named volume the service mounts. This
+          # is exactly the out-of-band provisioning the Founder runs on the host.
+          docker volume create "${COMPOSE_PROJECT}_ollama_models"
+          docker run --rm -v "${COMPOSE_PROJECT}_ollama_models:/root/.ollama" --entrypoint /bin/sh \
+            "$OLLAMA_IMAGE" -c '
+              ollama serve & srv=$!;
+              for i in $(seq 1 60); do ollama list >/dev/null 2>&1 && break; sleep 1; done;
+              ollama pull qwen2.5:0.5b;
+              ollama pull all-minilm;
+              ollama list;
+              kill "$srv" 2>/dev/null || true'
+
+      - name: Start the real VPS topology with the no-egress ollama
+        run: |
+          docker compose -f docker-compose.vps.yml -f docker-compose.vps.ollama-ci.yml -p "$COMPOSE_PROJECT" up -d
+          for i in $(seq 1 90); do
+            curl -sf -o /dev/null http://localhost:80/api/health && { echo "backend healthy"; break; }
+            sleep 2
+          done
+          curl -sS http://localhost:80/api/health
+
+      - name: Confirm the ollama service has the seeded models and is on the private network only
+        run: |
+          docker compose -f docker-compose.vps.yml -f docker-compose.vps.ollama-ci.yml -p "$COMPOSE_PROJECT" exec -T ollama ollama list | tee /tmp/ollama_list.txt
+          grep -q "qwen2.5:0.5b" /tmp/ollama_list.txt || (echo "::error::chat model not present in ollama volume" && exit 1)
+          grep -q "all-minilm" /tmp/ollama_list.txt || (echo "::error::embedding model not present in ollama volume" && exit 1)
+
+      - name: Prove ONE REAL embedding — upload reaches `indexed` via all-minilm
+        run: |
+          set -euo pipefail
+          COOKIES=$(mktemp)
+          LOGIN=$(curl -sS -c "$COOKIES" -X POST http://localhost:80/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"ci-founder@lifeai-vps-ci.invalid","password":"TestFounderPassword123!"}')
+          CSRF=$(echo "$LOGIN" | python3 -c "import sys,json; print(json.load(sys.stdin)['csrf_token'])")
+          [ -n "$CSRF" ] || (echo "::error::login returned no csrf_token: $LOGIN" && exit 1)
+          printf 'Zephyrine Qualtrough bor pa Vindgatan 4213.\n' > /tmp/fa.txt
+          UP=$(curl -sS -b "$COOKIES" -X POST http://localhost:80/api/library/import \
+            -H "X-CSRF-Token: $CSRF" -F "file=@/tmp/fa.txt;type=text/plain")
+          JOB_ID=$(echo "$UP" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          [ -n "$JOB_ID" ] || (echo "::error::no import job id: $UP" && exit 1)
+          SID=""; ST=""
+          for i in $(seq 1 150); do
+            J=$(curl -sS -b "$COOKIES" "http://localhost:80/api/library/jobs/$JOB_ID")
+            ST=$(echo "$J" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status'))")
+            SID=$(echo "$J" | python3 -c "import sys,json; fr=(json.load(sys.stdin).get('file_results') or [{}]); print(fr[0].get('source_id') or '')")
+            [ "$ST" = "completed" ] && break
+            [ "$ST" = "failed" ] && (echo "::error::import failed (real embed did not run): $J" && exit 1)
+            sleep 2
+          done
+          [ -n "$SID" ] || (echo "::error::no source_id after indexing (status=$ST)" && exit 1)
+          DET=$(curl -sS -b "$COOKIES" "http://localhost:80/api/library/$SID")
+          IDX=$(echo "$DET" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status'))")
+          CH=$(echo "$DET" | python3 -c "import sys,json; print(json.load(sys.stdin).get('chunk_count') or 0)")
+          [ "$IDX" = "indexed" ] && [ "$CH" -gt 0 ] || (echo "::error::source not indexed via real embed (status=$IDX chunks=$CH)" && exit 1)
+          echo "Confirmed: a real all-minilm embedding indexed the upload (chunks=$CH)."
+
+      - name: Prove ONE REAL chat through the backend (provider=ollama)
+        run: |
+          set -euo pipefail
+          COOKIES=$(mktemp)
+          LOGIN=$(curl -sS -c "$COOKIES" -X POST http://localhost:80/api/auth/login \
+            -H "Content-Type: application/json" \
+            -d '{"email":"ci-founder@lifeai-vps-ci.invalid","password":"TestFounderPassword123!"}')
+          CSRF=$(echo "$LOGIN" | python3 -c "import sys,json; print(json.load(sys.stdin)['csrf_token'])")
+          R=$(curl -sS -b "$COOKIES" -X POST http://localhost:80/api/chat \
+            -H "X-CSRF-Token: $CSRF" -H "Content-Type: application/json" \
+            -d '{"message":"Var bor Zephyrine Qualtrough? Svara kort."}')
+          AS=$(echo "$R" | python3 -c "import sys,json; print(json.load(sys.stdin).get('assistant_status'))")
+          PV=$(echo "$R" | python3 -c "import sys,json; print(json.load(sys.stdin).get('provider'))")
+          [ "$AS" = "succeeded" ] && [ "$PV" = "ollama" ] || (echo "::error::real chat failed (assistant_status=$AS provider=$PV): $R" && exit 1)
+          echo "Confirmed: a real chat was generated by the local ollama provider (status=$AS)."
+
+      - name: Compose logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.vps.yml -f docker-compose.vps.ollama-ci.yml -p "$COMPOSE_PROJECT" logs --tail=120 || true
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose -f docker-compose.vps.yml -f docker-compose.vps.ollama-ci.yml -p "$COMPOSE_PROJECT" down -v || true
+          docker volume rm "${COMPOSE_PROJECT}_ollama_models" 2>/dev/null || true
+
+  # ---------------------------------------------------------------------------------------
   # scripts/vps/deploy.sh and rollback.sh, exercised for real end to end: deploy a known-good
   # topology, record it, deploy an intentionally-broken image, watch deploy.sh detect the
   # failure and auto-rollback, then confirm the real request path works again on the restored

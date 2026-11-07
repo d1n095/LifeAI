@@ -1,0 +1,28 @@
+# CI-only override for the vps-ollama-verify job — never used on the real VPS.
+# Applied as `-f docker-compose.vps.yml -f docker-compose.vps.ollama-ci.yml` so the job tests the
+# REAL production compose (including the REAL `ollama` service from docker-compose.vps.yml), NOT a
+# rewritten copy and NOT the fake stub from docker-compose.vps.ci.yml (that stub stays exclusively
+# for the existing vps-compose-verify job, which this file never touches).
+#
+# What this changes, and why it's CI-only:
+#   - backend, worker: add host.docker.internal so they reach the runner-level Postgres GitHub
+#     Actions service (same pattern as docker-compose.vps.ci.yml / combined-container-verify).
+#     Production reaches its managed Postgres over the network and needs no such entry.
+#   - worker: shorter lease/poll so the indexing round-trip doesn't wait two real minutes.
+#
+# IMPORTANT — ollama gets NO egress here either. docker-compose.vps.yml keeps `ollama` on the
+# internal, egress-free `lifeai_data` network, and this override does NOT change that. The CI job
+# instead PRE-SEEDS the `ollama_models` volume with the test models by running a throwaway,
+# egress-permitted `ollama pull` BEFORE `compose up` — exactly mirroring the out-of-band host
+# provisioning procedure the Founder runs (see the vps-ollama-verify job and the PR description).
+# The real `ollama` service then only ever runs `ollama serve` against that already-seeded volume.
+services:
+  backend:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  worker:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      WORKER_LEASE_SECONDS: "6"
+      WORKER_POLL_INTERVAL_SECONDS: "1"
