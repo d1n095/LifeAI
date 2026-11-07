@@ -169,8 +169,23 @@ services:
       # existing REDIS_URL support (redis:// or rediss://, with or without a password) is
       # unchanged — this is just what gets fed into it now, see app/limiter.py.
       REDIS_URL: redis://:${REDIS_PASSWORD:?sätt REDIS_PASSWORD i /etc/lifeai/lifeai.env}@redis:6379/0
+      # Founder Alpha: default the active provider to the local, no-egress Ollama runtime (the
+      # `ollama` service). The Founder chooses the actual models via /etc/lifeai/lifeai.env — no
+      # model is hardcoded here (fail-closed if unset). CHAT_FALLBACK_ORDER empty = NO paid
+      # fallback: a failed local call surfaces as an error, never a silent call to a paid API —
+      # the same posture .github/workflows/founder-alpha-verification.yml already proves. (The
+      # worker needs this too: it runs the embedding provider during indexing.) Override the
+      # DEFAULT_*_PROVIDER in lifeai.env only for a deliberately non-local deployment.
+      DEFAULT_LLM_PROVIDER: ${DEFAULT_LLM_PROVIDER:-ollama}
+      DEFAULT_EMBEDDING_PROVIDER: ${DEFAULT_EMBEDDING_PROVIDER:-ollama}
+      DEFAULT_LLM_MODEL: ${DEFAULT_LLM_MODEL:?set DEFAULT_LLM_MODEL in /etc/lifeai/lifeai.env (Founder picks the production chat model; not hardcoded)}
+      DEFAULT_EMBEDDING_MODEL: ${DEFAULT_EMBEDDING_MODEL:?set DEFAULT_EMBEDDING_MODEL in /etc/lifeai/lifeai.env (Founder picks the production embedding model; not hardcoded)}
+      OLLAMA_BASE_URL: http://ollama:11434
+      CHAT_FALLBACK_ORDER: ""
     depends_on:
       redis:
+        condition: service_healthy
+      ollama:
         condition: service_healthy
       uploads-init:
         condition: service_completed_successfully
@@ -236,8 +251,23 @@ services:
       # never itself writes to it.
       RUN_PRIVILEGE_BOOT: "false"
       REDIS_URL: redis://:${REDIS_PASSWORD:?sätt REDIS_PASSWORD i /etc/lifeai/lifeai.env}@redis:6379/0
+      # Founder Alpha: default the active provider to the local, no-egress Ollama runtime (the
+      # `ollama` service). The Founder chooses the actual models via /etc/lifeai/lifeai.env — no
+      # model is hardcoded here (fail-closed if unset). CHAT_FALLBACK_ORDER empty = NO paid
+      # fallback: a failed local call surfaces as an error, never a silent call to a paid API —
+      # the same posture .github/workflows/founder-alpha-verification.yml already proves. (The
+      # worker needs this too: it runs the embedding provider during indexing.) Override the
+      # DEFAULT_*_PROVIDER in lifeai.env only for a deliberately non-local deployment.
+      DEFAULT_LLM_PROVIDER: ${DEFAULT_LLM_PROVIDER:-ollama}
+      DEFAULT_EMBEDDING_PROVIDER: ${DEFAULT_EMBEDDING_PROVIDER:-ollama}
+      DEFAULT_LLM_MODEL: ${DEFAULT_LLM_MODEL:?set DEFAULT_LLM_MODEL in /etc/lifeai/lifeai.env (Founder picks the production chat model; not hardcoded)}
+      DEFAULT_EMBEDDING_MODEL: ${DEFAULT_EMBEDDING_MODEL:?set DEFAULT_EMBEDDING_MODEL in /etc/lifeai/lifeai.env (Founder picks the production embedding model; not hardcoded)}
+      OLLAMA_BASE_URL: http://ollama:11434
+      CHAT_FALLBACK_ORDER: ""
     depends_on:
       redis:
+        condition: service_healthy
+      ollama:
         condition: service_healthy
       uploads-init:
         condition: service_completed_successfully
@@ -426,6 +456,60 @@ services:
     # Frontend and Caddy are not on lifeai_data at all, so they can't even resolve `redis`
     # via Docker DNS, let alone connect to it.
 
+  # Founder Alpha local model runtime (deployment blocker #1). Runs the local chat + embedding
+  # models the backend's default provider points at (OLLAMA_BASE_URL = http://ollama:11434).
+  #
+  # Egress posture (Life Vault): placed on `lifeai_data` (internal: true) ONLY — exactly like
+  # redis — so the model runtime has NO route to the internet. The backend reaches it by Docker
+  # DNS as `ollama` over that private network; nothing publishes a port. This is deliberate: the
+  # model must not be able to call out. Consequence: models are NOT pulled at runtime (no
+  # egress). They are provisioned out-of-band into the persistent `ollama_models` volume by a
+  # one-shot, egress-permitted bootstrap step (see docs/FOUNDER_ALPHA_STARTUP_AND_DEPLOYMENT.md);
+  # the service itself only runs `ollama serve`. CI pulls the test models via a separate,
+  # egress-permitted override (docker-compose.vps.ollama-ci.yml) — never this file.
+  ollama:
+    # Pinned by exact version AND multi-arch index digest (same discipline as redis/
+    # BACKEND_IMAGE). Re-pin deliberately on upgrade (new version → re-verify → new digest),
+    # never let it drift. Digest resolved from Docker Hub for tag 0.40.15 — re-verify
+    # independently before merge (it was read over an unauthenticated API).
+    image: ollama/ollama:0.40.15@sha256:0e59999e0e8f9fd4e704bd788a89b7e4cad399367fb1365f8c102ac662288761
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    # Model files + manifests live on the persistent volume; /tmp is scratch. read_only keeps the
+    # rest of the rootfs immutable. (Validate exact write-paths in CI — if `ollama serve` needs
+    # another writable path on this image version, extend tmpfs rather than dropping read_only.)
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ollama_models:/root/.ollama
+    # Sizing is a Founder/ops decision (depends on the chosen production model); bounded defaults,
+    # overridable from /etc/lifeai/lifeai.env. The CI test models (qwen2.5:0.5b, all-minilm) fit
+    # comfortably under these.
+    mem_limit: ${OLLAMA_MEM_LIMIT:-4g}
+    cpus: "${OLLAMA_CPUS:-2.0}"
+    pids_limit: 256
+    healthcheck:
+      # `ollama list` returns 0 once the server is up (even with zero models pulled yet).
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - lifeai_data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    # Deliberately no `ports:` — reachable only by the backend over the private lifeai_data
+    # network, and with no internet egress of its own.
+
 networks:
   lifeai_internal:
     driver: bridge
@@ -445,3 +529,7 @@ volumes:
   # scripts/vps/backup.sh/restore.sh alongside caddy_data/caddy_config — see those scripts'
   # own comments and docs/VPS_OPERATIONS_RUNBOOK.md for the backup/restore procedure.
   lifeai_uploads:
+  # Founder Alpha local models (ollama). Persistent so pulled/provisioned models survive
+  # restarts without re-pulling (and so the no-egress runtime never needs to). MUST be added to
+  # scripts/vps/backup.sh/restore.sh alongside the other named volumes.
+  ollama_models:
