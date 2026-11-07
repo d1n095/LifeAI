@@ -18,12 +18,20 @@ from app.db import Base
 class ProviderDisclosureDecision(str, enum.Enum):
     allowed = "allowed"
     denied = "denied"
+    # On-host processing by a local provider (e.g. an Ollama runner on loopback / in the same
+    # deployment -- see app/providers/ollama_provider.py's is_external_egress): the content
+    # was still gated (incomplete-request and NEVER_EGRESS denies, plus secret redaction, all
+    # apply identically), but it never left the host, so recording it as an external-AI
+    # "allowed" disclosure would be untrue. Distinguishing this is what makes the no-egress
+    # invariant checkable: a local-first ingestion produces zero `allowed` rows, only `local`.
+    # Stored in the same `decision` String(16) column -- no schema/migration change needed.
+    local = "local"
 
 
 class ProviderDisclosureEvent(Base):
-    """One egress-policy decision -- allowed or denied -- for one attempted external-provider
-    call. Never stores raw content, only hashes (see migration 0062's own docstring). Append-
-    only at the database level."""
+    """One egress-policy decision -- allowed, denied, or local (on-host, no external egress) --
+    for one attempted provider call. Never stores raw content, only hashes (see migration
+    0062's own docstring). Append-only at the database level."""
 
     __tablename__ = "provider_disclosure_events"
 

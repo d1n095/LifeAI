@@ -77,6 +77,20 @@ class LLMProvider(ABC):
 
     name: str
 
+    # Whether a call to this provider is an external-AI disclosure (content leaves the host
+    # to a third-party AI service) or stays on-host (a local model runner). DEFAULT = True,
+    # fail-safe: any provider that does not explicitly prove it runs on-host is treated as
+    # external egress, so a new provider that forgets to declare this is gated and ledgered as
+    # a disclosure (the safe side), never silently classified as "nothing left the machine".
+    # The egress gate (app/egress_policy/service.py, via app/providers/registry.py) uses this
+    # only to record a truthful decision ("local" vs external "allowed") -- it never relaxes
+    # any deny path for a local provider. A property, not a bare bool, because locality is a
+    # function of the CONFIGURED endpoint, not the provider class: a "local" runner pointed at
+    # a remote URL is external egress and must classify as such (see OllamaProvider).
+    @property
+    def is_external_egress(self) -> bool:
+        return True
+
     @abstractmethod
     async def chat(self, messages: list[Message], model: str, *, timeout: float | None = None, **kwargs) -> ChatResult: ...
 
