@@ -10,11 +10,21 @@ family of invariant this codebase already established for execution authority
 (PROPOSED_SCOPE != AUTHORIZED_SCOPE, migration 0057; MODEL REQUEST != AUTHORIZATION,
 app.mainai_execution.recovery_takeover), extended here to information disclosure.
 
-Wired first into the `provider_planning`/Safe Planner boundary only (the narrowest,
-best-understood, already-partially-redacted call path -- see `safe_provider_prompt()`,
-`app/safe_planner/service.py`). Deliberately NOT wired into `app/routers/chat.py` or the RAG
-embedding call sites yet -- those are real, larger, separately-tracked gaps (V1/V2 in the
-blocker map), out of scope for this foundation."""
+Wired first into the `provider_planning`/Safe Planner boundary, and since then into the RAG
+embedding call sites (`app/providers/registry.py::embed_with_policy`, reached by
+`app/rag/ingest.py`, `app/rag/retrieve.py`, `app/rag/media_import.py`,
+`app/routers/library.py`) and chat (`chat_with_fallback`), each passing `owner_id` to turn
+the gate on for that path. Every covered call records exactly one disclosure-ledger row.
+
+LOCAL vs EXTERNAL: a call to an on-host local model runner (e.g. an Ollama endpoint on
+loopback / in the same deployment -- see `app/providers/ollama_provider.py`'s
+`is_external_egress`) is NOT an external-AI disclosure. The caller reports this via
+`provider_is_local`; such a call is recorded with decision `local` instead of `allowed`, so
+the ledger is truthful and the no-egress invariant is checkable (a local-first ingestion
+produces zero external `allowed` rows). Crucially, `provider_is_local` NEVER relaxes a deny:
+the incomplete-request deny and the NEVER_EGRESS/private-key hard-deny apply identically to
+local calls (fail-safe -- locality is best-effort, and a NEVER_EGRESS marker means the
+content must not cross its trust boundary at all), and secret-pattern redaction still runs."""
 
 from __future__ import annotations
 
@@ -114,6 +124,7 @@ def enforce_egress_policy(
     task_id: uuid.UUID | None = None,
     goal_id: uuid.UUID | None = None,
     job_id: uuid.UUID | None = None,
+    provider_is_local: bool = False,
 ) -> Any:
     """THE enforcement point: every outbound provider call this gate covers must pass its
     content through this function before the provider is ever invoked. Returns the sanitized
@@ -130,7 +141,11 @@ def enforce_egress_policy(
     scratch. A retry, an idempotent replay, or a provider switch (A -> B) can never inherit an
     earlier call's decision -- there is no cache, no lookup-by-prior-hash, nothing here to
     bypass. This is deliberate, not an oversight: the adversarial test suite proves exactly
-    this (retry/idempotency and provider-switch cannot skip re-evaluation)."""
+    this (retry/idempotency and provider-switch cannot skip re-evaluation).
+
+    `provider_is_local` (default False) records an on-host local-provider call with decision
+    `local` instead of `allowed` -- see this module's docstring. It only ever affects the
+    allowed-path label; it NEVER skips or relaxes the two deny paths below."""
     attempted_hash = _hash_payload(payload)
 
     if not provider or not model or not purpose or not requested_by:
@@ -177,6 +192,13 @@ def enforce_egress_policy(
     redaction_categories = ["secret_pattern"] if redacted != payload else []
     sent_hash = _hash_payload(redacted)
 
+    # On-host local provider: the content was fully gated (both denies above still ran, and
+    # secrets are still redacted below), but it never left the host, so it is NOT an external-
+    # AI disclosure -- recorded as `local`, not `allowed`. External providers are unchanged.
+    decision = "local" if provider_is_local else "allowed"
+    scope = "on-host local provider -- no external-AI egress" if provider_is_local else "egress policy"
+    reason = f"passed {scope}" if not redaction_categories else f"passed {scope} after secret-pattern redaction"
+
     _record(
         db,
         owner_id=owner_id,
@@ -187,8 +209,8 @@ def enforce_egress_policy(
         task_id=task_id,
         goal_id=goal_id,
         job_id=job_id,
-        decision="allowed",
-        reason="passed egress policy" if not redaction_categories else "passed egress policy after secret-pattern redaction",
+        decision=decision,
+        reason=reason,
         redaction_categories=redaction_categories,
         attempted_hash=attempted_hash,
         sent_hash=sent_hash,

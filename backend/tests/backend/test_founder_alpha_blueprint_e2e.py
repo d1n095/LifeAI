@@ -23,6 +23,8 @@ Required chain covered end to end:
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import uuid
 
 import pytest
@@ -55,6 +57,11 @@ def _fake_model(monkeypatch):
         state["calls"] += 1
         if state["fail"]:
             raise ProviderError("synthesis provider deliberately unavailable (rollback test)")
+        # The real import worker also invokes claim extraction. Keep that model seam
+        # deterministic and empty so this fixture can drive upload -> index -> Blueprint
+        # without inventing claims or contacting an external provider.
+        if any("Svara ENDAST med en JSON-lista" in m.content for m in messages):
+            return ChatResult(content="[]", provider="openai", model=model, raw_usage={})
         user_msg = next((m.content for m in messages if m.role == "user"), "")
         n_sources = user_msg.count("(document ")
         body = f"BLUEPRINT DRAFT synthesised strictly from {n_sources} source(s)."
@@ -126,6 +133,107 @@ def _draft_rows(superuser_db, owner_id, title):
             ).order_by(BlueprintDraft.version)
         ).scalars().all()
     )
+
+
+def _import_indexed_source(client, csrf: str, filename: str, content: bytes) -> str:
+    """Drive the real durable import worker until the uploaded source is indexed."""
+    from app.worker import Worker
+
+    response = client.post(
+        "/api/library/import",
+        files={"file": (filename, content, "text/plain")},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert response.status_code == 200, response.text
+    job_id = response.json()["id"]
+    for _ in range(40):
+        asyncio.run(Worker().run_once())
+        job = client.get(f"/api/library/jobs/{job_id}")
+        assert job.status_code == 200, job.text
+        body = job.json()
+        results = body.get("file_results") or []
+        if body.get("status") == "completed" and results and results[0].get("source_id"):
+            return results[0]["source_id"]
+        if body.get("status") in {"failed", "partial"}:
+            raise AssertionError(f"import job {job_id} failed: {body}")
+    raise AssertionError(f"import job {job_id} never completed")
+
+
+def test_real_upload_to_original_to_blueprint_to_approval_journey(
+    client, superuser_db, _fake_model
+):
+    """The deterministic CI journey uses real HTTP, storage, worker, pgvector and approval.
+
+    Unlike the older composition test, this starts at the actual upload boundary instead of
+    manufacturing Document/DocumentChunk rows. It therefore proves that the immutable original
+    which the Founder can download is the same source that grounds the versioned Blueprint.
+    Only the model call is fake; the separate Founder Alpha Ollama workflow covers that seam.
+    """
+    founder_id = _founder_id(superuser_db)
+    csrf = _login(client)
+    marker = f"Project Zephyr marker {uuid.uuid4().hex}"
+    original = (
+        "Founder Alpha project evidence.\n"
+        f"{marker}\n"
+        "The Blueprint must cite this immutable uploaded source.\n"
+    ).encode("utf-8")
+    expected_sha = hashlib.sha256(original).hexdigest()
+
+    source_id = _import_indexed_source(client, csrf, "founder-alpha-evidence.txt", original)
+    source_uuid = uuid.UUID(source_id)
+    source = superuser_db.get(Document, source_uuid)
+    assert source is not None
+    assert source.uploaded_by == founder_id
+    assert source.checksum == expected_sha
+    storage_key_before = source.storage_key
+
+    downloaded = client.get(f"/api/library/{source_id}/original")
+    assert downloaded.status_code == 200, downloaded.text
+    assert downloaded.content == original
+    assert hashlib.sha256(downloaded.content).hexdigest() == expected_sha
+
+    title = f"Founder Alpha integrated {uuid.uuid4().hex[:8]}"
+    generated = client.post(
+        "/api/blueprint/drafts",
+        json={"title": title, "query": marker},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert generated.status_code == 201, generated.text
+    v1 = generated.json()
+    assert v1["status"] == "draft"
+    assert v1["version"] == 1
+    assert v1["source_document_ids"] == [source_id]
+    assert v1["provenance"]["originals_mutated"] is False
+    assert v1["provenance"]["pending_founder_approval"] is True
+
+    regenerated = client.post(
+        f"/api/blueprint/drafts/{v1['id']}/regenerate",
+        json={"query": marker},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert regenerated.status_code == 201, regenerated.text
+    v2 = regenerated.json()
+    assert v2["version"] == 2
+    assert v2["source_document_ids"] == [source_id]
+
+    approved = client.post(
+        f"/api/blueprint/drafts/{v2['id']}/approve",
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["status"] == "approved"
+    assert approved.json()["approved_by"] == str(founder_id)
+
+    # Re-read committed state after expiring the identity map: neither generation nor approval
+    # may mutate the source identity, original checksum, storage pointer or bytes.
+    superuser_db.expire_all()
+    source_after = superuser_db.get(Document, source_uuid)
+    assert source_after is not None
+    assert source_after.checksum == expected_sha
+    assert source_after.storage_key == storage_key_before
+    downloaded_after = client.get(f"/api/library/{source_id}/original")
+    assert downloaded_after.status_code == 200
+    assert downloaded_after.content == original
 
 
 def test_full_founder_alpha_workflow(client, superuser_db, _fake_model):

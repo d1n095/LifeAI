@@ -28,6 +28,7 @@ from app.providers.registry import resolve_active
 FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
 DIM = get_settings().embedding_dim
+EMBEDDING_MODEL = get_settings().default_embedding_model
 MATCHING_VECTOR = [0.5] * DIM  # identical query/chunk vector -> cosine similarity 1.0
 # This fake embed returns a full storage-width vector, so its native dim equals the stored width.
 ACTIVE_NATIVE_DIM = len(MATCHING_VECTOR)

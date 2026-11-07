@@ -252,7 +252,14 @@ async def test_mp3_import_produces_timestamped_searchable_chunks(db_session, mak
     # Searchable — hybrid_search's text channel finds the exact term, and the hit carries
     # the chunk's timestamp range through so a citation can open the right moment.
     _set_rls_user(db_session, user.id)
-    hits = hybrid_search(db_session, user.id, [0.01] * EMBEDDING_DIM, "produktvisionen")
+    hits = hybrid_search(
+        db_session,
+        user.id,
+        [0.01] * EMBEDDING_DIM,
+        "produktvisionen",
+        embedding_model=chunk.embedding_model,
+        embedding_native_dim=chunk.embedding_native_dim,
+    )
     assert len(hits) == 1
     assert hits[0]["start_seconds"] == 0.0
     assert hits[0]["end_seconds"] == 42.0

@@ -3,16 +3,21 @@
 pad math and fail-closed behavior; the DB tests run against real local Postgres with RLS, the
 same way the rest of tests/backend/rag/ does, and prove that retrieval scoped to an active
 (model, native_dim) never returns chunks from a different space, that cross-owner isolation
-still holds, and that legacy NULL-identity rows are invisible to a scoped query but still
-reachable unscoped (backward compatibility)."""
+still holds, and that legacy NULL-identity rows are never compared without an explicit
+re-embedding operation."""
 
 import math
+import os
+import subprocess
+import sys
 import uuid
+from pathlib import Path
 
 import pytest
 from sqlalchemy import text as sa_text
 
 from app.config import get_settings
+from app.db import migration_engine
 from app.models.document import Document, IndexStatus
 from app.rag.embedding_space import (
     EmbeddingSpaceError,
@@ -130,12 +135,14 @@ def test_search_is_scoped_to_active_space_and_never_mixes_models(db_session, mak
     assert [h["text"] for h in hits_a] == ["chunk from model a"]
 
     # Query in model-b's space: only model-b's chunk.
-    hits_b = search(db_session, user.id, query_native, top_k=10,
+    query_native_b = [1.0] + [0.0] * 1023
+    hits_b = search(db_session, user.id, query_native_b, top_k=10,
                     embedding_model="model-b", embedding_native_dim=1024)
     assert [h["text"] for h in hits_b] == ["chunk from model b"]
 
     # A space that stamped nothing returns nothing (not the nearest foreign-space vector).
-    hits_none = search(db_session, user.id, query_native, top_k=10,
+    query_native_c = [1.0] + [0.0] * 383
+    hits_none = search(db_session, user.id, query_native_c, top_k=10,
                        embedding_model="model-c", embedding_native_dim=384)
     assert hits_none == []
 
@@ -158,7 +165,7 @@ def test_active_space_search_keeps_cross_owner_isolation(db_session, superuser_d
     assert hits == []
 
 
-def test_legacy_null_identity_chunk_invisible_to_scoped_query_but_reachable_unscoped(
+def test_legacy_null_identity_chunk_is_never_semantically_compared(
     db_session, make_verified_user
 ):
     user, _ = make_verified_user()
@@ -174,7 +181,139 @@ def test_legacy_null_identity_chunk_invisible_to_scoped_query_but_reachable_unsc
     scoped = search(db_session, user.id, query, top_k=10,
                     embedding_model="model-a", embedding_native_dim=768)
     assert scoped == []
-    # Unscoped (no active space passed) still finds it — backward compatibility for any caller
-    # that has not adopted the identity arguments.
-    unscoped = search(db_session, user.id, query, top_k=10)
-    assert [h["text"] for h in unscoped] == ["legacy unstamped chunk"]
+    # An unscoped semantic query is ambiguous and must fail closed. Legacy rows remain stored
+    # for an explicit re-embedding operation; they are never silently compared.
+    with pytest.raises(EmbeddingSpaceError):
+        search(db_session, user.id, query, top_k=10)
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {},
+        {"embedding_model": "model-a"},
+        {"embedding_native_dim": 768},
+    ],
+)
+def test_retrieval_refuses_missing_or_partial_embedding_space_identity(
+    db_session, make_verified_user, identity
+):
+    """No public semantic-search call may silently fall back to cross-space ranking."""
+    user, _ = make_verified_user()
+    _set_rls_user(db_session, user.id)
+    doc_a = _make_doc(db_session, user.id, "space-a.txt")
+    doc_b = _make_doc(db_session, user.id, "space-b.txt")
+    padded_a, native_a = fit_vectors([[1.0] + [0.0] * 767], STORAGE)
+    padded_b, native_b = fit_vectors([[1.0] + [0.0] * 1023], STORAGE)
+    upsert_chunks(
+        db_session,
+        doc_a.id,
+        user.id,
+        ["model-a chunk"],
+        padded_a,
+        embedding_model="model-a",
+        embedding_native_dim=native_a,
+    )
+    upsert_chunks(
+        db_session,
+        doc_b.id,
+        user.id,
+        ["model-b chunk"],
+        padded_b,
+        embedding_model="model-b",
+        embedding_native_dim=native_b,
+    )
+    db_session.commit()
+
+    with pytest.raises(EmbeddingSpaceError):
+        search(
+            db_session,
+            user.id,
+            [1.0] + [0.0] * 767,
+            top_k=10,
+            **identity,
+        )
+
+
+def test_query_dimension_must_match_declared_embedding_space(db_session, make_verified_user):
+    """A caller must not relabel a 768-dimensional query as belonging to a 1024-d space."""
+    user, _ = make_verified_user()
+    _set_rls_user(db_session, user.id)
+    doc = _make_doc(db_session, user.id, "space-1024.txt")
+    padded, native = fit_vectors([[1.0] + [0.0] * 1023], STORAGE)
+    upsert_chunks(
+        db_session,
+        doc.id,
+        user.id,
+        ["1024-dimensional chunk"],
+        padded,
+        embedding_model="model-b",
+        embedding_native_dim=native,
+    )
+    db_session.commit()
+
+    with pytest.raises(EmbeddingSpaceError):
+        search(
+            db_session,
+            user.id,
+            [1.0] + [0.0] * 767,
+            top_k=10,
+            embedding_model="model-b",
+            embedding_native_dim=1024,
+        )
+
+
+def test_0069_downgrade_upgrade_preserves_embedding_space_identity(
+    superuser_db, make_verified_user
+):
+    """A claimed data-safe rollback must not erase the provenance needed for safe retrieval."""
+    user, _ = make_verified_user()
+    doc = _make_doc(superuser_db, user.id, "migration-provenance.txt")
+    padded, native = fit_vectors([[1.0] + [0.0] * 767], STORAGE)
+    upsert_chunks(
+        superuser_db,
+        doc.id,
+        user.id,
+        ["identity must survive rollback"],
+        padded,
+        embedding_model="model-a",
+        embedding_native_dim=native,
+    )
+    superuser_db.commit()
+    chunk_id = superuser_db.execute(
+        sa_text("SELECT id FROM document_chunks WHERE document_id = :doc_id"),
+        {"doc_id": str(doc.id)},
+    ).scalar_one()
+    superuser_db.close()
+    migration_engine.dispose()
+
+    backend_root = Path(__file__).resolve().parents[3]
+    env = {**os.environ}
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "0068"],
+            cwd=backend_root,
+            env=env,
+            check=True,
+        )
+    finally:
+        # 0069 was this source branch's head. In the composed Founder Alpha lineage the
+        # Blueprint and provider-locality migrations follow it, so always restore the actual
+        # repository head; otherwise later tests run against a silently partial schema.
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=backend_root,
+            env=env,
+            check=True,
+        )
+
+    migration_engine.dispose()
+    with migration_engine.connect() as conn:
+        row = conn.execute(
+            sa_text(
+                "SELECT embedding_model, embedding_native_dim "
+                "FROM document_chunks WHERE id = :chunk_id"
+            ),
+            {"chunk_id": str(chunk_id)},
+        ).one()
+    assert row == ("model-a", 768)

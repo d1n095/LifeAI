@@ -23,6 +23,13 @@ from app.models.media_url_import import MediaUrlImport
 from app.models.source_relationship import SourceRelationship
 from app.models.user import User
 from app.egress_policy import EgressDeniedError
+from app.library.originals import (
+    LoadedOriginal,
+    OriginalIntegrityError,
+    OriginalNotAvailable,
+    OriginalNotFound,
+    load_original,
+)
 from app.providers.registry import embed_with_policy, resolve_active
 from app.providers.verification import classify_provider_exception
 from app.rag.embedding_space import native_dim_of
@@ -452,6 +459,72 @@ def get_source_media(source_id: uuid.UUID, db: Session = Depends(get_db), user: 
     if media_bytes is None:
         raise HTTPException(status_code=404, detail="Ingen mediefil hittades för den här källan.")
     return Response(content=media_bytes, media_type=document.media_type or "application/octet-stream")
+
+
+def _content_disposition(filename: str) -> str:
+    """RFC 6266 / RFC 5987 `attachment` disposition. Always `attachment` (never `inline`) so a
+    browser downloads the original rather than rendering a text/html or image/svg+xml original
+    in the founder's session. `filename` is already sanitized (app/library/originals.py
+    safe_filename, ASCII `[A-Za-z0-9._ -]` only), so the quoted fallback is header-safe; the
+    `filename*` UTF-8 form is added for completeness."""
+    from urllib.parse import quote
+
+    return f"attachment; filename=\"{filename}\"; filename*=UTF-8''{quote(filename)}"
+
+
+@router.get(
+    "/{source_id}/original",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {"application/octet-stream": {}},
+            "description": "Den oförändrade originalfilens råa bytes (nedladdning).",
+        }
+    },
+)
+def get_source_original(
+    source_id: uuid.UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Blueprint §16.6: streams the untouched, content-addressed ORIGINAL of any source kind
+    back to the founder — the non-media counterpart to `GET /{source_id}/media`, so a founder
+    can download exactly the bytes they uploaded (text/PDF/DOCX/...), not just a derived
+    preview. All authorization, owner-scoping, integrity verification and auditing live in the
+    shared `load_original` service (app/library/originals.py), used by Life's own authorized
+    path too; this handler only maps typed failures to HTTP status and sets safe headers.
+
+    Bytes are always served as `application/octet-stream` with an `attachment` disposition
+    (never the declared media type) so an original that happens to be HTML/SVG can never render
+    inline in the founder's authenticated session. The content-addressed storage key is never
+    exposed. No AI/provider call and no egress happen here — reading an original is not
+    authority to disclose it externally."""
+    try:
+        original: LoadedOriginal = load_original(
+            db,
+            owner_id=user.id,
+            source_id=source_id,
+            actor_type="founder",
+            actor_id=user.id,
+            access_label="founder_download",
+            request=request,
+        )
+    except (OriginalNotFound, OriginalNotAvailable):
+        # Deliberately one 404 for both: never reveal whether a not-visible source exists.
+        raise HTTPException(status_code=404, detail="Originalet hittades inte.")
+    except OriginalIntegrityError:
+        raise HTTPException(status_code=503, detail="Originalet kunde inte verifieras just nu.")
+
+    return Response(
+        content=original.content,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": _content_disposition(original.filename),
+            # Belt-and-suspenders against content sniffing turning octet-stream into HTML.
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.delete("/{source_id}")

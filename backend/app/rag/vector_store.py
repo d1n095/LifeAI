@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
-from app.rag.embedding_space import pad_to_storage
+from app.rag.embedding_space import pad_to_storage, validate_embedding_space
 
 
 def upsert_chunks(
@@ -101,6 +101,10 @@ def search(
     is also what app/rag/retrieve.py's chat-context retrieval calls, so a deleted source can
     never be quoted back to the founder as if it still existed either.
     """
+    # Identity is mandatory for every semantic comparison.  Missing/partial metadata must not
+    # turn into an unscoped query that compares vectors from incompatible spaces.
+    validate_embedding_space(embedding_model, embedding_native_dim, vector)
+
     # Zero-pad a native query vector up to the storage column width (no-op when it already is
     # that width). Cosine ranking is identical to a native-width column — see
     # app/rag/embedding_space.py.
@@ -116,11 +120,10 @@ def search(
     # genuine 1536-d vector share this column but are semantically incomparable. Filtering here
     # is the no-silent-mixing guarantee; chunks from any other model/dim (or legacy NULL
     # identity) are simply never ranked against this query.
-    if embedding_model is not None and embedding_native_dim is not None:
-        stmt = stmt.where(
-            DocumentChunk.embedding_model == embedding_model,
-            DocumentChunk.embedding_native_dim == embedding_native_dim,
-        )
+    stmt = stmt.where(
+        DocumentChunk.embedding_model == embedding_model,
+        DocumentChunk.embedding_native_dim == embedding_native_dim,
+    )
     if project_id is not None:
         stmt = stmt.where(Document.project_id == project_id)
     if document_id is not None:
@@ -167,15 +170,15 @@ def hybrid_search(
 
     semantic_rows = []
     if vector is not None:
+        validate_embedding_space(embedding_model, embedding_native_dim, vector)
         vector = pad_to_storage(vector)
         semantic_filters = list(base_filters)
         # Same active-embedding-space guard as search(): the semantic channel never compares
         # across incompatible models/dims. The independent ILIKE text channel below is
         # unaffected, so a model switch degrades hybrid search to exact-text matches rather
         # than returning semantically meaningless cross-model "matches".
-        if embedding_model is not None and embedding_native_dim is not None:
-            semantic_filters.append(DocumentChunk.embedding_model == embedding_model)
-            semantic_filters.append(DocumentChunk.embedding_native_dim == embedding_native_dim)
+        semantic_filters.append(DocumentChunk.embedding_model == embedding_model)
+        semantic_filters.append(DocumentChunk.embedding_native_dim == embedding_native_dim)
         distance = DocumentChunk.embedding.cosine_distance(vector)
         semantic_stmt = (
             select(DocumentChunk, distance.label("distance"))
