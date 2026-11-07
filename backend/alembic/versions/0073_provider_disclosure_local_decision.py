@@ -1,4 +1,4 @@
-"""Allow the `local` disclosure decision on provider_disclosure_events — migration 0069.
+"""Allow the `local` disclosure decision on provider_disclosure_events — migration 0073.
 
 0062 created the egress disclosure ledger with decision CHECK-constrained to ('allowed',
 'denied'). A call to an ON-HOST local model runner (Ollama on loopback / in the same
@@ -15,8 +15,8 @@ RLS policy and redaction_categories constraint from 0062 are untouched.
 
 from alembic import op
 
-revision = "0069"
-down_revision = "0068"
+revision = "0073_provider_disclosure_local_decision"
+down_revision = "0072_blueprint_approve_identity"
 branch_labels = None
 depends_on = None
 
