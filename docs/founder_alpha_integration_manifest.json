@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "mission_branch": "codex/life-founder-alpha-integration",
+  "candidate_sha_source": "git rev-parse HEAD",
+  "first_cycle_go": false,
+  "release_candidate": false,
+  "expected_migration_head": "0073_provider_disclosure_local",
+  "components": [
+    {
+      "name": "frontend_security_ci_baseline",
+      "pr": 323,
+      "sha": "04b27e9585ea9def58d24407f7000a51577c89bf",
+      "status": "implemented_ci_green",
+      "required_for_first_start": true
+    },
+    {
+      "name": "local_provider_no_egress",
+      "pr": 326,
+      "sha": "3a07f58b01bdb34839222f57188a00a8568b1f6f",
+      "status": "implemented_review_required",
+      "required_for_first_start": true
+    },
+    {
+      "name": "docx_extraction_completeness",
+      "pr": 327,
+      "sha": "69cdaf342b6f3adacc6fa18455f14c5ac452a198",
+      "status": "implemented_review_required",
+      "required_for_first_start": false
+    },
+    {
+      "name": "provider_independent_startup_proof",
+      "pr": 328,
+      "sha": "fa840e47ae44490777a56e3684cf5c26085b7e5c",
+      "status": "implemented_review_required",
+      "required_for_first_start": true
+    },
+    {
+      "name": "original_download_ui",
+      "pr": 330,
+      "sha": "7a4404323d3684eaaf4c0f30973e539dc682cced",
+      "status": "implemented_review_required",
+      "required_for_first_start": true
+    },
+    {
+      "name": "first_start_verification",
+      "pr": 332,
+      "sha": "1a67a1607baafa905343b281851abeba97220f10",
+      "status": "implemented_review_required",
+      "required_for_first_start": true
+    },
+    {
+      "name": "real_local_ai_verification",
+      "pr": 334,
+      "sha": "82138cca0f0f01d0e8d7df4d3456523f3c745c56",
+      "status": "implemented_review_required",
+      "required_for_first_start": true
+    },
+    {
+      "name": "embedding_identity_provenance_fix",
+      "pr": 349,
+      "sha": "6598559b138e0b7b4b9af0a2da80d25b1df8d6f8",
+      "status": "frozen_waiting_independent_review",
+      "required_for_first_start": true
+    },
+    {
+      "name": "blueprint_workflow",
+      "pr": 340,
+      "sha": "add0da831c101af7061b7cf6309ce8041ed969aa",
+      "status": "builder_candidate_waiting_independent_review",
+      "required_for_first_start": true
+    },
+    {
+      "name": "e2e_runner_pin",
+      "pr": 344,
+      "sha": "44d67bb68f0595a7a2e3e88c6d6baac56204348c",
+      "status": "implemented_review_required",
+      "required_for_first_start": true
+    },
+    {
+      "name": "local_ollama_runtime",
+      "pr": 345,
+      "sha": "a35a40ffff07e0c51bf8398256f667d98e94c7f7",
+      "status": "implemented_review_required",
+      "required_for_first_start": true
+    },
+    {
+      "name": "secure_original_retrieval",
+      "pr": 351,
+      "sha": "a0063d4da6bce871dead53fcae26bee546c92859",
+      "status": "frozen_waiting_independent_review",
+      "required_for_first_start": true
+    }
+  ],
+  "release_blockers": [
+    "Independent review of PR #349 exact SHA 6598559b138e0b7b4b9af0a2da80d25b1df8d6f8",
+    "Independent review and frozen handoff of PR #340 exact SHA add0da831c101af7061b7cf6309ce8041ed969aa",
+    "Independent review of PR #351 exact SHA a0063d4da6bce871dead53fcae26bee546c92859",
+    "Exact-SHA CI and real-local acceptance on this composed integration head",
+    "Founder authorization remains required for merge, deployment and activation"
+  ],
+  "deferred_after_first_start": [
+    "OCR for scanned PDFs and standalone images",
+    "Passkey/PWA composition pending independent review",
+    "Infinite Canvas",
+    "Unattended autonomous execution"
+  ]
+}

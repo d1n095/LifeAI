@@ -15,7 +15,7 @@ RLS policy and redaction_categories constraint from 0062 are untouched.
 
 from alembic import op
 
-revision = "0073_provider_disclosure_local_decision"
+revision = "0073_provider_disclosure_local"
 down_revision = "0072_blueprint_approve_identity"
 branch_labels = None
 depends_on = None

@@ -297,8 +297,11 @@ def test_0069_downgrade_upgrade_preserves_embedding_space_identity(
             check=True,
         )
     finally:
+        # 0069 was this source branch's head. In the composed Founder Alpha lineage the
+        # Blueprint and provider-locality migrations follow it, so always restore the actual
+        # repository head; otherwise later tests run against a silently partial schema.
         subprocess.run(
-            [sys.executable, "-m", "alembic", "upgrade", "0069_embedding_space_identity"],
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
             cwd=backend_root,
             env=env,
             check=True,

@@ -1,18 +1,14 @@
-# Founder Alpha — real-local end-to-end verification (manual + on push to the candidate branch).
+# Founder Alpha — exact-SHA integration acceptance (manual + integration-branch push).
 #
 # Extends the #334 real-local-AI workflow to prove the COMPLETE Founder Alpha candidate — the
 # actual #340 head (Blueprint API+UI) composed with the original-download chain (#329/#330) and
 # the #333 embedding-space layer — runs Life end to end with REAL local AI models (Ollama),
 # real PostgreSQL/pgvector and real filesystem storage, with NO paid provider reachable.
 #
-# Candidate = deterministic reconstruction (same recipe family as the #334 workflow), but the
-# final merge is the LIVE #340 head (by branch, not a frozen SHA) so this always tests "the
-# actual #340 head" per the Founder directive:
-#   #323 trunk (04b27e9) + merge #328 (fa840e4) + merge #329 (830ab4d) + merge #327 (69cdaf3)
-#                        + merge origin/claude/founder-alpha-blueprint-draft (live #340 head)
-# Instead of a frozen expected-tree (the #340 head moves as the PR evolves), the reconstruction
-# asserts the integration invariants: exactly one 0069 migration (no #326 multi-head), the
-# Blueprint router present, and the #329 original-download endpoint present.
+# The integration branch records every immutable source SHA in
+# docs/founder_alpha_integration_manifest.json. CI checks out and tests github.sha itself; it
+# never reconstructs from a moving branch. Source ancestry and the single Alembic head are
+# verified before the real-local acceptance begins.
 #
 # Test models (TEMPORARY test config — NOT a production model decision):
 #   * Embedding: Ollama all-minilm  (native 384-dim; padded to vector(1536) by #333, cosine-exact)
@@ -28,28 +24,19 @@
 # Never: production credentials/Supabase, the live STRATO environment, paid AI calls, or egress
 # beyond pulling the open local models. Postgres is a throwaway pgvector service container;
 # Ollama runs on the runner; uploads go to a throwaway workspace dir; all torn down with the run.
-name: Founder Alpha verification (real local, manual)
+name: Founder Alpha integration (exact SHA, real local)
 
 on:
   workflow_dispatch: {}
   push:
     branches:
-      - claude/founder-alpha-blueprint-draft
+      - codex/life-founder-alpha-integration
 
 permissions:
   contents: read
 
 env:
   PYTHON_VERSION: "3.12"
-  CAND_TRUNK_BRANCH: claude/frontend-npm-audit-baseline-consolidation   # #323
-  CAND_TRUNK_SHA: "04b27e9585ea9def58d24407f7000a51577c89bf"
-  CAND_MERGE_1_BRANCH: claude/basic-startup-no-model-proof              # #328
-  CAND_MERGE_1_SHA: "fa840e47ae44490777a56e3684cf5c26085b7e5c"
-  CAND_MERGE_2_BRANCH: claude/library-original-retrieval               # #329
-  CAND_MERGE_2_SHA: "830ab4d9cf2edab27c6a91787988f5fbff1593da"
-  CAND_MERGE_3_BRANCH: claude/docx-extraction-completeness             # #327
-  CAND_MERGE_3_SHA: "69cdaf342b6f3adacc6fa18455f14c5ac452a198"
-  CAND_PR_BRANCH: claude/founder-alpha-blueprint-draft                 # #340 head (live)
   OLLAMA_EMBED_MODEL: "all-minilm"
   OLLAMA_CHAT_MODEL: "qwen2.5:0.5b"
   OLLAMA_NATIVE_DIM: "384"
@@ -97,55 +84,34 @@ jobs:
       FA_BASE_URL: http://127.0.0.1:8010
       FA_STATE_FILE: ${{ github.workspace }}/founder_alpha_state.json
     steps:
-      - name: Check out candidate trunk (#323)
+      - name: Check out the exact integration SHA
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.CAND_TRUNK_BRANCH }}
+          ref: ${{ github.sha }}
           path: candidate
           fetch-depth: 0
 
-      - name: Reconstruct the complete Founder Alpha candidate (#323+#328+#329+#327 + live #340 head)
+      - name: Bind acceptance to exact SHA and immutable source ancestry
         id: sha
         working-directory: candidate
         run: |
           set -euo pipefail
-          git config user.email "ci@local"
-          git config user.name "founder-alpha-ci"
-          test "$(git rev-parse HEAD)" = "$CAND_TRUNK_SHA" \
-            || { echo "::error::trunk ${CAND_TRUNK_BRANCH} moved: $(git rev-parse HEAD) != ${CAND_TRUNK_SHA}"; exit 1; }
-          replay_pinned() {
-            local branch="$1" sha="$2"
-            git fetch --no-tags origin "$branch"
-            test "$(git rev-parse FETCH_HEAD)" = "$sha" \
-              || { echo "::error::${branch} moved: $(git rev-parse FETCH_HEAD) != ${sha}"; exit 1; }
-            git merge --no-ff --no-edit "$sha" \
-              || { echo "::error::unexpected merge conflict merging ${branch} (${sha})"; exit 1; }
-          }
-          replay_pinned "$CAND_MERGE_1_BRANCH" "$CAND_MERGE_1_SHA"
-          replay_pinned "$CAND_MERGE_2_BRANCH" "$CAND_MERGE_2_SHA"
-          replay_pinned "$CAND_MERGE_3_BRANCH" "$CAND_MERGE_3_SHA"
-          # Live #340 head (the actual candidate under test) — recorded, not pinned.
-          git fetch --no-tags origin "$CAND_PR_BRANCH"
-          PR_HEAD="$(git rev-parse FETCH_HEAD)"
-          git merge --no-ff --no-edit "$PR_HEAD" \
-            || { echo "::error::unexpected merge conflict merging ${CAND_PR_BRANCH} (${PR_HEAD})"; exit 1; }
-          # Integration invariants (instead of a frozen tree, since the #340 head evolves):
-          HEADS="$(ls backend/alembic/versions | grep -c '^0069' || true)"
-          test "$HEADS" = "1" \
-            || { echo "::error::expected exactly one 0069 migration (no #326 multi-head), found $HEADS"; exit 1; }
+          RESOLVED="$(git rev-parse HEAD)"
+          test "$RESOLVED" = "$GITHUB_SHA" \
+            || { echo "::error::checkout $RESOLVED != event SHA $GITHUB_SHA"; exit 1; }
           test -f backend/app/routers/blueprint.py \
             || { echo "::error::blueprint router missing from reconstructed candidate"; exit 1; }
           grep -q "/original" backend/app/routers/library.py \
-            || { echo "::error::#329 original-download endpoint missing from reconstructed candidate"; exit 1; }
-          echo "Reconstructed candidate head: $(git rev-parse HEAD) (#340 head $PR_HEAD)"
+            || { echo "::error::secure original-download endpoint missing"; exit 1; }
+          echo "Exact integration candidate: $RESOLVED"
           {
-            echo "### Founder Alpha candidate reconstructed"
+            echo "### Founder Alpha exact-SHA integration candidate"
             echo ""
-            echo "- #340 head under test: \`$PR_HEAD\`"
-            echo "- reconstructed merge commit: \`$(git rev-parse HEAD)\`"
-            echo "- single 0069 migration: yes · blueprint router: yes · #329 /original: yes"
+            echo "- exact SHA under test: \`$RESOLVED\`"
+            echo "- source identities: \`docs/founder_alpha_integration_manifest.json\`"
+            echo "- release status: blocked pending independent review; \`first_cycle_go=false\`"
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "resolved=$PR_HEAD" >> "$GITHUB_OUTPUT"
+          echo "resolved=$RESOLVED" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@v5
         with:
@@ -158,6 +124,10 @@ jobs:
         run: |
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
+
+      - name: Verify immutable composition manifest and single migration head
+        working-directory: candidate
+        run: python backend/scripts/ci/verify_founder_alpha_integration.py
 
       - name: Install and start Ollama; pull the test models
         run: |
