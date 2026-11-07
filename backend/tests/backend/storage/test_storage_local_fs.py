@@ -39,6 +39,17 @@ def test_write_then_read_round_trips_exact_bytes(tmp_path):
         assert f.read() == payload
 
 
+def test_only_canonical_content_address_exposes_a_trusted_integrity_anchor(tmp_path):
+    storage = LocalFilesystemStorage(str(tmp_path))
+    payload = b"server generated content identity"
+    blob = storage.write_stream(_chunks(payload), max_bytes=10_000_000)
+
+    assert storage.trusted_sha256_for_key(blob.storage_key) == blob.sha256
+    assert storage.trusted_sha256_for_key(f"00/{blob.sha256}") is None
+    assert storage.trusted_sha256_for_key("../../etc/passwd") is None
+    assert storage.trusted_sha256_for_key(blob.sha256) is None
+
+
 def test_a_blob_survives_being_read_by_a_brand_new_storage_instance(tmp_path):
     """Durability doesn't depend on any single process's in-memory state: a fresh
     LocalFilesystemStorage constructed against the same root (standing in for a backend or
