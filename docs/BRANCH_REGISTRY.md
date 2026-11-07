@@ -6,6 +6,20 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Frontend npm-audit baseline-konsolidering (2026-10-31)
+
+Konsoliderar de spridda frontend-beroende-remedieringarna (#248/#275/#282/#305) till EN
+minimal, verifierad ändring på nuvarande baslinje så att `Frontend — npm audit`-grinden går
+grön — utan major-uppgradering, utan `--force`, utan suppression/blankett-allowlist.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `claude/frontend-npm-audit-baseline-consolidation` | — | **Aktiv (ingen PR ännu)** | ENDAST `frontend/package.json` + `package-lock.json` (+ `docs/FRONTEND_NPM_AUDIT_CONSOLIDATION.md`). next/eslint-config-next→16.4.3 (kontrollerad MINOR i major 16), overrides sharp 0.35.5 / js-yaml 4.3.2 / browserslist 4.28.7 / zod 4.6.7 / source-map-js 1.2.2, brace-expansion via `npm audit fix` (in-range). Återanvänder #248:s dep-set + #305:s zod. Grenad `64c07d5b0`. Verifierat: gate OK (0 high/critical), npm ci, lint (0 fel), build. 8 moderate kvar (ej blockerande per policy, ej suppressade). |
+
+**Beroenden/relation:** Oberoende av #316–#318 (rör ej dem). #248 är baslinje-baserad (dep-set
+återanvänt); #275/#282/#305 ligger på ANDRA baser (kan ej mergas direkt → ancestry-konflikt,
+återanvänder beslut ej brancher). Separat granskare krävs; författaren självcertifierar ej.
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en
