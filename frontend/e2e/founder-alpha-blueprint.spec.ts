@@ -164,7 +164,7 @@ test.describe("Founder Alpha: source-grounded Blueprint approval", () => {
 
     await page.getByRole("button", { name: "Regenerera (ny version)" }).click();
     await expect(page.getByRole("status")).toHaveText("Ny version skapad (version 2).");
-    await expect(article.getByText("version 2")).toBeVisible();
+    await expect(article.getByText("version 2", { exact: true })).toBeVisible();
     expect(approvalRequests).toBe(0);
 
     await page.getByRole("button", { name: "Godkänn utkast" }).click();
@@ -197,7 +197,9 @@ test.describe("Founder Alpha: source-grounded Blueprint approval", () => {
     await page.getByLabel("Titel").fill("Ogrundat utkast");
     await page.getByRole("button", { name: "Generera utkast" }).click();
 
-    await expect(page.getByRole("alert")).toHaveText("Ingen indexerad källa matchade frågan.");
+    await expect(page.getByRole("alert").filter({ hasText: "Ingen indexerad källa matchade frågan." })).toHaveText(
+      "Ingen indexerad källa matchade frågan."
+    );
     await expect(page.getByText("Godkänd", { exact: true })).toHaveCount(0);
     await expect(page.getByRole("status")).toHaveCount(0);
   });
