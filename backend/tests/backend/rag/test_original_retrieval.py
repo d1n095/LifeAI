@@ -33,6 +33,7 @@ from app.library.originals import (
     safe_filename,
 )
 from app.models.document import Document, IndexStatus
+from app.models.user import User
 from app.storage import get_storage
 
 FOUNDER_EMAIL = "founder@lifeos.local"
@@ -189,6 +190,13 @@ def test_download_requires_founder(client, make_verified_user):
     assert res.status_code in (401, 403)
 
 
+def test_original_download_rejects_unauthenticated_session(client):
+    """Authentication must fail before source lookup, even for a syntactically valid id."""
+    client.cookies.clear()
+    res = client.get(f"/api/library/{uuid.uuid4()}/original")
+    assert res.status_code in (401, 403)
+
+
 def test_concurrent_downloads_are_all_byte_identical(client):
     csrf = _login(client)
     raw = ("concurrent-läsning " * 500).encode("utf-8")
@@ -320,6 +328,192 @@ def test_corrupted_checksum_is_integrity_error(db_session, superuser_db, make_ve
             db_session, owner_id=owner.id, source_id=source_id,
             actor_type="founder", actor_id=owner.id, access_label="x",
         )
+
+
+def test_checksumless_legacy_original_uses_canonical_content_address_without_mutating_provenance(
+    db_session, superuser_db, make_verified_user
+):
+    """A canonical server-generated storage key is itself a trustworthy sha256 anchor.
+
+    Legacy rows can therefore be read only after their bytes verify against that address, but
+    retrieval must not backfill the absent checksum and pretend historical provenance changed.
+    """
+    owner, _ = make_verified_user()
+    raw = b"legacy bytes with a valid content-addressed identity"
+    source_id = _make_document(
+        superuser_db,
+        owner_id=owner.id,
+        content=raw,
+        with_checksum=False,
+    )
+    before = superuser_db.get(Document, source_id)
+    original_key = before.storage_key
+    assert before.checksum is None
+
+    _as_owner(db_session, owner.id)
+    loaded = load_original(
+        db_session,
+        owner_id=owner.id,
+        source_id=source_id,
+        actor_type="founder",
+        actor_id=owner.id,
+        access_label="legacy-content-addressed",
+    )
+
+    assert loaded.content == raw
+    assert loaded.checksum == hashlib.sha256(raw).hexdigest()
+    superuser_db.expire_all()
+    after = superuser_db.get(Document, source_id)
+    assert after.checksum is None
+    assert after.storage_key == original_key
+
+
+def test_checksumless_legacy_original_without_canonical_anchor_fails_closed(
+    db_session, superuser_db, make_verified_user
+):
+    """A regex-shaped but non-canonical database key is not a server-attested identity."""
+    owner, _ = make_verified_user()
+    raw = b"legacy bytes without a trustworthy address"
+    digest = hashlib.sha256(raw).hexdigest()
+    wrong_shard = "00" if not digest.startswith("00") else "ff"
+    doc = Document(
+        uploaded_by=owner.id,
+        title="legacy unknown identity",
+        status=IndexStatus.indexed,
+        original_filename="legacy.txt",
+        media_type="text/plain",
+        storage_key=f"{wrong_shard}/{digest}",
+        checksum=None,
+        size_bytes=len(raw),
+        stored_at=datetime.utcnow(),
+    )
+    superuser_db.add(doc)
+    superuser_db.commit()
+
+    _as_owner(db_session, owner.id)
+    with pytest.raises(OriginalIntegrityError):
+        load_original(
+            db_session,
+            owner_id=owner.id,
+            source_id=doc.id,
+            actor_type="founder",
+            actor_id=owner.id,
+            access_label="legacy-unknown-anchor",
+        )
+
+
+def test_checksumless_legacy_original_fails_closed(
+    db_session, superuser_db, make_verified_user
+):
+    """Reproduce #346's unchecked-legacy risk with a valid key but changed physical bytes."""
+    owner, _ = make_verified_user()
+    raw = b"trusted legacy bytes before storage tampering"
+    source_id = _make_document(
+        superuser_db,
+        owner_id=owner.id,
+        content=raw,
+        with_checksum=False,
+    )
+    doc = superuser_db.get(Document, source_id)
+    storage = get_storage()
+    # Test-only host tampering: keep the same length so size checks cannot catch it and the
+    # content-address-derived hash must do the security work.
+    replacement = b"X" * len(raw)
+    storage_path = storage.root / doc.storage_key
+    storage_path.write_bytes(replacement)
+
+    _as_owner(db_session, owner.id)
+    with pytest.raises(OriginalIntegrityError):
+        load_original(
+            db_session,
+            owner_id=owner.id,
+            source_id=source_id,
+            actor_type="founder",
+            actor_id=owner.id,
+            access_label="legacy-tamper-probe",
+        )
+
+    superuser_db.expire_all()
+    unchanged = superuser_db.get(Document, source_id)
+    assert unchanged.checksum is None
+    assert unchanged.storage_key == doc.storage_key
+    assert storage_path.read_bytes() == replacement  # retrieval never silently repairs/mutates
+
+
+def test_recorded_checksum_must_agree_with_content_address(
+    db_session, superuser_db, make_verified_user
+):
+    """Conflicting provenance anchors fail closed even if either value looks well formed."""
+    owner, _ = make_verified_user()
+    source_id = _make_document(superuser_db, owner_id=owner.id, content=b"anchor A")
+    superuser_db.execute(
+        sa_text("UPDATE documents SET checksum = :checksum WHERE id = :id"),
+        {"checksum": hashlib.sha256(b"anchor B").hexdigest(), "id": str(source_id)},
+    )
+    superuser_db.commit()
+
+    _as_owner(db_session, owner.id)
+    with pytest.raises(OriginalIntegrityError):
+        load_original(
+            db_session,
+            owner_id=owner.id,
+            source_id=source_id,
+            actor_type="founder",
+            actor_id=owner.id,
+            access_label="conflicting-anchors",
+        )
+
+
+def test_database_storage_key_cannot_traverse_storage_root(db_session, superuser_db, make_verified_user):
+    """A tampered database row must not turn the server-side storage key into a file read."""
+    owner, _ = make_verified_user()
+    raw = b"real original"
+    doc = Document(
+        uploaded_by=owner.id,
+        title="tampered storage key",
+        status=IndexStatus.indexed,
+        original_filename="original.txt",
+        media_type="text/plain",
+        storage_key="../../etc/passwd",
+        checksum=hashlib.sha256(raw).hexdigest(),
+        size_bytes=len(raw),
+        stored_at=datetime.utcnow(),
+    )
+    superuser_db.add(doc)
+    superuser_db.commit()
+
+    _as_owner(db_session, owner.id)
+    with pytest.raises(OriginalIntegrityError):
+        load_original(
+            db_session,
+            owner_id=owner.id,
+            source_id=doc.id,
+            actor_type="founder",
+            actor_id=owner.id,
+            access_label="path-probe",
+        )
+
+
+def test_http_content_disposition_rejects_header_injection(client, superuser_db):
+    """Exercise the real response boundary, not only the pure filename sanitizer."""
+    _login(client)
+    founder = superuser_db.query(User).filter(User.email == FOUNDER_EMAIL).one()
+    source_id = _make_document(
+        superuser_db,
+        owner_id=founder.id,
+        content=b"header probe",
+        filename='../../evil"\r\nSet-Cookie: owned=1.html',
+        media_type="text/html",
+    )
+
+    res = client.get(f"/api/library/{source_id}/original")
+    assert res.status_code == 200, res.text
+    disposition = res.headers["content-disposition"]
+    assert "\r" not in disposition and "\n" not in disposition
+    assert res.headers.get("set-cookie") is None
+    assert "../" not in disposition and "..\\" not in disposition
+    assert res.headers["content-type"] == "application/octet-stream"
+    assert res.headers["x-content-type-options"] == "nosniff"
 
 
 def test_retrieval_performs_no_provider_call_or_egress(db_session, superuser_db, make_verified_user, monkeypatch):

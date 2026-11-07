@@ -61,6 +61,19 @@ class StoredBlob:
 
 class StorageBackend(ABC):
     @abstractmethod
+    def trusted_sha256_for_key(self, storage_key: str) -> str | None:
+        """Return the SHA-256 integrity anchor encoded by a canonical, server-generated
+        content-addressed key, or ``None`` when this backend cannot prove that the key carries
+        such an anchor.
+
+        Callers must treat ``None`` as unknown, never as permission to skip verification.
+        Implementations must not derive this value from a user filename or other mutable
+        metadata.  This lets legacy rows whose separate checksum column is absent still be
+        verified against the storage system's own immutable content identity without
+        inventing or persisting historical provenance.
+        """
+
+    @abstractmethod
     def write_stream(self, read_chunk: Callable[[], bytes], *, max_bytes: int, chunk_size: int = 1 << 20) -> StoredBlob:
         """Streams from `read_chunk()` (called repeatedly; an empty bytes return means EOF)
         into durable storage, computing size and sha256 incrementally. Raises
