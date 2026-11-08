@@ -7,8 +7,8 @@ system — it reuses:
 
   * `app.rag.retrieve.retrieve_context` for source-grounding (the exact egress-gated,
     active-embedding-space retrieval chat.py uses), and
-  * the active local chat model (`app.providers.registry.resolve_active(db, "chat")`) for
-    synthesis — proven end-to-end under a real Ollama model in CI.
+  * the active chat model (`app.providers.registry.resolve_active(db, "chat")`) for synthesis,
+    with the owner-aware egress policy applied to the complete outbound prompt.
 
 Security invariants enforced here (not just in the service):
   * The whole router is `require_founder`-gated; every service call is scoped to the
@@ -43,7 +43,7 @@ from app.blueprint.service import (
 )
 from app.db import get_db
 from app.deps import require_founder
-from app.egress_policy import EgressDeniedError
+from app.egress_policy import EgressDeniedError, enforce_egress_policy
 from app.models.blueprint_draft import BlueprintDraft
 from app.models.user import User
 from app.providers.base import ProviderError
@@ -234,9 +234,9 @@ def _synthesis_prompt(title: str, query: str | None, hits: list[dict[str, Any]])
 
 
 async def _synthesize_with_active_model(
-    db: Session, *, title: str, query: str | None, hits: list[dict[str, Any]]
+    db: Session, *, owner_id: uuid.UUID, title: str, query: str | None, hits: list[dict[str, Any]]
 ) -> tuple[str, str | None, str | None]:
-    """Call the active local chat model to synthesise the draft body. Returns
+    """Call the active chat model to synthesise the draft body. Returns
     (body, provider_name, model_name). Raises HTTPException(503) when no usable chat model
     is configured or the provider fails — an honest 'model unavailable', never a fabricated
     body."""
@@ -261,6 +261,27 @@ async def _synthesize_with_active_model(
         ),
         Message(role="user", content=prompt),
     ]
+    try:
+        sanitized = enforce_egress_policy(
+            db,
+            owner_id=owner_id,
+            provider=provider.name,
+            model=model,
+            purpose="blueprint_synthesis",
+            requested_by="routers.blueprint",
+            payload=[{"role": message.role, "content": message.content} for message in messages],
+            provider_is_local=not getattr(provider, "is_external_egress", True),
+        )
+    except EgressDeniedError as exc:
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Källmaterialet kan inte användas för att generera ett utkast enligt egress-policyn.",
+        ) from exc
+
+    # Persist the disclosure decision before dispatch, including if the provider later fails.
+    db.commit()
+    messages = [Message(role=message["role"], content=message["content"]) for message in sanitized]
     try:
         result = await provider.chat(messages, model=model, timeout=_SYNTH_TIMEOUT_SECONDS)
     except ProviderError as exc:
@@ -308,7 +329,7 @@ async def _generate(db: Session, *, owner_id: uuid.UUID, title: str, query: str 
             h["similarity"] = h["score"]
 
     body, provider_name, model_name = await _synthesize_with_active_model(
-        db, title=title, query=query, hits=grounded
+        db, owner_id=owner_id, title=title, query=query, hits=grounded
     )
 
     try:

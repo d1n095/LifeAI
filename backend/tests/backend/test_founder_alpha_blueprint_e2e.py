@@ -34,6 +34,7 @@ from app.config import get_settings
 from app.models.blueprint_draft import BlueprintDraft
 from app.models.document import ActiveTruthStatus, Document, DocumentSource
 from app.models.document_chunk import DocumentChunk
+from app.models.provider_disclosure import ProviderDisclosureEvent
 from app.models.user import User
 
 FOUNDER_EMAIL = "founder@lifeos.local"
@@ -51,10 +52,11 @@ def _fake_model(monkeypatch):
     from app.providers.base import ChatResult, ProviderError
     from app.providers.openai_provider import OpenAIProvider
 
-    state = {"fail": False, "calls": 0}
+    state = {"fail": False, "calls": 0, "messages": []}
 
     async def _fake_chat(self, messages, model, **kwargs):
         state["calls"] += 1
+        state["messages"].append(messages)
         if state["fail"]:
             raise ProviderError("synthesis provider deliberately unavailable (rollback test)")
         # The real import worker also invokes claim extraction. Keep that model seam
@@ -438,6 +440,124 @@ def test_synthesis_failure_rolls_back_no_partial_draft(client, superuser_db, _fa
         )
     ).scalar_one()
     assert count == 0
+
+
+@pytest.mark.parametrize("forbidden", ["NEVER_EGRESS: private source", "-----BEGIN OPENSSH PRIVATE KEY-----"])
+def test_blueprint_denies_forbidden_source_before_external_chat(
+    client, superuser_db, _fake_model, forbidden
+):
+    founder_id = _founder_id(superuser_db)
+    doc = _make_indexed_source(superuser_db, founder_id, "Forbidden source")
+    chunk = superuser_db.query(DocumentChunk).filter_by(document_id=doc.id).one()
+    chunk.text = forbidden
+    superuser_db.commit()
+    csrf = _login(client)
+    title = f"Denied {uuid.uuid4().hex[:6]}"
+
+    res = client.post(
+        "/api/blueprint/drafts",
+        json={"title": title, "query": "source"},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert res.status_code == 422, res.text
+    assert _fake_model["calls"] == 0
+    assert _draft_rows(superuser_db, founder_id, title) == []
+    event = superuser_db.query(ProviderDisclosureEvent).filter_by(
+        owner_id=founder_id, purpose="blueprint_synthesis"
+    ).one()
+    assert event.decision == "denied"
+    assert event.sent_content_hash is None
+
+
+def test_blueprint_redacts_source_before_external_chat(client, superuser_db, _fake_model):
+    founder_id = _founder_id(superuser_db)
+    doc = _make_indexed_source(superuser_db, founder_id, "Secret source")
+    chunk = superuser_db.query(DocumentChunk).filter_by(document_id=doc.id).one()
+    secret = "sk-abcdefghijklmnopqrstuvwx"
+    chunk.text = f"Use api_key={secret} for this project."
+    superuser_db.commit()
+    csrf = _login(client)
+
+    res = client.post(
+        "/api/blueprint/drafts",
+        json={"title": f"Redaction {uuid.uuid4().hex[:6]}", "query": "source"},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert res.status_code == 201, res.text
+    assert _fake_model["calls"] == 1
+    assert secret not in str(_fake_model["messages"])
+    event = superuser_db.query(ProviderDisclosureEvent).filter_by(
+        owner_id=founder_id, purpose="blueprint_synthesis"
+    ).one()
+    assert event.decision == "allowed"
+    assert "secret_pattern" in event.redaction_categories
+
+
+def test_blueprint_local_chat_is_gated_and_ledgered(client, superuser_db, _fake_model, monkeypatch):
+    from app.providers.base import ChatResult
+    from app.routers import blueprint
+
+    founder_id = _founder_id(superuser_db)
+    doc = _make_indexed_source(superuser_db, founder_id, "Local source")
+    calls = []
+
+    class LocalProvider:
+        name = "local-test"
+        is_external_egress = False
+
+        async def chat(self, messages, model, **kwargs):
+            calls.append(messages)
+            return ChatResult(content="Local draft", provider=self.name, model=model, raw_usage={})
+
+    monkeypatch.setattr(blueprint, "resolve_active", lambda db, role: (LocalProvider(), "local-model"))
+    csrf = _login(client)
+    res = client.post(
+        "/api/blueprint/drafts",
+        json={"title": f"Local {uuid.uuid4().hex[:6]}", "query": "source"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert res.status_code == 201, res.text
+    assert len(calls) == 1
+    event = superuser_db.query(ProviderDisclosureEvent).filter_by(
+        owner_id=founder_id, purpose="blueprint_synthesis"
+    ).one()
+    assert event.decision == "local"
+
+    chunk = superuser_db.query(DocumentChunk).filter_by(document_id=doc.id).one()
+    chunk.text = "NEVER_EGRESS: do not send even to a local model"
+    superuser_db.commit()
+    denied = client.post(
+        f"/api/blueprint/drafts/{res.json()['id']}/regenerate",
+        json={"query": "source"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert denied.status_code == 422, denied.text
+    assert len(calls) == 1
+    decisions = [
+        row.decision for row in superuser_db.query(ProviderDisclosureEvent).filter_by(
+            owner_id=founder_id, purpose="blueprint_synthesis"
+        ).all()
+    ]
+    assert sorted(decisions) == ["denied", "local"]
+
+
+def test_blueprint_disclosure_survives_provider_failure(client, superuser_db, _fake_model):
+    founder_id = _founder_id(superuser_db)
+    _make_indexed_source(superuser_db, founder_id, "Failure source")
+    csrf = _login(client)
+    _fake_model["fail"] = True
+    res = client.post(
+        "/api/blueprint/drafts",
+        json={"title": f"Failure {uuid.uuid4().hex[:6]}", "query": "source"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert res.status_code == 503, res.text
+    event = superuser_db.query(ProviderDisclosureEvent).filter_by(
+        owner_id=founder_id, purpose="blueprint_synthesis"
+    ).one()
+    assert event.decision == "allowed"
 
 
 def test_version_uniqueness_is_db_enforced(client, superuser_db, _fake_model):
