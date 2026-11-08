@@ -17,7 +17,7 @@ The older registry entries still require separate reconciliation.
 | `codex/founder-alpha-blueprint-egress-remediation` | #360 | Open; Blueprint egress remedy. |
 | `copilot/founder-alpha-blueprint-egress` | #361 | Open draft, frozen due to overlapping #360; do not merge both. |
 | `codex/founder-alpha-0069-migration-compat` | #363 | Open; historical migration compatibility remedy. |
-| `copilot/founder-alpha-ollama-ci-pin` | — | Active; isolated Ollama CI artifact verification, based on frozen #352. |
+| `copilot/founder-alpha-ollama-ci-pin` | #364 | Open draft; isolated Ollama CI artifact verification, based on frozen #352. |
 | `claude/ollama-provider-failclosed` | #354 | Open; separate Claude provider reliability lane. |
 | `claude/provider-wait-backoff-floor-v2` | #358 | Open; separate Claude worker reliability lane. |
 | `codex/founder-alpha-final-gate-package` | #359 | Open; gate package, no startup authorization. |
