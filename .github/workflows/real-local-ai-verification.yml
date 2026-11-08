@@ -184,7 +184,20 @@ jobs:
       - name: Install and start Ollama; pull the test models
         run: |
           set -euo pipefail
-          curl -fsSL https://ollama.com/install.sh | sh
+          # Pin the exact release used by the Founder Alpha acceptance run; never execute
+          # downloaded installer code without verifying the artifact first.
+          archive="$RUNNER_TEMP/ollama-linux-amd64.tar.zst"
+          curl --fail --location --retry 3 --output "$archive" \
+            https://github.com/ollama/ollama/releases/download/v0.40.15/ollama-linux-amd64.tar.zst
+          echo "628c018404a4206493efd38e46251c154ede5141b8b8dc85c659b3b027c47379  $archive" | sha256sum --check
+          if ! command -v zstd >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends zstd
+          fi
+          mkdir -p "$RUNNER_TEMP/ollama"
+          tar --zstd -xf "$archive" -C "$RUNNER_TEMP/ollama"
+          export PATH="$RUNNER_TEMP/ollama/bin:$PATH"
+          echo "$RUNNER_TEMP/ollama/bin" >> "$GITHUB_PATH"
           # Run the server in the background (do not rely on a systemd unit on the runner).
           nohup ollama serve > "$GITHUB_WORKSPACE/ollama.log" 2>&1 &
           for i in $(seq 1 60); do
