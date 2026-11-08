@@ -6,6 +6,36 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Founder Alpha exact-SHA review lane (verified 2026-11-08)
+
+Verified against GitHub PR heads/bases and the checked-out integration tip. Detailed
+independent findings and acceptance criteria:
+`docs/FOUNDER_ALPHA_INDEPENDENT_REVIEW_CLOSEOUT_2026-11-08.md`.
+
+| Branch | PR | Status | Scope / blocker | Base |
+|---|---:|---|---|---|
+| `claude/provider-wait-backoff-floor-v2` | [#358](https://github.com/d1n095/LifeAI/pull/358) | Open, `UNSTABLE`; scoped behavior review PASS, required checks red | WAITING_PROVIDER floor; npm audit and Playwright runner failures remain | `claude/det-kommer-mer-879lcm` |
+| `codex/founder-alpha-final-gate-package` | [#359](https://github.com/d1n095/LifeAI/pull/359) | Open draft, clean | Final gate documentation; updated with exact-SHA reviews, but release remains FAIL / NOT READY | `codex/life-founder-alpha-integration` |
+| `codex/founder-alpha-blueprint-egress-remediation` | [#360](https://github.com/d1n095/LifeAI/pull/360) | Open draft, clean; **do not approve yet** | Source gate closes prior bypass; P2 disclosure receipt is rolled back on provider failure | `codex/life-founder-alpha-integration` |
+| `codex/founder-alpha-0069-migration-compat` | [#363](https://github.com/d1n095/LifeAI/pull/363) | Open draft, `UNSTABLE`; **blocked** | Latest 0073 downgrade/upgrade test fails; provenance-value round-trip and damaged-state recovery unverified | `codex/life-founder-alpha-integration` |
+| `copilot/founder-alpha-ollama-ci-pin` | [#364](https://github.com/d1n095/LifeAI/pull/364) | Open draft, clean; scoped installer review PASS | Fixed asset checksum validated; model tags and prior retrieval failure are separate follow-ups | `codex/life-founder-alpha-integration` |
+| `copilot/founder-alpha-review-closeout` | — | Local, unpushed; documentation-only commit | Exact-SHA independent review and Codex handoff; does not change candidate code | `claude/det-kommer-mer-879lcm` @ `64c07d5b0c4821bfb175700283021aa6e95cb61c` |
+
+**Dependencies and merge guidance:** #358 is independent of the Founder Alpha remediation,
+but its PR is not fully green. #360, #363, and #364 all branch from the same
+`codex/life-founder-alpha-integration` base and have no verified dependency on one another.
+#360 and #363 block the Founder Alpha gate until their findings are addressed and
+independently accepted. #364 is independently reviewable; its scoped PASS is not a startup
+approval. #359 is the decision package and must continue to show these blockers.
+Recommended order: close the #360 audit-durability and #363 migration blockers with separate
+reviewable candidates; handle #358 CI and #364 follow-ups independently; refresh #359 only
+with verified exact-head evidence. Do not update/rebase any dependent branch in advance of
+its actual base merge. No merge or deployment is authorized by this registry update.
+
+**Coordination note:** The report branch is isolated and unpushed. Existing candidate heads
+are frozen for this review; implementation remains a Codex handoff when available. The
+overall gate remains `first_cycle_go=false`.
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en
