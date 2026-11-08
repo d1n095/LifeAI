@@ -7,7 +7,7 @@ system — it reuses:
 
   * `app.rag.retrieve.retrieve_context` for source-grounding (the exact egress-gated,
     active-embedding-space retrieval chat.py uses), and
-  * the active local chat model (`app.providers.registry.resolve_active(db, "chat")`) for
+  * the shared owner-aware provider boundary (`app.providers.registry.chat_with_fallback`) for
     synthesis — proven end-to-end under a real Ollama model in CI.
 
 Security invariants enforced here (not just in the service):
@@ -47,7 +47,7 @@ from app.egress_policy import EgressDeniedError
 from app.models.blueprint_draft import BlueprintDraft
 from app.models.user import User
 from app.providers.base import ProviderError
-from app.providers.registry import resolve_active
+from app.providers.registry import chat_with_fallback
 from app.rag.retrieve import retrieve_context
 
 router = APIRouter(
@@ -234,20 +234,12 @@ def _synthesis_prompt(title: str, query: str | None, hits: list[dict[str, Any]])
 
 
 async def _synthesize_with_active_model(
-    db: Session, *, title: str, query: str | None, hits: list[dict[str, Any]]
+    db: Session, *, owner_id: uuid.UUID, title: str, query: str | None, hits: list[dict[str, Any]]
 ) -> tuple[str, str | None, str | None]:
     """Call the active local chat model to synthesise the draft body. Returns
     (body, provider_name, model_name). Raises HTTPException(503) when no usable chat model
     is configured or the provider fails — an honest 'model unavailable', never a fabricated
     body."""
-    try:
-        provider, model = resolve_active(db, role="chat")
-    except Exception as exc:  # NotConfigured / resolution failure
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Ingen aktiv språkmodell är konfigurerad för att generera ett utkast.",
-        ) from exc
-
     from app.providers.base import Message
 
     prompt = _synthesis_prompt(title, query, hits)
@@ -262,7 +254,23 @@ async def _synthesize_with_active_model(
         Message(role="user", content=prompt),
     ]
     try:
-        result = await provider.chat(messages, model=model, timeout=_SYNTH_TIMEOUT_SECONDS)
+        result, _attempted = await chat_with_fallback(
+            db,
+            messages,
+            owner_id=owner_id,
+            purpose="blueprint_synthesis",
+            requested_by="routers.blueprint._synthesize_with_active_model",
+            timeout=_SYNTH_TIMEOUT_SECONDS,
+        )
+    except EgressDeniedError as exc:
+        # The disclosure ledger row is part of the security evidence. No Blueprint row has
+        # been created at this point, so committing here persists only the policy decisions
+        # already made by retrieval/synthesis. Never retry or fall back after a content denial.
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Källmaterialet får inte skickas till den aktiva modellen enligt egress-policyn.",
+        ) from exc
     except ProviderError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -275,10 +283,10 @@ async def _synthesize_with_active_model(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Språkmodellen returnerade ett tomt utkast.",
         )
-    # Prefer the authoritative provider/model the ChatResult reports (what actually answered),
-    # falling back to the resolved identity.
-    provider_name = getattr(result, "provider", None) or getattr(provider, "name", None) or provider.__class__.__name__
-    model_name = getattr(result, "model", None) or model
+    # The ChatResult identifies what actually answered (including a legitimate configured
+    # fallback), rather than re-resolving mutable provider configuration after the call.
+    provider_name = getattr(result, "provider", None)
+    model_name = getattr(result, "model", None)
     return body, provider_name, model_name
 
 
@@ -308,7 +316,7 @@ async def _generate(db: Session, *, owner_id: uuid.UUID, title: str, query: str 
             h["similarity"] = h["score"]
 
     body, provider_name, model_name = await _synthesize_with_active_model(
-        db, title=title, query=query, hits=grounded
+        db, owner_id=owner_id, title=title, query=query, hits=grounded
     )
 
     try:

@@ -34,6 +34,7 @@ from app.config import get_settings
 from app.models.blueprint_draft import BlueprintDraft
 from app.models.document import ActiveTruthStatus, Document, DocumentSource
 from app.models.document_chunk import DocumentChunk
+from app.models.provider_disclosure import ProviderDisclosureEvent
 from app.models.user import User
 
 FOUNDER_EMAIL = "founder@lifeos.local"
@@ -95,7 +96,7 @@ def _active_embedding_space(superuser_db) -> tuple[str, int]:
     return model, len(MATCHING_VECTOR)
 
 
-def _make_indexed_source(superuser_db, owner_id, title: str, *, vector=None) -> Document:
+def _make_indexed_source(superuser_db, owner_id, title: str, *, text_value: str | None = None, vector=None) -> Document:
     """An uploaded, indexed immutable original: a Document (the original record, with a fixed
     checksum) + a DocumentChunk (the index entry) stamped with the active embedding space, so
     real owner-scoped pgvector retrieval ranks it exactly as a genuinely-ingested chunk."""
@@ -115,7 +116,7 @@ def _make_indexed_source(superuser_db, owner_id, title: str, *, vector=None) -> 
             document_id=document.id,
             owner_id=owner_id,
             chunk_index=0,
-            text=f"Innehåll i {title}.",
+            text=text_value or f"Innehåll i {title}.",
             embedding=vector or MATCHING_VECTOR,
             embedding_model=model,
             embedding_native_dim=native_dim,
@@ -359,6 +360,107 @@ def test_ungrounded_request_is_refused_and_persists_nothing(client, superuser_db
         )
     ).scalar_one()
     assert count == 0
+
+
+@pytest.mark.parametrize(
+    "forbidden_source",
+    [
+        "NEVER_EGRESS: Founderns privata underlag får inte lämna trust boundary.",
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nsynthetic-test-material\n-----END OPENSSH PRIVATE KEY-----",
+    ],
+)
+def test_blueprint_forbidden_retrieved_source_never_reaches_external_provider(
+    client, superuser_db, _fake_model, monkeypatch, forbidden_source
+):
+    """Regression for the independently demonstrated #340/#352 egress bypass.
+
+    Retrieval authority is not egress authority: source excerpts are re-evaluated as part of
+    the complete synthesis payload. A hard-denied excerpt must stop before provider.chat(),
+    persist a denied disclosure receipt, and leave no partial draft behind.
+    """
+    from app.providers.openai_provider import OpenAIProvider
+
+    founder_id = _founder_id(superuser_db)
+    _make_indexed_source(
+        superuser_db,
+        founder_id,
+        "Förbjudet Blueprint-underlag",
+        text_value=forbidden_source,
+    )
+    provider_calls: list[list[str]] = []
+
+    async def _must_not_run(self, messages, model, **kwargs):
+        provider_calls.append([message.content for message in messages])
+        raise AssertionError("forbidden Blueprint source reached external provider")
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _must_not_run)
+    csrf = _login(client)
+    title = f"Blocked {uuid.uuid4().hex[:8]}"
+    response = client.post(
+        "/api/blueprint/drafts",
+        json={"title": title, "query": "Blueprint-underlag"},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert response.status_code == 422, response.text
+    assert provider_calls == []
+    assert _draft_rows(superuser_db, founder_id, title) == []
+
+    denial = (
+        superuser_db.query(ProviderDisclosureEvent)
+        .filter_by(owner_id=founder_id, purpose="blueprint_synthesis", decision="denied")
+        .order_by(ProviderDisclosureEvent.created_at.desc(), ProviderDisclosureEvent.id.desc())
+        .first()
+    )
+    assert denial is not None
+    assert denial.requested_by == "routers.blueprint._synthesize_with_active_model"
+    assert denial.sent_content_hash is None
+    assert "never_egress_marker" in denial.redaction_categories
+
+
+def test_blueprint_retrieved_source_secrets_are_redacted_before_external_provider(
+    client, superuser_db, _fake_model, monkeypatch
+):
+    """Non-hard-denied secret patterns follow the shared redaction policy before egress."""
+    from app.providers.base import ChatResult
+    from app.providers.openai_provider import OpenAIProvider
+
+    founder_id = _founder_id(superuser_db)
+    secret = "sk-abcdefghijklmnopqrstuvwx"
+    _make_indexed_source(
+        superuser_db,
+        founder_id,
+        "Redacted Blueprint-underlag",
+        text_value=f"Anropa tjänsten med api_key={secret} och skapa sedan planen.",
+    )
+    sent_payloads: list[str] = []
+
+    async def _capture_redacted(self, messages, model, **kwargs):
+        sent_payloads.append("\n".join(message.content for message in messages))
+        return ChatResult(content="Safe grounded draft", provider=self.name, model=model, raw_usage={})
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _capture_redacted)
+    csrf = _login(client)
+    response = client.post(
+        "/api/blueprint/drafts",
+        json={"title": f"Redacted {uuid.uuid4().hex[:8]}", "query": "Blueprint-underlag"},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert response.status_code == 201, response.text
+    assert len(sent_payloads) == 1
+    assert secret not in sent_payloads[0]
+    assert "api_key=[REDACTED]" in sent_payloads[0]
+
+    allowed = (
+        superuser_db.query(ProviderDisclosureEvent)
+        .filter_by(owner_id=founder_id, purpose="blueprint_synthesis", decision="allowed")
+        .order_by(ProviderDisclosureEvent.created_at.desc(), ProviderDisclosureEvent.id.desc())
+        .first()
+    )
+    assert allowed is not None
+    assert "secret_pattern" in allowed.redaction_categories
+    assert allowed.sent_content_hash != allowed.attempted_content_hash
 
 
 def test_cross_owner_source_isolation_and_founder_only_gate(
