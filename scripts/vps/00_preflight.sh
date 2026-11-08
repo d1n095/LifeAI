@@ -5,11 +5,14 @@
 #
 # Usage: sudo ./00_preflight.sh [--min-disk-gb N] [--min-mem-mb N] [--domain example.com]
 #
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2329
 # ^ every check_*() function here is invoked indirectly, by name, via `check "..." check_x`
 # below — shellcheck's data-flow analysis can't trace that and flags the function bodies as
 # unreachable. They aren't; see https://www.shellcheck.net/wiki/SC2317's own "or ignore if
-# invoked indirectly" note, which is exactly this pattern.
+# invoked indirectly" note, which is exactly this pattern. SC2329 ("This function is never
+# invoked") is the same false positive under its own code — ShellCheck 0.11 (on the current
+# ubuntu-latest / ubuntu-26.04 runners) raises SC2329 where older versions raised only SC2317,
+# so both must be disabled or `vps-scripts-check` fails on an info-level finding alone.
 set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 # shellcheck source=./lib.sh
