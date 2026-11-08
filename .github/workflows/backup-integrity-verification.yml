@@ -72,7 +72,10 @@ jobs:
           [ -n "$seed" ] || { echo "::error::seed backup was not created"; exit 1; }
 
           echo "== make the next archive far exceed the remaining tmpfs space (incompressible) =="
-          head -c 2097152 /dev/urandom > "$compose/deployments/huge.bin"
+          # backup.sh archives deployments/*.json (not arbitrary files), so the oversized,
+          # incompressible payload must carry that extension to actually land in the archive.
+          head -c 4194304 /dev/urandom > "$compose/deployments/huge.json"
+          sleep 1.1   # ensure the failing attempt gets a DISTINCT timestamp from the seed
 
           echo "== attempt a backup that must hit ENOSPC during the final archive write =="
           set +e
