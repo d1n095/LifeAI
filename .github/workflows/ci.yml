@@ -2365,6 +2365,8 @@ jobs:
         run: |
           mkdir -p "$TEST_COMPOSE_DIR/deployments"
           cp docker-compose.vps.yml docker-compose.vps.ci.yml Caddyfile "$TEST_COMPOSE_DIR/"
+          mkdir -p "$TEST_COMPOSE_DIR/scripts/vps"
+          cp scripts/vps/ci_provider_stub.py "$TEST_COMPOSE_DIR/scripts/vps/"
           cat > "$TEST_ENV_FILE" <<EOF
           SECRET_KEY=ci-deploy-test-secret
           MAINAI_APP_PASSWORD=ci_deploy_test_pw
