@@ -31,6 +31,19 @@ WAITING_PROVIDER_BLOCKER = "provider planning is unavailable"
 WAITING_PROVIDER_MAX_BACKOFFS = 8
 WAITING_PROVIDER_BACKOFF_BASE_SECONDS = 30.0
 WAITING_PROVIDER_BACKOFF_CAP_SECONDS = 900.0
+# Minimum gap before a parked WAITING_PROVIDER task is eligible to retry. The park's whole
+# purpose (see _release_provider_wait_midflight) is "blocked, not immediate ready" — do NOT
+# hot-loop against a provider that is still down. compute_backoff_seconds uses *full* jitter
+# (a draw in [0, ceiling]), whose low tail can be ~0s and would schedule a retry essentially
+# now — reintroducing the very hot loop the park exists to prevent, and intermittently
+# scheduling next_retry_at at/behind wall-clock now under DB round-trip latency.
+#
+# The floor is applied as max(delay, min(MIN, base)): it is clamped to the *effective* base,
+# so a deliberately-zero base (the soak tests set WAITING_PROVIDER_BACKOFF_BASE_SECONDS = 0.0
+# to mean "no backoff — this park is immediately wakeable") yields a zero floor and still
+# wakes now, while the production base (30s) yields the full 5s floor. An absolute floor would
+# override an explicit zero base and break that established "wake now" contract.
+WAITING_PROVIDER_BACKOFF_MIN_SECONDS = 5.0
 
 
 def _latest_block_or_retry_reason(db: Session, *, task: MainAITask) -> str | None:
@@ -97,6 +110,10 @@ def compute_waiting_provider_retry_at(*, prior_backoffs: int, now: datetime | No
         base=WAITING_PROVIDER_BACKOFF_BASE_SECONDS,
         cap=WAITING_PROVIDER_BACKOFF_CAP_SECONDS,
     )
+    # Clamp the full-jitter low tail to a meaningful, strictly-future instant — but only up to
+    # the effective base, so an explicit base=0 ("wake now") is honored (see the constant's
+    # note). min(MIN, base) is 5s in production (base=30) and 0s when base is deliberately 0.
+    delay = max(delay, min(WAITING_PROVIDER_BACKOFF_MIN_SECONDS, WAITING_PROVIDER_BACKOFF_BASE_SECONDS))
     return now + timedelta(seconds=delay)
 
 
