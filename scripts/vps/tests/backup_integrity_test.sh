@@ -47,27 +47,26 @@ mkdir -p "$SHIM_DIR"
 
 cat > "$SHIM_DIR/tar" <<'SHIM'
 #!/usr/bin/env bash
-# Only interfere with the FINAL-archive write (target is a hidden *.partial.* file). Every
-# other tar call (the inner opt-lifeai tar, and all `tzf` listing/verification) passes through.
+# Only interfere with the FINAL-archive CREATE (target is a hidden *.partial.* file). backup.sh
+# always calls `tar <opts> FILE ...` with the opts bundle (e.g. czf / tzf) as $1 and FILE as $2.
+# We act only when opts request a create (c) AND the file is a .partial — so the inner
+# opt-lifeai create and every tzf listing/verification pass straight through to real tar.
+opts="${1:-}"
 target=""
-prev=""
-for a in "$@"; do
-    case "$prev" in -*f|f) target="$a";; esac
-    case "$a" in -*f) prev="f";; *) prev="";; esac
-done
-is_partial=0
-case "$target" in *.partial.*) is_partial=1;; esac
+case "$opts" in *f*) target="${2:-}";; esac
+is_create=0; case "$opts" in *c*) is_create=1;; esac
+is_partial=0; case "$target" in *.partial.*) is_partial=1;; esac
 case "${INJECT_TAR_MODE:-}" in
     fail_partial)
-        if [ "$is_partial" = 1 ]; then
+        if [ "$is_create" = 1 ] && [ "$is_partial" = 1 ]; then
             head -c 512 /dev/zero > "$target" 2>/dev/null || true   # leave a short/partial file
             echo "fake tar: simulated interrupted archive write" >&2
             exit 1
         fi
         ;;
     garbage_partial)
-        if [ "$is_partial" = 1 ]; then
-            printf 'this is not a valid gzip stream' > "$target"     # passes write, fails tzf
+        if [ "$is_create" = 1 ] && [ "$is_partial" = 1 ]; then
+            printf 'this is not a valid gzip stream' > "$target"     # write ok, fails tzf gate
             exit 0
         fi
         ;;
@@ -208,9 +207,11 @@ read -r C O < <(make_fixture "$WORK/s7")
 # second run is guaranteed to collide with the held lock.
 cat > "$SHIM_DIR/tar_slow" <<'SHIM'
 #!/usr/bin/env bash
-target=""; prev=""
-for a in "$@"; do case "$prev" in f) target="$a";; esac; case "$a" in -*f) prev="f";; *) prev="";; esac; done
-case "$target" in *.partial.*) sleep 3;; esac
+# Delay only the FINAL-archive create so the lock is held long enough for the second run to
+# collide with it. Same opts/target convention as the main tar shim.
+opts="${1:-}"; target=""
+case "$opts" in *f*) target="${2:-}";; esac
+case "$opts" in *c*) case "$target" in *.partial.*) sleep 3;; esac;; esac
 exec "$REAL_TAR" "$@"
 SHIM
 chmod +x "$SHIM_DIR/tar_slow"
