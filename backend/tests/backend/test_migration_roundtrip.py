@@ -18,7 +18,10 @@ calling alembic's Python API directly, so it exercises the exact command path
 import os
 import subprocess
 import sys
+import uuid
+from urllib.parse import urlparse, urlunparse
 
+import psycopg2
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import inspect
@@ -38,6 +41,104 @@ def _revision_count() -> int:
     config.set_main_option("script_location", os.path.join(BACKEND_ROOT, "alembic"))
     script = ScriptDirectory.from_config(config)
     return len(list(script.walk_revisions()))
+
+
+def _script_directory() -> ScriptDirectory:
+    config = Config(os.path.join(BACKEND_ROOT, "alembic.ini"))
+    config.set_main_option("script_location", os.path.join(BACKEND_ROOT, "alembic"))
+    return ScriptDirectory.from_config(config)
+
+
+def _run_alembic_on(database_url: str, *args: str) -> None:
+    env = {**os.environ, "DATABASE_URL": database_url}
+    subprocess.run([sys.executable, "-m", "alembic", *args], cwd=BACKEND_ROOT, check=True, env=env)
+
+
+def test_historical_standalone_0069_upgrades_without_skipping_embedding_identity():
+    """Regression for the #326/#349 revision-prefix collision.
+
+    The historical #326 database records the exact short revision ``0069``. Without that
+    revision in the composed graph, Alembic treated it as an abbreviation of
+    ``0069_embedding_space_identity``, skipped the embedding migration, and still reported a
+    green upgrade at head. Exercise the actual CLI against a disposable PostgreSQL database:
+    build the historical state, retain a real ``local`` disclosure event, then upgrade and
+    prove one head, preserved data, and present provenance columns.
+    """
+    script = _script_directory()
+    assert script.get_revision("0069").revision == "0069"
+    assert script.get_revision("0069_embedding_space_identity").down_revision == "0069"
+    assert script.get_heads() == ["0073_provider_disclosure_local"]
+
+    configured = urlparse(os.environ["DATABASE_URL"])
+    database_name = f"lifeai_historical_0069_{uuid.uuid4().hex}"
+    admin_url = urlunparse(configured._replace(path="/postgres"))
+    disposable_url = urlunparse(configured._replace(path=f"/{database_name}"))
+
+    admin = psycopg2.connect(admin_url)
+    admin.autocommit = True
+    try:
+        with admin.cursor() as cursor:
+            cursor.execute(f'CREATE DATABASE "{database_name}"')
+
+        _run_alembic_on(disposable_url, "upgrade", "0069")
+        owner_id = uuid.uuid4()
+        event_id = uuid.uuid4()
+        with psycopg2.connect(disposable_url) as historical:
+            with historical.cursor() as cursor:
+                cursor.execute("SELECT version_num FROM alembic_version")
+                assert cursor.fetchall() == [("0069",)]
+                cursor.execute(
+                    """
+                    INSERT INTO users (
+                        id, email, password_hash, role, is_active, created_at,
+                        email_verified, sessions_valid_after
+                    ) VALUES (%s, %s, %s, 'founder', true, now(), true, now())
+                    """,
+                    (str(owner_id), f"historical-{owner_id}@example.invalid", "not-a-real-hash"),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO provider_disclosure_events (
+                        id, owner_id, provider, model, purpose, requested_by, decision,
+                        reason, redaction_categories, attempted_content_hash, sent_content_hash
+                    ) VALUES (%s, %s, 'ollama', 'historical-model', 'migration-test',
+                              'test_migration_roundtrip', 'local', 'historical local event',
+                              '[]'::jsonb, %s, %s)
+                    """,
+                    (str(event_id), str(owner_id), "a" * 64, "b" * 64),
+                )
+
+        _run_alembic_on(disposable_url, "upgrade", "head")
+        with psycopg2.connect(disposable_url) as upgraded:
+            with upgraded.cursor() as cursor:
+                cursor.execute("SELECT version_num FROM alembic_version")
+                assert cursor.fetchall() == [("0073_provider_disclosure_local",)]
+                cursor.execute(
+                    """
+                    SELECT column_name
+                      FROM information_schema.columns
+                     WHERE table_schema = 'public'
+                       AND table_name = 'document_chunks'
+                       AND column_name IN ('embedding_model', 'embedding_native_dim')
+                     ORDER BY column_name
+                    """
+                )
+                assert cursor.fetchall() == [("embedding_model",), ("embedding_native_dim",)]
+                cursor.execute(
+                    "SELECT decision, attempted_content_hash, sent_content_hash "
+                    "FROM provider_disclosure_events WHERE id = %s",
+                    (str(event_id),),
+                )
+                assert cursor.fetchone() == ("local", "a" * 64, "b" * 64)
+    finally:
+        with admin.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = %s AND pid <> pg_backend_pid()",
+                (database_name,),
+            )
+            cursor.execute(f'DROP DATABASE IF EXISTS "{database_name}"')
+        admin.close()
 
 
 def _schema_snapshot() -> dict:

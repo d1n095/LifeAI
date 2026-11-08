@@ -8,10 +8,9 @@ FORCEd here, in the migration (the repo convention — every owner-scoped table 
 own migration; app/rls.py re-asserts the same policy at runtime), so a migration upgrade→
 downgrade→upgrade round-trip restores the table AND its isolation policy identically.
 
-Merge ordering: branches from 0069_embedding_space_identity (this lineage's single head). PR
-#326's own 0069 (provider_disclosure_local_decision) also branches from 0068; whichever of
-#333/#326 merges first, this migration's down_revision must end up chained onto the resulting
-single head at merge time (standard per the repo merge-rule). No data/logic conflict exists.
+The composed lineage is serial: historical provider-locality revision 0069, then
+0069_embedding_space_identity, then this revision. Keeping the historical revision id in the
+graph is required for data-safe upgrades from databases that already recorded it.
 """
 
 import sqlalchemy as sa
