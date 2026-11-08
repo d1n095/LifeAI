@@ -130,6 +130,12 @@ jobs:
       ENABLE_SCHEDULED_CLEANUP: "false"
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Founder Alpha's read-only first-start preflight verifies the frozen integration
+          # SHA through real Git ancestry and recomputes its source tree. The default depth-1
+          # checkout omits that parent object and creates a false repository-invalid result;
+          # retain history for this job instead of weakening the fail-closed verifier.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
