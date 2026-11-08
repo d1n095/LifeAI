@@ -324,7 +324,6 @@ read -r C O < <(make_fixture "$WORK/s10")
 # them. Give the two runs distinct content so an overwrite would be detectable as data loss.
 printf '{"deploy":"first"}\n'  > "$C/deployments/0001.json"
 PATH="$SHIM_DIR:$PATH" run_backup "$C" "$O"; rc1=$?
-a1="$(newest_archive "$O")"
 printf '{"deploy":"second-DISTINCT"}\n' > "$C/deployments/0001.json"
 PATH="$SHIM_DIR:$PATH" run_backup "$C" "$O"; rc2=$?
 [ "$rc1" = 0 ] && [ "$rc2" = 0 ] && pass "both same-second backups succeeded" || fail "a same-second backup failed (rc1=$rc1 rc2=$rc2)"
@@ -333,8 +332,9 @@ cnt_sha=$(find "$O" -maxdepth 1 -name 'lifeai-backup-*.tar.gz.sha256' | wc -l | 
 [ "$cnt_sha" = 2 ] && pass "each archive has its own sidecar" || fail "expected 2 sidecars, got $cnt_sha"
 allok=1; for a in "$O"/lifeai-backup-*.tar.gz; do ( cd "$O" && "$REAL_SHA256" -c "$(basename "$a").sha256" >/dev/null 2>&1 ) || allok=0; done
 [ "$allok" = 1 ] && pass "both same-second archives verify against their own sidecars" || fail "a same-second archive failed verification"
-a2="$(find "$O" -maxdepth 1 -name 'lifeai-backup-*.tar.gz' | sort -r | head -1)"
-[ "$a1" != "$a2" ] && pass "the two archives have distinct unique identifiers" || fail "identifier was reused ($a1)"
+# Distinct unique identifiers = distinct basenames among the same-second archives.
+distinct_ids=$(find "$O" -maxdepth 1 -name 'lifeai-backup-*.tar.gz' -exec basename {} \; | sort -u | wc -l | tr -d ' ')
+[ "$distinct_ids" = 2 ] && pass "the two same-second archives have distinct unique identifiers" || fail "identifier was reused (only $distinct_ids distinct of 2)"
 
 section "Scenario 11 — SIGKILL between sidecar-publish and archive-publish cannot damage a prior backup"
 read -r C O < <(make_fixture "$WORK/s11")
