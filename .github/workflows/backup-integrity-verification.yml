@@ -1,15 +1,17 @@
 # Executable Linux verification for the backup.sh atomic-finalization + checksum-gated
-# retention hardening (branch claude/vps-backup-atomic-finalize). Runs the deterministic
-# failure-injection harness (scripts/vps/tests/backup_integrity_test.sh) AND a real
-# disk-exhaustion (ENOSPC) scenario against a tmpfs — things a macOS dev box cannot do
+# retention hardening AND the crash-consistency fix (unique backup identifiers + checksum-first/
+# archive-last no-overwrite publication) on branch claude/vps-backup-crash-consistency. Runs the
+# deterministic failure-injection harness (scripts/vps/tests/backup_integrity_test.sh, scenarios
+# 1–13, including a SIGKILL emulated in the publish window and same-second identifier-reuse) AND
+# a real disk-exhaustion (ENOSPC) scenario against a tmpfs — things a macOS dev box cannot do
 # faithfully. Isolated: no secrets, no Docker images that need auth, no network egress, no
 # deployment. Synthetic data in disposable dirs only.
-name: Backup integrity verification (atomic finalize + retention)
+name: Backup integrity verification (atomic finalize + retention + crash-consistency)
 
 on:
   push:
     branches:
-      - claude/vps-backup-atomic-finalize
+      - claude/vps-backup-crash-consistency
   workflow_dispatch: {}
 
 concurrency:
@@ -43,7 +45,7 @@ jobs:
             shellcheck -x "$f"
           done
 
-      - name: Deterministic failure-injection suite (scenarios 1–9)
+      - name: Deterministic failure-injection suite (scenarios 1–13, incl. crash-consistency)
         run: |
           chmod +x scripts/vps/tests/backup_integrity_test.sh
           scripts/vps/tests/backup_integrity_test.sh

@@ -98,7 +98,33 @@ if [ "$DRY_RUN" != "1" ]; then
     fi
 fi
 
+# Human-readable UTC second-timestamp, recorded in the manifest and used as the SORTABLE
+# prefix of every canonical name so `sort` on the filename stays chronological.
 TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
+# Collision-proof backup identifier.
+#
+# A second-resolution timestamp alone is NOT a unique identifier: two backups started in the
+# same wall-clock second (two sequential runs, or an hourly timer that fires twice across a
+# clock adjustment) would compute the SAME canonical name `lifeai-backup-$TIMESTAMP.tar.gz`.
+# With a clobbering publish that lets a later run overwrite — or, if killed mid-publish, leave
+# a mismatched sidecar on — a previously validated recovery point. flock only serializes
+# *concurrent* runs; it does nothing for *sequential* same-second ones. So the identifier must
+# be unique by construction.
+#
+# Construction: the sortable second-timestamp, then a high-resolution + random uniqueness
+# token. `/dev/urandom` is the primary source (truly unique per run, independent of clock
+# resolution and unaffected by a frozen/rewound clock); GNU `date +%N` nanoseconds, when
+# available, are folded in so same-second backups also sort in creation order. $RANDOM+$$ are a
+# last-resort fallback if /dev/urandom is somehow unreadable. The token only ever lengthens the
+# name after the timestamp, so chronological lexical sort (restore discovery, retention) is
+# preserved; restore.sh captures the whole id via `(.*)` and reuses it only as a Docker volume
+# name, where '-' is valid — so this is discovery/restore compatible (covered by the tests).
+_backup_nanos=$(date -u +%N 2>/dev/null)
+case "$_backup_nanos" in ''|*[!0-9]*) _backup_nanos="000000000";; esac
+_backup_rand=$(od -An -N6 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+[ -n "$_backup_rand" ] || _backup_rand=$(printf '%08x%04x' "$$" "$RANDOM")
+BACKUP_ID="${TIMESTAMP}-${_backup_nanos}-${_backup_rand}"
+
 STAGING_DIR=$(mktemp -d)
 # TMP_ARCHIVE / TMP_CHECKSUM hold the in-progress (hidden, non-canonical) archive + checksum
 # paths so the EXIT trap removes them if the run dies before OR during atomic publication.
@@ -125,6 +151,25 @@ if [ "$DRY_RUN" != "1" ]; then
     for sp in "${stale_partials[@]}"; do
         log_warn "Removing stale incomplete-backup artifact from a previous interrupted run: $sp"
         rm -f "$sp"
+    done
+
+    # Orphaned checksum sidecar cleanup. Publication order is checksum-FIRST, archive-LAST (the
+    # archive is the atomic commit marker — see the publication block below). A run hard-killed
+    # in the window between the two therefore leaves a `lifeai-backup-<id>.tar.gz.sha256` with
+    # NO matching archive. That orphan is inert for retention (which globs archives, not
+    # sidecars) and for restore (which needs --from <archive>), but its archive id is unique and
+    # will never be published, so the sidecar is dead and should not accumulate. flock above
+    # guarantees no other backup is mid-publish right now, so a sidecar whose archive is absent
+    # is unambiguously such an orphan. We remove ONLY sidecars with no archive — a valid pair is
+    # never touched.
+    shopt -s nullglob
+    orphan_sidecars=("$OUTPUT_DIR"/lifeai-backup-*.tar.gz.sha256)
+    shopt -u nullglob
+    for sc in "${orphan_sidecars[@]}"; do
+        if [ ! -e "${sc%.sha256}" ]; then
+            log_warn "Removing orphaned checksum sidecar (its archive was never published — a run killed mid-publish): $sc"
+            rm -f "$sc"
+        fi
     done
 fi
 
@@ -205,24 +250,48 @@ else
     echo "$MANIFEST" > "$STAGING_DIR/manifest.json"
 fi
 
-ARCHIVE_NAME="lifeai-backup-$TIMESTAMP.tar.gz"
+ARCHIVE_NAME="lifeai-backup-$BACKUP_ID.tar.gz"
 ARCHIVE_PATH="$OUTPUT_DIR/$ARCHIVE_NAME"
 
-# --- Atomic, validated, durable publication -----------------------------------------------
+# --- Atomic, validated, durable, crash-consistent publication -----------------------------
 # The final archive is NEVER written directly to its canonical path. A direct write that was
 # interrupted (process killed, or ENOSPC mid-write) would leave a truncated
 # lifeai-backup-*.tar.gz that retention pruning counts as a real backup — and could then evict
-# a genuinely-good older one. Instead: build into a hidden, same-filesystem *.partial.* file
-# (so `mv` is an atomic rename, not a cross-device copy), prove it is a complete, readable
-# gzip/tar AND compute its checksum BEFORE publishing, then atomically rename it into the
-# canonical name. A failure at any step leaves only the hidden temp file, which the EXIT trap
-# removes and which no consumer ever treats as a backup.
+# a genuinely-good older one. Instead: build into a hidden, same-filesystem *.partial.* file,
+# prove it is a complete, readable gzip/tar AND compute its checksum BEFORE publishing, then
+# publish into the canonical names. A failure at any step leaves only hidden temps (removed by
+# the EXIT trap) or, at worst, an orphan sidecar (cleaned on the next run) — never a corrupt or
+# mismatched backup, and never damage to an existing one.
+#
+# Crash-consistency, two guarantees beyond plain atomicity:
+#
+#  1. No-overwrite publication. We publish with `ln TMP DEST` (a hardlink), NOT `mv`. link(2)
+#     fails with EEXIST if DEST already exists, so publication is an atomic test-and-create that
+#     can NEVER overwrite a finalized backup or its sidecar. `mv -f` would clobber; `mv -n` is
+#     NOT a safe substitute (it is stat-then-rename — a TOCTOU window — and on some platforms a
+#     silent no-op "success"), which is why we do not rely on it. Combined with the unique
+#     BACKUP_ID this is belt-and-braces: names don't collide, and if they somehow did we fail
+#     closed (die) instead of destroying the prior recovery point.
+#
+#  2. Commit-marker ordering. The checksum sidecar is published and synced FIRST; the archive
+#     is published LAST and is the single atomic "this backup is complete" marker that both
+#     retention (globs lifeai-backup-*.tar.gz) and restore (--from <archive>) key on. So a crash
+#     between the two publishes can only leave an archive-less orphan sidecar (inert; cleaned
+#     next run) — never an archive with a missing or mismatched sidecar. The reverse ordering
+#     (archive first) is exactly what let a kill between the steps leave an unrestorable,
+#     wrong-checksum archive; this ordering makes that state unreachable.
+#
+# Durability note: `ln`/rename only guarantee a consumer sees old-or-new, not that bytes
+# survive power loss while pages/dir entries are dirty. `sync` forces them out before each
+# publish and after. This bounds process-kill AND reduces the power-loss window, but a single
+# global rename is not a full journaled-commit guarantee — broad power-loss safety is NOT
+# claimed from the process-kill tests; see the test header and the DR package.
 if [ "$DRY_RUN" = "1" ]; then
-    log_info "[dry-run] would build the archive into a hidden .partial file, verify its tar+gzip integrity, write and re-verify its SHA-256, then atomically publish it as: $ARCHIVE_PATH (+ .sha256)"
+    log_info "[dry-run] would build the archive into a hidden .partial file, verify its tar+gzip integrity, write and re-verify its SHA-256, then publish checksum-first then archive-last via atomic no-overwrite links as: $ARCHIVE_PATH (+ .sha256)"
 else
     # mktemp creates the file with O_EXCL and mode 0600 — no symlink/path-traversal race, and
     # the random suffix keeps two runs' temp files distinct even if flock were unavailable.
-    TMP_ARCHIVE=$(mktemp "$OUTPUT_DIR/.lifeai-backup-$TIMESTAMP.tar.gz.partial.XXXXXX")
+    TMP_ARCHIVE=$(mktemp "$OUTPUT_DIR/.lifeai-backup-$BACKUP_ID.tar.gz.partial.XXXXXX")
     tar czf "$TMP_ARCHIVE" -C "$STAGING_DIR" .
     chmod 0600 "$TMP_ARCHIVE"
 
@@ -236,21 +305,37 @@ else
     # published .sha256 is immediately valid against the published archive.
     archive_hash=$(sha256sum "$TMP_ARCHIVE" | awk '{print $1}')
     [ -n "$archive_hash" ] || die "Could not compute SHA-256 of the new archive — NOT publishing."
-    TMP_CHECKSUM=$(mktemp "$OUTPUT_DIR/.lifeai-backup-$TIMESTAMP.tar.gz.sha256.partial.XXXXXX")
+    TMP_CHECKSUM=$(mktemp "$OUTPUT_DIR/.lifeai-backup-$BACKUP_ID.tar.gz.sha256.partial.XXXXXX")
     printf '%s  %s\n' "$archive_hash" "$ARCHIVE_NAME" > "$TMP_CHECKSUM"
     chmod 0600 "$TMP_CHECKSUM"
 
-    # Durability: an atomic rename only guarantees a consumer sees either the old or the new
-    # name — NOT that the bytes survive a power loss, since the data pages and directory entry
-    # may still be dirty in the page cache. sync forces them out before AND after the rename so
-    # a crash cannot leave a published-but-empty archive. (A targeted fsync of the file + parent
-    # dir would be more surgical, but bash has no fsync builtin; sync is the portable superset.)
+    # Fail-closed pre-check: never publish onto an existing finalized backup. With a unique
+    # BACKUP_ID this is unreachable in practice, so if either canonical name already exists it
+    # signals an id collision or a stray file — abort rather than risk destroying a recovery
+    # point. (The atomic `ln` below enforces this regardless; this gives a clear early error.)
+    if [ -e "$ARCHIVE_PATH" ] || [ -e "$ARCHIVE_PATH.sha256" ]; then
+        die "Refusing to publish: a backup already exists at $ARCHIVE_PATH(.sha256). Not overwriting a finalized backup."
+    fi
+
+    # Durability: flush the verified temp bytes before publishing any canonical name.
     sync
 
-    mv -f "$TMP_ARCHIVE" "$ARCHIVE_PATH"
-    TMP_ARCHIVE="" # published — no longer a temp for the EXIT trap to remove
-    mv -f "$TMP_CHECKSUM" "$ARCHIVE_PATH.sha256"
+    # Publish CHECKSUM FIRST (atomic, no-overwrite), then fsync it to disk, so the sidecar is
+    # durable before the archive — the commit marker — can appear. `ln` fails if the name
+    # exists: no clobber, no TOCTOU.
+    ln "$TMP_CHECKSUM" "$ARCHIVE_PATH.sha256" \
+        || die "Could not publish checksum sidecar (name already exists or link failed): $ARCHIVE_PATH.sha256"
+    rm -f "$TMP_CHECKSUM"
     TMP_CHECKSUM=""
+    sync
+
+    # Publish ARCHIVE LAST (atomic, no-overwrite) — this is the single step that makes the
+    # backup visible to retention and restore. A crash before this leaves only the synced
+    # orphan sidecar (cleaned next run); a crash after this leaves a complete, verifiable pair.
+    ln "$TMP_ARCHIVE" "$ARCHIVE_PATH" \
+        || die "Could not publish archive (name already exists or link failed): $ARCHIVE_PATH"
+    rm -f "$TMP_ARCHIVE"
+    TMP_ARCHIVE=""
     sync
 
     # Post-publish verification: prove the published pair verifies exactly as restore.sh will
