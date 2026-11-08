@@ -1241,16 +1241,9 @@ jobs:
   vps-scripts-check:
     name: VPS bootstrap scripts — shellcheck + dry-run
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/vps-worker-privilege-race-hotfix' || github.ref == 'refs/heads/codex/founder-alpha-vps-recovery-verification'
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/vps-worker-privilege-race-hotfix'
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref == 'refs/heads/codex/founder-alpha-vps-recovery-verification' && '07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765' || github.sha }}
-
-      - name: Bind VPS evidence to the frozen Founder Alpha integration tree
-        run: |
-          test "$(git rev-parse HEAD)" = "07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765"
-          test "$(git rev-parse HEAD^{tree})" = "cc454df61bcfd0eccaf98ccb0b057fa823acf96c"
 
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
