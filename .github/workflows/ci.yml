@@ -2400,6 +2400,9 @@ jobs:
           [ -f ~/.docker/config.json ] || echo '{}' > ~/.docker/config.json
           jq '.auths["ghcr.io"] = {"auth": "Y2ktdGVzdDpjaS10ZXN0"}' ~/.docker/config.json > /tmp/docker-config.json
           mv /tmp/docker-config.json ~/.docker/config.json
+          sudo mkdir -p /root/.docker
+          sudo cp ~/.docker/config.json /root/.docker/config.json
+          sudo chmod 600 /root/.docker/config.json
 
       - name: Deploy the known-good topology for real
         run: |
