@@ -6,6 +6,28 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Founder Alpha säkerhetsremediering (2026-11-08)
+
+Verifierat mot GitHub PR-heads 2026-11-08. Tabellen är en avgränsad uppdatering för
+Founder Alpha; äldre delar av registret behöver fortsatt separat avstämning.
+`first_cycle_go=false`; inga merge- eller deploybeslut fattas här.
+
+| Branch | PR | Status / ansvar |
+|---|---|---|
+| `claude/egress-local-provider-no-egress-ledger` | #326 | Öppen; lokal provider-egress. Dess fristående migration `0069` måste beaktas vid historiska uppgraderingar. |
+| `claude/founder-alpha-blueprint-draft` | #340 | Öppen, fryst kandidat `add0da831c101af7061b7cf6309ce8041ed969aa`; oberoende granskning FAIL: Blueprint-egress. |
+| `codex/pr333-embedding-identity-provenance-fix` | #349 | Öppen; embeddingidentitet. Fristående migrationskonflikt med #326; #352 har en linjär komposition. |
+| `codex/pr329-original-integrity-remediation` | #351 | Öppen; originalintegritet. Ändringarnas säkerhetsgranskning PASS inom begränsad scope. |
+| `codex/life-founder-alpha-integration` | #352 | Öppen, fryst kandidat `07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765`; oberoende granskning FAIL. |
+| `codex/founder-alpha-final-gate-package` | #359 | Öppen; beslutspaket, `first_cycle_go=false`. |
+| `claude/ollama-provider-failclosed` | #354 | Öppen; Claudes separata provider-reliability-lane. |
+| `claude/provider-wait-backoff-floor-v2` | #358 | Öppen; Claudes separata worker-reliability-lane. |
+| `copilot/founder-alpha-blueprint-egress` | — | Aktiv; Blueprint-egress-remediering baserad på #352, separat granskning krävs. |
+
+Blueprint-remedieringen beror på #352:s frysta komposition och ska inte uppdatera någon
+fryst kandidat. Migrationskompatibilitet och CI-installer är separata uppgifter. Eventuella
+framtida basuppdateringar väntar på faktiskt mergade beroenden; ingen förebyggande rebase.
+
 ## Frontend npm-audit baseline-konsolidering (2026-10-31)
 
 Konsoliderar de spridda frontend-beroende-remedieringarna (#248/#275/#282/#305) till EN
