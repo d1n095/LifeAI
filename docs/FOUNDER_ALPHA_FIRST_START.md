@@ -32,6 +32,12 @@ This verifies frozen ancestry, tree identity and one migration head. It intentio
 `NO-GO` and exits non-zero while reviews or configuration are unknown. It never converts builder
 evidence into a review PASS.
 
+The verifier supports both a full Git checkout and CI's depth-1 checkout without fetching from the
+network. With full history it traverses ancestry and recomputes #352's tree. With depth-1 history it
+accepts only the exact frozen #352 SHA encoded as HEAD's direct parent; that commit identity itself
+cryptographically binds the expected tree. It reports which evidence form was used. A branch name,
+mutable ref, environment assertion or merely missing history is never accepted as ancestry.
+
 ## Migration 0073 ancestry
 
 The source branches reused the numeric 0069 slot for different revisions. #352 resolves the

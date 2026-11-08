@@ -59,6 +59,11 @@ def test_preflight_validates_safe_config_but_stays_no_go_for_external_reviews(tm
     assert result.returncode == 1
     assert report["repository_valid"] is True
     assert report["failures"] == []
+    assert report["source_binding_evidence"] in {"full_ancestry", "exact_direct_parent"}
+    assert report["tree_binding_evidence"] in {
+        "source_object_recomputed",
+        "exact_direct_parent_commit_identity",
+    }
     assert report["rehearsal_preflight"] == "NO-GO"
     assert report["first_cycle_go"] is False
     assert report["startup_authorized"] is False
