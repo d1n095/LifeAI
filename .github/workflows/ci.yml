@@ -626,7 +626,7 @@ jobs:
     # Branch-gated (see `if` below) so it is not exercised by this PR's matrix, but it carries
     # the identical defect on the branches where it does run; pinned here for consistency.
     runs-on: ubuntu-24.04
-    if: github.ref == 'refs/heads/claude/verify-combined-container' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm'
+    if: github.ref == 'refs/heads/claude/verify-combined-container' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/verify-352-vps-integration'
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -1241,7 +1241,7 @@ jobs:
   vps-scripts-check:
     name: VPS bootstrap scripts — shellcheck + dry-run
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/vps-worker-privilege-race-hotfix'
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/vps-worker-privilege-race-hotfix' || github.ref == 'refs/heads/claude/verify-352-vps-integration'
     steps:
       - uses: actions/checkout@v4
 
@@ -1459,7 +1459,7 @@ jobs:
     # added temporarily so THIS branch's new round-trip/chat-citations/restart-survival/
     # provider-degradation steps actually run and can be confirmed green before merge — same
     # pattern as every prior branch in this list. Safe to remove once merged.
-    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/mainai-core-loop-v1' || github.ref == 'refs/heads/claude/vps-worker-privilege-race-hotfix'
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/mainai-core-loop-v1' || github.ref == 'refs/heads/claude/vps-worker-privilege-race-hotfix' || github.ref == 'refs/heads/claude/verify-352-vps-integration'
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -2287,7 +2287,7 @@ jobs:
     # (deploy/rollback verified against the real compose topology) actually runs and is
     # confirmed green on this branch before its PR — same pattern as vps-compose-verify
     # above. Safe to remove once merged — det-kommer-mer-879lcm is already in this list.
-    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/mainai-core-loop-v1' || github.ref == 'refs/heads/claude/vps-worker-privilege-race-hotfix'
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/mainai-core-loop-v1' || github.ref == 'refs/heads/claude/vps-worker-privilege-race-hotfix' || github.ref == 'refs/heads/claude/verify-352-vps-integration'
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -2462,7 +2462,7 @@ jobs:
   vps-backup-restore-test:
     name: VPS backup.sh / restore.sh — archive structure, checksums, and restore behavior
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm'
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/verify-352-vps-integration'
     env:
       TEST_COMPOSE_DIR: ${{ github.workspace }}/backup-test/opt-lifeai
       TEST_OUTPUT_DIR: ${{ github.workspace }}/backup-test/var-backups-lifeai
