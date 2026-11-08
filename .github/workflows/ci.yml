@@ -1607,15 +1607,14 @@ jobs:
           done
           echo "Confirmed: backend and worker are still non-root (UID 10001) — uploads-init running as root did not weaken their hardening."
 
-      - name: Verify a real upload now succeeds (no PermissionError) and the worker reads the SAME file
+      - name: Verify a real upload succeeds and the worker reads the SAME file through local Ollama
         # 2026-07-27 production incident: before uploads-init existed, this exact call 500'd
         # with PermissionError: [Errno 13] 'var/lib/lifeai/uploads/tmp' — the shared named
-        # volume was root-owned while backend/worker run as UID 10001. No embedding provider
-        # is configured in this job (deliberately — this test proves the STORAGE/permission
-        # fix, not embeddings, which is out of scope here per the founder's explicit
-        # instruction not to fold embedding-provider changes into this PR) — the worker
-        # correctly pausing on "no provider configured" (never a storage/permission error)
-        # is itself the proof that it could read the exact file backend wrote.
+        # volume was root-owned while backend/worker run as UID 10001. Founder Alpha now
+        # deliberately defaults this topology to the network-isolated local Ollama service,
+        # so a successful terminal import (rather than the legacy no-provider pause) proves
+        # both that the worker read backend's exact file and that no external provider was
+        # required.
         run: |
           set -e
           COOKIES=$(mktemp)
@@ -1640,17 +1639,13 @@ jobs:
           for i in $(seq 1 60); do
             JOB=$(curl -sS -b "$COOKIES" "http://localhost:80/api/library/jobs/$JOB_ID")
             STATUS=$(echo "$JOB" | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
-            [ "$STATUS" = "blocked" ] && break
-            [ "$STATUS" = "failed" ] && (echo "::error::import job failed (should have paused as 'blocked' on no provider configured, not failed): $JOB" && exit 1)
+            [ "$STATUS" = "completed" ] && break
+            [ "$STATUS" = "failed" ] && (echo "::error::import job failed instead of completing through the local provider stub: $JOB" && exit 1)
+            [ "$STATUS" = "blocked" ] && (echo "::error::import job blocked despite the local provider stub: $JOB" && exit 1)
             sleep 1
           done
-          [ "$STATUS" = "blocked" ] || (echo "::error::import job never reached 'blocked', stuck at '$STATUS'" && exit 1)
-          REASON=$(echo "$JOB" | python3 -c "import sys,json; print(json.load(sys.stdin)['file_results'][0]['reason'])")
-          case "$REASON" in
-            *"API-nyckel"*) ;;
-            *) echo "::error::expected the honest 'no API key configured' pause reason, got: $REASON" && exit 1 ;;
-          esac
-          echo "Confirmed: the worker read the SAME file from the shared volume, extracted it, and paused cleanly on 'no embedding provider configured' — never a storage/permission error. Reason: $REASON"
+          [ "$STATUS" = "completed" ] || (echo "::error::import job never completed through the local provider stub, stuck at '$STATUS'" && exit 1)
+          echo "Confirmed: the worker read the SAME file from the shared volume and completed through the network-isolated local provider stub."
 
           rm -f /tmp/uploads-init-test.txt "$COOKIES"
 
