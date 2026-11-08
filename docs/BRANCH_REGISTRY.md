@@ -22,7 +22,7 @@ Founder Alpha; äldre delar av registret behöver fortsatt separat avstämning.
 | `codex/founder-alpha-final-gate-package` | #359 | Öppen; beslutspaket, `first_cycle_go=false`. |
 | `claude/ollama-provider-failclosed` | #354 | Öppen; Claudes separata provider-reliability-lane. |
 | `claude/provider-wait-backoff-floor-v2` | #358 | Öppen; Claudes separata worker-reliability-lane. |
-| `copilot/founder-alpha-blueprint-egress` | — | Aktiv; Blueprint-egress-remediering baserad på #352, separat granskning krävs. |
+| `copilot/founder-alpha-blueprint-egress` | #361 | Öppen draft; Blueprint-egress-remediering baserad på #352, separat granskning krävs. |
 
 Blueprint-remedieringen beror på #352:s frysta komposition och ska inte uppdatera någon
 fryst kandidat. Migrationskompatibilitet och CI-installer är separata uppgifter. Eventuella
