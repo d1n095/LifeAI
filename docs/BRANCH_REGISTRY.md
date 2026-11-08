@@ -6,6 +6,25 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Founder Alpha CI installer lane (2026-11-08)
+
+Verified against GitHub PR heads. `first_cycle_go=false`; no merge or deployment authority.
+The older registry entries still require separate reconciliation.
+
+| Branch | PR | Scope / dependency |
+|---|---|---|
+| `codex/life-founder-alpha-integration` | #352 | Open; frozen `07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765`. Security review FAIL. |
+| `codex/founder-alpha-blueprint-egress-remediation` | #360 | Open; Blueprint egress remedy. |
+| `copilot/founder-alpha-blueprint-egress` | #361 | Open draft, frozen due to overlapping #360; do not merge both. |
+| `codex/founder-alpha-0069-migration-compat` | #363 | Open; historical migration compatibility remedy. |
+| `copilot/founder-alpha-ollama-ci-pin` | #364 | Open draft; isolated Ollama CI artifact verification, based on frozen #352. |
+| `claude/ollama-provider-failclosed` | #354 | Open; separate Claude provider reliability lane. |
+| `claude/provider-wait-backoff-floor-v2` | #358 | Open; separate Claude worker reliability lane. |
+| `codex/founder-alpha-final-gate-package` | #359 | Open; gate package, no startup authorization. |
+
+These remediation lanes are independent code scopes but may conflict in this registry.
+Reconcile the registry during eventual composition; do not rebase before dependencies merge.
+
 ## Frontend npm-audit baseline-konsolidering (2026-10-31)
 
 Konsoliderar de spridda frontend-beroende-remedieringarna (#248/#275/#282/#305) till EN
