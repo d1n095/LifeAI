@@ -5,8 +5,9 @@ This checklist prepares a controlled startup; it does not execute one. Founder a
 ## 1. Freeze and authority
 
 - [ ] Founder records approved product commit `07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765` and tree `cc454df61bcfd0eccaf98ccb0b057fa823acf96c`.
-- [ ] Independent exact-SHA PASS exists for #340 `add0da831c101af7061b7cf6309ce8041ed969aa`.
-- [ ] Independent exact-SHA PASS exists for the full #352 composition.
+- [ ] The independent P1 FAIL on #340/#352 source egress is closed on a corrected frozen SHA, with provider-spy evidence proving forbidden retrieved content never reaches an external provider.
+- [ ] The historical standalone-`0069` upgrade defect is closed with a data-preserving migration and PostgreSQL round-trip evidence.
+- [ ] Independent exact-SHA PASS exists for the remediated full Founder Alpha composition; #352 `07ce4a1...` itself is FAIL / NOT READY.
 - [ ] No branch movement, merge, deployment, paid-provider, Recall or unrelated-write authority is inferred from either PASS.
 - [ ] Founder explicitly approves the isolated rehearsal scope, owner, repository, worktree, expiry and stop conditions.
 

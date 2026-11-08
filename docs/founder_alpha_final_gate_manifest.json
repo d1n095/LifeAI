@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-11-08T13:50:00Z",
+  "generated_at": "2026-11-08T14:30:00Z",
   "first_cycle_go": false,
   "product": {
     "pull_request": 352,
     "commit": "07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765",
     "tree": "cc454df61bcfd0eccaf98ccb0b057fa823acf96c",
     "migration_head": "0073_provider_disclosure_local",
-    "independent_verdict": "required"
+    "independent_verdict": "fail_not_ready"
   },
   "security_dependencies": [
     {
@@ -27,10 +27,27 @@
     {
       "pull_request": 340,
       "commit": "add0da831c101af7061b7cf6309ce8041ed969aa",
-      "scope": "Blueprint approval, source authority and version allocation",
-      "verdict": "required"
+      "scope": "Blueprint approval, source authority, version allocation and source egress",
+      "verdict": "fail_p1_high",
+      "review": "https://github.com/d1n095/LifeAI/pull/340#pullrequestreview-5818138627",
+      "finding": "retrieved source excerpts bypass owner-aware egress policy before provider invocation"
     }
   ],
+  "product_review": {
+    "review": "https://github.com/d1n095/LifeAI/pull/352#pullrequestreview-5818155966",
+    "verdict": "fail_not_ready",
+    "findings": [
+      "P1 HIGH: Blueprint source egress bypass",
+      "historical standalone 0069 upgrade not verified by the reviewed candidate",
+      "P3 LOW: mutable unpinned Ollama installer in CI"
+    ]
+  },
+  "active_remediation": {
+    "pull_request": 360,
+    "commit": "3053ce3149207b6cc7476b75b602df643afcfb75",
+    "scope": "owner-aware Blueprint source egress enforcement",
+    "status": "builder_candidate_requires_independent_review"
+  },
   "supporting_evidence": {
     "preflight": {
       "pull_request": 356,
@@ -84,8 +101,9 @@
     }
   },
   "blocking_gates": [
-    "independent exact-SHA verdict for PR 340 add0da831c101af7061b7cf6309ce8041ed969aa",
-    "independent exact-SHA verdict for PR 352 07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765"
+    "independent exact-SHA PASS for the Blueprint source-egress correction",
+    "data-preserving upgrade compatibility from historical standalone revision 0069",
+    "independent exact-SHA PASS for the remediated Founder Alpha composition"
   ],
   "production_only_gaps": [
     "VPS bootstrap scripts on current Ubuntu 26 / ShellCheck 0.11 runner",
