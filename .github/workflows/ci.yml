@@ -1491,6 +1491,8 @@ jobs:
       FRONTEND_IMAGE: lifeai-vps-frontend:ci
       DOMAIN: ":80"
       REDIS_PASSWORD: ci-vps-compose-verify-redis-password-1234567890
+      DEFAULT_LLM_MODEL: ci-stub-chat
+      DEFAULT_EMBEDDING_MODEL: ci-stub-embed
       LIFEAI_ENV_FILE: ${{ github.workspace }}/ci-secrets.env
     steps:
       - uses: actions/checkout@v4
@@ -2377,6 +2379,8 @@ jobs:
           SMTP_USERNAME=ci
           SMTP_PASSWORD=ci
           SMTP_FROM_EMAIL=no-reply@lifeos.local
+          DEFAULT_LLM_MODEL=ci-stub-chat
+          DEFAULT_EMBEDDING_MODEL=ci-stub-embed
           DOMAIN=:80
           BACKEND_IMAGE=${{ steps.digests.outputs.good_backend }}
           FRONTEND_IMAGE=${{ steps.digests.outputs.good_frontend }}
