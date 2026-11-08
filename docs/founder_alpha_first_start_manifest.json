@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "integration_pr": 352,
+  "integration_sha": "07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765",
+  "integration_tree": "cc454df61bcfd0eccaf98ccb0b057fa823acf96c",
+  "expected_migration_head": "0073_provider_disclosure_local",
+  "first_cycle_go": false,
+  "startup_authorized": false,
+  "review_gates": [
+    {
+      "pr": 349,
+      "sha": "6598559b138e0b7b4b9af0a2da80d25b1df8d6f8",
+      "scope": "embedding identity and downgrade provenance",
+      "status": "independent_review_required"
+    },
+    {
+      "pr": 340,
+      "sha": "add0da831c101af7061b7cf6309ce8041ed969aa",
+      "scope": "Blueprint grounding, versioning and approval boundary",
+      "status": "independent_review_required"
+    },
+    {
+      "pr": 351,
+      "sha": "a0063d4da6bce871dead53fcae26bee546c92859",
+      "scope": "original retrieval and content integrity",
+      "status": "independent_review_required"
+    },
+    {
+      "pr": 352,
+      "sha": "07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765",
+      "scope": "composed Founder Alpha integration",
+      "status": "independent_review_required"
+    }
+  ],
+  "exact_sha_evidence": {
+    "mandatory_ci_run": 42426029333,
+    "pull_request_ci_run": 42426032374,
+    "real_local_acceptance_run": 42426029291,
+    "backend_result": "2373 passed, 1 skipped",
+    "real_local_result": "13/13 PASS"
+  },
+  "migration_chain": [
+    "0068",
+    "0069_embedding_space_identity",
+    "0070_blueprint_drafts",
+    "0071_blueprint_approval_guard",
+    "0072_blueprint_approve_identity",
+    "0073_provider_disclosure_local"
+  ],
+  "synthetic_rehearsal_required_controls": {
+    "isolated_database": true,
+    "isolated_redis": true,
+    "isolated_storage": true,
+    "synthetic_files_only": true,
+    "local_ollama_only": true,
+    "paid_provider_keys_absent": true,
+    "chat_fallback_order_empty": true,
+    "github_write_enabled": false,
+    "github_auto_merge_enabled": false,
+    "recall_activation_forbidden": true
+  },
+  "founder_only_gates": [
+    "accept independent exact-SHA review verdicts",
+    "authorize merge of a later reviewed candidate",
+    "select the exact image digests and infrastructure",
+    "provide secrets through the approved secret store",
+    "authorize the first synthetic startup",
+    "select and authorize each real project-file import"
+  ],
+  "external_owners": {
+    "independent_examination": "Copilot or another reviewer who did not implement the candidate",
+    "infrastructure_and_runtime_reliability": "Claude",
+    "startup_and_real_file_authorization": "Founder"
+  }
+}
