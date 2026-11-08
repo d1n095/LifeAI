@@ -19,7 +19,7 @@ independent findings and acceptance criteria:
 | `codex/founder-alpha-blueprint-egress-remediation` | [#360](https://github.com/d1n095/LifeAI/pull/360) | Open draft, clean; **do not approve yet** | Source gate closes prior bypass; P2 disclosure receipt is rolled back on provider failure | `codex/life-founder-alpha-integration` |
 | `codex/founder-alpha-0069-migration-compat` | [#363](https://github.com/d1n095/LifeAI/pull/363) | Open draft, `UNSTABLE`; **blocked** | Latest 0073 downgrade/upgrade test fails; provenance-value round-trip and damaged-state recovery unverified | `codex/life-founder-alpha-integration` |
 | `copilot/founder-alpha-ollama-ci-pin` | [#364](https://github.com/d1n095/LifeAI/pull/364) | Open draft, clean; scoped installer review PASS | Fixed asset checksum validated; model tags and prior retrieval failure are separate follow-ups | `codex/life-founder-alpha-integration` |
-| `copilot/founder-alpha-review-closeout` | — | Local, unpushed; documentation-only commit | Exact-SHA independent review and Codex handoff; does not change candidate code | `claude/det-kommer-mer-879lcm` @ `64c07d5b0c4821bfb175700283021aa6e95cb61c` |
+| `copilot/founder-alpha-review-closeout` | — | Pushed; draft PR creation pending; documentation-only evidence | Exact-SHA independent review and Codex handoff; does not change candidate code | `claude/det-kommer-mer-879lcm` @ `64c07d5b0c4821bfb175700283021aa6e95cb61c` |
 
 **Dependencies and merge guidance:** #358 is independent of the Founder Alpha remediation,
 but its PR is not fully green. #360, #363, and #364 all branch from the same
