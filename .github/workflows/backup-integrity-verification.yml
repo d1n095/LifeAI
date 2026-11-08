@@ -1,0 +1,109 @@
+# Executable Linux verification for the backup.sh atomic-finalization + checksum-gated
+# retention hardening (branch claude/vps-backup-atomic-finalize). Runs the deterministic
+# failure-injection harness (scripts/vps/tests/backup_integrity_test.sh) AND a real
+# disk-exhaustion (ENOSPC) scenario against a tmpfs — things a macOS dev box cannot do
+# faithfully. Isolated: no secrets, no Docker images that need auth, no network egress, no
+# deployment. Synthetic data in disposable dirs only.
+name: Backup integrity verification (atomic finalize + retention)
+
+on:
+  push:
+    branches:
+      - claude/vps-backup-atomic-finalize
+  workflow_dispatch: {}
+
+concurrency:
+  group: backup-integrity-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backup-integrity:
+    name: backup.sh atomic finalize + retention — failure injection + ENOSPC
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tool versions (evidence)
+        run: |
+          echo "bash: $(bash --version | head -1)"
+          echo "shellcheck: $(shellcheck --version | awk '/version:/{print $2}')"
+          echo "flock: $(command -v flock || echo MISSING)"
+          echo "sha256sum: $(command -v sha256sum)"
+          tar --version | head -1
+
+      - name: ShellCheck the changed scripts (on the runner's own shellcheck)
+        working-directory: scripts/vps
+        run: |
+          for f in backup.sh restore.sh lib.sh tests/backup_integrity_test.sh; do
+            echo "--- $f ---"
+            shellcheck -x "$f"
+          done
+
+      - name: Deterministic failure-injection suite (scenarios 1–9)
+        run: |
+          chmod +x scripts/vps/tests/backup_integrity_test.sh
+          scripts/vps/tests/backup_integrity_test.sh
+
+      - name: Disk-exhaustion (ENOSPC) — real tmpfs, cannot publish, prior backup survives
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          compose="$work/opt-lifeai"
+          mkdir -p "$compose/deployments"
+          printf 'services: {}\n' > "$compose/docker-compose.vps.yml"
+          printf 'example.com { respond "ok" }\n' > "$compose/Caddyfile"
+          printf '{"deploy":"record"}\n' > "$compose/deployments/0001.json"
+
+          # A deliberately small backup store so the SECOND backup cannot fit.
+          out="/mnt/enospc"
+          sudo mkdir -p "$out"
+          sudo mount -t tmpfs -o size=1M tmpfs "$out"
+          sudo chown "$(id -u):$(id -g)" "$out"
+          trap 'sudo umount "$out" 2>/dev/null || true; rm -rf "$work"' EXIT
+
+          echo "== seed one good (small) backup that fits =="
+          scripts/vps/backup.sh --compose-dir "$compose" --output-dir "$out"
+          seed="$(find "$out" -maxdepth 1 -name 'lifeai-backup-*.tar.gz' | sort -r | head -1)"
+          seed_sha="$(sha256sum "$seed" | awk '{print $1}')"
+          [ -n "$seed" ] || { echo "::error::seed backup was not created"; exit 1; }
+
+          echo "== make the next archive far exceed the remaining tmpfs space (incompressible) =="
+          # backup.sh archives deployments/*.json (not arbitrary files), so the oversized,
+          # incompressible payload must carry that extension to actually land in the archive.
+          head -c 4194304 /dev/urandom > "$compose/deployments/huge.json"
+          sleep 1.1   # ensure the failing attempt gets a DISTINCT timestamp from the seed
+
+          echo "== attempt a backup that must hit ENOSPC during the final archive write =="
+          set +e
+          scripts/vps/backup.sh --compose-dir "$compose" --output-dir "$out"
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ] && echo "OK: backup.sh failed under ENOSPC (rc=$rc)" || { echo "::error::backup.sh wrongly succeeded under ENOSPC"; exit 1; }
+
+          canon=$(find "$out" -maxdepth 1 -name 'lifeai-backup-*.tar.gz' | wc -l)
+          [ "$canon" -eq 1 ] || { echo "::error::expected only the seed archive, found $canon"; exit 1; }
+          echo "OK: no truncated canonical archive was published"
+
+          partials=$(find "$out" -maxdepth 1 -name '.lifeai-backup-*.partial.*' | wc -l)
+          [ "$partials" -eq 0 ] || { echo "::error::left $partials .partial file(s) on ENOSPC"; exit 1; }
+          echo "OK: temp .partial cleaned up"
+
+          [ "$(sha256sum "$seed" | awk '{print $1}')" = "$seed_sha" ] || { echo "::error::seed backup was damaged"; exit 1; }
+          ( cd "$out" && sha256sum -c "$(basename "$seed").sha256" >/dev/null ) || { echo "::error::seed backup no longer verifies"; exit 1; }
+          echo "OK: prior good backup intact and still verifies after ENOSPC"
+
+          echo "== recovery: restore from the surviving good backup =="
+          scripts/vps/restore.sh --from "$seed" --target-dir "$work/recovered" --confirm >/dev/null
+          diff -q "$compose/docker-compose.vps.yml" "$work/recovered/docker-compose.vps.yml" >/dev/null \
+            && echo "OK: recovered content matches original" \
+            || { echo "::error::recovered content differs"; exit 1; }
+
+          echo "ENOSPC scenario: PASS"
+
+      - name: Summary
+        if: always()
+        run: echo "Backup integrity verification complete — see step logs for per-scenario PASS/FAIL."
