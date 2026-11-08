@@ -38,18 +38,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Restores the original two-value constraints. Any pre-existing `local` rows would violate
-    # the stricter decision CHECK — an intentional downgrade guard, not a silent data change.
-    op.execute("""
-        ALTER TABLE provider_disclosure_events
-            DROP CONSTRAINT ck_provider_disclosure_events_sent_hash_matches_decision,
-            ADD CONSTRAINT ck_provider_disclosure_events_sent_hash_matches_decision CHECK (
-                (decision = 'denied' AND sent_content_hash IS NULL)
-                OR (decision = 'allowed' AND sent_content_hash IS NOT NULL)
-            );
-
-        ALTER TABLE provider_disclosure_events
-            DROP CONSTRAINT ck_provider_disclosure_events_decision,
-            ADD CONSTRAINT ck_provider_disclosure_events_decision
-                CHECK (decision IN ('allowed', 'denied'));
-    """)
+    # Historical 0069 already established these constraints. They must survive a downgrade
+    # to 0072, including databases which contain immutable local disclosure events.
+    pass

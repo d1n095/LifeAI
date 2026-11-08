@@ -6,6 +6,27 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Founder Alpha migration compatibility (2026-11-08)
+
+Verified against GitHub PR heads. `first_cycle_go=false`; no merge or deployment authority.
+The older registry entries still require separate reconciliation.
+
+| Branch | PR | Scope / dependency |
+|---|---|---|
+| `claude/egress-local-provider-no-egress-ledger` | #326 | Open; historical standalone revision `0069`. |
+| `codex/pr333-embedding-identity-provenance-fix` | #349 | Open; embedding identity revision, originally a sibling of #326's `0069`. |
+| `codex/life-founder-alpha-integration` | #352 | Open; frozen `07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765`. Historical `0069` upgrade skips embedding columns. |
+| `copilot/founder-alpha-blueprint-egress` | #361 | Open draft; independent Blueprint egress fix based on #352. |
+| `codex/founder-alpha-0069-migration-compat` | #363 | Open; historical migration compatibility remedy based on #352. |
+| `copilot/founder-alpha-migration-compat` | — | Paused local experiment; overlaps #363, do not open a competing PR. |
+| `claude/ollama-provider-failclosed` | #354 | Open; separate Claude provider reliability lane. |
+| `claude/provider-wait-backoff-floor-v2` | #358 | Open; separate Claude worker reliability lane. |
+| `codex/founder-alpha-final-gate-package` | #359 | Open; gate package, no startup authorization. |
+
+#361 and migration compatibility are independent changes but both update this registry, so
+their eventual composition must reconcile the documentation. Do not update either frozen
+candidate or rebase in advance of its actual dependency merging.
+
 ## Frontend npm-audit baseline-konsolidering (2026-10-31)
 
 Konsoliderar de spridda frontend-beroende-remedieringarna (#248/#275/#282/#305) till EN

@@ -18,18 +18,16 @@ dimension is <= the storage dimension is handled at the application layer by zer
 require an actual, destructive column-dimension change (a model wider than the storage dim)
 remains a separate, explicitly Founder-gated migration — intentionally not performed here.
 
-NOTE (merge ordering): this branches from 0068, as does PR #326's own 0069
-("0069_provider_disclosure_local_decision"). They have distinct revision ids and touch
-disjoint tables; whichever merges second must set its down_revision to the other (standard
-per the repo's merge-rule), or a trivial merge migration can join the two heads. No data or
-logic conflict exists between them.
+The historical #326 revision `0069` precedes this revision. Keeping its exact identifier
+prevents Alembic from interpreting the older revision as a prefix for this one and silently
+skipping the embedding columns.
 """
 
 import sqlalchemy as sa
 from alembic import op
 
 revision = "0069_embedding_space_identity"
-down_revision = "0068"
+down_revision = "0069"
 branch_labels = None
 depends_on = None
 
