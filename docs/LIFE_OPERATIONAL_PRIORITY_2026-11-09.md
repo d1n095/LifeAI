@@ -260,7 +260,8 @@ premature until that end-to-end proof exists (and it cannot, pre-activation, wit
   with **no** empty/placeholder/weakness check — so `.env.example`'s `MAINAI_APP_PASSWORD=change-me`
   would provision the production app role with a publicly-known password. PR #371 does **not** cover
   this (it is an app-startup setting guard; this is a pre-boot bootstrap script reading
-  `os.environ`). **Owned as a separate P1 candidate (2026-11-09) — see that PR.**
+  `os.environ`). **Fixed on a separate P1 candidate: PR #374** (`claude/db-bootstrap-password-guard`,
+  draft, base=default; 29/29 tests, ruff clean; Copilot exact-SHA review requested).
 - **Non-durable external-disclosure receipts.** The external-AI disclosure ledger
   (`provider_disclosure_events`) has a durability gap in the Codex-owned egress/receipt code
   path. **Codex-owned — recorded here as a known blocker, not modified by this work** (see the
@@ -275,6 +276,8 @@ premature until that end-to-end proof exists (and it cannot, pre-activation, wit
 | #335→#336 workers | `claude/mainai-executive-business-workflow` / `...model-backed-workers` tips | Claude | OPEN, unmerged | Authorized *design*, not activated |
 | #360 / #361 Blueprint egress remediation | `codex/...` / `copilot/...` tips | **Codex / Copilot** | DRAFT, unmerged | Not Claude-owned — do not modify |
 | #371 / #372 security P1s | `84fcb9f1` / `8a155c30` | Claude | DRAFT, unmerged | Authorized fix, review-pending |
+| #374 DB-role password guard | `235ce1d1` | Claude | DRAFT, unmerged | Authorized fix, review-pending |
+| #373 this docs package | `598e527c`+ | Claude | DRAFT, docs-only | Analysis/record, not executable |
 
 **Rule applied:** a draft PR is a *future proposal*; nothing above is authorized to execute on
 the Founder's behalf until merged behind independent review and explicitly activated. Head SHAs
