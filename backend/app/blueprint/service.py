@@ -67,9 +67,16 @@ def generate_blueprint_draft(
     query: str | None = None,
     model_provider: str | None = None,
     model_name: str | None = None,
+    open_questions: list[str] | None = None,
 ) -> BlueprintDraft:
     """Generate a new versioned, source-grounded Blueprint DRAFT. Refuses to create an
-    ungrounded draft (no sources). Never mutates originals; never auto-approves."""
+    ungrounded draft (no sources). Never mutates originals; never auto-approves.
+
+    `open_questions` lets the synthesis step surface the Blueprint's own MISSING INFORMATION /
+    unresolved dependencies (Founder-Alpha Blueprint field "Missing information"). It is recorded
+    in `provenance` (a JSON column — no schema change) so a draft honestly carries what it could
+    NOT yet ground, rather than presenting a confident-looking but incomplete plan. Optional and
+    backward-compatible: omitting it preserves the exact prior behavior."""
     hits = [h for h in (source_hits or []) if h.get("document_id")]
     if not hits:
         raise BlueprintError(
@@ -93,6 +100,8 @@ def generate_blueprint_draft(
         "pending_founder_approval": True,
         "grounded_in_sources": True,
         "source_count": len(source_document_ids),
+        "open_questions": list(open_questions or []),
+        "has_open_questions": bool(open_questions),
     }
 
     # P2 — version allocation is max(version)+1 guarded by the unique index
@@ -208,3 +217,44 @@ def get_blueprint_draft(db: Session, *, owner_id: uuid.UUID, draft_id: uuid.UUID
     if row is None or row.owner_id != owner_id:
         return None
     return row
+
+
+def blueprint_source_staleness(
+    db: Session, *, owner_id: uuid.UUID, draft: BlueprintDraft
+) -> dict[str, Any]:
+    """Read-only staleness check for a draft's grounding EVIDENCE.
+
+    A Blueprint is only as current as the sources it was grounded in. After a draft is generated,
+    a source Document can be reclassified by the Founder as historical/superseded/disputed/proposed
+    (`ActiveTruthStatus`), or removed. This reports which of `draft.source_document_ids` are no
+    longer current, so a stale Blueprint is detectable BEFORE it is approved or acted on — directly
+    serving the Founder quality requirement "detect stale decisions and source evidence."
+
+    Reuses `app.rag.trust.NON_ACTIVE_STATUSES` + `ActiveTruthStatus` (no second staleness notion).
+    Owner-scoped (documents are owner-scoped via `uploaded_by`), never mutates anything, and adds
+    no migration — it only reads the current classification of already-recorded sources.
+    """
+    from app.models.document import Document
+    from app.rag.trust import NON_ACTIVE_STATUSES
+
+    details: list[dict[str, Any]] = []
+    for sid in draft.source_document_ids or []:
+        try:
+            doc = db.get(Document, uuid.UUID(str(sid)))
+        except (ValueError, TypeError):
+            details.append({"document_id": str(sid), "reason": "invalid_id"})
+            continue
+        if doc is None or doc.uploaded_by != owner_id:
+            # Missing, or not the owner's own source -> cannot be treated as current evidence.
+            details.append({"document_id": str(sid), "reason": "missing"})
+            continue
+        status = getattr(doc.active_truth_status, "value", str(doc.active_truth_status))
+        if status in NON_ACTIVE_STATUSES:
+            details.append({"document_id": str(sid), "reason": status})
+
+    return {
+        "draft_id": str(draft.id),
+        "is_stale": bool(details),
+        "stale_source_ids": [d["document_id"] for d in details],
+        "details": details,
+    }
