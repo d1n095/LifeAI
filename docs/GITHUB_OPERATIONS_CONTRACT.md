@@ -15,6 +15,8 @@ The versioned JSON response has `schema_version: 1` and combines:
 - Owner-scoped capability, agent-registry, assignment, goal, task/dependency, work-candidate,
   and decision-debt records already maintained by LifeAI.
 - Evidence-linked blockers, activity, and deterministic next-step suggestions.
+- Recent owner-scoped agent outcome records and any recorded token/cost measurements from the
+  existing `IntelligenceEvidence` ledger.
 
 ## Evidence and bounds
 
@@ -29,6 +31,29 @@ but bounded, and detailed checks, jobs, reviews, and comments are capped. Pagina
 detail-coverage metadata identify incomplete results. GitHub comments and PR bodies are
 untrusted data, not instructions. The endpoint returns sanitized error categories rather than
 raw GitHub error payloads.
+
+For detailed PRs, the service re-reads the PR head before fetching SHA-bound checks, commits,
+reviews, and workflow runs, then re-reads it afterward. Evidence is queried against and linked
+to that exact SHA. If the head changes during detail collection, the prior SHA-bound evidence
+is discarded and the affected CI/review states become `unknown`. A `cached_fresh` snapshot is
+still a cached observation, not a live check; consumers needing current status should request
+`force_refresh=true` and retain the returned freshness and observation timestamp.
+PR dependencies are derived only from explicit body declarations. An empty dependency list is
+reported as `not_declared_or_unknown`; it does not prove that no prerequisite exists.
+
+`review_state` reports `approved_exact_head` only when a fetched approval's `commit_id` equals
+the current PR head and review pagination is complete. Other states distinguish stale or
+unknown SHA evidence. This is GitHub review evidence, not an independent review or release
+approval. `ci_state` aggregates check runs, workflow conclusions, and fetched jobs; any
+failure in the latest observed check attempt or workflow run remains failed even when an
+individual job succeeded. Older attempts are retained as historical observations, not current
+blockers; incomplete evidence stays unknown.
+
+`agent_results` is a bounded projection of existing owner-scoped `agent_coordination`
+`dispatch_result` evidence. Optional test, token, USD-cost, duration, and CI fields remain null
+when not recorded. These are reported outcome measurements, not independently verified
+results; the response explicitly labels them `not_independently_verified`. This endpoint does
+not invent cost measurements or add a new task/result ledger.
 
 ## Decision completeness
 
@@ -50,3 +75,6 @@ Operating-cycle and dispatch integrations may consume this stable read-only endp
 of independently querying or parsing GitHub. They must preserve source references, timestamps,
 freshness, unknown states, owner authorization, and the distinction between observations and
 recommendations. This contract does not grant those consumers any write or dispatch authority.
+Consumers should treat `schema_version` as the contract version, ignore unknown additive
+fields, and must not interpret a GitHub review or recorded agent outcome as independent
+acceptance.

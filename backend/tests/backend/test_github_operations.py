@@ -10,7 +10,15 @@ import pytest
 from app.integrations import github_operations
 from app.integrations.decision_completeness import PRIORITY_DIMENSIONS, assess_decision_completeness
 from app.integrations.github_client import GitHubClient, GitHubClientError, GitHubListResult
-from app.integrations.github_operations import _check_state, _fetch_github_observation, build_project_snapshot
+from app.integrations.github_operations import (
+    _agent_result_summary,
+    _aggregate_ci_state,
+    _check_state,
+    _discover_pull_request_details,
+    _fetch_github_observation,
+    _review_state,
+    build_project_snapshot,
+)
 
 
 def _client(monkeypatch) -> GitHubClient:
@@ -144,6 +152,75 @@ async def test_missing_github_credentials_fail_before_network(monkeypatch):
     assert calls == []
 
 
+@pytest.mark.asyncio
+async def test_invalid_repository_configuration_fails_before_network(monkeypatch):
+    client = _client(monkeypatch)
+    monkeypatch.setattr(client.settings, "github_repo", "d1n095/LifeAI?redirect=example.invalid")
+    calls = []
+
+    async def fake_request(*args, **kwargs):
+        calls.append(args)
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+    with pytest.raises(GitHubClientError):
+        await client.list_pull_requests(state="open")
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_project_discovery_uses_only_read_only_http_requests(monkeypatch):
+    client = _client(monkeypatch)
+    calls = []
+    head_sha = "a" * 40
+
+    async def fake_request(self, method, url, *, headers=None, json=None, **kwargs):
+        parsed = urlsplit(str(url))
+        calls.append((method, parsed.path))
+        assert headers["Authorization"].startswith("Bearer ")
+        if parsed.path == "/repos/d1n095/LifeAI":
+            body = {
+                "full_name": "d1n095/LifeAI",
+                "html_url": "https://github.com/d1n095/LifeAI",
+                "default_branch": "main",
+            }
+        elif parsed.path == "/repos/d1n095/LifeAI/pulls":
+            body = [{
+                "number": 1,
+                "title": "Synthetic",
+                "draft": False,
+                "body": "",
+                "html_url": "https://github.com/d1n095/LifeAI/pull/1",
+                "user": {"login": "builder"},
+                "head": {"ref": "feature/synthetic", "sha": head_sha, "repo": {"full_name": "d1n095/LifeAI"}},
+                "base": {"ref": "main", "sha": "b" * 40},
+                "updated_at": "2026-11-09T12:00:00Z",
+            }] if parse_qs(parsed.query).get("state") == ["open"] else []
+        elif parsed.path == "/repos/d1n095/LifeAI/pulls/1":
+            body = {
+                "head": {"ref": "feature/synthetic", "sha": head_sha},
+                "base": {"ref": "main", "sha": "b" * 40},
+                "mergeable": None,
+                "mergeable_state": "unknown",
+            }
+        elif parsed.path == f"/repos/d1n095/LifeAI/commits/{head_sha}":
+            body = {"sha": head_sha, "html_url": f"https://github.com/d1n095/LifeAI/commit/{head_sha}", "commit": {}}
+        elif parsed.path == f"/repos/d1n095/LifeAI/commits/{head_sha}/check-runs":
+            body = {"check_runs": []}
+        elif parsed.path == "/repos/d1n095/LifeAI/actions/runs":
+            body = {"workflow_runs": []}
+        else:
+            body = []
+        return httpx.Response(200, request=httpx.Request(method, url), json=body)
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", fake_request)
+    observation = await _fetch_github_observation(client)
+
+    assert observation["repository"]["full_name"] == "d1n095/LifeAI"
+    assert observation["pull_requests"][0]["head_sha"] == head_sha
+    assert calls
+    assert {method for method, _path in calls} == {"GET"}
+
+
 def test_ci_conclusions_preserve_failed_cancelled_pending_skipped_and_success():
     cases = [
         ({"status": "completed", "conclusion": "failure"}, "failed"),
@@ -161,6 +238,9 @@ def test_ci_conclusions_preserve_failed_cancelled_pending_skipped_and_success():
 class FakeGitHub:
     def __init__(self, *, head_sha: str = "a" * 40):
         self.head_sha = head_sha
+        self.detail_head_sha = head_sha
+        self.recheck_head_sha: dict[int, str] = {}
+        self.pull_request_calls: dict[int, int] = {}
         self.open_prs = [
             {
                 "number": 101,
@@ -231,11 +311,26 @@ class FakeGitHub:
         )
 
     async def get_pull_request(self, number):
-        return {"mergeable": None, "mergeable_state": "unknown"}
+        calls = self.pull_request_calls.get(number, 0) + 1
+        self.pull_request_calls[number] = calls
+        sha = self.recheck_head_sha.get(number, self.detail_head_sha) if calls > 1 else self.detail_head_sha
+        pull_request = next(item for item in self.open_prs if item["number"] == number)
+        return {
+            "head": {"sha": sha, "ref": pull_request["head"]["ref"]},
+            "base": {"sha": pull_request["base"]["sha"], "ref": pull_request["base"]["ref"]},
+            "mergeable": None,
+            "mergeable_state": "unknown",
+        }
 
-    async def list_pull_request_reviews(self, number):
+    async def list_pull_request_reviews(self, number, *, max_pages=1):
         reviews = (
-            [{"id": number, "user": {"login": "reviewer"}, "state": "APPROVED", "submitted_at": "2026-11-09T13:00:00Z"}]
+            [{
+                "id": number,
+                "user": {"login": "reviewer"},
+                "state": "APPROVED",
+                "commit_id": self.detail_head_sha,
+                "submitted_at": "2026-11-09T13:00:00Z",
+            }]
             if number == 102
             else []
         )
@@ -254,13 +349,13 @@ class FakeGitHub:
     async def list_check_runs_result(self, sha):
         checks = (
             [{"name": "tests", "status": "completed", "conclusion": "failure", "html_url": "https://github.com/d1n095/LifeAI/actions/runs/1"}]
-            if sha == self.head_sha
+            if sha == self.detail_head_sha
             else []
         )
         return GitHubListResult(checks, 1, False)
 
     async def list_workflow_runs(self, sha):
-        if sha != self.head_sha:
+        if sha != self.detail_head_sha:
             return GitHubListResult([], 1, False)
         return GitHubListResult(
             [{"id": 9001, "name": "CI", "status": "completed", "conclusion": "failure", "head_sha": sha, "html_url": "https://github.com/d1n095/LifeAI/actions/runs/9001"}],
@@ -299,6 +394,7 @@ async def test_snapshot_preserves_exact_sha_ci_dependencies_draft_and_unknown_me
             "tasks": [],
             "work_candidates": [],
             "decision_debt": {"items": []},
+            "agent_results": [],
             "next_work": [],
         },
     )
@@ -310,19 +406,169 @@ async def test_snapshot_preserves_exact_sha_ci_dependencies_draft_and_unknown_me
     assert pr_by_number[101]["base_branch"] == "main"
     assert pr_by_number[101]["mergeability"]["state"] == "UNKNOWN"
     assert pr_by_number[101]["checks"][0]["state"] == "failed"
+    assert pr_by_number[101]["ci_state"] == "failed"
     assert pr_by_number[101]["workflow_runs"][0]["jobs"][0]["state"] == "failed"
     assert pr_by_number[101]["dependencies"][0]["state"] == "open"
     assert pr_by_number[102]["dependencies"][0]["state"] == "merged"
+    assert pr_by_number[102]["review_state"] == "approved_exact_head"
+    assert pr_by_number[102]["reviews"][0]["commit_sha"] == pr_by_number[102]["head_sha"]
     assert pr_by_number[103]["draft"] is True
+    assert pr_by_number[103]["dependency_evidence"]["state"] == "not_declared_or_unknown"
     assert any(blocker["kind"] == "failed_check" for blocker in snapshot["blockers"])
     assert any(blocker["kind"] == "failed_workflow_job" for blocker in snapshot["blockers"])
     assert any(item["kind"] == "dependency_unblocked" for item in snapshot["recommendations"])
     assert all(comment["untrusted_content"] for pr in pr_by_number.values() for comment in pr["comments"])
 
     fake.head_sha = "e" * 40
+    fake.detail_head_sha = fake.head_sha
     fake.open_prs[0]["head"]["sha"] = fake.head_sha
     updated = await _fetch_github_observation(fake)
     assert updated["pull_requests"][0]["head_sha"] == "e" * 40
+
+
+@pytest.mark.asyncio
+async def test_head_change_between_list_and_detail_uses_latest_sha_for_evidence():
+    fake = FakeGitHub()
+    fake.open_prs[0]["head"]["sha"] = "a" * 40
+    fake.detail_head_sha = "e" * 40
+
+    observation = await _fetch_github_observation(fake)
+    pull_request = observation["pull_requests"][0]
+
+    assert pull_request["head_sha"] == "e" * 40
+    assert pull_request["head_sha_changed_since_list"] is True
+    assert all(check["head_sha"] == pull_request["head_sha"] for check in pull_request["checks"])
+    assert all(run["head_sha"] == pull_request["head_sha"] for run in pull_request["workflow_runs"])
+
+
+@pytest.mark.asyncio
+async def test_head_change_during_detail_invalidates_sha_bound_reviews_checks_and_runs():
+    fake = FakeGitHub()
+    fake.recheck_head_sha[101] = "f" * 40
+
+    observation = await _fetch_github_observation(fake)
+    pull_request = next(item for item in observation["pull_requests"] if item["number"] == 101)
+
+    assert pull_request["head_sha"] == "f" * 40
+    assert pull_request["head_sha_changed_during_detail"] is True
+    assert pull_request["checks"] == []
+    assert pull_request["workflow_runs"] == []
+    assert pull_request["latest_commit"] is None
+    assert pull_request["ci_state"] == "unknown"
+    assert pull_request["review_state"] == "unknown_head_changed"
+
+
+def test_review_state_requires_current_sha_and_complete_review_history():
+    review = {
+        "user": {"login": "reviewer"},
+        "state": "APPROVED",
+        "commit_id": "a" * 40,
+        "submitted_at": "2026-11-09T13:00:00Z",
+    }
+
+    assert _review_state([review], head_sha="a" * 40, truncated=False) == "approved_exact_head"
+    assert _review_state([review], head_sha="b" * 40, truncated=False) == "approval_stale_head"
+    assert _review_state([{**review, "commit_id": None}], head_sha="a" * 40, truncated=False) == "approval_sha_unknown"
+    assert _review_state([review], head_sha="a" * 40, truncated=True) == "unknown_truncated"
+
+
+def test_ci_aggregate_failure_is_not_overridden_by_successful_individual_job():
+    details = {
+        "checks": [{"state": "success"}],
+        "workflow_runs": [{
+            "status": "completed",
+            "conclusion": "failure",
+            "jobs": [{"state": "success"}],
+        }],
+        "detail_errors": [],
+    }
+
+    assert _aggregate_ci_state(details) == "failed"
+
+
+def test_ci_summary_uses_latest_check_and_workflow_for_each_name():
+    details = {
+        "checks": [
+            {"name": "tests", "state": "success", "started_at": "2026-11-09T12:00:00Z", "is_latest_for_check": True},
+            {"name": "tests", "state": "failed", "started_at": "2026-11-09T11:00:00Z", "is_latest_for_check": False},
+        ],
+        "workflow_runs": [
+            {
+                "name": "CI",
+                "status": "completed",
+                "conclusion": "success",
+                "is_latest_for_workflow": True,
+                "jobs": [{"state": "success"}],
+            },
+            {
+                "name": "CI",
+                "status": "completed",
+                "conclusion": "failure",
+                "is_latest_for_workflow": False,
+                "jobs": [{"state": "failed"}],
+            },
+        ],
+        "detail_errors": [],
+    }
+
+    assert _aggregate_ci_state(details) == "success"
+
+
+@pytest.mark.asyncio
+async def test_workflow_run_with_a_different_head_sha_is_not_used_as_current_evidence():
+    fake = FakeGitHub()
+
+    async def mismatched_runs(_sha):
+        return GitHubListResult(
+            [{
+                "id": 9002,
+                "name": "stale CI",
+                "status": "completed",
+                "conclusion": "success",
+                "head_sha": "f" * 40,
+                "html_url": "https://github.com/d1n095/LifeAI/actions/runs/9002",
+            }],
+            1,
+            False,
+        )
+
+    fake.list_workflow_runs = mismatched_runs
+    pull_request = await _discover_pull_request_details(fake, fake.open_prs[0])
+
+    assert pull_request["workflow_runs"] == []
+    assert "workflow_run_head_sha_mismatch" in pull_request["detail_errors"]
+    assert pull_request["ci_state"] == "failed"
+
+
+def test_agent_result_projection_exposes_canonical_usage_without_claiming_verification():
+    from types import SimpleNamespace
+
+    evidence = SimpleNamespace(
+        id="evidence-id",
+        source_ref="assignment-id",
+        evidence_kind="dispatch_result",
+        review_kind="unknown",
+        deterministic=True,
+        observed_at=datetime(2026, 11, 9, tzinfo=timezone.utc),
+        payload={
+            "tests_passed": True,
+            "tests_run": 12,
+            "tests_failed": 0,
+            "duration_seconds": 4.5,
+            "cost_tokens": 1200,
+            "cost_usd": "0.025",
+            "ci_conclusion": "success",
+            "failure_reason": "untrusted, potentially sensitive content",
+        },
+    )
+
+    result = _agent_result_summary(evidence)
+
+    assert result["verification_status"] == "not_independently_verified"
+    assert result["cost_tokens"] == 1200
+    assert result["cost_usd"] == 0.025
+    assert result["tests_passed"] is True
+    assert "failure_reason" not in result
 
 
 async def _async_value(value):

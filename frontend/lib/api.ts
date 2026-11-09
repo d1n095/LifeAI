@@ -772,6 +772,9 @@ export type GitHubOperationsCheck = {
   conclusion: string | null;
   state: string;
   url: string | null;
+  app_id?: number | null;
+  app_name?: string | null;
+  is_latest_for_check?: boolean;
 };
 
 export type GitHubOperationsPullRequest = {
@@ -786,11 +789,23 @@ export type GitHubOperationsPullRequest = {
   base_branch: string | null;
   base_sha: string | null;
   updated_at: string | null;
+  head_sha_changed_since_list: boolean;
+  head_sha_changed_during_detail: boolean;
+  head_sha_rechecked_at: string | null;
   dependencies: { number: number; state: string; blocked: boolean; url: string; source: string }[];
+  dependency_evidence: { state: string; method: string; source: string | null };
   mergeability: { state: string; mergeable: boolean | null; mergeable_state: string | null };
   review_state: string;
+  ci_state: string;
   requested_reviewers: string[];
-  reviews: { id: number | null; author: string | null; state: string; submitted_at: string | null; url: string | null }[];
+  reviews: {
+    id: number | null;
+    author: string | null;
+    state: string;
+    commit_sha: string | null;
+    submitted_at: string | null;
+    url: string | null;
+  }[];
   comments: { id: number | null; author: string | null; created_at: string | null; body: string; url: string | null; untrusted_content: true }[];
   checks: GitHubOperationsCheck[];
   workflow_runs: {
@@ -800,6 +815,7 @@ export type GitHubOperationsPullRequest = {
     conclusion: string | null;
     url: string | null;
     head_sha: string | null;
+    is_latest_for_workflow: boolean;
     jobs: GitHubOperationsCheck[];
   }[];
   latest_commit: { sha: string; message: string; committed_at: string | null; url: string | null } | null;
@@ -852,6 +868,23 @@ export type GitHubOperationsSnapshot = {
     head_sha: string | null;
     block_reason: string | null;
     source: { href: string };
+  }[];
+  agent_results: {
+    id: string;
+    assignment_id: string;
+    evidence_kind: string;
+    review_kind: string;
+    deterministic: boolean;
+    verification_status: "not_independently_verified";
+    observed_at: string | null;
+    tests_passed: boolean | null;
+    tests_run: number | null;
+    tests_failed: number | null;
+    duration_seconds: number | null;
+    cost_tokens: number | null;
+    cost_usd: number | null;
+    ci_conclusion: string | null;
+    source: { kind: string; id: string; source_ref: string; href: string };
   }[];
   goals: { id: string; title: string; status: string; created_at: string | null; source: { href: string } }[];
   tasks: { id: string; description: string; status: string; blocker_reason: string | null; source: { href: string } }[];

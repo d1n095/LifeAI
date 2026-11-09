@@ -117,16 +117,8 @@ export default function GitHubOperationsPage() {
             <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
               <Metric label="Open PRs" value={pullRequests.length} />
               <Metric
-                label="Failed CI observations"
-                value={failedChecks.length + pullRequests.reduce(
-                  (total, pr) => total
-                    + pr.workflow_runs.filter((run) => run.conclusion === "failure").length
-                    + pr.workflow_runs.reduce(
-                      (runTotal, run) => runTotal + run.jobs.filter((job) => job.state === "failed").length,
-                      0,
-                    ),
-                  0,
-                )}
+                label="PRs with failed CI evidence"
+                value={pullRequests.filter((pr) => pr.ci_state === "failed").length}
               />
               <Metric label="Recorded blockers" value={openBlockers.length} />
               <Metric label="Registered assignments" value={snapshot.assignments.length} />
@@ -243,6 +235,33 @@ export default function GitHubOperationsPage() {
                       {assignment.block_reason && <p className="mt-1 text-xs text-amber-100">{assignment.block_reason}</p>}
                     </div>
                   ))}
+                  {snapshot.agent_results.length > 0 && (
+                    <div className="space-y-2 pt-2">
+                      <h3 className="text-xs uppercase text-white/45">Recorded agent result and usage evidence</h3>
+                      {snapshot.agent_results.map((result) => (
+                        <article key={result.id} className="rounded-lg border border-border bg-panel p-3 text-xs">
+                          <div className="flex flex-wrap justify-between gap-2">
+                            <span>Assignment <code>{result.assignment_id}</code></span>
+                            <StatusBadge value={result.verification_status} />
+                          </div>
+                          <p className="mt-1 text-white/50">
+                            Observed {formatDate(result.observed_at)} · evidence {result.evidence_kind} · review kind {result.review_kind}
+                          </p>
+                          <p className="mt-1 text-white/60">
+                            Tests {result.tests_passed === null ? "UNKNOWN" : result.tests_passed ? "reported passed" : "reported failed"}
+                            {" "}({result.tests_run ?? "UNKNOWN"} run, {result.tests_failed ?? "UNKNOWN"} failed) · CI {result.ci_conclusion ?? "UNKNOWN"}
+                          </p>
+                          <p className="mt-1 text-white/60">
+                            Usage {result.cost_tokens ?? "UNKNOWN"} tokens · ${result.cost_usd ?? "UNKNOWN"} · {result.duration_seconds ?? "UNKNOWN"}s
+                          </p>
+                          <p className="mt-1 text-white/40">
+                            Source evidence <code>{result.id}</code> · deterministic record: {result.deterministic ? "yes" : "no"}; result is not independently verified.
+                          </p>
+                          <a href={result.source.href} className="mt-1 inline-block text-accent2 underline">Open agent registry</a>
+                        </article>
+                      ))}
+                    </div>
+                  )}
                 </>
               )}
             </section>
@@ -304,7 +323,9 @@ export default function GitHubOperationsPage() {
 }
 
 function PullRequestCard({ pr }: { pr: GitHubOperationsPullRequest }) {
-  const failedChecks = pr.checks.filter((check) => check.state === "failed");
+  const failedChecks = pr.checks.filter(
+    (check) => check.state === "failed" && check.is_latest_for_check !== false,
+  );
   return (
     <article className="rounded-xl border border-border bg-panel p-4" data-testid={`pull-request-${pr.number}`}>
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -327,10 +348,24 @@ function PullRequestCard({ pr }: { pr: GitHubOperationsPullRequest }) {
         </div>
         <div className="flex flex-wrap gap-2">
           <StatusBadge value={pr.review_state} />
+          <StatusBadge value={`CI ${pr.ci_state}`} />
           <StatusBadge value={pr.mergeability.state} />
           {failedChecks.length > 0 && <StatusBadge value={`${failedChecks.length} failed checks`} />}
         </div>
       </div>
+      <p className="mt-2 text-xs text-white/40">
+        Review state is a GitHub observation, not an independent review or release approval.
+      </p>
+      {pr.head_sha_changed_since_list && (
+        <p className="mt-2 text-xs text-amber-100">
+          The PR head changed between list and detail reads; SHA-bound evidence is tied to the newer detail-read SHA shown above.
+        </p>
+      )}
+      {pr.head_sha_changed_during_detail && (
+        <p className="mt-2 text-xs text-amber-100">
+          The PR head changed during this snapshot. Earlier SHA-bound checks, workflow runs, commit, and review status were invalidated.
+        </p>
+      )}
       {pr.dependencies.length > 0 && (
         <div className="mt-3 text-sm">
           <strong className="text-xs text-white/50">Declared dependencies</strong>
@@ -343,25 +378,33 @@ function PullRequestCard({ pr }: { pr: GitHubOperationsPullRequest }) {
           </ul>
         </div>
       )}
+      {pr.dependencies.length === 0 && (
+        <p className="mt-2 text-xs text-white/40">
+          No explicit dependency was found in the PR body; prerequisite completeness is UNKNOWN.
+        </p>
+      )}
       <div className="mt-3 grid gap-4 lg:grid-cols-2">
         <div>
-          <h3 className="mb-1 text-xs uppercase text-white/45">Checks on exact HEAD</h3>
+          <h3 className="mb-1 text-xs uppercase text-white/45">CI evidence for {pr.head_sha ?? "UNKNOWN HEAD"}</h3>
           <CheckList checks={pr.checks} empty="No check data fetched (UNKNOWN, not passed)." />
           {pr.workflow_runs.map((run) => (
             <div key={run.id} className="mt-2 border-l border-border pl-3 text-xs">
               <ExternalLink href={run.url ?? ""}>{run.name ?? `Workflow run ${run.id}`}</ExternalLink>
-              <span className="ml-2 text-white/50">{run.status} / {run.conclusion ?? "pending"}</span>
+              <span className="ml-2 text-white/50">
+                {run.is_latest_for_workflow ? "latest" : "historical"} · {run.status} / {run.conclusion ?? "pending"}
+              </span>
               <CheckList checks={run.jobs} empty="Jobs not returned." />
             </div>
           ))}
         </div>
         <div>
-          <h3 className="mb-1 text-xs uppercase text-white/45">Review evidence</h3>
+          <h3 className="mb-1 text-xs uppercase text-white/45">GitHub review evidence · not independent approval</h3>
           {pr.reviews.length === 0 ? <p className="text-xs text-white/45">No review was fetched; review state is not verified.</p> : (
             <ul className="space-y-1 text-xs">
               {pr.reviews.map((review, index) => (
                 <li key={review.id ?? index}>
                   {review.author ?? "UNKNOWN"} · {review.state} · {formatDate(review.submitted_at)}
+                  {" "}· commit {review.commit_sha ?? "UNKNOWN"}
                   {review.url && <> · <ExternalLink href={review.url}>source</ExternalLink></>}
                 </li>
               ))}
@@ -463,6 +506,7 @@ function CheckList({ checks, empty }: { checks: GitHubOperationsCheck[]; empty: 
           {check.url ? <ExternalLink href={check.url}>{check.name ?? "Unnamed check"}</ExternalLink> : <span>{check.name ?? "Unnamed check"}</span>}
           <span className={check.state === "failed" ? "text-red-200" : "text-white/50"}>
             {check.status ?? "UNKNOWN"} / {check.conclusion ?? "pending"} · {check.state}
+            {check.is_latest_for_check === false ? " · historical" : ""}
           </span>
         </li>
       ))}

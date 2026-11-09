@@ -10,6 +10,7 @@ import asyncio
 import copy
 import re
 import time
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -24,6 +25,7 @@ from app.config import get_settings
 from app.integrations.decision_completeness import assess_decision_completeness
 from app.integrations.github_client import GitHubClient, GitHubClientError, GitHubListResult
 from app.mainai_executive.why_graph import list_decision_debt, why_feature_exists
+from app.models.intelligence_governance import IntelligenceEvidence
 from app.models.mainai_execution import (
     MainAIGoal,
     MainAIGoalStatus,
@@ -35,7 +37,7 @@ from app.models.work_candidate import WorkCandidate
 
 SNAPSHOT_TTL_SECONDS = 60
 MAX_DETAILED_PULL_REQUESTS = 8
-MAX_WORKFLOW_JOBS_PER_PULL_REQUEST = 2
+MAX_WORKFLOW_RUNS_PER_PULL_REQUEST = 2
 MAX_COMMENT_LENGTH = 800
 _SNAPSHOT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _DEPENDENCY_PATTERN = re.compile(
@@ -63,24 +65,84 @@ def _safe_text(value: Any, limit: int = MAX_COMMENT_LENGTH) -> str:
     return cleaned[:limit]
 
 
+def _safe_nonnegative_number(value: Any, *, integer: bool = False) -> int | float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal, str)):
+        return None
+    if isinstance(value, str) and len(value) > 64:
+        return None
+    try:
+        numeric = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not numeric.is_finite() or numeric < 0:
+        return None
+    if integer:
+        return int(numeric) if numeric == numeric.to_integral_value() else None
+    return float(numeric)
+
+
+def _agent_result_summary(evidence: IntelligenceEvidence) -> dict[str, Any]:
+    payload = evidence.payload if isinstance(evidence.payload, dict) else {}
+    return {
+        "id": str(evidence.id),
+        "assignment_id": evidence.source_ref,
+        "evidence_kind": evidence.evidence_kind,
+        "review_kind": evidence.review_kind,
+        "deterministic": bool(evidence.deterministic),
+        "verification_status": "not_independently_verified",
+        "observed_at": _iso(evidence.observed_at),
+        "tests_passed": payload.get("tests_passed") if isinstance(payload.get("tests_passed"), bool) else None,
+        "tests_run": _safe_nonnegative_number(payload.get("tests_run"), integer=True),
+        "tests_failed": _safe_nonnegative_number(payload.get("tests_failed"), integer=True),
+        "duration_seconds": _safe_nonnegative_number(payload.get("duration_seconds")),
+        "cost_tokens": _safe_nonnegative_number(payload.get("cost_tokens"), integer=True),
+        "cost_usd": _safe_nonnegative_number(payload.get("cost_usd")),
+        "ci_conclusion": _safe_text(payload.get("ci_conclusion"), 80) or None,
+        "source": {
+            "kind": "intelligence_evidence",
+            "id": str(evidence.id),
+            "source_ref": evidence.source_ref,
+            "href": "/admin/agents",
+        },
+    }
+
+
 def _list_items(result: GitHubListResult) -> list[dict]:
     return result.items
 
 
-def _review_state(reviews: list[dict]) -> str:
+def _review_state(reviews: list[dict], *, head_sha: str | None, truncated: bool) -> str:
+    if truncated:
+        return "unknown_truncated"
+    if not head_sha:
+        return "unknown_head_sha"
     latest_by_reviewer: dict[str, dict] = {}
     for review in reviews:
-        reviewer = (review.get("user") or {}).get("login")
-        if not reviewer or review.get("state") in {"PENDING", "COMMENTED"}:
+        reviewer = review.get("author") or (review.get("user") or {}).get("login")
+        if not reviewer:
             continue
         previous = latest_by_reviewer.get(reviewer)
         if previous is None or str(review.get("submitted_at") or "") >= str(previous.get("submitted_at") or ""):
             latest_by_reviewer[reviewer] = review
-    states = {item.get("state") for item in latest_by_reviewer.values()}
+    submitted = [
+        item
+        for item in latest_by_reviewer.values()
+        if item.get("state") in {"APPROVED", "CHANGES_REQUESTED"}
+    ]
+    exact_head = [
+        item
+        for item in submitted
+        if str(item.get("commit_id") or item.get("commit_sha") or "").lower() == head_sha.lower()
+    ]
+    states = {item.get("state") for item in exact_head}
     if "CHANGES_REQUESTED" in states:
-        return "changes_requested"
+        return "changes_requested_exact_head"
     if "APPROVED" in states:
-        return "approved"
+        return "approved_exact_head"
+    if any(not (item.get("commit_id") or item.get("commit_sha")) for item in submitted):
+        return "approval_sha_unknown"
+    if submitted:
+        return "approval_stale_head"
     return "pending_or_not_requested"
 
 
@@ -100,30 +162,94 @@ def _check_state(check: dict) -> str:
     return "unknown"
 
 
+def _aggregate_ci_state(details: dict[str, Any]) -> str:
+    latest_checks = [
+        check for check in details["checks"] if check.get("is_latest_for_check", True)
+    ]
+    states = [item["state"] for item in latest_checks]
+    for run in details["workflow_runs"]:
+        if not run.get("is_latest_for_workflow", True):
+            continue
+        states.append(_check_state(run))
+        states.extend(job["state"] for job in run["jobs"])
+    if "failed" in states:
+        return "failed"
+    if "pending" in states:
+        return "pending"
+    if "cancelled" in states:
+        return "cancelled"
+    if "skipped" in states:
+        return "skipped"
+    if not states or "unknown" in states:
+        return "unknown"
+    if any(
+        details.get(key)
+        for key in ("checks_truncated", "workflow_runs_truncated", "workflow_jobs_truncated")
+    ):
+        return "unknown"
+    if any(error in details["detail_errors"] for error in (
+        "checks_unavailable",
+        "workflow_runs_unavailable",
+        "workflow_jobs_unavailable",
+        "workflow_run_head_sha_mismatch",
+    )):
+        return "unknown"
+    return "success"
+
+
+def _mark_latest_checks(checks: list[dict]) -> list[dict]:
+    grouped: dict[tuple[Any, Any], list[dict]] = {}
+    for item in checks:
+        grouped.setdefault((item.get("app_id"), item.get("name")), []).append(item)
+    for items in grouped.values():
+        if len(items) == 1:
+            items[0]["is_latest_for_check"] = True
+            continue
+        timestamps = [str(item.get("started_at") or "") for item in items]
+        latest = max(timestamps)
+        if latest:
+            for item, timestamp in zip(items, timestamps):
+                item["is_latest_for_check"] = timestamp == latest
+        else:
+            for item in items:
+                item["is_latest_for_check"] = False
+    return checks
+
+
 async def _discover_pull_request_details(client: GitHubClient, pull_request: dict) -> dict[str, Any]:
     number = int(pull_request["number"])
-    sha = str((pull_request.get("head") or {}).get("sha") or "")
+    listed_sha = str((pull_request.get("head") or {}).get("sha") or "")
+    pull_request_detail = await client.get_pull_request(number)
+    detail_head = pull_request_detail.get("head") or {}
+    sha = str(detail_head.get("sha") or "")
+    valid_sha = bool(re.fullmatch(r"[0-9a-fA-F]{7,64}", sha))
     result: dict[str, Any] = {
         "reviews": [],
         "comments": [],
         "checks": [],
         "workflow_runs": [],
         "latest_commit": None,
+        "head_sha": sha if valid_sha else None,
+        "head_branch": detail_head.get("ref"),
+        "base_branch": (pull_request_detail.get("base") or {}).get("ref"),
+        "base_sha": ((pull_request_detail.get("base") or {}).get("sha")),
+        "head_sha_changed_since_list": bool(listed_sha and valid_sha and listed_sha.lower() != sha.lower()),
         "mergeability": {"state": "UNKNOWN", "mergeable": None, "mergeable_state": None},
         "detail_errors": [],
         "detail_observed_at": datetime.now(timezone.utc).isoformat(),
     }
 
     calls: dict[str, Any] = {
-        "pull_request": client.get_pull_request(number),
-        "reviews": client.list_pull_request_reviews(number),
+        "reviews": client.list_pull_request_reviews(number, max_pages=5),
         "comments": client.list_pull_request_comments(number),
         "review_comments": client.list_pull_request_review_comments(number),
     }
-    if sha and re.fullmatch(r"[0-9a-fA-F]{7,64}", sha):
+    if valid_sha:
         calls["checks"] = client.list_check_runs_result(sha)
         calls["workflow_runs"] = client.list_workflow_runs(sha)
         calls["latest_commit"] = client.get_commit_metadata(sha)
+    else:
+        result["detail_errors"].append("current_head_sha_unavailable")
 
     results = await asyncio.gather(*calls.values(), return_exceptions=True)
     data = dict(zip(calls, results))
@@ -133,22 +259,13 @@ async def _discover_pull_request_details(client: GitHubClient, pull_request: dic
         if isinstance(value, Exception):
             result["detail_errors"].append(f"{name}_unavailable")
             continue
-        if name == "pull_request":
-            mergeable = value.get("mergeable")
-            mergeable_state = value.get("mergeable_state")
-            state = "UNKNOWN" if mergeable is None else ("MERGEABLE" if mergeable else "CONFLICTING")
-            result["mergeability"] = {
-                "state": state,
-                "mergeable": mergeable,
-                "mergeable_state": mergeable_state,
-                "observed_at": result["detail_observed_at"],
-            }
-        elif name == "reviews":
+        if name == "reviews":
             result["reviews"] = [
                 {
                     "id": item.get("id"),
                     "author": (item.get("user") or {}).get("login"),
                     "state": item.get("state", "UNKNOWN"),
+                    "commit_sha": item.get("commit_id"),
                     "submitted_at": item.get("submitted_at"),
                     "url": item.get("html_url"),
                 }
@@ -190,27 +307,44 @@ async def _discover_pull_request_details(client: GitHubClient, pull_request: dic
                 result.get("comments_truncated", False) or value.truncated or len(value.items) > 20
             )
         elif name == "checks":
-            result["checks"] = [
+            result["checks"] = _mark_latest_checks([
                 {
                     "name": item.get("name"),
                     "status": item.get("status"),
                     "conclusion": item.get("conclusion"),
                     "state": _check_state(item),
+                    "app_id": (item.get("app") or {}).get("id"),
+                    "app_name": (item.get("app") or {}).get("name"),
+                    "head_sha": sha,
                     "url": item.get("html_url") or item.get("details_url"),
                     "started_at": item.get("started_at"),
                     "completed_at": item.get("completed_at"),
                 }
                 for item in value.items
-            ]
+            ])
             result["checks_truncated"] = value.truncated
         elif name == "workflow_runs":
-            runs = _list_items(value)[:MAX_WORKFLOW_JOBS_PER_PULL_REQUEST]
+            runs = sorted(
+                _list_items(value),
+                key=lambda item: str(item.get("created_at") or ""),
+                reverse=True,
+            )[:MAX_WORKFLOW_RUNS_PER_PULL_REQUEST]
+            latest_workflow_keys = set()
+            matching_runs = []
+            for run in runs:
+                if str(run.get("head_sha") or "").lower() == sha.lower():
+                    workflow_key = run.get("workflow_id") or run.get("name") or run.get("id")
+                    run["is_latest_for_workflow"] = workflow_key not in latest_workflow_keys
+                    latest_workflow_keys.add(workflow_key)
+                    matching_runs.append(run)
+                else:
+                    result["detail_errors"].append("workflow_run_head_sha_mismatch")
             result["workflow_jobs_truncated"] = False
             jobs_per_run = await asyncio.gather(
-                *(client.list_workflow_jobs(int(run["id"])) for run in runs),
+                *(client.list_workflow_jobs(int(run["id"])) for run in matching_runs),
                 return_exceptions=True,
             )
-            for run, jobs_result in zip(runs, jobs_per_run):
+            for run, jobs_result in zip(matching_runs, jobs_per_run):
                 jobs = []
                 if isinstance(jobs_result, asyncio.CancelledError):
                     raise jobs_result
@@ -227,6 +361,7 @@ async def _discover_pull_request_details(client: GitHubClient, pull_request: dic
                             "status": job.get("status"),
                             "conclusion": job.get("conclusion"),
                             "state": _check_state(job),
+                            "head_sha": sha,
                             "url": job.get("html_url"),
                             "started_at": job.get("started_at"),
                             "completed_at": job.get("completed_at"),
@@ -240,9 +375,10 @@ async def _discover_pull_request_details(client: GitHubClient, pull_request: dic
                         "status": run.get("status"),
                         "conclusion": run.get("conclusion"),
                         "url": run.get("html_url"),
+                        "head_sha": run.get("head_sha"),
+                        "is_latest_for_workflow": run.get("is_latest_for_workflow", False),
                         "created_at": run.get("created_at"),
                         "updated_at": run.get("updated_at"),
-                        "head_sha": run.get("head_sha"),
                         "jobs": jobs,
                     }
                 )
@@ -252,11 +388,66 @@ async def _discover_pull_request_details(client: GitHubClient, pull_request: dic
             committer = commit.get("committer") or {}
             result["latest_commit"] = {
                 "sha": value.get("sha"),
+                "source_head_sha": sha,
                 "message": _safe_text(commit.get("message"), 500),
                 "committed_at": committer.get("date"),
                 "url": value.get("html_url"),
             }
-    result["review_state"] = _review_state(result["reviews"])
+    result["review_state"] = _review_state(
+        result["reviews"],
+        head_sha=result["head_sha"],
+        truncated=result.get("reviews_truncated", False),
+    )
+    result["ci_state"] = _aggregate_ci_state(result)
+    result["mergeability"] = {
+        "state": "UNKNOWN" if pull_request_detail.get("mergeable") is None else (
+            "MERGEABLE" if pull_request_detail.get("mergeable") else "CONFLICTING"
+        ),
+        "mergeable": pull_request_detail.get("mergeable"),
+        "mergeable_state": pull_request_detail.get("mergeable_state"),
+        "observed_at": result["detail_observed_at"],
+    }
+    try:
+        final_detail = await client.get_pull_request(number)
+        final_sha = str(((final_detail.get("head") or {}).get("sha")) or "")
+    except (GitHubClientError, httpx.RequestError):
+        final_sha = ""
+        result["detail_errors"].append("head_sha_recheck_unavailable")
+    if not re.fullmatch(r"[0-9a-fA-F]{7,64}", final_sha):
+        result["head_sha"] = None
+        result["review_state"] = "unknown_head_sha"
+        result["checks"] = []
+        result["workflow_runs"] = []
+        result["latest_commit"] = None
+        result["mergeability"] = {"state": "UNKNOWN", "mergeable": None, "mergeable_state": None}
+        result["ci_state"] = "unknown"
+    elif final_sha.lower() != sha.lower():
+        result["head_sha_changed_during_detail"] = True
+        result["head_sha"] = final_sha
+        result["head_sha_rechecked_at"] = datetime.now(timezone.utc).isoformat()
+        result["head_branch"] = (final_detail.get("head") or {}).get("ref")
+        result["base_branch"] = (final_detail.get("base") or {}).get("ref")
+        result["base_sha"] = (final_detail.get("base") or {}).get("sha")
+        result["checks"] = []
+        result["workflow_runs"] = []
+        result["latest_commit"] = None
+        result["mergeability"] = {"state": "UNKNOWN", "mergeable": None, "mergeable_state": None}
+        result["review_state"] = "unknown_head_changed"
+        result["ci_state"] = "unknown"
+        result["detail_errors"].append("head_sha_changed_during_detail")
+    else:
+        result["head_sha_rechecked_at"] = datetime.now(timezone.utc).isoformat()
+    if "reviews_unavailable" in result["detail_errors"] and result["review_state"] not in {
+        "unknown_head_sha",
+        "unknown_head_changed",
+    }:
+        result["review_state"] = "unknown_reviews_unavailable"
+    elif result["review_state"] not in {"unknown_head_sha", "unknown_head_changed"}:
+        result["review_state"] = _review_state(
+            result["reviews"],
+            head_sha=result["head_sha"],
+            truncated=result.get("reviews_truncated", False),
+        )
     return result
 
 
@@ -296,7 +487,10 @@ async def _fetch_github_observation(client: GitHubClient) -> dict[str, Any]:
                     "workflow_runs": [],
                     "latest_commit": None,
                     "mergeability": {"state": "UNKNOWN", "mergeable": None, "mergeable_state": None},
-                    "review_state": "unknown",
+                    "review_state": "unknown_not_fetched",
+                    "ci_state": "unknown",
+                    "head_sha": (pr.get("head") or {}).get("sha"),
+                    "head_sha_changed_since_list": False,
                     "detail_errors": ["details_unavailable"],
                     "detail_observed_at": datetime.now(timezone.utc).isoformat(),
                 }
@@ -311,7 +505,8 @@ async def _fetch_github_observation(client: GitHubClient) -> dict[str, Any]:
         base = pr.get("base") or {}
         detail = details_by_number.get(number)
         dependencies = []
-        for dependency_number in _dependency_numbers(pr.get("body")):
+        dependency_numbers = _dependency_numbers(pr.get("body"))
+        for dependency_number in dependency_numbers:
             state = dependency_state.get(dependency_number, "unknown")
             dependencies.append(
                 {
@@ -330,20 +525,29 @@ async def _fetch_github_observation(client: GitHubClient) -> dict[str, Any]:
                 "draft": bool(pr.get("draft")),
                 "author": (pr.get("user") or {}).get("login"),
                 "url": pr.get("html_url"),
-                "head_branch": head.get("ref"),
-                "head_sha": head.get("sha"),
+                "head_branch": (detail or {}).get("head_branch") or head.get("ref"),
+                "head_sha": detail["head_sha"] if detail and "head_sha" in detail else head.get("sha"),
                 "head_repository": (head.get("repo") or {}).get("full_name"),
-                "base_branch": base.get("ref"),
-                "base_sha": (base.get("sha")),
+                "base_branch": (detail or {}).get("base_branch") or base.get("ref"),
+                "base_sha": (detail or {}).get("base_sha") or base.get("sha"),
+                "head_sha_changed_since_list": detail.get("head_sha_changed_since_list", False) if detail else False,
+                "head_sha_changed_during_detail": detail.get("head_sha_changed_during_detail", False) if detail else False,
+                "head_sha_rechecked_at": detail.get("head_sha_rechecked_at") if detail else None,
                 "updated_at": pr.get("updated_at"),
                 "created_at": pr.get("created_at"),
                 "dependencies": dependencies,
+                "dependency_evidence": {
+                    "state": "explicit_dependencies_found" if dependency_numbers else "not_declared_or_unknown",
+                    "method": "explicit_pull_request_body",
+                    "source": pr.get("html_url"),
+                },
                 "mergeability": (
                     detail["mergeability"]
                     if detail
                     else {"state": "UNKNOWN", "mergeable": None, "mergeable_state": None}
                 ),
                 "review_state": detail["review_state"] if detail else "unknown_not_fetched",
+                "ci_state": detail.get("ci_state", "unknown") if detail else "unknown",
                 "requested_reviewers": [
                     (reviewer or {}).get("login") for reviewer in pr.get("requested_reviewers", [])
                 ],
@@ -466,6 +670,18 @@ def _local_project_state(db: Session, owner_id: UUID) -> dict[str, Any]:
     )
     agents = all_agents_runtime_snapshot(db, owner_id=owner_id)
     assignments = work_registry_snapshot(db, owner_id=owner_id)
+    agent_result_evidence = list(
+        db.execute(
+            select(IntelligenceEvidence)
+            .where(
+                IntelligenceEvidence.owner_id == owner_id,
+                IntelligenceEvidence.source_type == "agent_coordination",
+                IntelligenceEvidence.evidence_kind == "dispatch_result",
+            )
+            .order_by(IntelligenceEvidence.observed_at.desc())
+            .limit(20)
+        ).scalars()
+    )
     active_goal_statuses = tuple(status for status in MainAIGoalStatus if status not in {
         MainAIGoalStatus.failed, MainAIGoalStatus.completed, MainAIGoalStatus.cancelled
     })
@@ -598,6 +814,7 @@ def _local_project_state(db: Session, owner_id: UUID) -> dict[str, Any]:
             }
             for item in assignments
         ],
+        "agent_results": [_agent_result_summary(item) for item in agent_result_evidence],
         "goals": [
             {
                 "id": str(goal.id),
@@ -692,7 +909,7 @@ async def build_project_snapshot(
                     }
                 )
         for check in pr["checks"]:
-            if check["state"] == "failed":
+            if check.get("is_latest_for_check", True) and check["state"] == "failed":
                 blockers.append(
                     {
                         "kind": "failed_check",
@@ -703,6 +920,8 @@ async def build_project_snapshot(
                     }
                 )
         for run in pr["workflow_runs"]:
+            if not run.get("is_latest_for_workflow"):
+                continue
             if _check_state(run) == "failed":
                 blockers.append(
                     {
@@ -734,14 +953,16 @@ async def build_project_snapshot(
                     "evidence": "Latest submitted review state",
                 }
             )
-        elif not pr["draft"] and pr["review_state"] in {"pending_or_not_requested", "unknown_not_fetched"}:
+        elif not pr["draft"] and pr["review_state"] != "approved_exact_head":
             recommendations.append(
                 {
                     "kind": "review",
-                    "title": f"Review PR #{pr['number']}",
+                    "title": f"Verify current-head review for PR #{pr['number']}",
                     "status": "review_needed_or_not_verified",
                     "source": pr["url"],
-                    "reason": "No current approval was observed in the fetched review history.",
+                    "reason": (
+                        f"Current-head review evidence is {pr['review_state']}; this is not an independent review or release approval."
+                    ),
                     "decision_completeness": assess_decision_completeness(
                         provenance=None,
                         category="project_work_priority",
@@ -784,6 +1005,7 @@ async def build_project_snapshot(
         "capabilities": local["capabilities"],
         "agents": local["agents"],
         "assignments": local["assignments"],
+        "agent_results": local["agent_results"],
         "goals": local["goals"],
         "tasks": local["tasks"],
         "work_candidates": local["work_candidates"],

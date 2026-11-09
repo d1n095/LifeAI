@@ -14,6 +14,8 @@ sektioner nedan är inte en fullständig aktuell PR-lista.
 
 | Branch | PR | Status | Bas / beroende | Scope / ägare |
 |---|---|---|---|---|
+| `claude/frontend-npm-audit-baseline-consolidation` | [#323](https://github.com/d1n095/LifeAI/pull/323) | **Öppen, ready-for-review** | `claude/det-kommer-mer-879lcm` | Claude: frontend npm-audit remediation; owns dependency and lockfile changes. #376 does not alter dependencies or weaken the audit gate. |
+| `claude/ci-e2e-runner-pin` | [#344](https://github.com/d1n095/LifeAI/pull/344) | **Öppen, draft** | `claude/founder-alpha-blueprint-draft` (#340 lane) | Claude: pins the three browser-installing CI jobs to `ubuntu-24.04`; exact `.github/workflows/ci.yml` overlap with #376. |
 | `claude/coordination-operating-cycle-github-fed` | [#338](https://github.com/d1n095/LifeAI/pull/338) | **Öppen, ready-for-review** | #314 (`3aa2bec`) | GitHub-fed operating-cycle task selection; äger `agent_coordination/github_fed_cycle.py`, inte `integrations/github_client.py`. |
 | `claude/coordination-authorized-dispatch` | [#339](https://github.com/d1n095/LifeAI/pull/339) | **Öppen, ready-for-review** | #338 (`d92e01d`) | Authorized agent dispatch; äger `authorized_dispatch_step.py`. Väntar på #338. |
 | `codex/founder-alpha-blueprint-egress-remediation` | [#360](https://github.com/d1n095/LifeAI/pull/360) | **Öppen, draft** | #352 (`07ce4a1`) | Codex: Blueprint egress/receipts; isolerad från operations-center-koden. |
@@ -27,6 +29,17 @@ sektioner nedan är inte en fullständig aktuell PR-lista.
 **Rekommenderad ordning / väntande beroenden:** #338 före #339; håll dem orörda tills respektive
 ägare och beroende tillåter ändring. #360/#363 ligger på den frysta Founder Alpha-stackens
 #352-bas och ska inte dras in här. #371/#372 har inte godkänts; #374 väntar på oberoende review.
+
+**Verifierad överlappning:** #344 och #376 ändrar samma tre `runs-on`-rader i
+`.github/workflows/ci.yml` till `ubuntu-24.04`. Båda ändringarna behövs för att deras separata
+CI-körningar ska kunna installera Playwright Chromium, men #344 riktar sig mot
+`claude/founder-alpha-blueprint-draft` medan #376 riktar sig mot
+`claude/det-kommer-mer-879lcm`. #376 behåller sin fungerande pin för egen verifiering; ändra
+inte #344 från denna lane. Vid framtida integrering ska den identiska hunkens slutliga
+förekomst verifieras en gång mot basens faktiska SHA, utan att skapa en konkurrerande runner-
+policy. #323 äger npm-audit/dependency-remediation; #376 lämnar dess filer och säkerhetsgate
+orörda.
+
 Operations Center-branchen är en separat, read-only observationsyta och ska inte dispatcha
 agenter eller konkurrera om #338/#339:s operating-cycle/dispatchlogik.
 

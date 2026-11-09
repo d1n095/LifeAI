@@ -44,10 +44,26 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
             source: "explicit_dependency_in_pull_request_body",
           },
         ],
+        dependency_evidence: {
+          state: "explicit_dependencies_found",
+          method: "explicit_pull_request_body",
+          source: "https://github.com/d1n095/LifeAI/pull/411",
+        },
         mergeability: { state: "UNKNOWN", mergeable: null, mergeable_state: null },
-        review_state: "pending_or_not_requested",
+        review_state: "approval_stale_head",
+        ci_state: "failed",
+        head_sha_changed_since_list: false,
+        head_sha_changed_during_detail: false,
+        head_sha_rechecked_at: "2026-11-09T12:00:00Z",
         requested_reviewers: ["reviewer"],
-        reviews: [],
+        reviews: [{
+          id: 2,
+          author: "reviewer",
+          state: "APPROVED",
+          commit_sha: "b".repeat(40),
+          submitted_at: "2026-11-09T11:00:00Z",
+          url: "https://github.com/d1n095/LifeAI/pull/411#pullrequestreview-2",
+        }],
         comments: [
           {
             id: 1,
@@ -64,7 +80,16 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
             status: "completed",
             conclusion: "failure",
             state: "failed",
+            is_latest_for_check: true,
             url: "https://github.com/d1n095/LifeAI/actions/runs/411",
+          },
+          {
+            name: "Historical attempt",
+            status: "completed",
+            conclusion: "failure",
+            state: "failed",
+            is_latest_for_check: false,
+            url: "https://github.com/d1n095/LifeAI/actions/runs/410",
           },
         ],
         workflow_runs: [
@@ -75,6 +100,7 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
             conclusion: "failure",
             url: "https://github.com/d1n095/LifeAI/actions/runs/411",
             head_sha: HEAD_SHA,
+            is_latest_for_workflow: true,
             jobs: [
               {
                 name: "Backend",
@@ -99,6 +125,7 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
     capabilities: [],
     agents: [],
     assignments: [],
+    agent_results: [],
     goals: [],
     tasks: [],
     work_candidates: [],
@@ -142,6 +169,10 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
   await expect(page.getByTestId("pull-request-411")).toContainText(`HEAD ${HEAD_SHA}`);
   await expect(page.getByTestId("pull-request-411")).toContainText("DRAFT");
   await expect(page.getByTestId("pull-request-411")).toContainText("Backend tests");
+  await expect(page.getByTestId("pull-request-411")).toContainText("CI failed");
+  await expect(page.getByTestId("pull-request-411")).toContainText("1 failed checks");
+  await expect(page.getByTestId("pull-request-411")).toContainText("Historical attempt");
+  await expect(page.getByTestId("pull-request-411")).toContainText("approval_stale_head");
   await expect(page.getByTestId("pull-request-411")).toContainText("PR #410 · open");
   await expect(page.getByTestId("pull-request-411")).toContainText("Synthetic untrusted comment");
   await expect(page.getByRole("link", { name: "Open source" }).first()).toHaveAttribute(
