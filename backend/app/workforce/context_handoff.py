@@ -158,6 +158,10 @@ class AgentTaskContext:
     expires_at: str
     source_refs: tuple[SourceRef, ...] = ()
     minimized_items: tuple[dict, ...] = ()  # disclosure-minimized extras (see build_* below)
+    # Relevant PAST integration failures (compact, honestly-labelled summaries from
+    # app.mainai_execution.integration_intelligence) so the agent avoids repeating known
+    # problems — each carries its own confidence/status, never upgraded to 'fact'.
+    integration_lessons: tuple[dict, ...] = ()
     decisions: tuple[str, ...] = ()
     constraints: tuple[str, ...] = ()
     prior_attempts: tuple[str, ...] = ()
@@ -190,6 +194,7 @@ class AgentTaskContext:
             "context_version": self.context_version,
             "source_refs": [r.to_dict() for r in self.source_refs],
             "minimized_items": list(self.minimized_items),
+            "integration_lessons": list(self.integration_lessons),
             "decisions": list(self.decisions),
             "constraints": list(self.constraints),
             "prior_attempts": list(self.prior_attempts),
@@ -247,6 +252,7 @@ def build_agent_task_context(
     approval_limits: list[str] | None = None,
     missing_info: list[str] | None = None,
     uncertainty: list[str] | None = None,
+    integration_lessons: list[dict] | None = None,
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
     context_version: int = 1,
     now: datetime | None = None,
@@ -275,13 +281,15 @@ def build_agent_task_context(
     missing.extend(f"withheld:{kind}" for kind in denied_kinds)
 
     refs = tuple(source_refs or ())
-    # Security pre-check across all free-text + excerpts.
+    lessons = tuple(integration_lessons or ())
+    # Security pre-check across all free-text + excerpts (including attached lesson summaries).
     _assert_no_never_egress(
         [objective, *acceptance_criteria, *(decisions or []), *(constraints or []),
          *(prior_attempts or []), *(dependencies or []), *(ownership_boundaries or []),
          *(approval_limits or []), *(uncertainty or []), *missing]
         + [r.excerpt for r in refs]
         + [str(item.get("excerpt")) for item in accepted_items]
+        + [str(v) for lesson in lessons for v in lesson.values()]
     )
 
     now = now or _utcnow()
@@ -296,6 +304,7 @@ def build_agent_task_context(
         expires_at=(now + timedelta(seconds=ttl_seconds)).isoformat(),
         source_refs=refs,
         minimized_items=tuple(accepted_items),
+        integration_lessons=lessons,
         decisions=tuple(decisions or ()),
         constraints=tuple(constraints or ()),
         prior_attempts=tuple(prior_attempts or ()),
