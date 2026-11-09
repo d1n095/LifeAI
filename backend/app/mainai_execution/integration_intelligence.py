@@ -58,23 +58,45 @@ def integration_tags(
 
 
 def summarize_integration_lesson(lesson) -> dict:
-    """Compact, honestly-labelled summary that DISTINGUISHES symptom / root cause / validated fix
-    and carries the lesson's own confidence + status verbatim (never upgraded to 'fact')."""
+    """Compact, honestly-labelled summary that keeps CONFIDENCE, VERIFICATION STATUS and EVIDENCE
+    PROVENANCE as SEPARATE meanings (requirement 1):
+
+    - `confidence` (certain/likely/uncertain) is the AUTHOR's own confidence — never, by itself,
+      proof that anything was verified.
+    - `verification_status` is the lesson's ACTUAL verification state. A fix is `verified` ONLY when
+      it was validated by an executable regression test — the exact signal
+      `verification_status == "verified_by_regression_test"` that `app.inspectable_memory.service`
+      already treats as `MemoryTruthState.VERIFIED` (reused, not reinvented). So a `certain` but
+      unverified lesson is NOT verified, and a low-confidence lesson WITH a passing regression test
+      IS (requirements 2/3).
+    - `fix_status` distinguishes a PROPOSED fix from one VALIDATED by a regression test
+      (requirement 4).
+    - Historical/superseded lessons are never current validated guidance: `verified` additionally
+      requires `status == "active"` (requirement 5).
+    - `source_ref` (+ evidence) is retained so a recommendation can cite its provenance
+      (requirement 6)."""
     confidence = getattr(lesson.confidence, "value", str(lesson.confidence))
+    status = getattr(lesson.status, "value", str(lesson.status))
+    verification_status = getattr(lesson, "verification_status", None) or "unverified"
+    fix_validated_by_regression_test = verification_status == "verified_by_regression_test"
     return {
         "lesson_id": str(lesson.id),
         "affected_component": lesson.affected_component,
         "symptom": _trim(lesson.problem),
         "root_cause": _trim(lesson.root_cause),
-        "validated_fix": _trim(lesson.fix),
+        "fix": _trim(lesson.fix),
+        "fix_status": "validated_by_regression_test" if fix_validated_by_regression_test else "proposed",
         "general_rule": _trim(lesson.general_rule),
+        "has_regression_test": bool(lesson.regression_test),
         "regression_test": lesson.regression_test,
         "severity": getattr(lesson.severity, "value", str(lesson.severity)),
-        "confidence": confidence,
-        "status": getattr(lesson.status, "value", str(lesson.status)),
-        # Only an explicitly 'certain' lesson is a verified fact; likely/uncertain stay hypotheses.
-        "verified": confidence == "certain",
-        "source_ref": lesson.source_ref,
+        # Three SEPARATE axes — never conflated:
+        "confidence": confidence,  # author confidence
+        "verification_status": verification_status,  # actual verification state
+        # Verified = validated by a regression test AND still current. Confidence alone never suffices.
+        "verified": fix_validated_by_regression_test and status == "active",
+        "status": status,
+        "source_ref": lesson.source_ref,  # evidence provenance
         "applies_to": list(lesson.applies_to or []),
     }
 

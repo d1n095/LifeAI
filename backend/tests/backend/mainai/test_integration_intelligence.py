@@ -23,7 +23,8 @@ from app.workforce.context_handoff import ContextHandoffError, build_agent_task_
 
 
 def _record(db, *, applies_to, affected_component, confidence, problem="symptom X",
-            root_cause="root cause Y", fix="validated fix Z", source_ref="unit-test"):
+            root_cause="root cause Y", fix="validated fix Z", source_ref="unit-test",
+            verification_status=None, regression_test=None):
     lesson = lessons_mod.record_lesson(
         db,
         problem=problem,
@@ -39,7 +40,10 @@ def _record(db, *, applies_to, affected_component, confidence, problem="symptom 
         created_by="test",
         first_seen_at=datetime.utcnow(),
         confidence=confidence,
+        regression_test=regression_test,
     )
+    if verification_status is not None:
+        lesson.verification_status = verification_status  # actual verification state, set post-hoc
     db.commit()
     return lesson
 
@@ -73,18 +77,51 @@ def test_summary_distinguishes_symptom_root_cause_and_validated_fix(db_session):
     s = summarize_integration_lesson(lesson)
     assert s["symptom"] == "single-shot adapter reported as interactive"
     assert s["root_cause"] == "adapter protocol not fully implemented"
-    assert s["validated_fix"].startswith("treat LocalCLIAdapter as single-shot")
+    assert s["fix"].startswith("treat LocalCLIAdapter as single-shot")
+    assert s["fix_status"] == "proposed"  # no regression validation yet -> proposed, not validated
     assert s["affected_component"] == "agent_coordination.adapters"
 
 
-def test_unverified_lesson_is_surfaced_but_not_promoted_to_fact(db_session):
+def test_confidence_alone_never_marks_a_lesson_verified(db_session):
+    """Verification is SEPARATE from confidence: a 'certain' but unverified lesson is NOT verified;
+    a low-confidence lesson validated by a regression test IS."""
     tag = f"conf-{uuid.uuid4().hex[:6]}"
-    likely = _record(db_session, applies_to=[tag], affected_component="x", confidence=EngineeringLessonConfidence.likely)
-    certain = _record(db_session, applies_to=[tag], affected_component="y", confidence=EngineeringLessonConfidence.certain)
+    certain_unverified = _record(
+        db_session, applies_to=[tag], affected_component="x",
+        confidence=EngineeringLessonConfidence.certain,  # author is confident ...
+    )  # ... but verification_status defaults to 'unverified'
+    likely_validated = _record(
+        db_session, applies_to=[tag], affected_component="y",
+        confidence=EngineeringLessonConfidence.likely,
+        regression_test="tests/backend/test_x.py::test_regression",
+        verification_status="verified_by_regression_test",
+    )
     by_id = {str(s["lesson_id"]): s for s in integration_lessons_for_task_context(db_session, extra_tags=[tag], max_lessons=10)}
-    assert by_id[str(likely.id)]["verified"] is False  # a hypothesis stays a hypothesis
-    assert by_id[str(likely.id)]["confidence"] == "likely"
-    assert by_id[str(certain.id)]["verified"] is True  # only an explicitly 'certain' lesson is a fact
+    cu = by_id[str(certain_unverified.id)]
+    lv = by_id[str(likely_validated.id)]
+    assert cu["confidence"] == "certain" and cu["verification_status"] == "unverified"
+    assert cu["verified"] is False and cu["fix_status"] == "proposed"  # confidence != verification
+    assert lv["confidence"] == "likely" and lv["verification_status"] == "verified_by_regression_test"
+    assert lv["verified"] is True and lv["fix_status"] == "validated_by_regression_test"
+
+
+def test_regression_validated_but_non_active_lesson_is_not_current_validated_guidance(db_session):
+    """A regression-validated lesson that is no longer active must not be surfaced as current,
+    validated guidance (requirement 5)."""
+    from app.models.mainai_execution import EngineeringLessonStatus
+
+    lesson = _record(
+        db_session, applies_to=[f"old-{uuid.uuid4().hex[:6]}"], affected_component="z",
+        confidence=EngineeringLessonConfidence.certain,
+        regression_test="tests/backend/test_old.py::test_regression",
+        verification_status="verified_by_regression_test",
+    )
+    db_session.refresh(lesson)
+    lesson.status = EngineeringLessonStatus.historical
+    db_session.commit()
+    s = summarize_integration_lesson(lesson)
+    assert s["status"] == "historical"
+    assert s["verified"] is False  # validated once, but no longer current guidance
 
 
 def test_obsolete_non_active_lesson_is_not_surfaced_as_current(db_session):
