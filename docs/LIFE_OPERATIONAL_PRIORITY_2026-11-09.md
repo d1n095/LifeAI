@@ -53,8 +53,8 @@ Each capability is classified with the project's own capability-reality vocabula
 | Class | Meaning here |
 |---|---|
 | **IMPLEMENTED (data+service)** | Durable schema + service functions exist and are committed to default; typically "no UI, not autonomously wired" by the module's own design. |
-| **TESTED** | Has committed backend tests exercising the service path (unit/integration), but not necessarily a real end-to-end production run. |
-| **OPERATIONAL** | Reachable and exercised through a real running path on behalf of the Founder. **Today: nothing is OPERATIONAL in production — default is unactivated, `first_cycle_go=false`.** |
+| **TESTED (local/reviewed)** | Has committed backend tests exercising the service path (unit/integration), typically against a local/CI Postgres with synthetic data. **A reviewed local test is NOT production readiness** — it proves a unit/path works in isolation, not that the full chain runs under real providers, real agents, and real CI. |
+| **OPERATIONAL** | Reachable and exercised through a real running path on behalf of the Founder. **Today: nothing is OPERATIONAL in production — default is unactivated, `first_cycle_go=false`, and the complete autonomous coordination chain is unverified end-to-end (§4.a).** |
 | **BLOCKED** | Built but gated behind an unmet dependency (a merge, an authorization, a provider activation). |
 | **FUTURE** | Deliberately deferred; a named limitation, not a prohibition (per each module's "Explicitly deferred layers"). |
 
@@ -119,38 +119,55 @@ about it.
   `app.mainai_executive.priority` / `missing_piece` exist as the wiring seam.
 
 ### Capability 6 — Track current GitHub branches, PRs, reviews, CI, agent activity
-- **Reuse:** `app.integrations.github_client` (real client: `get_ref`, `get_pull_request`,
-  `list_pull_requests_for_head`, `list_check_runs`, branch/blob/tree/commit/PR create+update,
-  `commit_multiple_files`), the GitHub-fed operating cycle (PR #338,
+- **Reuse:** `app.integrations.github_client`, the GitHub-fed operating cycle (PR #338,
   `claude/coordination-operating-cycle-github-fed`), `app.agent_coordination.runtime_view`.
-- **Status:** IMPLEMENTED (data+service) + TESTED (client + coordination). **BLOCKED** at the
-  operational layer: the read-only-GitHub-intake operating cycle is PR #338 (open, stacked on
-  #314) and the authorized-dispatch step is PR #339 — neither merged.
-- **Gap:** activation only; the client and cycle exist. (`github_client.is_configured()` means a
-  token is a deploy-time config step, not a code gap.)
+- **Status:** PARTIAL (data+service) + TESTED (local). **Correction (2026-11-09): this needs
+  additional *read* capabilities, not activation alone.** The current client
+  (`backend/app/integrations/github_client.py`) is *write/targeted-read* oriented: it has
+  `get_ref`, `get_pull_request(number)`, `list_pull_requests_for_head(head, base)` (head-scoped,
+  not repo-wide), `list_check_runs(ref)`, `get_commit`, plus branch/blob/tree/commit/PR
+  create+update. It **cannot comprehensively discover**: it has no list-all-branches, no
+  list-all-open-PRs (only head-scoped), no PR-**reviews** listing, no **workflow-runs** listing
+  (only check-runs by ref), and no **agent-session** discovery. "Track GitHub activity" therefore
+  requires *new read methods on the client*, then wiring the operating cycle (#338/#339) — not
+  activation of an already-complete capability.
+- **Gap:** (a) client read-surface expansion (branches/open-PRs/reviews/workflow-runs/agent
+  sessions); (b) merge + activation of the operating cycle. A token via
+  `github_client.is_configured()` is a config step, but it is **not** the whole gap.
 
 ### Capability 7 — Communicate with authorized dev agents via verified APIs/CLI
 - **Reuse:** `app.agent_coordination` (adapters for Claude Code / Cursor Agent / Codex;
   `adapter_availability()` real reachability; `dispatch.py`, `execution_control.py`,
   `routing.py`), `app.workforce` (Stage-T contracts over coordination + spend + egress).
-- **Status:** IMPLEMENTED (data+service) + TESTED (adapter availability, routing, dispatch
-  bookkeeping). **BLOCKED** at operational dispatch: real dispatch is PR #339 (durable
-  `WAITING_FOR_PROVIDER` fallback) and workforce activation gates (`app.workforce.activation_gates`)
-  remain closed.
-- **Gap:** activation + a configured provider; the integration surface exists and never mints a
-  second queue (`agent_coordination.service` docstring).
+- **Status:** PARTIAL (data+service) + TESTED (local: adapter availability, routing, dispatch
+  bookkeeping). **Correction (2026-11-09): the agent *runtime* is not fully operational.** The
+  concrete real adapter `LocalCLIAdapter` (`backend/app/agent_coordination/adapters.py:158`) is,
+  by its own design, **bounded, single-shot and non-interactive**: `send_instruction()` and
+  `resume()` raise `NotImplementedError`, `control_capabilities()` reports only
+  `supports_cancel=True`, and `collect_result()` returns *output references* — byte-**lengths** of
+  stdout/stderr plus an exit-code summary — **not usable agent results** (the actual agent output
+  is not returned). The richer `AgentAdapter` Protocol (interactive messaging/resume/structured
+  results) is declared but **not implemented** by the real adapter; the only other adapter is
+  `NotConfiguredAdapter` (fail-closed). **BLOCKED** at operational dispatch (PR #339) and
+  workforce activation gates (`app.workforce.activation_gates`).
+- **Gap:** (a) an interactive/result-returning agent runtime beyond single-shot subprocess
+  capture; (b) activation + a configured provider. The bookkeeping never mints a second queue
+  (`agent_coordination.service` docstring) — that part is sound.
 
 ### Capability 8 — Assign work, receive results, coordinate independent verification
 - **Reuse:** `app.mainai_execution` (GOAL→PLAN→DURABLE TASKS→EXECUTOR→VERIFY→**APPROVAL GATE**→
   FINAL REPORT; `approval.py`, `verify.py`, `recovery_*`), `app.workforce.verification` +
   `audit_receipt`, `app.mainai_executive.safe_composed_run`, the executive business workflow
   (PR #335) and model-backed workers (PR #336).
-- **Status:** IMPLEMENTED (data+service) + TESTED. Independent verification and a Founder-gated
-  approval step are **already first-class** in the schema, not an afterthought.
+- **Status:** IMPLEMENTED (data+service) + TESTED (local). Independent verification and a
+  Founder-gated approval step are **already first-class** in the schema, not an afterthought.
+  **Correction (2026-11-09):** because the agent runtime returns only output references
+  (capability 7) and no cycle has run end-to-end, "receive usable results" is **not yet real** —
+  the approval/verify schema exists but has not consumed a genuine agent result in a live run.
 - **Gap:** real model-backed execution (PR #336, depends on #335) is unmerged; provider activation
-  disabled. Independent *review* of results is today performed by separate agents/humans (Copilot/
-  Codex) — the directive's "independent review" requirement is met process-wise, not yet
-  automated.
+  disabled; usable-result capture depends on the capability-7 runtime gap. Independent *review* of
+  results is today performed by separate agents/humans (Copilot/Codex) — the directive's
+  "independent review" requirement is met process-wise, not yet automated.
 
 ### Capability 9 — Maintain continuity across sessions without Founder micromanagement
 - **Reuse:** `app.mainai_executive.continuity` + `multi_session`, `app.founder_memory`,
@@ -203,17 +220,65 @@ architecture"), the real gaps are:
 
 1. **Nothing is merged.** Default `64c07d5b` carries the foundations but none of the activation/
    wiring PRs. This is the dominant blocker.
-2. **Enforced session-start Context Bundle** (capabilities #2/#9): the design exists
-   (`FOUNDER_KNOWLEDGE_BOOTSTRAP.md` §3) but `scripts/build_context_bundle.py` is unwritten. This
-   is the one small *new* artifact worth building — and it is glue, not a subsystem.
-3. **Provider activation + spend grant** remain deliberately off (`first_cycle_go=false`); every
+2. **GitHub read-surface** (capability #6): the client needs *new read methods*
+   (list-all-branches / open-PRs / PR-reviews / workflow-runs / agent-sessions) before Life can
+   comprehensively track project activity. This is small, bounded code — not activation, not new
+   architecture — and would be its own reviewed PR.
+3. **Interactive/result-returning agent runtime** (capability #7/#8): `LocalCLIAdapter` is
+   single-shot and returns output *references*, not usable results. A runtime that returns real
+   agent output (and optionally supports mid-run messaging/resume) is needed before "receive
+   usable results" is real. Design/ownership TBD — do not build here.
+4. **Session-start context assembly** (capabilities #2/#9): an enforced, versioned,
+   source-grounded session context is needed. **Per Mission 2 (2026-11-09) this is now a
+   dependency-verified *design* that reuses existing canonical sources
+   (`founder_memory`/`inspectable_memory`/`active_context`/`memory_threads`/executive continuity/
+   project-status) — NOT the older `founder_vault/index.yaml` script, which depends on a
+   `founder_vault/` tree absent on default.** See
+   `docs/LIFE_SESSION_CONTEXT_ASSEMBLY_DESIGN_2026-11-09.md`. Implementation deferred until
+   prerequisites + owner are confirmed.
+5. **Provider activation + spend grant** remain deliberately off (`first_cycle_go=false`); every
    execution/dispatch capability is BLOCKED on a Founder-authorized, egress-gated, spend-bounded
-   activation, which is a decision, not code.
-4. **Machine-readable project-intent graph** (capability #3) is partial — entities/intents exist,
+   activation — a decision, not code.
+6. **Machine-readable project-intent graph** (capability #3) is partial — entities/intents exist,
    a single linked vision graph does not. Deferrable; not a first-start blocker.
 
-None of these requires new product architecture. Items 1 and 3 are Founder/sequencing decisions;
-item 2 is a small, source-grounded script; item 4 is future.
+None of these requires new product architecture. Items 1 and 5 are Founder/sequencing decisions;
+items 2–4 are bounded, reviewed, source-grounded increments (and item 4 is design-only for now);
+item 6 is future.
+
+### 4.a The complete autonomous coordination chain is unverified end-to-end
+No run has exercised Founder instruction → retrieval → understanding → priorities → **real agent
+dispatch** → **usable results** → CI/review correlation → persisted continuity → next-step in one
+continuous, authorized pass. Each *stage* has local tests; the *whole chain under real providers,
+real agents and real CI* has never run. Classifying any stage as OPERATIONAL is therefore
+premature until that end-to-end proof exists (and it cannot, pre-activation, with
+`first_cycle_go=false`).
+
+### 4.b Security blockers that gate a safe first start (not fixed by this doc)
+- **Database-role bootstrap password is unvalidated.** `backend/scripts/security/ensure_app_role.py`
+  (`main()`/`derive_only()`) uses `MAINAI_APP_PASSWORD` verbatim to `CREATE/ALTER ROLE mainai_app`
+  with **no** empty/placeholder/weakness check — so `.env.example`'s `MAINAI_APP_PASSWORD=change-me`
+  would provision the production app role with a publicly-known password. PR #371 does **not** cover
+  this (it is an app-startup setting guard; this is a pre-boot bootstrap script reading
+  `os.environ`). **Owned as a separate P1 candidate (2026-11-09) — see that PR.**
+- **Non-durable external-disclosure receipts.** The external-AI disclosure ledger
+  (`provider_disclosure_events`) has a durability gap in the Codex-owned egress/receipt code
+  path. **Codex-owned — recorded here as a known blocker, not modified by this work** (see the
+  readiness matrix FS-7).
+
+### 4.c Exact-SHA dependency ownership (future proposal vs authorized implementation)
+| PR | Head SHA (verify at review) | Owner | Status | Future proposal or authorized? |
+|---|---|---|---|---|
+| #340 Blueprint draft (0070) | `claude/founder-alpha-blueprint-draft` tip | Claude (stacked on #333) | DRAFT, unmerged | **Future proposal machinery** — not authorized to run |
+| #338 GitHub-fed operating cycle | `claude/coordination-operating-cycle-github-fed` tip | Claude (stacked on #314) | OPEN, unmerged | Authorized *design*, not activated |
+| #339 authorized dispatch | `claude/coordination-authorized-dispatch` tip | Claude (stacked on #338) | OPEN, unmerged | Authorized *design*, not activated |
+| #335→#336 workers | `claude/mainai-executive-business-workflow` / `...model-backed-workers` tips | Claude | OPEN, unmerged | Authorized *design*, not activated |
+| #360 / #361 Blueprint egress remediation | `codex/...` / `copilot/...` tips | **Codex / Copilot** | DRAFT, unmerged | Not Claude-owned — do not modify |
+| #371 / #372 security P1s | `84fcb9f1` / `8a155c30` | Claude | DRAFT, unmerged | Authorized fix, review-pending |
+
+**Rule applied:** a draft PR is a *future proposal*; nothing above is authorized to execute on
+the Founder's behalf until merged behind independent review and explicitly activated. Head SHAs
+drift as branches update — resolve the live tip at review time (`gh pr view <n> --json headRefOid`).
 
 ---
 
