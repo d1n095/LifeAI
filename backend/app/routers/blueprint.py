@@ -37,6 +37,7 @@ from sqlalchemy.orm import Session
 from app.blueprint.service import (
     BlueprintError,
     approve_blueprint_draft,
+    evaluate_blueprint_readiness,
     generate_blueprint_draft,
     get_blueprint_draft,
     list_blueprint_drafts,
@@ -361,6 +362,21 @@ def get_draft(
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Blueprint-utkast hittades inte.")
     return _to_out(row)
+
+
+@router.get("/drafts/{draft_id}/readiness")
+def draft_readiness(
+    draft_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+) -> dict:
+    """Founder-visible readiness report: READY / NEEDS_INFORMATION / STALE / BLOCKED with
+    per-source evidence and reasons. READ-ONLY — it authorizes nothing; approval re-enforces the
+    same source-readiness invariant server-side (see approve_blueprint_draft)."""
+    row = get_blueprint_draft(db, owner_id=user.id, draft_id=draft_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Blueprint-utkast hittades inte.")
+    return evaluate_blueprint_readiness(db, owner_id=user.id, draft=row)
 
 
 @router.post("/drafts/{draft_id}/regenerate", response_model=BlueprintDraftOut, status_code=status.HTTP_201_CREATED)

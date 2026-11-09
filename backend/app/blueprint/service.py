@@ -89,8 +89,19 @@ def generate_blueprint_draft(
         raise BlueprintError("synthesizer produced no draft text")
 
     source_document_ids = sorted({str(h["document_id"]) for h in hits})
+    # Grounding BASELINE: capture each source's content identity (checksum) and truth-status AT
+    # generation time, so a later readiness/approval check can tell a STATUS change
+    # (active -> historical) apart from a CONTENT/VERSION change (checksum differs) — both
+    # invalidate the original grounding. Additive to source_refs (a JSON column); no schema change.
+    _baseline = _source_baselines(db, source_document_ids)
     source_refs = [
-        {"document_id": str(h["document_id"]), "similarity": h.get("similarity"), "excerpt": _excerpt(h)}
+        {
+            "document_id": str(h["document_id"]),
+            "similarity": h.get("similarity"),
+            "excerpt": _excerpt(h),
+            "source_checksum": _baseline.get(str(h["document_id"]), {}).get("checksum"),
+            "source_status_at_generation": _baseline.get(str(h["document_id"]), {}).get("status"),
+        }
         for h in hits
     ]
     provenance = {
@@ -153,6 +164,13 @@ def approve_blueprint_draft(
 ) -> BlueprintDraft:
     """Explicit Founder approval — the ONLY path from 'draft' to 'approved'.
 
+    Source-readiness is ENFORCED here, server-side and fail-closed: inside the privileged
+    transaction the draft row is locked FOR UPDATE and its grounding evidence is re-checked FRESH
+    (status change OR content/checksum change OR missing/unauthorized source). A STALE/BLOCKED
+    draft is refused and nothing is approved. This closes the gap where staleness was detectable
+    (`blueprint_source_staleness` / `evaluate_blueprint_readiness`) but not prevented — a readiness
+    report alone never authorizes.
+
     Integrity is enforced in the DATABASE, not here: approval runs through the owner-scoped,
     transaction-safe SECURITY DEFINER function `blueprint_approve_draft` (migrations 0071/0072),
     which takes a row lock (`FOR UPDATE`) and re-checks status inside the lock (concurrent
@@ -189,6 +207,81 @@ def approve_blueprint_draft(
                 _sa_text("SELECT set_config('app.current_user_id', :uid, true)"),
                 {"uid": str(owner_id)},
             )
+            # SERVER-ENFORCED, TOCTOU-SAFE SOURCE-READINESS GATE (fail closed). In ONE privileged
+            # transaction:
+            #  (a) lock the draft FOR UPDATE and read its CANONICAL grounding (source ids +
+            #      source_refs baseline + provenance) FROM THE LOCKED ROW — never from ORM state
+            #      read on a separate session (requirement 1);
+            #  (b) lock every referenced document FOR SHARE, in deterministic id order, which blocks
+            #      any concurrent UPDATE/DELETE of those rows (FOR SHARE conflicts with FOR NO KEY
+            #      UPDATE and FOR UPDATE) until this transaction commits — so the evidence cannot
+            #      change between validation and the approval commit (requirements 2/3);
+            #  (c) re-validate each source UNDER that lock, failing closed on a missing baseline,
+            #      missing/unauthorized/inconsistent/invalid source, an empty source set, or a
+            #      status/content change (requirements 4/5/6/7).
+            locked = conn.execute(
+                _sa_text(
+                    "SELECT source_document_ids, source_refs, provenance FROM blueprint_drafts "
+                    "WHERE id = :id AND owner_id = :owner AND status = 'draft' FOR UPDATE"
+                ),
+                {"id": str(draft_id), "owner": str(owner_id)},
+            ).mappings().first()
+            if locked is None:
+                raise BlueprintError(
+                    f"blueprint draft {draft_id} is not an approvable draft for this owner "
+                    "(missing, not owned, or already decided)"
+                )
+            source_ids = [str(s) for s in (locked["source_document_ids"] or [])]
+            baseline_by_id = {
+                str(r.get("document_id")): r
+                for r in (locked["source_refs"] or [])
+                if isinstance(r, dict) and r.get("document_id") is not None
+            }
+            # A draft must NEVER be approvable with no grounding sources (requirement 6).
+            if not source_ids:
+                raise BlueprintError(
+                    "approval_blocked_blocked: Blueprint has no grounding source documents — "
+                    "refusing to approve an ungrounded draft"
+                )
+            severities: list[str | None] = []
+            reasons: list[str] = []
+            # Deterministic lock-acquisition order avoids deadlocks between concurrent approvals.
+            for sid in sorted(source_ids):
+                baseline = baseline_by_id.get(sid)
+                cur = None
+                # Only take the FOR SHARE lock for a source whose baseline is itself valid; an
+                # inconsistent/missing-baseline source is already blocked (classified below).
+                if baseline is not None and baseline.get("source_checksum") is not None:
+                    cur = conn.execute(
+                        _sa_text(
+                            "SELECT uploaded_by::text AS uploaded_by, "
+                            "active_truth_status::text AS status, checksum "
+                            "FROM documents WHERE id = CAST(:id AS uuid) FOR SHARE"
+                        ),
+                        {"id": sid},
+                    ).mappings().first()
+                present = cur is not None
+                authorized = bool(present and cur["uploaded_by"] == str(owner_id))
+                severity, reason = _classify_source(
+                    baseline_present=baseline is not None,
+                    baseline_checksum=(baseline or {}).get("source_checksum"),
+                    baseline_status=(baseline or {}).get("source_status_at_generation"),
+                    present=present,
+                    authorized=authorized,
+                    status=cur["status"] if present else None,
+                    current_checksum=cur["checksum"] if present else None,
+                )
+                severities.append(severity)
+                if reason:
+                    reasons.append(f"{sid}:{reason}")
+            open_questions = list((locked["provenance"] or {}).get("open_questions") or [])
+            readiness = _overall_readiness(severities, bool(open_questions))
+            if readiness in APPROVAL_BLOCKING_READINESS:
+                raise BlueprintError(
+                    f"approval_blocked_{readiness.lower()}: Blueprint evidence is not approvable "
+                    f"({readiness}); refusing to approve on stale/missing/unauthorized sources: "
+                    + (", ".join(reasons) or "see readiness report")
+                )
             conn.execute(
                 _sa_text("SELECT blueprint_approve_draft(:draft_id, :approved_by)"),
                 {"draft_id": str(draft_id), "approved_by": approved_by},
@@ -257,4 +350,157 @@ def blueprint_source_staleness(
         "is_stale": bool(details),
         "stale_source_ids": [d["document_id"] for d in details],
         "details": details,
+    }
+
+
+# --- Blueprint readiness + fail-closed approval safety -----------------------------------------
+
+READINESS_READY = "READY"
+READINESS_NEEDS_INFORMATION = "NEEDS_INFORMATION"
+READINESS_STALE = "STALE"
+READINESS_BLOCKED = "BLOCKED"
+
+# Approval FAILS CLOSED on these: stale/missing/unauthorized EVIDENCE. NEEDS_INFORMATION
+# (unanswered open questions) is advisory — the Founder may knowingly approve despite it — so it
+# does NOT block approval. READY/NEEDS_INFORMATION are approvable; STALE/BLOCKED are not.
+APPROVAL_BLOCKING_READINESS = frozenset({READINESS_STALE, READINESS_BLOCKED})
+
+
+def _source_baselines(db: Session, source_document_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Current (checksum, truth-status) of each source — captured at generation as the grounding
+    baseline. Owner-agnostic read (the caller already owns these ids); missing docs are omitted."""
+    from app.models.document import Document
+
+    out: dict[str, dict[str, Any]] = {}
+    for sid in source_document_ids:
+        try:
+            doc = db.get(Document, uuid.UUID(str(sid)))
+        except (ValueError, TypeError):
+            continue
+        if doc is not None:
+            out[str(sid)] = {
+                "checksum": getattr(doc, "checksum", None),
+                "status": getattr(doc.active_truth_status, "value", str(doc.active_truth_status)),
+            }
+    return out
+
+
+def _classify_source(
+    *,
+    baseline_present: bool,
+    baseline_checksum,
+    baseline_status: str | None,
+    present: bool,
+    authorized: bool,
+    status: str | None,
+    current_checksum,
+) -> tuple[str | None, str | None]:
+    """Severity of one source for readiness: (None | 'stale' | 'blocked', reason). FAILS CLOSED.
+
+    Evaluated against the grounding BASELINE recorded at generation:
+    - no matching source_ref baseline for a source id  -> blocked (inconsistent_ref);
+    - a baseline with no recorded checksum              -> blocked (missing_baseline);
+    - grounded on a source already non-active at generation -> stale (grounded_on_<status>);
+    - source now missing / not the owner's              -> blocked (missing / unauthorized);
+    - source now non-active                             -> stale (status:<status>);
+    - content/version changed (checksum differs)        -> stale (content_changed).
+    Distinguishes a STATUS change from a CONTENT/VERSION change — both invalidate the grounding."""
+    from app.rag.trust import NON_ACTIVE_STATUSES
+
+    if not baseline_present:
+        return "blocked", "inconsistent_ref"
+    if baseline_checksum is None:
+        return "blocked", "missing_baseline"
+    if baseline_status in NON_ACTIVE_STATUSES:
+        return "stale", f"grounded_on_{baseline_status}"
+    if not present:
+        return "blocked", "missing"
+    if not authorized:
+        return "blocked", "unauthorized"
+    if status in NON_ACTIVE_STATUSES:
+        return "stale", f"status:{status}"
+    if current_checksum is None or baseline_checksum != current_checksum:
+        return "stale", "content_changed"
+    return None, None
+
+
+def _overall_readiness(source_severities: list[str | None], has_open_questions: bool) -> str:
+    if any(s == "blocked" for s in source_severities):
+        return READINESS_BLOCKED
+    if any(s == "stale" for s in source_severities):
+        return READINESS_STALE
+    if has_open_questions:
+        return READINESS_NEEDS_INFORMATION
+    return READINESS_READY
+
+
+def evaluate_blueprint_readiness(
+    db: Session, *, owner_id: uuid.UUID, draft: BlueprintDraft
+) -> dict[str, Any]:
+    """Founder-visible readiness REPORT: classifies a draft READY / NEEDS_INFORMATION / STALE /
+    BLOCKED from the CURRENT state of its grounding sources (vs the baseline recorded at
+    generation) plus its open questions, with per-source evidence references and reasons.
+
+    READ-ONLY and NON-AUTHORIZING: a READY result grants nothing — approval is a separate,
+    server-enforced, Founder-only action (`approve_blueprint_draft`), which re-checks this
+    invariant inside its own locked transaction. This report is for display/decision support.
+    """
+    from app.models.document import Document
+
+    baseline_by_id = {
+        str(r.get("document_id")): r
+        for r in (draft.source_refs or [])
+        if isinstance(r, dict) and r.get("document_id") is not None
+    }
+    source_ids = [str(s) for s in (draft.source_document_ids or [])]
+    sources_report: list[dict[str, Any]] = []
+    severities: list[str | None] = []
+    # A draft with NO grounding sources can never be READY (requirement 6).
+    if not source_ids:
+        severities.append("blocked")
+        sources_report.append({"document_id": None, "severity": "blocked", "reason": "no_grounding_sources"})
+    for sid in source_ids:
+        baseline = baseline_by_id.get(sid)
+        try:
+            doc = db.get(Document, uuid.UUID(sid))
+        except (ValueError, TypeError):
+            doc = None
+        present = doc is not None
+        authorized = bool(present and doc.uploaded_by == owner_id)
+        status = getattr(doc.active_truth_status, "value", str(doc.active_truth_status)) if present else None
+        current_checksum = getattr(doc, "checksum", None) if present else None
+        severity, reason = _classify_source(
+            baseline_present=baseline is not None,
+            baseline_checksum=(baseline or {}).get("source_checksum"),
+            baseline_status=(baseline or {}).get("source_status_at_generation"),
+            present=present,
+            authorized=authorized,
+            status=status,
+            current_checksum=current_checksum,
+        )
+        severities.append(severity)
+        sources_report.append(
+            {
+                "document_id": sid,
+                "severity": severity,
+                "reason": reason,
+                "current_status": status,
+                "content_changed": reason == "content_changed",
+                "present": present,
+                "authorized": authorized,
+            }
+        )
+
+    open_questions = list((draft.provenance or {}).get("open_questions") or [])
+    readiness = _overall_readiness(severities, bool(open_questions))
+    return {
+        "draft_id": str(draft.id),
+        "title": draft.title,
+        "version": draft.version,
+        "status": draft.status,
+        "readiness": readiness,
+        "blocks_approval": readiness in APPROVAL_BLOCKING_READINESS,
+        "sources": sources_report,
+        "open_questions": open_questions,
+        "reasons": [f"{s['document_id']}: {s['reason']}" for s in sources_report if s["reason"]],
     }
