@@ -22,7 +22,7 @@ sektioner nedan är inte en fullständig aktuell PR-lista.
 | `claude/provider-egress-ownerless-callers` | [#372](https://github.com/d1n095/LifeAI/pull/372) | **Öppen, draft; oberoende review FAIL** | default (`64c07d5`) | Claude: ownerless-provider-egress. Current SHA `8a155c3`; disclosure receipt rollback durability remains unresolved. |
 | `claude/life-operational-priority-readiness-2026-11-09` | [#373](https://github.com/d1n095/LifeAI/pull/373) | **Öppen, draft** | default (`64c07d5`) | Claude: operational/readiness docs. Current head `18f378a`; Copilot published a documentation consistency FAIL review on the prior reviewed head; the new head requires re-review. |
 | `claude/db-bootstrap-password-guard` | [#374](https://github.com/d1n095/LifeAI/pull/374) | **Öppen, draft; independent review pending** | default (`64c07d5`) | Claude: database-role password guard. Current SHA `235ce1d`. |
-| `copilot/github-operations-center` | [#376](https://github.com/d1n095/LifeAI/pull/376) | **Öppen, draft; CI queued** | default `64c07d5` (`24ae430`) | Copilot: read-only project-wide GitHub observations, Founder operations view, and decision-completeness evidence projection. No dependency on #338/#339; future consumers may use its stable API. |
+| `copilot/github-operations-center` | [#376](https://github.com/d1n095/LifeAI/pull/376) | **Öppen, draft** | default `64c07d5` | Copilot: read-only project-wide GitHub observations, Founder operations view, and decision-completeness evidence projection. No dependency on #338/#339; future consumers may use its stable API. |
 
 **Rekommenderad ordning / väntande beroenden:** #338 före #339; håll dem orörda tills respektive
 ägare och beroende tillåter ändring. #360/#363 ligger på den frysta Founder Alpha-stackens
