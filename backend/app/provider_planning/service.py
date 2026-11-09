@@ -112,33 +112,42 @@ class RegistryPlanningAdapter:
         self.model = model
 
     async def propose(self, request_payload, *, timeout_seconds, max_output_bytes):
-        from app.providers.registry import chat_with_fallback, get_provider
+        from app.providers.registry import get_provider
 
         serialized = json.dumps(request_payload, sort_keys=True, separators=(",", ":"))
         messages = [
             Message(role="system", content=PROVIDER_SYSTEM_PROMPT),
             Message(role="user", content=serialized),
         ]
-        if self.provider_name:
-            if not self.model:
-                raise ProviderError(
-                    "An explicit planning provider requires an explicit model.",
-                    category="not_configured",
-                )
-            provider = get_provider(self.provider_name)
-            result = await provider.chat(
-                messages,
-                model=self.model,
-                timeout=timeout_seconds,
-                max_tokens=max_output_bytes // 4,
+        # Egress-safety invariant: this adapter performs a raw, single-provider external call
+        # and does NOT run the egress gate itself. That is safe ONLY because its sole caller,
+        # plan_with_provider(), runs enforce_egress_policy() for exactly this (provider, model)
+        # immediately before calling propose() and passes the already-sanitized payload in.
+        # That pre-gate binds the authorization to one explicit provider/model, so this call
+        # must use that same explicit provider/model and nothing else.
+        #
+        # The previous `else` branch here fell back to chat_with_fallback() with no owner_id:
+        # that both skipped the egress gate entirely AND could hop to a DIFFERENT provider than
+        # the one plan_with_provider() authorized — an unguarded, provider-hopping disclosure
+        # path (external fallback must be evaluated separately for every attempt, which an
+        # ungated fallback does not do). It is unreachable via plan_with_provider() today
+        # (planned_provider=None is refused before propose()), so removing it changes no working
+        # behavior; we fail closed instead of leaving a latent bypass. A caller that genuinely
+        # wants multi-provider fallback must use providers.registry.chat_with_fallback() with an
+        # owner_id so each attempt is egress-gated.
+        if not self.provider_name or not self.model:
+            raise ProviderError(
+                "RegistryPlanningAdapter requires an explicit, egress-authorized provider and "
+                "model; it does not perform ungated provider fallback.",
+                category="not_configured",
             )
-        else:
-            result, _attempted = await chat_with_fallback(
-                self.db,
-                messages,
-                timeout=timeout_seconds,
-                max_tokens=max_output_bytes // 4,
-            )
+        provider = get_provider(self.provider_name)
+        result = await provider.chat(
+            messages,
+            model=self.model,
+            timeout=timeout_seconds,
+            max_tokens=max_output_bytes // 4,
+        )
         return ProviderResponse(
             content=result.content,
             provider=result.provider,

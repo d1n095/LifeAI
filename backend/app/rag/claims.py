@@ -23,6 +23,7 @@ from app.models.knowledge_claim import ClaimConfidence, ClaimStatus, ClaimType, 
 from app.models.knowledge_version import KnowledgeVersion
 from app.models.memory_source_unit import SnapshotStatus
 from app.project_entities import record_interpretation_proposal
+from app.egress_policy import EgressDeniedError
 from app.providers.base import Message, ProviderError
 from app.providers.registry import chat_with_fallback
 from app.rag.memory_source import DocumentSourceLocator, get_or_create_memory_source_unit
@@ -248,7 +249,31 @@ async def extract_claims_for_document(
             Message(role="user", content=chunk.text[:4000]),
         ]
         try:
-            result, _ = await chat_with_fallback(db, messages)
+            # Owner-aware egress gate (Life Vault / External-AI Egress Control): the chunk text
+            # below is the owner's real document content, so it must pass through
+            # enforce_egress_policy() before any external provider sees it. Passing owner_id is
+            # what activates the gate (default-deny on NEVER_EGRESS/private-key content, secret
+            # redaction, one disclosure-ledger row per attempt, re-evaluated per fallback
+            # provider). Before this, the call omitted owner_id and the gate was skipped
+            # entirely — protected content reached external providers unaudited.
+            result, _ = await chat_with_fallback(
+                db,
+                messages,
+                owner_id=owner_id,
+                purpose="claim_extraction",
+                requested_by="rag.claims.extract_claims_for_document",
+            )
+        except EgressDeniedError:
+            # Fail closed: the owner's egress policy refused this chunk's content. Never send
+            # it. Skip only this chunk — the same resilience contract as a provider error — and
+            # rely on the durable "denied" disclosure-ledger row the gate already wrote.
+            logger.info(
+                "Claim extraction skipped one chunk for document %s (owner %s): egress policy "
+                "denied outbound disclosure.",
+                document.id,
+                owner_id,
+            )
+            continue
         except ProviderError:
             continue
 
@@ -401,7 +426,32 @@ async def backfill_claim_types(
             Message(role="user", content=json.dumps([c.claim_text for c in candidates])),
         ]
         try:
-            chat_result, _ = await chat_with_fallback(db, messages)
+            # Owner-aware egress gate: the payload above is the owner's real claim text, so it
+            # must pass through enforce_egress_policy() before any external provider. Passing
+            # owner_id activates the gate (see extract_claims_for_document for the full
+            # rationale); before this the call omitted it and backfill disclosed claim text to
+            # external providers unaudited.
+            chat_result, _ = await chat_with_fallback(
+                db,
+                messages,
+                owner_id=owner_id,
+                purpose="claim_type_backfill",
+                requested_by="rag.claims.backfill_claim_types",
+            )
+        except EgressDeniedError:
+            # Fail closed: refuse to disclose this batch's claim text. Treat it like a failed
+            # batch (excluded from the rest of THIS run so it isn't re-queried in a tight loop);
+            # the gate already wrote a durable "denied" disclosure-ledger row.
+            logger.info(
+                "Claim-type backfill skipped a batch of %d claim(s) for owner %s: egress policy "
+                "denied outbound disclosure.",
+                len(candidates),
+                owner_id,
+            )
+            result.failed += len(candidates)
+            failed_ids.update(c.id for c in candidates)
+            batches_done += 1
+            continue
         except ProviderError:
             result.failed += len(candidates)
             failed_ids.update(c.id for c in candidates)
