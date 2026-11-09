@@ -87,6 +87,113 @@ def test_placeholder_secret_check_passes_with_real_values(monkeypatch):
     main_module._check_no_placeholder_secrets()  # must not raise
 
 
+# --- Regression coverage for the production secret-validation bypass -------------------------
+# The pre-fix guard compared only against the config.py default string
+# ("change-me-in-production"), but the committed .env.example ships SECRET_KEY=change-me and
+# FOUNDER_PASSWORD=change-me. An operator who copied .env.example and set a real FOUNDER_EMAIL
+# booted production with a publicly-known SECRET_KEY and Founder password. These table-driven
+# tests pin the full known-placeholder denylist, empty/weak values, valid settings, and the
+# invariant that no secret value is ever echoed into the (log-bound) error message.
+
+# A helper to set a fully-valid production secret baseline, then let each test override.
+def _set_valid_production_baseline(monkeypatch):
+    monkeypatch.setattr(main_module.settings, "environment", "production")
+    monkeypatch.setattr(main_module.settings, "secret_key", "a-real-generated-secret-9f3b2c")
+    monkeypatch.setattr(main_module.settings, "founder_password", "ARealFounderPassword123!")
+    monkeypatch.setattr(main_module.settings, "founder_email", "real-founder@example.com")
+
+
+# Every value app/providers/base.py's denylist treats as a placeholder, plus the bracket
+# template conventions — each must be rejected for BOTH production secret fields.
+_KNOWN_PLACEHOLDER_VALUES = [
+    "change-me",            # the exact value .env.example ships — the reported P1
+    "CHANGE-ME",            # case-insensitive
+    "changeme",
+    "change_me",
+    "change-me-in-production",
+    "your-api-key-here",
+    "replace-me",
+    "<your-secret-here>",   # angle-bracket template
+    "{{SECRET_KEY}}",       # brace template
+]
+
+
+@pytest.mark.parametrize("field", ["secret_key", "founder_password"])
+@pytest.mark.parametrize("placeholder", _KNOWN_PLACEHOLDER_VALUES)
+def test_known_placeholder_secrets_block_production_startup(monkeypatch, field, placeholder):
+    _set_valid_production_baseline(monkeypatch)
+    monkeypatch.setattr(main_module.settings, field, placeholder)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        main_module._check_no_placeholder_secrets()
+
+    message = str(exc_info.value)
+    assert field.upper() in message
+    # Never leak the secret value itself into a log-bound startup error.
+    assert placeholder not in message
+
+
+@pytest.mark.parametrize("field", ["secret_key", "founder_password"])
+def test_empty_production_secret_blocks_startup(monkeypatch, field):
+    _set_valid_production_baseline(monkeypatch)
+    monkeypatch.setattr(main_module.settings, field, "")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        main_module._check_no_placeholder_secrets()
+    assert field.upper() in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "field,too_short",
+    [
+        ("secret_key", "x" * (main_module._MIN_SECRET_KEY_LENGTH - 1)),
+        ("founder_password", "x" * (main_module._MIN_FOUNDER_PASSWORD_LENGTH - 1)),
+    ],
+)
+def test_too_short_production_secret_blocks_startup(monkeypatch, field, too_short):
+    _set_valid_production_baseline(monkeypatch)
+    monkeypatch.setattr(main_module.settings, field, too_short)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        main_module._check_no_placeholder_secrets()
+    message = str(exc_info.value)
+    assert field.upper() in message
+    assert too_short not in message  # weak value must not be logged either
+
+
+def test_reported_env_example_scenario_blocks_startup(monkeypatch):
+    """The exact reported path: operator copies .env.example (change-me secrets), sets a real
+    Founder email, deploys to production. Pre-fix this booted clean; it must now fail closed."""
+    monkeypatch.setattr(main_module.settings, "environment", "production")
+    monkeypatch.setattr(main_module.settings, "secret_key", "change-me")
+    monkeypatch.setattr(main_module.settings, "founder_password", "change-me")
+    monkeypatch.setattr(main_module.settings, "founder_email", "real-founder@example.com")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        main_module._check_no_placeholder_secrets()
+    message = str(exc_info.value)
+    assert "SECRET_KEY" in message
+    assert "FOUNDER_PASSWORD" in message
+    assert "change-me" not in message
+
+
+@pytest.mark.parametrize(
+    "secret_key,founder_password,founder_email",
+    [
+        ("a-real-generated-secret", "ARealFounderPassword123!", "real-founder@example.com"),
+        ("S" * main_module._MIN_SECRET_KEY_LENGTH, "P" * main_module._MIN_FOUNDER_PASSWORD_LENGTH, "ops@company.io"),
+        ("7Qm!pX2v9Lr4Zt8KwNc", "correct horse battery staple", "founder@my-real-domain.com"),
+    ],
+)
+def test_valid_production_settings_allow_startup(monkeypatch, secret_key, founder_password, founder_email):
+    monkeypatch.setattr(main_module.settings, "environment", "production")
+    monkeypatch.setattr(main_module.settings, "secret_key", secret_key)
+    monkeypatch.setattr(main_module.settings, "founder_password", founder_password)
+    monkeypatch.setattr(main_module.settings, "founder_email", founder_email)
+
+    main_module._check_no_placeholder_secrets()  # must not raise
+
+
 def test_cookie_security_check_rejects_insecure_cookies_in_production(monkeypatch):
     monkeypatch.setattr(main_module.settings, "cookie_secure", False)
     with pytest.raises(RuntimeError, match="COOKIE_SECURE"):

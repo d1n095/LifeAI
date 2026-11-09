@@ -252,25 +252,61 @@ def _warn_placeholder_provider_keys() -> None:
             )
 
 
+# Minimum lengths for the two production secrets that sign sessions / guard the single
+# full-access Founder account. Deliberately modest floors (not a cleverness heuristic): they
+# only reject obviously-too-weak values, never a real, unusually-shaped generated secret.
+# SECRET_KEY signs auth cookies/JWTs (HS256) — 16 chars is the low end of a usable signing
+# key; FOUNDER_PASSWORD is a human-set password for the one account with full MainAI access.
+_MIN_SECRET_KEY_LENGTH = 16
+_MIN_FOUNDER_PASSWORD_LENGTH = 12
+
+
 def _check_no_placeholder_secrets() -> None:
-    """Every one of these has an insecure, publicly-readable-in-this-repo default value —
-    fine for local dev (see docker-compose.yml), but if any of them is still that default
-    once ENVIRONMENT=production, the deployment is either misconfigured (an operator forgot
-    to set it in the Render dashboard) or, worse, an attacker who has read this file already
-    knows a working credential for the single account with full MainAI access. Fail loudly
-    at startup rather than silently accepting a knowable password."""
-    placeholder_fields = {
-        "SECRET_KEY": settings.secret_key == "change-me-in-production",
-        "FOUNDER_PASSWORD": settings.founder_password == "change-me-in-production",
-        "FOUNDER_EMAIL": settings.founder_email == "founder@lifeos.local",
-    }
-    still_default = [name for name, is_placeholder in placeholder_fields.items() if is_placeholder]
-    if still_default:
+    """Fail-closed production guard for the secrets that protect the single full-access
+    Founder account. Every one of these has an insecure, publicly-readable-in-this-repo
+    default — fine for local dev (see docker-compose.yml), but if any is still a placeholder
+    once ENVIRONMENT=production, the deployment is either misconfigured (an operator forgot to
+    set it in the Render dashboard) or, worse, an attacker who read this repo already knows a
+    working credential for the one account with full MainAI access.
+
+    The exact-string check this replaces (`== "change-me-in-production"`) had a real hole:
+    the config.py default is `change-me-in-production`, but the committed `.env.example`
+    ships `SECRET_KEY=change-me` / `FOUNDER_PASSWORD=change-me`. An operator who copied
+    `.env.example`, set a real FOUNDER_EMAIL (so the only placeholder the old guard still
+    caught no longer tripped), and deployed to production started up clean with a
+    publicly-known SECRET_KEY and Founder password. We now reject the WHOLE known-placeholder
+    denylist (app/providers/base.py's looks_like_placeholder_secret — `change-me`, `changeme`,
+    `change_me`, `<...>`/`{...}` templates, etc.), plus empty and obviously-too-short values.
+
+    Never raises or logs the secret VALUE — only the field name and the category of failure,
+    so this message is safe in Render's log stream. Fails loudly at startup rather than
+    silently accepting a knowable/weak credential."""
+    problems: list[str] = []
+
+    # Secrets: reject empty, any known placeholder (shared denylist), and too-short values.
+    for name, value, floor in (
+        ("SECRET_KEY", settings.secret_key, _MIN_SECRET_KEY_LENGTH),
+        ("FOUNDER_PASSWORD", settings.founder_password, _MIN_FOUNDER_PASSWORD_LENGTH),
+    ):
+        if not value:
+            problems.append(f"{name} (saknas/tomt)")
+        elif looks_like_placeholder_secret(value):
+            problems.append(f"{name} (känt platshållarvärde)")
+        elif len(value) < floor:
+            problems.append(f"{name} (för kort — minst {floor} tecken)")
+
+    # FOUNDER_EMAIL is not a secret, but leaving it at the built-in default means the Founder
+    # account was never actually provisioned for this deployment — still a misconfiguration
+    # that must block a production boot.
+    if settings.founder_email == "founder@lifeos.local":
+        problems.append("FOUNDER_EMAIL (fortfarande standardvärdet)")
+
+    if problems:
         raise RuntimeError(
-            f"Följande miljövariabler är fortfarande satta till sina osäkra/oanvändbara "
-            f"standardvärden i en produktionsmiljö (ENVIRONMENT=production): "
-            f"{', '.join(still_default)}. Sätt riktiga värden i Render-dashboarden "
-            "(sync: false i render.yaml — aldrig committade) innan produktionsdeploy."
+            "Osäker produktionskonfiguration (ENVIRONMENT=production): "
+            f"{', '.join(problems)}. Sätt riktiga, unika värden i Render-dashboarden "
+            "(sync: false i render.yaml — aldrig committade) innan produktionsdeploy. "
+            "(Inga hemliga värden loggas — endast fältnamn och typ av fel.)"
         )
 
 
