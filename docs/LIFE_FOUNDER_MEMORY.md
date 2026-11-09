@@ -1,5 +1,11 @@
 # LIFE FOUNDER/USER MEMORY
 
+> **Navigation note (added 2026-11-09, history below unchanged):** This foundation (migration
+> 0049) is current and remains the live founder-memory mechanism. For how it fits the Founder
+> Alpha operational priority and first-start readiness, see
+> `docs/FOUNDER_NOTES_STATUS_OVERLAY_2026-11-09.md` and
+> `docs/LIFE_OPERATIONAL_PRIORITY_2026-11-09.md`. `first_cycle_go=false`.
+
 ## Foundation scope
 
 This document defines the foundation introduced by migration 0049: a queryable,

@@ -1,5 +1,11 @@
 # Founder Knowledge Bootstrap — designförslag (blockerande)
 
+> **Navigeringsnot (tillagd 2026-11-09, historik oförändrad nedan):** Detta dokument är ett
+> designförslag från mitten av 2026. En del av minnes-/kunskapsgrunden det förutsåg är sedan dess
+> **byggd** (se `docs/FOUNDER_NOTES_STATUS_OVERLAY_2026-11-09.md` för aktuell status och vad som
+> fortfarande är öppet: Context Bundle-skriptet samt §6/§8:s arkitekturfrågor). Originaltexten
+> nedan är bevarad oförändrad. `first_cycle_go=false`.
+
 **Status: DESIGNFÖRSLAG, väntar på godkännande. Ingen kod, RLS-policy, `render.yaml` eller
 deploy är ändrad av detta dokument.** Detta är steg 1 (inventering + design) av den begärda
 arkitekturkorrigeringen. Inget i punkt 2–8 nedan implementeras förrän det är uttryckligen
