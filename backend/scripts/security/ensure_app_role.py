@@ -97,6 +97,76 @@ APP_ROLE = "mainai_app"
 _TEST_FORCE_CONNECT_FAILURES = int(os.environ.get("TEST_FORCE_APP_DB_CONNECT_FAILURES", "0") or "0")
 
 
+# --- Production database-role password hardening (2026-11-09) ------------------------------
+# This pre-boot script provisions the `mainai_app` Postgres role DIRECTLY from
+# MAINAI_APP_PASSWORD (see main(): CREATE/ALTER ROLE ... PASSWORD). A placeholder or weak value
+# here therefore means the production database role itself is created with a publicly-known
+# password — a DIFFERENT trust boundary from app/main.py's own settings guard (PR #371), which
+# never reads MAINAI_APP_PASSWORD (it is consumed only by this bootstrap path and
+# docker-entrypoint.sh, not by app.config.Settings). The shipped backend/.env.example ships
+# `MAINAI_APP_PASSWORD=change-me`, so an operator who copies it and deploys to production would,
+# without this guard, provision `mainai_app` with the password "change-me".
+#
+# Deliberately self-contained (NO `app` import): this script runs before the app and must stay
+# dependency-light and importable in isolation (see test loader). It mirrors the INTENT of
+# app.providers.base.looks_like_placeholder_secret without importing it across the pre-boot
+# boundary.
+_MIN_APP_PASSWORD_LENGTH = 12
+
+# Compared case-insensitively against the stripped value. Substrings catch the shipped
+# .env.example family and common "fill me in" markers; the exact set catches trivially weak
+# single-word passwords. Never a secret value is logged — only that a match occurred.
+_PLACEHOLDER_APP_PASSWORD_SUBSTRINGS = (
+    "change-me", "changeme", "change_me", "your-password", "your_password",
+    "placeholder", "example", "replace-me", "replaceme", "to-be-set", "tobeset",
+)
+_WEAK_EXACT_APP_PASSWORDS = frozenset(
+    {
+        "", "password", "passw0rd", "postgres", "admin", "root", "secret", "test",
+        "mainai", "mainai_app", "db", "database", "changeme", "change-me",
+        "12345678", "123456789", "1234567890", "qwerty", "letmein", "welcome",
+    }
+)
+
+
+def _looks_like_placeholder_app_password(value: str) -> bool:
+    v = value.strip().lower()
+    if v in _WEAK_EXACT_APP_PASSWORDS:
+        return True
+    return any(marker in v for marker in _PLACEHOLDER_APP_PASSWORD_SUBSTRINGS)
+
+
+def _validate_app_password_for_production(app_password: str) -> None:
+    """Fail-closed guard, run BEFORE any role is created/altered or any APP_DATABASE_URL is
+    emitted. When ENVIRONMENT=production, reject an empty, known-placeholder, or too-short
+    MAINAI_APP_PASSWORD. In any other environment (development/test/CI, or unset) this is a
+    no-op, preserving existing behavior exactly — the local Docker Compose path never sets
+    MAINAI_APP_PASSWORD at all, and CI exercises this script with synthetic values outside
+    production.
+
+    Independent of MAINAI_APP_ROTATE_PASSWORD: a weak value is rejected whether the role is
+    being freshly created or rotated, so rotation semantics are preserved (a *strong* rotation
+    still proceeds; a *weak* one is refused before touching the role). Never logs the secret
+    value — only the variable name and the category of failure."""
+    environment = os.environ.get("ENVIRONMENT", "").strip().lower()
+    if environment != "production":
+        return
+    if not app_password or not app_password.strip():
+        problem = "saknas/tomt"
+    elif _looks_like_placeholder_app_password(app_password):
+        problem = "känt platshållar-/svagt värde"
+    elif len(app_password) < _MIN_APP_PASSWORD_LENGTH:
+        problem = f"för kort — minst {_MIN_APP_PASSWORD_LENGTH} tecken"
+    else:
+        return
+    raise SystemExit(
+        f"Osäker produktionskonfiguration (ENVIRONMENT=production): MAINAI_APP_PASSWORD "
+        f"({problem}). Sätt ett riktigt, unikt lösenord för databasrollen '{APP_ROLE}' innan "
+        "deploy — inga roller ändras och inga tjänster startas förrän det är gjort. "
+        "(Inget hemligt värde loggas — endast variabelnamn och typ av fel.)"
+    )
+
+
 def _app_username(admin_username: str) -> str:
     """Under Supabase's Session Pooler (Supavisor), the admin URL's username is a pooler
     login identity of the form `<role>.<tenant-id>` (see the current_user comment below) —
@@ -167,6 +237,9 @@ def derive_only() -> None:
     APP_DATABASE_URL and writes it to $RENDER_ENV_FILE, touching no database at all."""
     database_url = os.environ["DATABASE_URL"]
     app_password = os.environ["MAINAI_APP_PASSWORD"]
+    # Fail closed on a placeholder/weak production password BEFORE emitting an
+    # APP_DATABASE_URL that application/worker services will source and connect with.
+    _validate_app_password_for_production(app_password)
     env_file = os.environ.get("RENDER_ENV_FILE")
 
     app_database_url = _derive_app_database_url(database_url, app_password)
@@ -181,6 +254,10 @@ def derive_only() -> None:
 def main() -> None:
     database_url = os.environ["DATABASE_URL"]
     app_password = os.environ["MAINAI_APP_PASSWORD"]
+    # Fail closed on a placeholder/weak production password BEFORE connecting as admin or
+    # running any CREATE/ALTER ROLE below — no role is modified and no service is started
+    # until a real, strong production password is set.
+    _validate_app_password_for_production(app_password)
     env_file = os.environ.get("RENDER_ENV_FILE")
     # Explicit, one-off opt-in for an operator who actually wants to rotate the password on
     # this specific deploy — never inferred, never a side effect of an ordinary restart.

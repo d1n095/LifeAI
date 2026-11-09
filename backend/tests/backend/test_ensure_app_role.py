@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 from urllib.parse import urlparse
 
 import psycopg2
+import pytest
 
 SCRIPT_PATH = Path(__file__).resolve().parent.parent.parent / "scripts" / "security" / "ensure_app_role.py"
 
@@ -392,3 +393,170 @@ def test_s1a_renarrowing_failure_rolls_back_the_whole_transaction_not_just_itsel
         engine.dispose()
         # Restore a clean, fully-narrowed state for any tests that run after this one.
         apply_module.apply_and_verify(settings.database_url)
+
+
+# ---------------------------------------------------------------------------------------------
+# Production MAINAI_APP_PASSWORD hardening (2026-11-09)
+#
+# These tests pin the fail-closed guard added to ensure_app_role.py: in production, an empty,
+# placeholder, or too-short MAINAI_APP_PASSWORD must stop the boot BEFORE any role is created/
+# altered or any APP_DATABASE_URL is emitted; in non-production, behavior is unchanged. The
+# negative controls prove no database connection is ever attempted, and that the secret value
+# itself is never echoed into the error.
+# ---------------------------------------------------------------------------------------------
+
+# Placeholder/weak values that must be rejected in production. Includes the exact value shipped
+# in backend/.env.example (`change-me`).
+_REJECTED_PROD_PASSWORDS = [
+    "",
+    "   ",
+    "change-me",
+    "CHANGE-ME",
+    "changeme",
+    "change-me-in-production",
+    "please-change-me-now",
+    "password",
+    "postgres",
+    # NB: "mainai_app" is also rejected (covered in the unit test below) but is deliberately
+    # NOT listed here: it equals the role name the error message intentionally prints, so the
+    # "secret value never disclosed" assertion below would false-positive on it.
+    "your-password-here",
+    "short1",          # non-placeholder but under the length floor (6 < 12)
+    "0123456789",      # 10 chars, under the floor
+]
+
+# A strong, non-placeholder value that must be accepted in production (also the kind Render's
+# platform-generated secret produces).
+_STRONG_PROD_PASSWORD = "Gx7-pQ2v!Lm9_tR4sW8e"
+
+
+def _connect_forbidden(*_a, **_k):
+    raise AssertionError(
+        "psycopg2.connect must NOT be called: the production password guard has to fail "
+        "closed before any database connection or role mutation"
+    )
+
+
+@pytest.mark.parametrize("bad_password", _REJECTED_PROD_PASSWORDS)
+def test_production_placeholder_or_weak_password_blocks_before_any_db_access(monkeypatch, bad_password):
+    """Negative control: with ENVIRONMENT=production, a weak/placeholder MAINAI_APP_PASSWORD
+    raises SystemExit and NEVER opens a database connection (so no role is created/altered)."""
+    module = _load_module()
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://postgres:adminpw@db.example.com:5432/postgres")
+    monkeypatch.setenv("MAINAI_APP_PASSWORD", bad_password)
+    monkeypatch.delenv("RENDER_ENV_FILE", raising=False)
+    monkeypatch.delenv("MAINAI_APP_ROTATE_PASSWORD", raising=False)
+    # Hard proof the guard runs first: any connection attempt turns into an AssertionError.
+    monkeypatch.setattr(module.psycopg2, "connect", _connect_forbidden)
+
+    with pytest.raises(SystemExit) as excinfo:
+        module.main()
+
+    message = str(excinfo.value)
+    assert "MAINAI_APP_PASSWORD" in message
+    assert "production" in message.lower()
+    # The secret value is never disclosed in the error (skip the empty/whitespace cases).
+    if bad_password.strip():
+        assert bad_password not in message
+
+
+def test_production_rotation_with_weak_password_is_refused_before_touching_the_role(monkeypatch):
+    """Rotation semantics preserved: even with MAINAI_APP_ROTATE_PASSWORD=true, a weak password
+    is refused before any ALTER ROLE — a weak rotation must not proceed."""
+    module = _load_module()
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://postgres:adminpw@db.example.com:5432/postgres")
+    monkeypatch.setenv("MAINAI_APP_PASSWORD", "change-me")
+    monkeypatch.setenv("MAINAI_APP_ROTATE_PASSWORD", "true")
+    monkeypatch.delenv("RENDER_ENV_FILE", raising=False)
+    monkeypatch.setattr(module.psycopg2, "connect", _connect_forbidden)
+
+    with pytest.raises(SystemExit):
+        module.main()
+
+
+def test_production_strong_password_is_accepted_and_proceeds(monkeypatch):
+    """Positive control: a strong production password passes the guard and the script proceeds
+    to its normal (mocked) provisioning path — proving the guard does not block legitimate
+    production deploys."""
+    module = _load_module()
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://postgres:adminpw@db.example.com:5432/postgres")
+    monkeypatch.setenv("MAINAI_APP_PASSWORD", _STRONG_PROD_PASSWORD)
+    monkeypatch.delenv("RENDER_ENV_FILE", raising=False)
+    monkeypatch.delenv("MAINAI_APP_ROTATE_PASSWORD", raising=False)
+
+    fake_cursor = MagicMock()
+    fake_cursor.__enter__.return_value = fake_cursor
+    fake_cursor.__exit__.return_value = False
+    fake_cursor.fetchone.side_effect = _fetchone_dispatcher(fake_cursor, current_user="postgres", role_exists=True)
+    fake_conn = MagicMock()
+    fake_conn.cursor.return_value = fake_cursor
+    monkeypatch.setattr(module.psycopg2, "connect", lambda *a, **kw: fake_conn)
+
+    module.main()  # must not raise
+
+    executed = [call.args[0] for call in fake_cursor.execute.call_args_list]
+    assert "SELECT current_user" in executed  # proof it reached the provisioning path
+
+
+@pytest.mark.parametrize("environment", [None, "development", "test", "staging"])
+def test_non_production_weak_password_is_allowed(monkeypatch, environment):
+    """Preserve safe development/test behavior: outside production the guard is a no-op, so the
+    existing weak synthetic password keeps working (no SystemExit from the guard)."""
+    module = _load_module()
+    if environment is None:
+        monkeypatch.delenv("ENVIRONMENT", raising=False)
+    else:
+        monkeypatch.setenv("ENVIRONMENT", environment)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://postgres:adminpw@db.example.com:5432/postgres")
+    monkeypatch.setenv("MAINAI_APP_PASSWORD", "app-pw")  # weak, as existing tests use
+    monkeypatch.delenv("RENDER_ENV_FILE", raising=False)
+
+    fake_cursor = MagicMock()
+    fake_cursor.__enter__.return_value = fake_cursor
+    fake_cursor.__exit__.return_value = False
+    fake_cursor.fetchone.side_effect = _fetchone_dispatcher(fake_cursor, current_user="postgres", role_exists=True)
+    fake_conn = MagicMock()
+    fake_conn.cursor.return_value = fake_cursor
+    monkeypatch.setattr(module.psycopg2, "connect", lambda *a, **kw: fake_conn)
+
+    module.main()  # must not raise — dev/test behavior unchanged
+
+
+def test_derive_only_blocks_placeholder_in_production_and_writes_no_env(monkeypatch, tmp_path):
+    """The durable-worker `--derive-only` path also fails closed in production, and writes no
+    APP_DATABASE_URL (which would otherwise carry the weak password to every worker)."""
+    module = _load_module()
+    env_file = tmp_path / "render_env.sh"
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://postgres:adminpw@db.example.com:5432/postgres")
+    monkeypatch.setenv("MAINAI_APP_PASSWORD", "change-me")
+    monkeypatch.setenv("RENDER_ENV_FILE", str(env_file))
+
+    with pytest.raises(SystemExit):
+        module.derive_only()
+
+    assert not env_file.exists(), "no APP_DATABASE_URL may be written when the guard fails"
+
+
+def test_validator_unit_rejects_placeholders_and_accepts_strong(monkeypatch):
+    """Direct unit coverage of the classifier + validator, independent of the full script."""
+    module = _load_module()
+    assert module._looks_like_placeholder_app_password("change-me") is True
+    assert module._looks_like_placeholder_app_password("  CHANGEME  ") is True
+    assert module._looks_like_placeholder_app_password("postgres") is True
+    assert module._looks_like_placeholder_app_password("mainai_app") is True
+    assert module._looks_like_placeholder_app_password(_STRONG_PROD_PASSWORD) is False
+
+    # In production: empty/placeholder/short raise; strong passes.
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    for bad in ("", "change-me", "short1"):
+        with pytest.raises(SystemExit):
+            module._validate_app_password_for_production(bad)
+    module._validate_app_password_for_production(_STRONG_PROD_PASSWORD)  # no raise
+
+    # Outside production: even a placeholder is a no-op.
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    module._validate_app_password_for_production("change-me")  # no raise
