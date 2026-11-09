@@ -6,6 +6,30 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Verifierade aktiva Founder Alpha- och GitHub Operations Center-lanes (2026-11-09)
+
+Senast kontrollerat mot GitHub API 2026-11-09. Detta är den aktuella, verifierade
+överlappningskartan för den nya read-only GitHub-intelligence-funktionen; äldre historiska
+sektioner nedan är inte en fullständig aktuell PR-lista.
+
+| Branch | PR | Status | Bas / beroende | Scope / ägare |
+|---|---|---|---|---|
+| `claude/coordination-operating-cycle-github-fed` | [#338](https://github.com/d1n095/LifeAI/pull/338) | **Öppen, ready-for-review** | #314 (`3aa2bec`) | GitHub-fed operating-cycle task selection; äger `agent_coordination/github_fed_cycle.py`, inte `integrations/github_client.py`. |
+| `claude/coordination-authorized-dispatch` | [#339](https://github.com/d1n095/LifeAI/pull/339) | **Öppen, ready-for-review** | #338 (`d92e01d`) | Authorized agent dispatch; äger `authorized_dispatch_step.py`. Väntar på #338. |
+| `codex/founder-alpha-blueprint-egress-remediation` | [#360](https://github.com/d1n095/LifeAI/pull/360) | **Öppen, draft** | #352 (`07ce4a1`) | Codex: Blueprint egress/receipts; isolerad från operations-center-koden. |
+| `codex/founder-alpha-0069-migration-compat` | [#363](https://github.com/d1n095/LifeAI/pull/363) | **Öppen, draft** | #352 (`07ce4a1`) | Codex: migration ancestry; isolerad från operations-center-koden. |
+| `claude/prod-secret-validation-hardening` | [#371](https://github.com/d1n095/LifeAI/pull/371) | **Öppen, draft; oberoende review FAIL** | default (`64c07d5`) | Claude: production-secret validation. Current SHA `84fcb9f`; weak DB-role password remains unguarded. |
+| `claude/provider-egress-ownerless-callers` | [#372](https://github.com/d1n095/LifeAI/pull/372) | **Öppen, draft; oberoende review FAIL** | default (`64c07d5`) | Claude: ownerless-provider-egress. Current SHA `8a155c3`; disclosure receipt rollback durability remains unresolved. |
+| `claude/life-operational-priority-readiness-2026-11-09` | [#373](https://github.com/d1n095/LifeAI/pull/373) | **Öppen, draft** | default (`64c07d5`) | Claude: operational/readiness docs. Current head `18f378a`; Copilot published a documentation consistency FAIL review on the prior reviewed head; the new head requires re-review. |
+| `claude/db-bootstrap-password-guard` | [#374](https://github.com/d1n095/LifeAI/pull/374) | **Öppen, draft; independent review pending** | default (`64c07d5`) | Claude: database-role password guard. Current SHA `235ce1d`. |
+| `copilot/github-operations-center` | — | **Implementation in progress** | default `64c07d5` | Copilot: read-only project-wide GitHub observations and Founder operations view. No dependency on #338/#339; future consumers may use its stable API. |
+
+**Rekommenderad ordning / väntande beroenden:** #338 före #339; håll dem orörda tills respektive
+ägare och beroende tillåter ändring. #360/#363 ligger på den frysta Founder Alpha-stackens
+#352-bas och ska inte dras in här. #371/#372 har inte godkänts; #374 väntar på oberoende review.
+Operations Center-branchen är en separat, read-only observationsyta och ska inte dispatcha
+agenter eller konkurrera om #338/#339:s operating-cycle/dispatchlogik.
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en

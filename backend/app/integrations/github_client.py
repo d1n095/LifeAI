@@ -2,7 +2,8 @@
 app/agent_orchestration.py) and, as of the MainAI Execution Loop V0.1 executor
 (app/mainai_execution/execution_job.py), real repo edits.
 
-  - read: get_ref, get_pull_request, list_check_runs
+  - read: refs, PRs/reviews/comments, commit/check metadata, Actions runs/jobs, and bounded
+    pagination for the read-only GitHub Operations Center.
   - write (only ever called when settings.github_write_enabled is True — see
     prepare_github_pr()): create_branch, create_or_update_file, create_pull_request,
     update_pull_request
@@ -30,6 +31,11 @@ without a separate, explicit human decision regardless.
 """
 
 import base64
+import asyncio
+import re
+from dataclasses import dataclass
+from time import time
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -42,7 +48,25 @@ class GitHubClientError(RuntimeError):
     pass
 
 
+class GitHubRateLimitError(GitHubClientError):
+    def __init__(self, status_code: int, retry_after_seconds: float | None):
+        super().__init__(f"GitHub read rate limited ({status_code}).")
+        self.retry_after_seconds = retry_after_seconds
+
+
+@dataclass(frozen=True)
+class GitHubListResult:
+    items: list[dict]
+    pages_fetched: int
+    truncated: bool
+
+
 class GitHubClient:
+    READ_TIMEOUT_SECONDS = 8.0
+    MAX_READ_ATTEMPTS = 3
+    MAX_PAGES = 5
+    PAGE_SIZE = 100
+
     def __init__(self):
         self.settings = get_settings()
 
@@ -54,6 +78,8 @@ class GitHubClient:
             raise GitHubClientError(
                 "GITHUB_TOKEN och/eller GITHUB_REPO är inte satta — MainAI kan inte prata med GitHub."
             )
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.settings.github_repo or ""):
+            raise GitHubClientError("GITHUB_REPO must identify one owner/repository.")
         return self.settings.github_repo
 
     def _headers(self) -> dict:
@@ -63,14 +89,88 @@ class GitHubClient:
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
-    async def _request(self, method: str, path: str, *, json: dict | None = None, timeout: float = 30) -> dict:
+    async def _request(self, method: str, path: str, *, json: dict | None = None, timeout: float = 30) -> dict | list:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.request(method, f"{API_BASE}{path}", headers=self._headers(), json=json)
             if resp.status_code >= 400:
+                if resp.status_code == 429 or (
+                    resp.status_code == 403 and "rate limit" in resp.text.lower()
+                ):
+                    retry_after = resp.headers.get("Retry-After")
+                    reset_at = resp.headers.get("X-RateLimit-Reset")
+                    try:
+                        retry_after_seconds = float(retry_after) if retry_after else None
+                    except ValueError:
+                        retry_after_seconds = None
+                    if retry_after_seconds is None and reset_at:
+                        try:
+                            retry_after_seconds = max(0.0, float(reset_at) - time())
+                        except ValueError:
+                            retry_after_seconds = None
+                    raise GitHubRateLimitError(resp.status_code, retry_after_seconds)
                 raise GitHubClientError(f"GitHub {method} {path} misslyckades ({resp.status_code}): {resp.text[:500]}")
             return resp.json() if resp.content else {}
 
     # --- Read ---------------------------------------------------------------------------
+
+    async def _read_request(self, path: str) -> dict | list:
+        """Bounded retry for safe GETs only; mutations are never retried automatically."""
+        for attempt in range(self.MAX_READ_ATTEMPTS):
+            try:
+                return await self._request("GET", path, timeout=self.READ_TIMEOUT_SECONDS)
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if attempt + 1 == self.MAX_READ_ATTEMPTS:
+                    raise GitHubClientError("GitHub read timed out or the network was unavailable.") from exc
+            except GitHubRateLimitError as exc:
+                if attempt + 1 == self.MAX_READ_ATTEMPTS or (
+                    exc.retry_after_seconds is not None and exc.retry_after_seconds > 2
+                ):
+                    raise GitHubClientError("GitHub read is rate limited; refresh later.") from exc
+                delay = exc.retry_after_seconds if exc.retry_after_seconds is not None else 0.1 * (attempt + 1)
+                await asyncio.sleep(max(0.0, delay))
+                continue
+            except GitHubClientError as exc:
+                match = re.search(r"\((\d{3})\)", str(exc))
+                status_code = int(match.group(1)) if match else None
+                retryable = status_code == 429 or status_code is not None and status_code >= 500
+                if status_code == 403 and "rate limit" in str(exc).lower():
+                    retryable = True
+                if not retryable or attempt + 1 == self.MAX_READ_ATTEMPTS:
+                    raise
+            await asyncio.sleep(0.1 * (attempt + 1))
+        raise GitHubClientError("GitHub read failed.")
+
+    async def _list_paginated(
+        self,
+        path: str,
+        *,
+        params: dict[str, str | int],
+        item_key: str | None = None,
+        max_pages: int = MAX_PAGES,
+        page_size: int = PAGE_SIZE,
+    ) -> GitHubListResult:
+        if not 1 <= max_pages <= self.MAX_PAGES or not 1 <= page_size <= self.PAGE_SIZE:
+            raise ValueError("GitHub pagination limits are outside the configured bounds.")
+        items: list[dict] = []
+        pages_fetched = 0
+        truncated = False
+        for page in range(1, max_pages + 1):
+            query = urlencode({**params, "per_page": page_size, "page": page})
+            data = await self._read_request(f"{path}?{query}")
+            page_items = data.get(item_key, []) if item_key and isinstance(data, dict) else data
+            if not isinstance(page_items, list):
+                raise GitHubClientError("GitHub returned an unexpected list response.")
+            pages_fetched += 1
+            items.extend(item for item in page_items if isinstance(item, dict))
+            if len(page_items) < page_size:
+                break
+            if page == max_pages:
+                truncated = True
+        return GitHubListResult(items=items, pages_fetched=pages_fetched, truncated=truncated)
+
+    async def get_repository(self) -> dict:
+        repo = self._require_configured()
+        return await self._read_request(f"/repos/{repo}")
 
     async def get_ref(self, branch: str) -> str:
         """Returns the commit SHA a branch currently points at."""
@@ -80,7 +180,73 @@ class GitHubClient:
 
     async def get_pull_request(self, number: int) -> dict:
         repo = self._require_configured()
-        return await self._request("GET", f"/repos/{repo}/pulls/{number}")
+        return await self._read_request(f"/repos/{repo}/pulls/{number}")
+
+    async def list_pull_requests(
+        self, *, state: str, max_pages: int = MAX_PAGES, page_size: int = PAGE_SIZE
+    ) -> GitHubListResult:
+        if state not in {"open", "closed"}:
+            raise ValueError("Pull request state must be open or closed.")
+        repo = self._require_configured()
+        return await self._list_paginated(
+            f"/repos/{repo}/pulls",
+            params={"state": state, "sort": "updated", "direction": "desc"},
+            max_pages=max_pages,
+            page_size=page_size,
+        )
+
+    async def list_pull_request_reviews(self, number: int, *, max_pages: int = 1) -> GitHubListResult:
+        repo = self._require_configured()
+        return await self._list_paginated(
+            f"/repos/{repo}/pulls/{number}/reviews",
+            params={},
+            max_pages=max_pages,
+        )
+
+    async def list_pull_request_comments(self, number: int, *, max_pages: int = 1) -> GitHubListResult:
+        repo = self._require_configured()
+        return await self._list_paginated(
+            f"/repos/{repo}/issues/{number}/comments",
+            params={"sort": "updated", "direction": "desc"},
+            max_pages=max_pages,
+        )
+
+    async def list_pull_request_review_comments(self, number: int, *, max_pages: int = 1) -> GitHubListResult:
+        repo = self._require_configured()
+        return await self._list_paginated(
+            f"/repos/{repo}/pulls/{number}/comments",
+            params={"sort": "updated", "direction": "desc"},
+            max_pages=max_pages,
+        )
+
+    async def list_workflow_runs(self, head_sha: str, *, max_pages: int = 1) -> GitHubListResult:
+        if not re.fullmatch(r"[0-9a-fA-F]{7,64}", head_sha):
+            raise ValueError("A full or abbreviated commit SHA is required.")
+        repo = self._require_configured()
+        return await self._list_paginated(
+            f"/repos/{repo}/actions/runs",
+            params={"head_sha": head_sha},
+            item_key="workflow_runs",
+            max_pages=max_pages,
+            page_size=20,
+        )
+
+    async def list_workflow_jobs(self, run_id: int, *, max_pages: int = 1) -> GitHubListResult:
+        if run_id <= 0:
+            raise ValueError("Workflow run id must be positive.")
+        repo = self._require_configured()
+        return await self._list_paginated(
+            f"/repos/{repo}/actions/runs/{run_id}/jobs",
+            params={},
+            item_key="jobs",
+            max_pages=max_pages,
+        )
+
+    async def get_commit_metadata(self, sha: str) -> dict:
+        if not re.fullmatch(r"[0-9a-fA-F]{7,64}", sha):
+            raise ValueError("A full or abbreviated commit SHA is required.")
+        repo = self._require_configured()
+        return await self._read_request(f"/repos/{repo}/commits/{quote(sha, safe='')}")
 
     async def list_pull_requests_for_head(self, *, head: str, base: str, state: str = "all") -> list[dict]:
         """Hardening pass finding (P1): the resume-safety counterpart to `get_ref(branch)` in
@@ -93,10 +259,19 @@ class GitHubClient:
         repo = self._require_configured()
         return await self._request("GET", f"/repos/{repo}/pulls?head={head}&base={base}&state={state}")
 
-    async def list_check_runs(self, ref: str) -> list[dict]:
+    async def list_check_runs_result(self, ref: str, *, max_pages: int = 2) -> GitHubListResult:
         repo = self._require_configured()
-        data = await self._request("GET", f"/repos/{repo}/commits/{ref}/check-runs")
-        return data.get("check_runs", [])
+        if not re.fullmatch(r"[0-9a-fA-F]{7,64}", ref):
+            raise ValueError("A full or abbreviated commit SHA is required.")
+        return await self._list_paginated(
+            f"/repos/{repo}/commits/{quote(ref, safe='')}/check-runs",
+            params={},
+            item_key="check_runs",
+            max_pages=max_pages,
+        )
+
+    async def list_check_runs(self, ref: str) -> list[dict]:
+        return (await self.list_check_runs_result(ref)).items
 
     # --- Write (only called when settings.github_write_enabled is True) -----------------
 

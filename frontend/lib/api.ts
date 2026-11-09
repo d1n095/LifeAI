@@ -736,7 +736,152 @@ export type MainAIGoalReport = {
   generated_at: string;
 };
 
+export type DecisionCompleteness = {
+  category: string;
+  status: "COMPLETE" | "INCOMPLETE" | "NOT_CHECKED";
+  factors_evaluated: { name: string; value: number; source_ref: string; observed_at: string }[];
+  factors_missing: string[];
+  factors_stale: string[];
+  factors_freshness_unknown: string[];
+  factors_not_applicable: string[];
+  factors_assumed_or_unsourced: string[];
+  impact_unknown_for: string[];
+  mandatory_constraints: Record<
+    string,
+    { status: string; reason?: string; source_ref?: string; observed_at?: string }
+  >;
+  alternatives: {
+    status: string;
+    items: { description?: string; source_ref?: string; observed_at?: string }[];
+  };
+  priority: {
+    status: string;
+    horizon: string | null;
+    score: number | null;
+    explanation: Record<string, unknown> | null;
+    engine: string;
+  };
+  reevaluation: { status: string; previous_decision_ref: string | null; evidence_delta: unknown[]; reason: string };
+  research: { status: string; reason: string };
+  authority_granted: false;
+};
+
+export type GitHubOperationsCheck = {
+  name: string | null;
+  status: string | null;
+  conclusion: string | null;
+  state: string;
+  url: string | null;
+};
+
+export type GitHubOperationsPullRequest = {
+  number: number;
+  title: string;
+  state: string;
+  draft: boolean;
+  author: string | null;
+  url: string | null;
+  head_branch: string | null;
+  head_sha: string | null;
+  base_branch: string | null;
+  base_sha: string | null;
+  updated_at: string | null;
+  dependencies: { number: number; state: string; blocked: boolean; url: string; source: string }[];
+  mergeability: { state: string; mergeable: boolean | null; mergeable_state: string | null };
+  review_state: string;
+  requested_reviewers: string[];
+  reviews: { id: number | null; author: string | null; state: string; submitted_at: string | null; url: string | null }[];
+  comments: { id: number | null; author: string | null; created_at: string | null; body: string; url: string | null; untrusted_content: true }[];
+  checks: GitHubOperationsCheck[];
+  workflow_runs: {
+    id: number;
+    name: string | null;
+    status: string | null;
+    conclusion: string | null;
+    url: string | null;
+    head_sha: string | null;
+    jobs: GitHubOperationsCheck[];
+  }[];
+  latest_commit: { sha: string; message: string; committed_at: string | null; url: string | null } | null;
+  detail_errors: string[];
+  details_truncated: boolean;
+};
+
+export type GitHubOperationsSnapshot = {
+  schema_version: number;
+  repository: { full_name: string | null; url: string | null; default_branch?: string; availability: string };
+  observation: {
+    freshness: "live" | "cached_fresh" | "stale" | "unavailable";
+    observed_at: string | null;
+    cache_age_seconds: number | null;
+    error_category: string | null;
+    pagination: Record<string, number | boolean>;
+  };
+  pull_requests: GitHubOperationsPullRequest[];
+  closed_pull_requests: { number: number; state: string; url: string | null; updated_at: string | null }[];
+  capabilities: {
+    id: string;
+    key: string;
+    domain: string;
+    status: string;
+    status_reason: string | null;
+    last_verified_at: string | null;
+    verification_evidence_id: string | null;
+    known_limitations: string[];
+    test_state: string;
+    source: { href: string };
+  }[];
+  agents: {
+    id: string;
+    key: string;
+    name: string;
+    registry_status: string;
+    runtime_status: string;
+    availability_reason: string;
+    adapter_kind: string;
+    heartbeat_at: string | null;
+    source: { href: string };
+  }[];
+  assignments: {
+    id: string;
+    agent_key: string;
+    role: string;
+    status: string;
+    runtime_status: string;
+    branch: string | null;
+    head_sha: string | null;
+    block_reason: string | null;
+    source: { href: string };
+  }[];
+  goals: { id: string; title: string; status: string; created_at: string | null; source: { href: string } }[];
+  tasks: { id: string; description: string; status: string; blocker_reason: string | null; source: { href: string } }[];
+  work_candidates: {
+    id: string;
+    title: string;
+    status: string;
+    priority: string;
+    classifier_confidence: number | null;
+    decision_completeness: DecisionCompleteness;
+    source: { href: string };
+  }[];
+  decision_debt: { items: { note_id: string; status: string; impact: string; preview: string }[] };
+  blockers: { kind: string; status: string; title: string; source: string; evidence: string }[];
+  recommendations: {
+    kind: string;
+    title: string;
+    status: string;
+    source: string;
+    reason?: string;
+    decision_completeness?: DecisionCompleteness;
+  }[];
+  activity: { kind: string; title: string; timestamp: string | null; source: string | null; head_sha: string | null }[];
+};
+
 export const api = {
+  githubOperationsSnapshot: (forceRefresh = false) =>
+    request<GitHubOperationsSnapshot>(
+      `/api/github-operations/snapshot${forceRefresh ? "?force_refresh=true" : ""}`,
+    ),
   login: (email: string, password: string) =>
     request<CurrentUser>("/api/auth/login", {
       method: "POST",
