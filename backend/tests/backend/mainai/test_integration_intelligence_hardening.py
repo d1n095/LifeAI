@@ -350,7 +350,14 @@ def test_verification_claim_the_db_row_itself_does_not_make_is_clamped_regardles
     assert item["verification_status"] == "unverified"
 
 
-def test_the_one_genuine_case_a_real_active_db_backed_allowlisted_verified_lesson_stands(db_session):
+def test_even_a_real_active_db_backed_allowlisted_lesson_is_not_regression_proven_without_executed_evidence(db_session):
+    """Founder decision #380 (2026-11-10) — the authoritative resolution of the execution-evidence
+    gap. Even a REAL, active, DB-backed lesson whose own stored verification_status is
+    "verified_by_regression_test" and whose regression_test target is allowlist-shaped is NOT
+    presented to an agent as verified / regression-proven, because a stored column + an allowlisted
+    test NAME does not prove the test for this exact lesson version actually executed and passed.
+    `_has_executed_regression_run_evidence` is the single place that would flip this once a durable
+    execution-run record exists (a separate, dependency-owned increment)."""
     tag = f"genuine-{uuid.uuid4().hex[:6]}"
     lesson = _record(
         db_session, applies_to=[tag], regression_test="tests/backend/mainai/test_x.py::test_regression",
@@ -359,9 +366,11 @@ def test_the_one_genuine_case_a_real_active_db_backed_allowlisted_verified_lesso
     # Caller's dict need not even match -- the canonical DB row is what's actually used.
     caller_dict = {"lesson_id": str(lesson.id), "root_cause": "irrelevant caller text"}
     item = _packet([caller_dict], trust_zone="LOCAL_INTERNAL", db=db_session)["integration_lessons"][0]
-    assert item["verified"] is True
-    assert item["verification_status"] == "verified_by_regression_test"
-    assert item["root_cause"] == "root cause"  # re-derived from the DB row, not the caller's text
+    assert item["verified"] is False  # no executed-run evidence -> never regression-proven
+    assert item["verification_status"] == "unverified"
+    assert item["verification_evidence"] == "self_asserted"
+    assert item["fix_status"] != "validated_by_regression_test"
+    assert item["root_cause"] == "root cause"  # still re-derived from the DB row, not the caller's text
 
 
 # --- 6. Egress-before-dispatch -----------------------------------------------------------------
@@ -414,9 +423,6 @@ def test_egress_policy_sees_the_final_payload_and_destination_before_any_dispatc
         seen["provider"] = kwargs["provider"]
         return _real_enforce(db, **kwargs)
 
-    import app.workforce.context_handoff as ch_mod
-
-    original = ch_mod.dispatch_agent_task_context.__globals__.get("enforce_egress_policy")
     import app.egress_policy as egress_mod
 
     import unittest.mock as mock

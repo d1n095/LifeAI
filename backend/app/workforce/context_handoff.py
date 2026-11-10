@@ -131,6 +131,10 @@ _STRUCTURED_LESSON_FIELDS = (
     "status",
     "fix_status",
     "has_regression_test",
+    # Founder decision #380 (2026-11-10): names whether CANONICAL EXECUTABLE evidence backs the
+    # verification claim ("executable_regression_run") or it is merely stored/self-asserted
+    # ("self_asserted"). Controlled vocabulary, no free text — safe to pass through.
+    "verification_evidence",
 )
 
 # Free-text / provenance-bearing fields named explicitly in the 2026-11-10 independent-review
@@ -209,42 +213,71 @@ def _regression_target_is_allowlist_shaped(target) -> bool:
         return False
 
 
+def _has_executed_regression_run_evidence(effective: dict) -> bool:
+    """FOUNDER DECISION #380 (2026-11-10) — the authoritative resolution of the gap the rest of
+    this function's docstring flags. A stored `verification_status` column plus an allowlist-
+    shaped `regression_test` NAME is NOT proof that an allowlisted regression test for THIS exact
+    lesson version was actually executed and returned a passing result. The durable, append-only
+    execution-run record (lesson_id + content fingerprint + target + executed_at + passed) that
+    WOULD prove it does not exist in this codebase today; adding it needs a new table/migration,
+    an explicitly separate, dependency-owned increment this PR does not build. Until that record
+    exists there is NO executed-run evidence for any lesson, so this is always False and a
+    `verified=true` claim can never be presented to an agent. When that evidence source lands it
+    wires in HERE (consulting the run record for this lesson version), without lowering the bar
+    in the meantime."""
+    return False
+
+
 def _clamp_verification_claim(effective: dict, *, confirmation: str) -> tuple[dict, bool]:
     """Never let a `verified` / `verification_status` CLAIM in a lesson dict stand on its own
     say-so (independent-review handoff requirement 3c: "no caller/external agent can self-assert
-    verification_status/verified"). The claim may stand ONLY when ALL of:
+    verification_status/verified"), AND never present a lesson as regression-proven without
+    CANONICAL EXECUTABLE evidence (Founder decision #380). The claim may stand ONLY when ALL of:
       1. `confirmation == "confirmed_active"` — `_revalidate_lesson_against_db` independently
          re-derived THIS summary from the live, active `EngineeringLesson` row itself (so the
          claim was never taken from the caller-supplied dict at all);
       2. the freshly re-derived `verification_status` is exactly `"verified_by_regression_test"`;
-      3. its `regression_test` target is allowlist-shaped (see `_regression_target_is_allowlist_shaped`).
+      3. its `regression_test` target is allowlist-shaped (see `_regression_target_is_allowlist_shaped`);
+      4. an EXECUTED regression-run record backs it (`_has_executed_regression_run_evidence`).
     Anything else is clamped down to `verified=False` / `verification_status="unverified"` —
     including a lesson this function cannot reach a DB for at all (`confirmation ==
     "unconfirmed"`, e.g. no `db` was passed) — never clamped UP.
 
-    KNOWN REMAINING GAP (flagged, not silently papered over): this proves the lesson's OWN
-    stored `verification_status` column says `verified_by_regression_test` and that its
-    `regression_test` target is a structurally valid path — it does NOT prove that an
-    allowlisted regression test for this EXACT lesson version was actually executed and
-    returned a passing result. That requires a durable, append-only execution-run record
-    (lesson_id + content fingerprint + target + executed_at + passed) that does not exist in
-    this codebase today and that a new table/migration would be needed to add — explicitly out
-    of this PR's own stated scope ("no new migration"). Until that record exists, a lesson's
-    `verification_status` column can still be set by any code path with DB write access without
-    ever having run a test (see test_integration_intelligence.py's `_record()` helper, which
-    does exactly that "post-hoc" for test fixtures). Returns (effective_with_clamped_fields,
-    claim_was_unconfirmed)."""
+    FORMER GAP, NOW CLOSED BY POLICY: conditions 1–3 only prove the lesson's OWN stored
+    `verification_status` column says `verified_by_regression_test` and that its `regression_test`
+    target is a structurally valid path — they do NOT prove the test for this exact lesson version
+    ran and passed. No execution-run record exists to prove that yet (see
+    `_has_executed_regression_run_evidence`), so condition 4 is unsatisfiable today and the
+    agent-facing representation NEVER claims `verified=true` / regression-proven from a stored
+    string. A lesson's `verification_status` column can still be set post-hoc by any code path
+    with DB write access without ever running a test (see the test fixtures' `_record()` helper);
+    that is exactly why a stored string alone can no longer promote the claim. Returns
+    (effective_with_clamped_fields, claim_was_unconfirmed)."""
     status_claim = effective.get("verification_status")
     verified_claim = bool(effective.get("verified"))
     allowlisted = bool(effective.get("regression_test")) and _regression_target_is_allowlist_shaped(
         effective.get("regression_test")
     )
-    can_stand = confirmation == "confirmed_active" and status_claim == "verified_by_regression_test" and allowlisted
+    can_stand = (
+        confirmation == "confirmed_active"
+        and status_claim == "verified_by_regression_test"
+        and allowlisted
+        and _has_executed_regression_run_evidence(effective)
+    )
     claim_was_unconfirmed = (not can_stand) and (verified_claim or status_claim not in (None, "unverified"))
     clamped = {
         **effective,
         "verified": bool(can_stand),
         "verification_status": "verified_by_regression_test" if can_stand else "unverified",
+        # Never present a stored/self-asserted claim as regression-proven (Founder decision #380):
+        # the proven fix label is reserved for executed-run evidence; otherwise reflect the honest
+        # state. A lesson that merely CLAIMS regression validation is marked unproven, not proposed.
+        "verification_evidence": "executable_regression_run" if can_stand else "self_asserted",
+        "fix_status": (
+            "validated_by_regression_test"
+            if can_stand
+            else ("claimed_validated_unproven" if status_claim == "verified_by_regression_test" else "proposed")
+        ),
     }
     return clamped, claim_was_unconfirmed
 

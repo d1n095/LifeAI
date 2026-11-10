@@ -35,8 +35,9 @@ Never promotes an unverified claim into an established fact: each lesson's own `
 (certain/likely/uncertain) and `status` are carried verbatim into every summary, so a hypothesis
 stays labelled a hypothesis. Only `status="active"` lessons are surfaced (`lookup_lessons` filters
 out superseded/historical/disputed), so an OBSOLETE fix is not presented as current guidance
-(requirement 8). Symptom / root cause / validated fix are reported as separate fields
-(requirement 2).
+(requirement 8). Symptom / root cause / proposed fix are reported as separate fields
+(requirement 2). A stored verification string is never, on its own, presented as a regression-proven
+fix — see `summarize_integration_lesson` and Founder decision #380 (2026-11-10).
 """
 
 from __future__ import annotations
@@ -75,20 +76,41 @@ def integration_tags(
     return tags
 
 
+# FOUNDER DECISION #380 (2026-11-10): a STORED `verification_status` string (even
+# `"verified_by_regression_test"`) plus an allowlisted `regression_test` NAME is NOT proof a
+# regression test executed and passed against this lesson's version. The model itself warns of this
+# (migration 0063: "naming a regression_test is not itself proof it caught the bug"), and an
+# investigation of the existing CI/evidence architecture found NO mechanism linking a lesson version
+# to a concrete executed test-run outcome. Until such canonical EXECUTABLE evidence exists (a
+# separate, dependency-owned increment — NOT built here), no lesson has executed-run evidence, so the
+# agent-facing summary never claims `verified=true` or presents a lesson as regression-proven. The
+# authoritative packet-level enforcement is `context_handoff._clamp_verification_claim`
+# (condition 4, `_has_executed_regression_run_evidence`); this base summary mirrors that so the
+# direct-summary path (`integration_lessons_for_task_context`) is honest too.
+def _has_executed_regression_run_evidence(lesson) -> bool:
+    return False
+
+
 def summarize_integration_lesson(lesson) -> dict:
-    """Compact, honestly-labelled summary that keeps CONFIDENCE, VERIFICATION STATUS and EVIDENCE
-    PROVENANCE as SEPARATE meanings (requirement 1):
+    """Compact, honestly-labelled summary that keeps CONFIDENCE, the SELF-ASSERTED VERIFICATION
+    CLAIM, EXECUTABLE-EVIDENCE state and EVIDENCE PROVENANCE as SEPARATE meanings (requirement 1):
 
     - `confidence` (certain/likely/uncertain) is the AUTHOR's own confidence — never, by itself,
       proof that anything was verified.
-    - `verification_status` is the lesson's ACTUAL verification state. A fix is `verified` ONLY when
-      it was validated by an executable regression test — the exact signal
-      `verification_status == "verified_by_regression_test"` that `app.inspectable_memory.service`
-      already treats as `MemoryTruthState.VERIFIED` (reused, not reinvented). So a `certain` but
-      unverified lesson is NOT verified, and a low-confidence lesson WITH a passing regression test
-      IS (requirements 2/3).
-    - `fix_status` distinguishes a PROPOSED fix from one VALIDATED by a regression test
-      (requirement 4).
+    - `verification_status` is carried VERBATIM as the lesson's stored, SELF-ASSERTED claim — it is
+      surfaced honestly as a claim, not as proof. A stored `"verified_by_regression_test"` string is
+      NOT, on its own, evidence a regression test executed and passed (migration 0063).
+    - `verification_evidence` names whether CANONICAL EXECUTABLE evidence backs the claim:
+      `"executable_regression_run"` only when a concrete executed regression-run record exists,
+      otherwise `"self_asserted"`. No such evidence source exists yet, so it is `"self_asserted"`
+      for every lesson today.
+    - `verified` is the agent-facing "is this a regression-PROVEN, current fix?" — true ONLY with
+      executed-run evidence AND an active status, so it is `False` until that evidence mechanism
+      lands (Founder decision #380). Confidence alone never suffices; a stored verification string
+      alone never suffices (requirements 2/3/5).
+    - `fix_status` distinguishes a `"proposed"` fix, a `"claimed_validated_unproven"` fix (asserts
+      regression validation but no executed evidence backs it), and a `"validated_by_regression_test"`
+      fix (reserved for executed evidence) (requirement 4).
     - Historical/superseded lessons are never current validated guidance: `verified` additionally
       requires `status == "active"` (requirement 5).
     - `source_ref` (+ evidence) is retained so a recommendation can cite its provenance
@@ -96,23 +118,34 @@ def summarize_integration_lesson(lesson) -> dict:
     confidence = getattr(lesson.confidence, "value", str(lesson.confidence))
     status = getattr(lesson.status, "value", str(lesson.status))
     verification_status = getattr(lesson, "verification_status", None) or "unverified"
-    fix_validated_by_regression_test = verification_status == "verified_by_regression_test"
+    # The STORED claim (self-asserted) — honest input, never by itself promoted to proof.
+    claims_regression_validated = verification_status == "verified_by_regression_test"
+    has_executable_evidence = _has_executed_regression_run_evidence(lesson)
+    verified = has_executable_evidence and status == "active"
+    if verified:
+        fix_status = "validated_by_regression_test"
+    elif claims_regression_validated:
+        fix_status = "claimed_validated_unproven"  # asserted, but no executed-run evidence backs it
+    else:
+        fix_status = "proposed"
     return {
         "lesson_id": str(lesson.id),
         "affected_component": lesson.affected_component,
         "symptom": _trim(lesson.problem),
         "root_cause": _trim(lesson.root_cause),
         "fix": _trim(lesson.fix),
-        "fix_status": "validated_by_regression_test" if fix_validated_by_regression_test else "proposed",
+        "fix_status": fix_status,
         "general_rule": _trim(lesson.general_rule),
         "has_regression_test": bool(lesson.regression_test),
         "regression_test": lesson.regression_test,
         "severity": getattr(lesson.severity, "value", str(lesson.severity)),
-        # Three SEPARATE axes — never conflated:
+        # SEPARATE axes — never conflated:
         "confidence": confidence,  # author confidence
-        "verification_status": verification_status,  # actual verification state
-        # Verified = validated by a regression test AND still current. Confidence alone never suffices.
-        "verified": fix_validated_by_regression_test and status == "active",
+        "verification_status": verification_status,  # stored, self-asserted claim (verbatim)
+        "verification_evidence": "executable_regression_run" if has_executable_evidence else "self_asserted",
+        # Verified = backed by EXECUTED regression evidence AND still current. A stored verification
+        # string or high confidence never suffices (Founder decision #380, 2026-11-10).
+        "verified": verified,
         "status": status,
         "source_ref": lesson.source_ref,  # evidence provenance
         "applies_to": list(lesson.applies_to or []),

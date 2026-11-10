@@ -82,26 +82,54 @@ def test_summary_distinguishes_symptom_root_cause_and_validated_fix(db_session):
 
 
 def test_confidence_alone_never_marks_a_lesson_verified(db_session):
-    """Verification is SEPARATE from confidence: a 'certain' but unverified lesson is NOT verified;
-    a low-confidence lesson validated by a regression test IS."""
+    """Confidence is SEPARATE from verification, AND a stored verification string is a SELF-ASSERTED
+    CLAIM, not proof (Founder decision #380, 2026-11-10). A 'certain' but unverified lesson is not
+    verified; a lesson that merely STORES "verified_by_regression_test" is still NOT presented as
+    regression-proven, because no executed regression-run evidence backs the stored string."""
     tag = f"conf-{uuid.uuid4().hex[:6]}"
     certain_unverified = _record(
         db_session, applies_to=[tag], affected_component="x",
         confidence=EngineeringLessonConfidence.certain,  # author is confident ...
     )  # ... but verification_status defaults to 'unverified'
-    likely_validated = _record(
+    claims_validated = _record(
         db_session, applies_to=[tag], affected_component="y",
         confidence=EngineeringLessonConfidence.likely,
         regression_test="tests/backend/test_x.py::test_regression",
-        verification_status="verified_by_regression_test",
+        verification_status="verified_by_regression_test",  # a STORED claim, not executed evidence
     )
     by_id = {str(s["lesson_id"]): s for s in integration_lessons_for_task_context(db_session, extra_tags=[tag], max_lessons=10)}
     cu = by_id[str(certain_unverified.id)]
-    lv = by_id[str(likely_validated.id)]
+    cv = by_id[str(claims_validated.id)]
     assert cu["confidence"] == "certain" and cu["verification_status"] == "unverified"
     assert cu["verified"] is False and cu["fix_status"] == "proposed"  # confidence != verification
-    assert lv["confidence"] == "likely" and lv["verification_status"] == "verified_by_regression_test"
-    assert lv["verified"] is True and lv["fix_status"] == "validated_by_regression_test"
+    assert cu["verification_evidence"] == "self_asserted"
+    # The stored claim is carried VERBATIM (honest) ...
+    assert cv["confidence"] == "likely" and cv["verification_status"] == "verified_by_regression_test"
+    # ... but NEVER promoted to regression-proven without executed evidence.
+    assert cv["verified"] is False
+    assert cv["fix_status"] == "claimed_validated_unproven"
+    assert cv["verification_evidence"] == "self_asserted"
+
+
+def test_stored_verification_string_is_never_presented_as_regression_proven(db_session):
+    """Core Founder #380 correction: the agent-facing representation must NOT claim verified=true or
+    present a lesson as regression-proven from a stored verification_status + allowlisted test name,
+    because the existing evidence architecture provides NO executed lesson-version->test-run proof.
+    No lesson reaches verified=true / fix_status=validated_by_regression_test until executable
+    evidence exists (a separate, dependency-owned increment)."""
+    tag = f"proof-{uuid.uuid4().hex[:6]}"
+    _record(
+        db_session, applies_to=[tag], affected_component="providers.registry",
+        confidence=EngineeringLessonConfidence.certain,
+        regression_test="tests/backend/test_x.py::test_regression",
+        verification_status="verified_by_regression_test",
+    )
+    summaries = integration_lessons_for_task_context(db_session, extra_tags=[tag], max_lessons=10)
+    assert summaries
+    for s in summaries:
+        assert s["verified"] is False, "no stored string may be promoted to verified without executed evidence"
+        assert s["fix_status"] != "validated_by_regression_test"
+        assert s["verification_evidence"] == "self_asserted"
 
 
 def test_regression_validated_but_non_active_lesson_is_not_current_validated_guidance(db_session):
