@@ -55,7 +55,7 @@ Heads, baser och CI verifierade mot GitHub API. #237, #239 och #243 har inte upp
 | `claude/kill-switch-authority-epoch-race-fix` | [#243](https://github.com/d1n095/LifeAI/pull/243) | **Closed, superseded by #237**; historical HEAD `3a19c7640ec75b5574cc268ed1c8b76ddba4d43e` | #239 @ `b248302` | Claude: alternate `workforce_authority_epoch` design is not an integration candidate. Retain its normal-grant race scenarios as historical evidence only. Its takeover-fence finding is not an outstanding #237 defect: exact #237 source calls `assert_authority_grant_allowed()` in `alternate_agent_takeover`, and Founder-reported real-Postgres checks covered takeover. Do not reopen or port the alternate state architecture. |
 | `codex/life-founder-alpha-integration` | [#352](https://github.com/d1n095/LifeAI/pull/352) | Öppen, draft; `07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765` | #340 | Codex: frozen Founder Alpha integration base for #360/#363. |
 | `codex/founder-alpha-0069-migration-compat` | [#363](https://github.com/d1n095/LifeAI/pull/363) | Öppen, draft; `1d3fcb0440aca0f460330ecacfb99c15809665fa` | #352 @ `07ce4a1` | Codex: preserves Founder Alpha migration ancestry. Migration check passed; backend unit/integration fails the latest downgrade/upgrade round-trip at the no-op 0073 marker. Its provider-disclosure `0069` is the parent of `0069_embedding_space_identity` and later Blueprint migrations. Reconcile with #237's active `0069` before integration; do not renumber in isolation. |
-| `claude/integration-intelligence-lessons` | [#380](https://github.com/d1n095/LifeAI/pull/380) | Öppen, draft; current HEAD `ba01ac45467c3e9524ce31d33e0884849fdd5967`; prior `f39a119…` **FAIL**, current correction **INDEPENDENT REVIEW PENDING** | #377 | Claude: current correction claims per-field minimization, DB-backed lesson revalidation, and egress-before-send with zero sends on denial/error. Builder reports 24 adversarial tests plus existing suite; this is not independent acceptance. Current checks show E2E and npm audit failures, backend checks pending. Keep external handoff blocked until exact-SHA review. |
+| `claude/integration-intelligence-lessons` | [#380](https://github.com/d1n095/LifeAI/pull/380) | Öppen, draft; current HEAD `ba01ac45467c3e9524ce31d33e0884849fdd5967`; independent review **FAIL** | #377 | Claude: prior discarded-minimization bug is fixed in source and the dispatch helper checks egress before its callback. Required owner/project authorization is still absent; verified status is not tied to canonical executed-test evidence; production dispatch/prompt path is absent. Focused adversarial tests could not run locally (`pytest` unavailable); GitHub E2E and npm audit fail, backend checks pending. External handoff remains blocked. |
 | `claude/blueprint-readiness-approval-safety` | [#379](https://github.com/d1n095/LifeAI/pull/379) | Öppen, draft; `5685926d8f7e0b75997fc223b52c83afe3b75556` | #378 | Claude: conditional independent PASS only for currently immutable/content-addressed sources; mutable-source generation remains unsupported. |
 
 **Stop-control ownership / status:** #237's `mainai_stop_state` and `mainai_stop_events` are the
@@ -79,8 +79,10 @@ global-stop/RLS behavior (no application call path was found), and runtime-role 
 state/event mutations. These need focused DB/runtime-role tests on the corrected candidate.
 #237's current CI still fails backend unit/integration and npm audit. #243 is closed/superseded,
 not an active remediation candidate. #380's `7ea2234` and `f39a119` FAIL verdicts are historical;
-`ba01ac4` is a new correction pending independent exact-SHA verification, and remains blocked for
-external handoff meanwhile.
+the exact-SHA review of `ba01ac4` also returns FAIL against the required owner/project and
+verification-evidence invariants. Its minimized external fields and helper-level egress check are
+present in source, but focused tests could not execute locally and production dispatch is absent.
+It remains blocked for external handoff.
 
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
