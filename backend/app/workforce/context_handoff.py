@@ -37,7 +37,12 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-from app.workforce.context import minimize_for_trust_zone
+from app.workforce.context import (
+    EXTERNALISH_ZONES,
+    classify_trust_zone,
+    minimize_for_trust_zone,
+)
+from app.workforce.injection import looks_like_prompt_injection
 
 # Public, documented sentinel (a convention, NOT a copy of egress-policy-private logic): a packet
 # carrying it must never be transmitted. The authoritative outbound gate remains
@@ -87,6 +92,87 @@ def _assert_no_never_egress(values: list[str | None]) -> None:
                 "refusing to build an agent context packet containing a NEVER_EGRESS-marked "
                 "value (authoritative gate: app.egress_policy.enforce_egress_policy)"
             )
+
+
+# Material that must NEVER leave the vault, checked on EVERY nested string field (a sentinel scan
+# alone is insufficient): the NEVER_EGRESS marker and private-key block headers.
+_HARD_DENY_MARKERS = (
+    NEVER_EGRESS_SENTINEL,
+    "-----BEGIN OPENSSH PRIVATE KEY-----",
+    "-----BEGIN RSA PRIVATE KEY-----",
+    "-----BEGIN PRIVATE KEY-----",
+    "-----BEGIN EC PRIVATE KEY-----",
+)
+
+
+def _iter_strings(value):
+    """Yield every nested string in a dict/list/scalar — so a scan covers ALL lesson fields, not
+    just a top-level sentinel check."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _iter_strings(v)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _iter_strings(v)
+
+
+def _sanitize_integration_lessons(
+    lessons, *, trust_zone: str
+) -> tuple[list[dict], list[str]]:
+    """Trust-zone + authorization filter for integration lessons entering a task packet.
+
+    Integration lessons are RETRIEVED, founder-wide, UNTRUSTED data. Before they may ride in a
+    packet — especially one bound for an EXTERNAL provider/untrusted remote — each lesson is
+    checked, over ALL its nested fields, and either included-as-labelled-data or EXCLUDED (fail
+    closed). Reuses the existing workforce disclosure/injection primitives; introduces no second
+    store. Returns (safe_lessons, withheld_reasons).
+
+    Rules:
+      - ANY zone: a lesson carrying a NEVER_EGRESS marker or private-key material in ANY nested
+        field is EXCLUDED (never a sentinel-only top-level check).
+      - EXTERNAL zones (EXTERNAL_PROVIDER/UNTRUSTED_REMOTE): the lesson is run through
+        `minimize_for_trust_zone` (disclosure-kind authorization); prose that reads like
+        instructions (`looks_like_prompt_injection`) is EXCLUDED — it cannot be authorized for an
+        external provider. If authorization cannot be established, the lesson is excluded.
+      - Every INCLUDED lesson is marked `untrusted_data=True` (never higher-priority instructions)
+        and `requires_egress_authorization` for external zones — the AUTHORITATIVE outbound gate
+        (`app.egress_policy.enforce_egress_policy`, which writes durable disclosure receipts) must
+        still run before any real external transmission; this filter never substitutes for it.
+    """
+    zone = classify_trust_zone(trust_zone)
+    external = zone in EXTERNALISH_ZONES
+    safe: list[dict] = []
+    withheld: list[str] = []
+    for lesson in lessons or ():
+        if not isinstance(lesson, dict):
+            withheld.append("?:not_a_lesson_dict")
+            continue
+        lid = str(lesson.get("lesson_id", "?"))
+        strings = list(_iter_strings(lesson))
+        if any(any(m in s for m in _HARD_DENY_MARKERS) for s in strings):
+            withheld.append(f"{lid}:never_egress_or_private_key")
+            continue
+        if external:
+            _accepted, denied = minimize_for_trust_zone(
+                trust_zone=zone, requested_items=[{"kind": "engineering_lesson", "ref": lid}]
+            )
+            if denied:
+                withheld.append(f"{lid}:disclosure_denied:{denied[0]}")
+                continue
+            if any(looks_like_prompt_injection(s) for s in strings):
+                withheld.append(f"{lid}:prompt_injection_shaped")
+                continue
+        safe.append(
+            {
+                **lesson,
+                "untrusted_data": True,
+                "trust_zone": zone,
+                "requires_egress_authorization": external,
+            }
+        )
+    return safe, withheld
 
 
 @dataclass(frozen=True)
@@ -281,15 +367,21 @@ def build_agent_task_context(
     missing.extend(f"withheld:{kind}" for kind in denied_kinds)
 
     refs = tuple(source_refs or ())
-    lessons = tuple(integration_lessons or ())
-    # Security pre-check across all free-text + excerpts (including attached lesson summaries).
+    # Integration lessons are RETRIEVED, untrusted data: trust-zone + authorization filter every
+    # lesson (over ALL nested fields) against THIS packet's trust zone BEFORE inclusion. Unsafe
+    # lessons are excluded (fail closed) and recorded in missing_info, never silently dropped.
+    safe_lessons, lesson_withheld = _sanitize_integration_lessons(
+        integration_lessons or (), trust_zone=trust_zone
+    )
+    missing.extend(f"lesson_withheld:{reason}" for reason in lesson_withheld)
+    lessons = tuple(safe_lessons)
+    # Security pre-check on CALLER-PROVIDED core fields (lessons already hard-denied above).
     _assert_no_never_egress(
         [objective, *acceptance_criteria, *(decisions or []), *(constraints or []),
          *(prior_attempts or []), *(dependencies or []), *(ownership_boundaries or []),
          *(approval_limits or []), *(uncertainty or []), *missing]
         + [r.excerpt for r in refs]
         + [str(item.get("excerpt")) for item in accepted_items]
-        + [str(v) for lesson in lessons for v in lesson.values()]
     )
 
     now = now or _utcnow()
