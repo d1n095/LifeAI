@@ -43,6 +43,52 @@ orörda.
 Operations Center-branchen är en separat, read-only observationsyta och ska inte dispatcha
 agenter eller konkurrera om #338/#339:s operating-cycle/dispatchlogik.
 
+## Verifierade stop-control- och migrationsblockerare (2026-11-10)
+
+Heads, baser och CI verifierade mot GitHub API. #237, #239 och #243 har inte uppdaterats sedan
+1–2 september; deras checks är därför gammal evidens, inte aktuell release-verifiering.
+
+| Branch | PR | Status / exact HEAD | Bas / beroende | Scope / evidens |
+|---|---|---|---|---|
+| `cursor/mainai-safe-internal-startup` | [#237](https://github.com/d1n095/LifeAI/pull/237) | Öppen, ready; `7878958bfa57fa999122ac3008e9f261233f158e`; independent review **FAIL** | `claude/det-kommer-mer-879lcm` @ `64c07d5` | Cursor: Founder-selected durable stop-state/event direction. Blocked by unlocked recovery-clear race, owner-RLS-limited global revocation if invoked in a tenant session, no verified global-stop app call path, and unprotected stop/event table DML. Exact-SHA backend suite failed at `test_capability_record_active_context_linking`; npm audit failed. |
+| `claude/workforce-kill-switch-owner-scoping` | [#239](https://github.com/d1n095/LifeAI/pull/239) | Öppen, ready; `b248302f0de240fd5b347404ad26ef61b32942aa` | `claude/det-kommer-mer-879lcm` @ `64c07d5` | Claude: owner-scoped kill-switch prerequisite for #243; no latest review. |
+| `claude/kill-switch-authority-epoch-race-fix` | [#243](https://github.com/d1n095/LifeAI/pull/243) | Öppen, ready; `3a19c7640ec75b5574cc268ed1c8b76ddba4d43e`; independent review **FAIL** | #239 @ `b248302` | Claude: DB epoch/locking race fix. All seven exact-SHA normal-grant race scenarios passed; takeover bypasses the grant fence, global revocation is owner-RLS-limited if invoked in a tenant session, no global-stop app call path was found, and the epoch table has no DB mutation fence. Full backend failed at `test_composed_safe_internal_executive_school` because `clear_kill_switch_for_recovery()` lacked required `db`; npm audit failed. Preserve the proven normal-grant locking/tests when reconciling with #237; do not merge its competing migration as-is. |
+| `codex/life-founder-alpha-integration` | [#352](https://github.com/d1n095/LifeAI/pull/352) | Öppen, draft; `07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765` | #340 | Codex: frozen Founder Alpha integration base for #360/#363. |
+| `codex/founder-alpha-0069-migration-compat` | [#363](https://github.com/d1n095/LifeAI/pull/363) | Öppen, draft; `1d3fcb0440aca0f460330ecacfb99c15809665fa` | #352 @ `07ce4a1` | Codex: preserves Founder Alpha migration ancestry. Migration check passed, but backend unit/integration failed. Its provider-disclosure `0069` is the parent of `0069_embedding_space_identity` and later Blueprint migrations. |
+| `claude/integration-intelligence-lessons` | [#380](https://github.com/d1n095/LifeAI/pull/380) | Öppen, draft; `f39a1199556337bef8f60637a8e25d01cb40beb2`; independent review **FAIL** | #377 | Claude: new exact-SHA review reproduced owner/project lesson disclosure, heuristic injection bypass and caller-forgeable verification claims; authoritative egress enforcement is absent/unverified. Focused 5 tests passed; backend CI passed, both E2E jobs and npm audit failed. Not approved for external handoff. |
+| `claude/blueprint-readiness-approval-safety` | [#379](https://github.com/d1n095/LifeAI/pull/379) | Öppen, draft; `5685926d8f7e0b75997fc223b52c83afe3b75556` | #378 | Claude: conditional independent PASS only for currently immutable/content-addressed sources; mutable-source generation remains unsupported. |
+
+**Stop-control ownership overlap:** #237 and #243 both change
+`backend/app/workforce/kill_switch.py`, `backend/app/workforce/provider_worker.py`,
+`backend/app/workforce/safe_internal_run.py`, and the executive dashboard/loop/observability
+surfaces. #243 is based on #239, not #237. It must not be updated/rebased preemptively; reconcile
+the behavior only after its declared prerequisite and the selected canonical direction are
+actually integrated.
+
+**Alembic integration blocker — do not merge these revisions as-is:** #237
+`0069_mainai_stop_controls.py`, #243 `0069_workforce_authority_epoch.py`, and #363
+`0069_provider_disclosure_local_decision.py` each declare `revision = "0069"` and
+`down_revision = "0068"`. The #363 embedding-space revision descends from its provider-disclosure
+`0069`, so preserving that historical ancestry requires coordinated reconciliation of its
+descendants too. These are separate ownership lanes and histories, not safe independent numbering
+changes. The Founder selected #237's durable stop-state/event architecture as the direction,
+subject to independent validation. #243's database row-lock race protection and seven passing
+concurrency scenarios are evidence to preserve, not approval of its duplicate epoch table or
+migration. Coordinate the shared model and a single Alembic lineage with Cursor, Claude, and Codex
+after the prerequisite/base changes are accepted; do not rebase or renumber branches preemptively.
+
+Independent comments with exact-SHA findings are now published on #237, #243, and #380. For #237
+and #243, the source review did not locally reproduce the PostgreSQL interleavings; treat them as
+confirmed code-path blockers requiring targeted DB regression tests, not as executed attack tests.
+No backend application call site for either candidate's global-stop API was found; therefore that
+operational path is NOT VERIFIED, and the RLS findings are conditional on invocation in a
+tenant-scoped runtime session.
+Their September CI evidence must be rerun against the eventual integrated candidate. Preserve
+#243's passing normal broker-grant race scenarios, but add takeover and runtime-role/RLS coverage.
+#380's earlier `7ea2234` FAIL remains historical; current `f39a119` is also FAIL and blocked for
+external handoff. Its five focused pure tests pass but do not cover the demonstrated disclosure
+and egress gaps.
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en
