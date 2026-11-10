@@ -227,7 +227,9 @@ export default function GitHubOperationsPage() {
                       <SourceLink href={candidate.url ?? ""} label={`PR #${candidate.number}`} /> · <StatusBadge value={candidate.readiness} />
                       <p className="break-all">HEAD {candidate.head_sha ?? "UNKNOWN"} · base {candidate.base_branch ?? "UNKNOWN"}</p>
                       <p>Dependencies: {candidate.dependencies.map((dep) => `#${dep.number} (${dep.state})`).join(", ") || "UNKNOWN"}</p>
+                      <p>Transitive dependency chain: {candidate.dependency_chain?.map((number) => `#${number}`).join(", ") || "UNKNOWN / none observed"}</p>
                       <p>Required upstream: {candidate.required_upstream_candidates?.map((dep) => `#${dep.number} (${dep.state}, ${dep.head_sha ?? "SHA UNKNOWN"})`).join(", ") || "UNKNOWN"} · safe to integrate: {candidate.safe_to_integrate ?? "UNKNOWN"}</p>
+                      <p>Changed migration revisions: {candidate.migration_dependencies?.map((migration) => `${migration.revision} ← ${migration.down_revision.join(", ") || "root"} (${migration.path})`).join("; ") || "UNKNOWN / none observed"}</p>
                       <p>Owner: {candidate.owner.agent ?? "UNKNOWN"} · Review: {candidate.review_state} · {candidate.security_review}</p>
                       <p>{candidate.readiness_reason}</p>
                     </div>

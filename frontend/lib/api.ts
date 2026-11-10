@@ -921,6 +921,14 @@ export type IntegrationAnalysis = {
     url: string | null;
     owner: { github_author: string | null; agent: string | null; status: string };
     dependencies: { number: number; state: string; url?: string | null; source: string }[];
+    dependency_chain?: number[];
+    migration_dependencies?: {
+      revision: string;
+      down_revision: string[];
+      path: string;
+      url: string;
+      schema_effects?: { table: string; operation: string }[];
+    }[];
     required_upstream_candidates?: { number: number; state: string; head_sha: string | null }[];
     review_state: string;
     security_review: string;
