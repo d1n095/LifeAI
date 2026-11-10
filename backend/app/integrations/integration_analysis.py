@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import hashlib
 import re
 from collections import defaultdict
 from typing import Any
@@ -107,6 +108,7 @@ async def inspect_migration_graph(client: GitHubClient, pr: dict, repo: str) -> 
                             if node.value is None or ast.literal_eval(node.value) is not None:
                                 return None, "migration_dependency_metadata_unsupported"
                     return {"revision": revision, "down_revision": list(parents), "path": path,
+                            "content_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
                             "url": f"https://github.com/{repo}/blob/{sha}/{quote(path, safe='/')}"}, None
                 except (GitHubClientError, httpx.RequestError, ValueError, SyntaxError, TypeError):
                     return None, "migration_graph_metadata_unavailable"
@@ -286,6 +288,13 @@ def build_integration_graph(
                     [{"url": dep.get("url"), "kind": dep.get("source")}],
                     "Coordinate with the owners before using this dependency.",
                     ["Verify the replacement dependency and re-run downstream integration tests."])
+            elif dep.get("state") == "unknown":
+                add("dependency_unobserved", [number], f"Dependency #{dep['number']} is not present in the bounded GitHub observation.",
+                    [{"url": dep.get("url"), "kind": dep.get("source"),
+                      "observation": "dependency state unavailable"}],
+                    "Refresh or inspect the referenced PR; do not assume it is merged or available.",
+                    ["Verify the dependency's exact current state and SHA before composing branches."],
+                    "incomplete_evidence")
         reviews = [r for r in pr.get("reviews", []) if r.get("state") in {"APPROVED", "CHANGES_REQUESTED"}]
         stale = [r for r in reviews if r.get("commit_sha") and pr.get("head_sha")
                  and r["commit_sha"].lower() != pr["head_sha"].lower()]
@@ -384,7 +393,7 @@ def build_integration_graph(
                                   for item in inspections if item.get("errors")],
             "ambiguous_head_branches": ambiguous_branches,
             "ambiguous_closed_head_branches": ambiguous_closed_branches,
-            "migration_ancestry": "UNKNOWN — changed files only, not full revision graphs",
+            "migration_ancestry": "UNKNOWN — request an exact-HEAD graph scan for up to two PRs",
             "founder_decisions": "NOT_CHECKED — no authenticated approval record was established",
             "engineering_lessons": "NOT_CHECKED — external-handoff lesson authorization is blocked",
             "independent_security_reviews": "UNKNOWN — GitHub approvals are not independent acceptance",
@@ -402,6 +411,10 @@ async def analyze_integration(
     if github.get("freshness") in {"stale", "unavailable"} or not repo:
         result = build_integration_graph(github, [], assignments)
         result["coverage"]["inspection_errors"].append({"number": None, "errors": ["live_github_unavailable"]})
+        if include_migration_graph:
+            result["coverage"]["migration_graph"] = {
+                "status": "UNKNOWN", "graphs": [], "errors": ["live_github_unavailable"]
+            }
         return result
     client = GitHubClient()
     semaphore = asyncio.Semaphore(4)
@@ -414,11 +427,11 @@ async def analyze_integration(
     result = build_integration_graph(github, inspections, assignments)
 
     def invalidate(number: int) -> None:
-        graph = result["coverage"].get("migration_graph")
-        if graph and graph.get("number") == number:
-            result["coverage"]["migration_graph"] = {
-                "number": number, "status": "UNKNOWN", "errors": ["head_changed_after_graph"]
-            }
+        graph_result = result["coverage"].get("migration_graph")
+        if graph_result:
+            for graph in graph_result.get("graphs", []):
+                if graph.get("number") == number:
+                    graph.update(status="UNKNOWN", migrations=[], errors=["head_changed_after_graph"])
             result["coverage"]["migration_ancestry"] = "UNKNOWN — HEAD changed; refresh required"
         node = next(item for item in result["candidates"] if item["number"] == number)
         node["review_state"] = "unknown_head_changed"
@@ -447,43 +460,106 @@ async def analyze_integration(
     for inspection in inspections:
         if any(error.startswith("head_changed_") for error in inspection["errors"]):
             invalidate(inspection["number"])
-    if include_migration_graph and len(selected) == 1 and inspections[0]["status"] == "observed":
-        pr = selected[0]
-        graph = await inspect_migration_graph(client, pr, repo)
-        result["coverage"]["migration_graph"] = graph
-        if any(error.startswith("head_changed_") for error in graph["errors"]):
-            invalidate(pr["number"])
-        if graph["status"] == "observed":
+    selection_complete = (
+        numbers is None or len(selected) == len(set(numbers))
+    )
+    if (
+        include_migration_graph and selection_complete and selected
+        and all(scan["status"] == "observed" for scan in inspections)
+    ):
+        graphs = await asyncio.gather(*(inspect_migration_graph(client, pr, repo) for pr in selected))
+        result["coverage"]["migration_graph"] = {
+            "status": "observed" if all(graph["status"] == "observed" for graph in graphs) else "UNKNOWN",
+            "graphs": graphs,
+        }
+        for graph in graphs:
+            if any(error.startswith("head_changed_") for error in graph["errors"]):
+                invalidate(graph["number"])
+        if all(graph["status"] == "observed" for graph in graphs):
             result["coverage"]["migration_ancestry"] = (
-                "Observed selected HEAD version directory only; configuration and other branches are not verified."
+                "Observed selected exact-HEAD version directories only; configuration and other branches are not verified."
             )
-            kinds = [
-                ("migration_duplicate_revision", graph.get("duplicates", []), "Duplicate revision IDs"),
-                ("migration_missing_ancestor", graph["missing"], "Missing parent revisions"),
-                ("migration_multiple_heads", graph["heads"] if len(graph["heads"]) > 1 else [], "Multiple revision heads"),
-                ("migration_cycle", graph.get("cycle_revisions", []), "Cyclic or cycle-dependent revisions"),
-            ]
-            for kind, values, label in kinds:
-                if not values:
-                    continue
-                result["findings"].append({
-                    "kind": kind, "certainty": "observed", "pull_requests": [pr["number"]],
-                    "detail": f"{label} in the selected version directory: {', '.join(values)}.",
-                    "evidence": graph["migrations"],
-                    "recommendation": "Coordinate a reviewed migration ancestry without rewriting applied history.",
-                    "owners": [{"number": pr["number"], **_owner(pr, assignments, repo)}],
-                    "tests": ["Test Alembic heads, fresh install and populated upgrade/downgrade."],
-                    "downstream_revalidate": [
-                        node["number"] for node in result["candidates"]
-                        if pr["number"] in node["dependency_chain"]
-                    ],
-                    "reuse": "UNKNOWN — require an independently verified canonical implementation",
-                })
-                node = next(node for node in result["candidates"] if node["number"] == pr["number"])
-                node["readiness"], node["readiness_reason"] = "BLOCKED", "Observed integration conflict."
+            for graph in graphs:
+                pr = next(item for item in selected if item["number"] == graph["number"])
+                kinds = [
+                    ("migration_duplicate_revision", graph.get("duplicates", []), "Duplicate revision IDs"),
+                    ("migration_missing_ancestor", graph["missing"], "Missing parent revisions"),
+                    ("migration_multiple_heads", graph["heads"] if len(graph["heads"]) > 1 else [], "Multiple revision heads"),
+                    ("migration_cycle", graph.get("cycle_revisions", []), "Cyclic or cycle-dependent revisions"),
+                ]
+                for kind, values, label in kinds:
+                    if not values:
+                        continue
+                    result["findings"].append({
+                        "kind": kind, "certainty": "observed", "pull_requests": [pr["number"]],
+                        "detail": f"{label} in the selected version directory: {', '.join(values)}.",
+                        "evidence": graph["migrations"],
+                        "recommendation": "Coordinate a reviewed migration ancestry without rewriting applied history.",
+                        "owners": [{"number": pr["number"], **_owner(pr, assignments, repo)}],
+                        "tests": ["Test Alembic heads, fresh install and populated upgrade/downgrade."],
+                        "downstream_revalidate": [
+                            node["number"] for node in result["candidates"]
+                            if pr["number"] in node["dependency_chain"]
+                        ],
+                        "reuse": "UNKNOWN — require an independently verified canonical implementation",
+                    })
+                    node = next(node for node in result["candidates"] if node["number"] == pr["number"])
+                    node["readiness"], node["readiness_reason"] = "BLOCKED", "Observed integration conflict."
+            revisions: dict[str, list[tuple[dict, dict]]] = defaultdict(list)
+            for graph in graphs:
+                for migration in graph["migrations"]:
+                    revisions[migration["revision"]].append((graph, migration))
+            changed_paths = {
+                inspection["number"]: set(inspection.get("files", []))
+                for inspection in inspections
+            }
+            seen_pairs: set[tuple[int, int, str]] = set()
+            for revision, entries in revisions.items():
+                pairs = []
+                for index, (left_graph, left) in enumerate(entries):
+                    for right_graph, right in entries[index + 1:]:
+                        if left_graph["number"] == right_graph["number"]:
+                            continue
+                        if (
+                            left["path"] not in changed_paths.get(left_graph["number"], set())
+                            and right["path"] not in changed_paths.get(right_graph["number"], set())
+                        ):
+                            continue
+                        if (left["path"], tuple(left["down_revision"]), left["content_sha256"]) == (
+                            right["path"], tuple(right["down_revision"]), right["content_sha256"]
+                        ):
+                            continue
+                        pair = (left_graph["number"], right_graph["number"], revision)
+                        if pair not in seen_pairs:
+                            pairs.append((left_graph, left, right_graph, right))
+                            seen_pairs.add(pair)
+                for left_graph, left, right_graph, right in pairs:
+                    numbers_pair = sorted([left_graph["number"], right_graph["number"]])
+                    result["findings"].append({
+                        "kind": "cross_pr_migration_graph_conflict", "certainty": "observed",
+                        "pull_requests": numbers_pair,
+                        "detail": f"Revision {revision} differs across selected PR migration graphs.",
+                        "evidence": [{"number": left_graph["number"], **left},
+                                     {"number": right_graph["number"], **right}],
+                        "recommendation": "Coordinate one migration definition and ancestry; preserve already-applied history.",
+                        "owners": [
+                            {"number": left_graph["number"], **_owner(next(p for p in selected if p["number"] == left_graph["number"]), assignments, repo)},
+                            {"number": right_graph["number"], **_owner(next(p for p in selected if p["number"] == right_graph["number"]), assignments, repo)},
+                        ],
+                        "tests": ["Compose the exact PR heads, then verify Alembic heads, fresh install, populated upgrade and downgrade/upgrade."],
+                        "downstream_revalidate": sorted(
+                            node["number"] for node in result["candidates"]
+                            if set(numbers_pair).intersection(node["dependency_chain"])
+                        ),
+                        "reuse": "UNKNOWN — require an independently verified canonical implementation",
+                    })
+                    for number in numbers_pair:
+                        node = next(node for node in result["candidates"] if node["number"] == number)
+                        node["readiness"], node["readiness_reason"] = "BLOCKED", "Observed cross-PR migration graph conflict."
     elif include_migration_graph:
         result["coverage"]["migration_graph"] = {
-            "status": "UNKNOWN", "errors": ["exactly_one_observed_pr_required"]
+            "status": "UNKNOWN", "graphs": [],
+            "errors": ["incomplete_or_unobserved_pr_selection"]
         }
     by_branch, _ = _unique_branch_map(prs)
     scan_by_number = {item["number"]: item for item in inspections}

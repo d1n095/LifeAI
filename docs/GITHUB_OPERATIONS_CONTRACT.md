@@ -71,13 +71,19 @@ Multiple PRs sharing a head branch are reported as ambiguous, not resolved by li
 `coverage` is part of the safety contract: file-list pagination is capped at two pages and
 each PR at twelve migration files. Missing files, changing heads, API failures, unobserved
 branches and truncated lists are not negative evidence. By default this inspects changed files,
-not the complete revision graph. The optional `?pr=237&include_migration_graph=true` scans one
-exact-HEAD `backend/alembic/versions` directory with at most 128 migration files and four
-concurrent reads. It reports duplicate revision IDs, missing parents, multiple heads and cycles
-only when every listed migration is parsed and HEAD is stable. Unsupported labels or
+not the complete revision graph. The optional `?pr=237&pr=363&include_migration_graph=true`
+scans one or two exact-HEAD `backend/alembic/versions` directories, each with at most 128
+migration files and four concurrent reads. It reports duplicate revision IDs, missing parents,
+multiple heads and cycles only when every listed migration is parsed and HEAD is stable. Across
+the selected PR graphs it flags differing definitions only when at least one side changed that
+migration in its PR; unrelated historical divergence is not attributed to the candidates.
+Unsupported labels or
 `depends_on`, nested directories, incomplete reads, limits, and changed HEADs yield UNKNOWN.
-It does not inspect arbitrary Alembic configuration, other version locations or composed
-cross-PR trees; those remain unverified. It cannot establish an authenticated Founder-approved architecture decision,
+It does not inspect arbitrary Alembic configuration, other version locations or a composed
+merged tree; those remain unverified. An explicit dependency absent from the bounded open/closed
+PR observation is reported as `dependency_unobserved`, with candidate readiness left UNKNOWN.
+Closed-unmerged references are blockers but are not inferred to be superseded without an
+authoritative supersession record. It cannot establish an authenticated Founder-approved architecture decision,
 identify a supersession from arbitrary PR text, or establish that a previous lesson's remedy
 was independently verified. These are NOT_CHECKED. It does not expose or reuse unverified
 founder-wide lessons (#380 remains blocked). A GitHub approval is not independent security

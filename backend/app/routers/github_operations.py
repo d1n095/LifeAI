@@ -46,10 +46,12 @@ async def get_integration_analysis(
     user: User = Depends(require_founder),
 ):
     """Analyze bounded current PR observations; no authorization or execution is granted."""
-    if pr is not None and (len(pr) > MAX_ANALYZED_PRS or any(number <= 0 for number in pr)):
+    if pr is not None and (
+        len(pr) > MAX_ANALYZED_PRS or any(number <= 0 for number in pr) or len(set(pr)) != len(pr)
+    ):
         raise HTTPException(status_code=422, detail="Invalid pull request selection.")
-    if include_migration_graph and (pr is None or len(pr) != 1):
-        raise HTTPException(status_code=422, detail="Migration graph requires exactly one selected pull request.")
+    if include_migration_graph and (pr is None or not 1 <= len(pr) <= 2):
+        raise HTTPException(status_code=422, detail="Migration graph requires one or two selected pull requests.")
     github = await _get_github_observation(force_refresh)
     local = _local_project_state(db, user.id)
     return await analyze_integration(github, local["assignments"], pr, include_migration_graph)

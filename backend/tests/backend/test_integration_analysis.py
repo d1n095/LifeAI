@@ -310,6 +310,89 @@ async def test_complete_migration_graph_detects_missing_parents_heads_duplicates
 
 
 @pytest.mark.asyncio
+async def test_two_exact_pr_graphs_detect_cross_pr_revision_collision(monkeypatch):
+    paths = {
+        237: "backend/alembic/versions/0069_mainai_stop_controls.py",
+        363: "backend/alembic/versions/0069_provider_disclosure_local_decision.py",
+    }
+    prs = [pr(237, SHA_237, "stop"), pr(363, SHA_363, "disclosure")]
+    sources = {
+        237: {
+            "0069_mainai_stop_controls.py": 'revision = "0069"\ndown_revision = "0068"',
+            "0004_legacy.py": 'revision = "0004"\ndown_revision = "0003"\n# branch A',
+        },
+        363: {
+            "0069_provider_disclosure_local_decision.py": 'revision = "0069"\ndown_revision = "0068"',
+            "0004_legacy.py": 'revision = "0004"\ndown_revision = "0003"\n# branch B',
+        },
+    }
+
+    class Fake:
+        async def get_pull_request(self, number):
+            return {"head": {"sha": SHA_237 if number == 237 else SHA_363}}
+
+        async def list_pull_request_files(self, number):
+            return GitHubListResult([{"filename": paths[number], "status": "added"}], 1, False)
+
+        async def list_migration_directory(self, sha):
+            number = 237 if sha == SHA_237 else 363
+            return [{"type": "file", "path": f"backend/alembic/versions/{name}"} for name in sources[number]]
+
+        async def get_file_at_commit(self, path, sha):
+            number = 237 if sha == SHA_237 else 363
+            if path in sources[number]:
+                return sources[number][path]
+            return sources[number][path.rsplit("/", 1)[-1]]
+
+    monkeypatch.setattr(analysis, "GitHubClient", Fake)
+    result = await analysis.analyze_integration(
+        observation(prs), [], [237, 363], include_migration_graph=True
+    )
+    findings = [f for f in result["findings"] if f["kind"] == "cross_pr_migration_graph_conflict"]
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["pull_requests"] == [237, 363]
+    assert {e["revision"] for e in finding["evidence"]} == {"0069"}
+    assert {e["number"] for e in finding["evidence"]} == {237, 363}
+    assert all(node["readiness"] == "BLOCKED" for node in result["candidates"])
+    assert result["coverage"]["migration_graph"]["status"] == "observed"
+
+
+@pytest.mark.asyncio
+async def test_partial_requested_graph_selection_stays_unknown(monkeypatch):
+    item = pr(1, "a" * 40, "branch")
+
+    class Fake:
+        async def get_pull_request(self, number):
+            return {"head": {"sha": item["head_sha"]}}
+
+        async def list_pull_request_files(self, number):
+            return GitHubListResult([], 1, False)
+
+        async def list_migration_directory(self, sha):
+            raise AssertionError("Must not scan an incomplete requested selection")
+
+    monkeypatch.setattr(analysis, "GitHubClient", Fake)
+    result = await analysis.analyze_integration(
+        observation([item]), [], [1, 2], include_migration_graph=True
+    )
+    assert result["coverage"]["migration_graph"]["status"] == "UNKNOWN"
+    assert result["coverage"]["migration_graph"]["errors"] == ["incomplete_or_unobserved_pr_selection"]
+
+
+def test_unobserved_dependency_has_evidence_but_does_not_claim_missing_or_ready():
+    item = pr(1, "a" * 40, "branch", dependencies=[{
+        "number": 99, "state": "unknown", "source": "explicit_dependency_in_pull_request_body",
+        "url": "https://github.com/d1n095/LifeAI/pull/99",
+    }])
+    result = analysis.build_integration_graph(observation([item]), [], [])
+    finding = next(f for f in result["findings"] if f["kind"] == "dependency_unobserved")
+    assert finding["certainty"] == "incomplete_evidence"
+    assert finding["pull_requests"] == [1]
+    assert result["candidates"][0]["readiness"] == "UNKNOWN"
+
+
+@pytest.mark.asyncio
 async def test_incomplete_migration_graph_never_claims_missing_ancestor_or_multiple_heads():
     item = pr(1, "a" * 40, "branch")
 
@@ -388,5 +471,6 @@ def test_founder_only_analysis_endpoint_and_bounds(monkeypatch):
     assert response.status_code == 200
     assert response.json()["coverage"]["inspection_errors"][0]["numbers"] == [237, 363]
     assert client.get("/api/github-operations/integration-analysis?pr=0").status_code == 422
+    assert client.get("/api/github-operations/integration-analysis?pr=1&pr=1").status_code == 422
     assert client.get("/api/github-operations/integration-analysis?include_migration_graph=true").status_code == 422
     assert client.get("/api/github-operations/integration-analysis?" + "&".join("pr=1" for _ in range(9))).status_code == 422

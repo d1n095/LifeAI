@@ -191,6 +191,7 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
           inspected_pull_requests: [411, 412], limit: 8, open_prs_truncated: false,
           inspection_errors: [], migration_ancestry: "UNKNOWN", founder_decisions: "NOT_CHECKED",
           engineering_lessons: "NOT_CHECKED", independent_security_reviews: "UNKNOWN",
+          migration_graph: { status: "observed", graphs: [], errors: [] },
         },
       }),
     }),
@@ -206,7 +207,7 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
     "Owner: #411: UNKNOWN",
   );
   await page.getByLabel("PR numbers (optional)").fill("411");
-  await page.getByLabel("Scan migration graph (one PR; up to 128 files)").check();
+  await page.getByLabel("Compare migration graphs (1–2 PRs; up to 128 files each)").check();
   const graphRequest = page.waitForRequest((request) =>
     request.url().includes("/api/github-operations/integration-analysis?") &&
     request.url().includes("pr=411") && request.url().includes("include_migration_graph=true"),

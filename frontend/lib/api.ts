@@ -948,7 +948,18 @@ export type IntegrationAnalysis = {
     founder_decisions: string;
     engineering_lessons: string;
     independent_security_reviews: string;
-    migration_graph?: { status: string; errors: string[]; heads?: string[]; missing?: string[] };
+    migration_graph?: {
+      status: string;
+      errors?: string[];
+      graphs?: {
+        number: number;
+        head_sha: string;
+        status: string;
+        errors: string[];
+        heads?: string[];
+        missing?: string[];
+      }[];
+    };
   };
 };
 

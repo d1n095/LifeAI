@@ -164,10 +164,10 @@ export default function GitHubOperationsPage() {
               onSubmit={(event) => {
                 event.preventDefault();
                 const parts = selectedPrs.split(",").map((part) => part.trim());
-                if (migrationGraph && (parts.length !== 1 || !/^[1-9]\d*$/.test(parts[0]))) {
+                if (migrationGraph && (parts.length < 1 || parts.length > 2 || !parts.every((part) => /^[1-9]\d*$/.test(part)))) {
                   analysisRequest.current++;
                   setAnalysis(null);
-                  setAnalysisError("Migration graph requires exactly one positive PR number.");
+                  setAnalysisError("Cross-PR migration graph requires one or two positive PR numbers.");
                 } else if (!selectedPrs.trim()) {
                   void loadAnalysis();
                 } else if (parts.length <= 8 && parts.every((part) => /^[1-9]\d*$/.test(part) && Number.isSafeInteger(Number(part)))) {
@@ -181,7 +181,7 @@ export default function GitHubOperationsPage() {
             >
               <label htmlFor="integration-prs" className="text-sm text-white/60">PR numbers (optional)</label>
               <input id="integration-prs" value={selectedPrs} onChange={(event) => setSelectedPrs(event.target.value)} className="rounded border border-border bg-panel px-2 text-sm" placeholder="237, 363" />
-              <label className="text-sm text-white/60"><input type="checkbox" checked={migrationGraph} onChange={(event) => setMigrationGraph(event.target.checked)} /> Scan migration graph (one PR; up to 128 files)</label>
+              <label className="text-sm text-white/60"><input type="checkbox" checked={migrationGraph} onChange={(event) => setMigrationGraph(event.target.checked)} /> Compare migration graphs (1–2 PRs; up to 128 files each)</label>
               <button type="submit" className="rounded border border-border px-3 py-1 text-sm">Analyze</button>
             </form>
             {analysisError && <p role="alert" className="text-sm text-amber-100">{analysisError}</p>}
@@ -194,7 +194,14 @@ export default function GitHubOperationsPage() {
                 {analysis.coverage.inspection_errors.map((item, index) => (
                   <p key={index} className="text-xs text-amber-100">PR {item.number ?? "selection"}: {item.errors.join(", ")} {item.numbers?.join(", ")}</p>
                 ))}
-                {analysis.coverage.migration_graph && <p className="text-xs text-white/50">Migration graph: {analysis.coverage.migration_graph.status} {analysis.coverage.migration_graph.errors.join(", ")}</p>}
+                {analysis.coverage.migration_graph && (
+                  <div className="text-xs text-white/50">
+                    <p>Migration graphs: {analysis.coverage.migration_graph.status} {analysis.coverage.migration_graph.errors?.join(", ")}</p>
+                    {analysis.coverage.migration_graph.graphs?.map((graph) => (
+                      <p key={graph.number}>PR #{graph.number} @ {graph.head_sha}: {graph.status}; heads {graph.heads?.join(", ") || "UNKNOWN"}; missing {graph.missing?.join(", ") || "none observed"}; {graph.errors.join(", ")}</p>
+                    ))}
+                  </div>
+                )}
                 {analysis.findings.length === 0 && <Empty>No conflicts observed in the inspected data; completeness and readiness remain UNKNOWN.</Empty>}
                 {analysis.findings.map((finding, index) => (
                   <article key={`${finding.kind}-${index}`} className="rounded-lg border border-border bg-panel p-3 text-sm">
