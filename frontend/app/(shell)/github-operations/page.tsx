@@ -1,30 +1,50 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   DecisionCompleteness,
   GitHubOperationsCheck,
   GitHubOperationsPullRequest,
   GitHubOperationsSnapshot,
+  IntegrationAnalysis,
 } from "@/lib/api";
 
 export default function GitHubOperationsPage() {
   const [snapshot, setSnapshot] = useState<GitHubOperationsSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [analysis, setAnalysis] = useState<IntegrationAnalysis | null>(null);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [selectedPrs, setSelectedPrs] = useState("");
+  const analysisRequest = useRef(0);
 
-  async function load(forceRefresh = false) {
+  const loadAnalysis = useCallback(async (numbers: number[] = []) => {
+    const requestId = ++analysisRequest.current;
+    setAnalysis(null);
+    setAnalysisError(null);
+    try {
+      const result = await api.githubIntegrationAnalysis(numbers);
+      if (requestId === analysisRequest.current) setAnalysis(result);
+    } catch {
+      if (requestId === analysisRequest.current) {
+        setAnalysisError("Integration analysis is unavailable; readiness is UNKNOWN.");
+      }
+    }
+  }, []);
+
+  const load = useCallback(async (forceRefresh = false) => {
     setLoading(true);
     setError(null);
     try {
       setSnapshot(await api.githubOperationsSnapshot(forceRefresh));
+      void loadAnalysis();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not load project status.");
     } finally {
       setLoading(false);
     }
-  }
+  }, [loadAnalysis]);
 
   useEffect(() => {
     let active = true;
@@ -47,7 +67,7 @@ export default function GitHubOperationsPage() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [load]);
 
   const pullRequests = snapshot?.pull_requests ?? [];
   const detailCount = snapshot?.observation.pagination.detailed_pull_request_count;
@@ -133,6 +153,72 @@ export default function GitHubOperationsPage() {
                 Detailed checks, reviews, and comments were fetched for {detailCount} of {totalPrCount} open PRs.
                 Remaining PR details are UNKNOWN, not passed.
               </p>
+            )}
+          </section>
+
+          <section className="space-y-3" aria-label="Integration analysis">
+            <SectionHeading title="Integration analysis" note="Read-only evidence, not security approval. Findings are never dispatched." />
+            <form
+              className="flex flex-wrap gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                const parts = selectedPrs.split(",").map((part) => part.trim());
+                if (!selectedPrs.trim()) {
+                  void loadAnalysis();
+                } else if (parts.length <= 8 && parts.every((part) => /^[1-9]\d*$/.test(part) && Number.isSafeInteger(Number(part)))) {
+                  void loadAnalysis(parts.map(Number));
+                } else {
+                  analysisRequest.current++;
+                  setAnalysis(null);
+                  setAnalysisError("Enter up to eight comma-separated positive PR numbers.");
+                }
+              }}
+            >
+              <label htmlFor="integration-prs" className="text-sm text-white/60">PR numbers (optional)</label>
+              <input id="integration-prs" value={selectedPrs} onChange={(event) => setSelectedPrs(event.target.value)} className="rounded border border-border bg-panel px-2 text-sm" placeholder="237, 363" />
+              <button type="submit" className="rounded border border-border px-3 py-1 text-sm">Analyze</button>
+            </form>
+            {analysisError && <p role="alert" className="text-sm text-amber-100">{analysisError}</p>}
+            {analysis && (
+              <>
+                <p className="text-xs text-white/50">
+                  Observation {analysis.freshness} · inspected {analysis.coverage.inspected_pull_requests.join(", ") || "NONE"} · limit {analysis.coverage.limit}.
+                  {" "}{analysis.coverage.migration_ancestry}. {analysis.coverage.founder_decisions}. {analysis.coverage.engineering_lessons}.
+                </p>
+                {analysis.coverage.inspection_errors.map((item, index) => (
+                  <p key={index} className="text-xs text-amber-100">PR {item.number ?? "selection"}: {item.errors.join(", ")} {item.numbers?.join(", ")}</p>
+                ))}
+                {analysis.findings.length === 0 && <Empty>No conflicts observed in the inspected data; completeness and readiness remain UNKNOWN.</Empty>}
+                {analysis.findings.map((finding, index) => (
+                  <article key={`${finding.kind}-${index}`} className="rounded-lg border border-border bg-panel p-3 text-sm">
+                    <div className="flex justify-between gap-3"><strong>{finding.detail}</strong><StatusBadge value={finding.certainty} /></div>
+                    <p className="mt-1 text-xs text-white/50">PRs {finding.pull_requests.join(", ")} · {finding.kind}</p>
+                    <p className="mt-1">{finding.recommendation}</p>
+                    <p className="mt-1 text-xs text-white/50">Owner: {finding.owners.map((owner) => `#${owner.number}: ${owner.agent ?? "UNKNOWN"} (${owner.status})`).join("; ")}</p>
+                    <p className="mt-1 text-xs text-white/50">Reuse: {finding.reuse}</p>
+                    <p className="mt-1 text-xs text-white/50">Tests: {finding.tests.join(" ")}</p>
+                    <p className="mt-1 text-xs text-white/50">Downstream revalidation: {finding.downstream_revalidate.join(", ") || "UNKNOWN / none observed"}</p>
+                    {finding.evidence.map((evidence, evidenceIndex) => (
+                      <p key={evidenceIndex} className="mt-1 break-all text-xs">
+                        {evidence.path ?? evidence.reviewed_sha ?? evidence.revision ?? "Evidence"}{" "}
+                        {evidence.url && <SourceLink href={evidence.url} />}
+                      </p>
+                    ))}
+                  </article>
+                ))}
+                <details className="rounded-lg border border-border bg-panel p-3 text-sm">
+                  <summary className="cursor-pointer">Dependency graph and readiness ({analysis.candidates.length})</summary>
+                  {analysis.candidates.map((candidate) => (
+                    <div key={candidate.number} className="border-t border-border py-2 text-xs">
+                      <SourceLink href={candidate.url ?? ""} label={`PR #${candidate.number}`} /> · <StatusBadge value={candidate.readiness} />
+                      <p className="break-all">HEAD {candidate.head_sha ?? "UNKNOWN"} · base {candidate.base_branch ?? "UNKNOWN"}</p>
+                      <p>Dependencies: {candidate.dependencies.map((dep) => `#${dep.number} (${dep.state})`).join(", ") || "UNKNOWN"}</p>
+                      <p>Owner: {candidate.owner.agent ?? "UNKNOWN"} · Review: {candidate.review_state} · {candidate.security_review}</p>
+                      <p>{candidate.readiness_reason}</p>
+                    </div>
+                  ))}
+                </details>
+              </>
             )}
           </section>
 

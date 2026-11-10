@@ -910,7 +910,54 @@ export type GitHubOperationsSnapshot = {
   activity: { kind: string; title: string; timestamp: string | null; source: string | null; head_sha: string | null }[];
 };
 
+export type IntegrationAnalysis = {
+  schema_version: number;
+  freshness: string;
+  observed_at: string | null;
+  candidates: {
+    number: number;
+    head_sha: string | null;
+    base_branch: string | null;
+    url: string | null;
+    owner: { github_author: string | null; agent: string | null; status: string };
+    dependencies: { number: number; state: string; url?: string | null; source: string }[];
+    review_state: string;
+    security_review: string;
+    migration_scan: string;
+    readiness: "BLOCKED" | "UNKNOWN" | "READY";
+    readiness_reason: string;
+  }[];
+  findings: {
+    kind: string;
+    certainty: string;
+    pull_requests: number[];
+    detail: string;
+    evidence: { url?: string | null; path?: string; revision?: string; head_sha?: string; reviewed_sha?: string }[];
+    recommendation: string;
+    owners: { number: number; github_author: string | null; agent: string | null; status: string }[];
+    tests: string[];
+    downstream_revalidate: number[];
+    reuse: string;
+  }[];
+  coverage: {
+    inspected_pull_requests: number[];
+    limit: number;
+    open_prs_truncated: boolean;
+    inspection_errors: { number: number | null; errors: string[]; numbers?: number[] }[];
+    migration_ancestry: string;
+    founder_decisions: string;
+    engineering_lessons: string;
+    independent_security_reviews: string;
+  };
+};
+
 export const api = {
+  githubIntegrationAnalysis: (numbers: number[] = []) => {
+    const query = new URLSearchParams();
+    numbers.forEach((number) => query.append("pr", String(number)));
+    const suffix = query.toString();
+    return request<IntegrationAnalysis>(`/api/github-operations/integration-analysis${suffix ? `?${suffix}` : ""}`);
+  },
   githubOperationsSnapshot: (forceRefresh = false) =>
     request<GitHubOperationsSnapshot>(
       `/api/github-operations/snapshot${forceRefresh ? "?force_refresh=true" : ""}`,

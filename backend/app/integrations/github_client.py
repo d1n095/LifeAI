@@ -182,6 +182,46 @@ class GitHubClient:
         repo = self._require_configured()
         return await self._read_request(f"/repos/{repo}/pulls/{number}")
 
+    async def list_pull_request_files(self, number: int) -> GitHubListResult:
+        if number <= 0:
+            raise ValueError("Pull request number must be positive.")
+        repo = self._require_configured()
+        return await self._list_paginated(
+            f"/repos/{repo}/pulls/{number}/files", params={}, max_pages=2
+        )
+
+    async def get_file_at_commit(self, path: str, sha: str) -> str:
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+            raise ValueError("An exact commit SHA is required.")
+        if not re.fullmatch(r"backend/alembic/versions/[A-Za-z0-9_.-]+\.py", path):
+            raise ValueError("Only migration files can be read.")
+        repo = self._require_configured()
+        data = await self._read_request(
+            f"/repos/{repo}/contents/{quote(path, safe='/')}?{urlencode({'ref': sha})}"
+        )
+        if not isinstance(data, dict) or data.get("encoding") != "base64":
+            raise GitHubClientError("GitHub file content unavailable.")
+        if not isinstance(data.get("size"), int) or data["size"] > 65536:
+            raise GitHubClientError("GitHub migration exceeds the size limit.")
+        try:
+            if not isinstance(data.get("content"), str) or len(data["content"]) > 90000:
+                raise ValueError("Migration content exceeds the size limit.")
+            content = base64.b64decode("".join(data["content"].split()), validate=True)
+            if len(content) > 65536:
+                raise ValueError("Migration content exceeds the size limit.")
+            return content.decode("utf-8")
+        except (KeyError, TypeError, ValueError, UnicodeDecodeError) as exc:
+            raise GitHubClientError("GitHub migration content could not be decoded.") from exc
+
+    async def compare_commits(self, ancestor: str, descendant: str) -> dict:
+        if not all(re.fullmatch(r"[0-9a-fA-F]{40}", sha) for sha in (ancestor, descendant)):
+            raise ValueError("Exact commit SHAs are required.")
+        repo = self._require_configured()
+        data = await self._read_request(f"/repos/{repo}/compare/{ancestor}...{descendant}")
+        if not isinstance(data, dict):
+            raise GitHubClientError("GitHub comparison unavailable.")
+        return data
+
     async def list_pull_requests(
         self, *, state: str, max_pages: int = MAX_PAGES, page_size: int = PAGE_SIZE
     ) -> GitHubListResult:

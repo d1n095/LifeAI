@@ -162,10 +162,49 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
   await page.route("**/api/github-operations/snapshot*", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(snapshot) }),
   );
+  await page.route("**/api/github-operations/integration-analysis*", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema_version: 1,
+        freshness: "live",
+        observed_at: "2026-11-09T12:00:00Z",
+        candidates: [{
+          number: 411, head_sha: HEAD_SHA, base_branch: "main",
+          url: "https://github.com/d1n095/LifeAI/pull/411",
+          owner: { github_author: "builder", agent: null, status: "unknown" },
+          dependencies: [], review_state: "approval_stale_head",
+          security_review: "UNKNOWN", migration_scan: "observed",
+          readiness: "BLOCKED", readiness_reason: "Observed integration conflict.",
+        }],
+        findings: [{
+          kind: "migration_revision_collision", certainty: "observed_cross_branch_conflict",
+          pull_requests: [411, 412], detail: "Different changed migrations declare revision 0069.",
+          evidence: [{ path: "backend/alembic/versions/0069_test.py", url: `https://github.com/d1n095/LifeAI/blob/${HEAD_SHA}/backend/alembic/versions/0069_test.py` }],
+          recommendation: "Coordinate a single reviewed migration ancestry.",
+          owners: [{ number: 411, github_author: "builder", agent: null, status: "unknown" }],
+          tests: ["Test fresh install and upgrade."], downstream_revalidate: [],
+          reuse: "UNKNOWN",
+        }],
+        coverage: {
+          inspected_pull_requests: [411, 412], limit: 8, open_prs_truncated: false,
+          inspection_errors: [], migration_ancestry: "UNKNOWN", founder_decisions: "NOT_CHECKED",
+          engineering_lessons: "NOT_CHECKED", independent_security_reviews: "UNKNOWN",
+        },
+      }),
+    }),
+  );
   await page.getByRole("link", { name: "GitHub Operations", exact: true }).click();
   await page.waitForURL(`${FRONTEND_URL}/github-operations`);
 
   await expect(page.getByTestId("snapshot-freshness")).toContainText("LIVE");
+  await expect(page.getByRole("region", { name: "Integration analysis" })).toContainText(
+    "Different changed migrations declare revision 0069.",
+  );
+  await expect(page.getByRole("region", { name: "Integration analysis" })).toContainText(
+    "Owner: #411: UNKNOWN",
+  );
   await expect(page.getByTestId("pull-request-411")).toContainText(`HEAD ${HEAD_SHA}`);
   await expect(page.getByTestId("pull-request-411")).toContainText("DRAFT");
   await expect(page.getByTestId("pull-request-411")).toContainText("Backend tests");

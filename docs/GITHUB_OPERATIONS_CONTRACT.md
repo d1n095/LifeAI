@@ -41,6 +41,48 @@ still a cached observation, not a live check; consumers needing current status s
 PR dependencies are derived only from explicit body declarations. An empty dependency list is
 reported as `not_declared_or_unknown`; it does not prove that no prerequisite exists.
 
+## Integration analysis
+
+`GET /api/github-operations/integration-analysis[?pr=237&pr=363]` is Founder-only and
+rate-limited. It uses the same configured repository and snapshot; it makes read-only GitHub
+GET requests, never dispatches, mutates branches, invokes providers, or reads lesson prose.
+Up to eight open PRs may be selected using repeated `pr` parameters. With no selection the
+first eight observed open PRs are inspected. Invalid selections return 422; PRs absent from
+the bounded observation are reported in `coverage.inspection_errors`.
+
+The versioned response contains `candidates`, `findings`, and `coverage`. Candidate nodes
+include exact HEAD SHA, base branch, explicit/base-branch dependencies, a transitive
+`dependency_chain`, GitHub review evidence, owner information from exact-SHA registered agent
+assignments, and readiness. GitHub authors are not assumed to be active agents. A missing or
+ambiguous owner remains UNKNOWN. `BLOCKED` is based on observed failures or dependencies;
+otherwise readiness is `UNKNOWN`, never a release approval.
+
+For inspected same-repository PRs, the analysis rechecks the HEAD before and after bounded
+changed-file reads. It parses literal Alembic `revision` and `down_revision` assignments
+without importing or executing code. Different changed migrations claiming the same revision
+are surfaced as cross-branch conflicts with SHA-pinned source links. Shared security-critical
+files are flagged as overlap **risks**, not proof of competing authority. Parent/child
+ancestry comparisons use exact SHAs and recheck both heads. A non-ancestor upstream HEAD
+shows that changes have not propagated, but does not claim that a particular fix is missing.
+If a recheck finds a changed HEAD, the affected review, owner assignment, migration findings,
+and readiness are invalidated; the observed SHA remains historical and refresh is required.
+Multiple PRs sharing a head branch are reported as ambiguous, not resolved by list order.
+
+`coverage` is part of the safety contract: file-list pagination is capped at two pages and
+each PR at twelve migration files. Missing files, changing heads, API failures, unobserved
+branches and truncated lists are not negative evidence. This version inspects changed files,
+not the complete revision graph: missing ancestors, multiple heads, and unrelated divergence
+remain UNKNOWN. It cannot establish an authenticated Founder-approved architecture decision,
+identify a supersession from arbitrary PR text, or establish that a previous lesson's remedy
+was independently verified. These are NOT_CHECKED. It does not expose or reuse unverified
+founder-wide lessons (#380 remains blocked). A GitHub approval is not independent security
+acceptance. Findings contain source evidence and generic corrective test criteria; suggested
+owners are UNKNOWN unless an exact-SHA assignment is present. No recommendation grants
+authority or instructs an agent to act.
+
+`freshness`, `observed_at`, scan limits and errors must be preserved by consumers. Stale or
+unavailable snapshots are not scanned, and no observation is represented as live approval.
+
 `review_state` reports `approved_exact_head` only when a fetched approval's `commit_id` equals
 the current PR head and review pagination is complete. Other states distinguish stale or
 unknown SHA evidence. This is GitHub review evidence, not an independent review or release

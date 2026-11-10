@@ -591,6 +591,8 @@ async def _fetch_github_observation(client: GitHubClient) -> dict[str, Any]:
                 "state": "merged" if pr.get("merged_at") else "closed_unmerged",
                 "url": pr.get("html_url"),
                 "updated_at": pr.get("updated_at"),
+                "head_branch": (pr.get("head") or {}).get("ref"),
+                "head_sha": (pr.get("head") or {}).get("sha"),
             }
             for pr in closed_prs
         ],
