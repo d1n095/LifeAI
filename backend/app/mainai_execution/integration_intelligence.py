@@ -13,6 +13,24 @@ This module only RETRIEVES relevant active lessons for an integration context (r
 renders them as compact, honestly-labelled summaries to attach to an agent task-context package
 (requirement 6), so a recommendation can explain how history influenced it (requirement 10).
 
+Owner/project scope (independent-review handoff, PR #380): retrieval here is intentionally
+tag-only, with no owner/project predicate, because `EngineeringLesson` itself carries no
+owner_id/project column and is documented in at least three other places
+(`app.models.mainai_execution.EngineeringLesson`'s own docstring,
+`app.mainai_execution.lessons`'s module docstring, and
+docs/LIFE_VAULT_V4_V5_V7_V8_DESIGN_MEMOS.md / docs/LIFE_MULTI_AGENT_WORK_COORDINATION.md /
+docs/LIFE_VAULT_EGRESS_CONTROL.md's V4 entry) as deliberately founder-wide, cross-project
+knowledge in this single-founder system ("MainAI 0.1 is single-founder-only today" —
+LIFE_VAULT_EGRESS_CONTROL.md). Two different integration contexts matching the same tag are
+the SAME founder's own lesson store queried twice, not a cross-tenant disclosure — see
+`tests/backend/mainai/test_integration_intelligence_hardening.py`'s
+`test_engineering_lesson_has_no_owner_or_project_column_by_documented_design` /
+`test_identical_tags_from_two_synthetic_contexts_share_the_same_lesson_by_design`, which pin
+this so a future PR cannot silently reintroduce per-owner lesson data without updating both the
+schema and that test. What IS enforced here, per lesson field, trust zone, and verification
+claim, is `app.workforce.context_handoff._sanitize_integration_lessons` et al. — this module
+only retrieves and summarizes; it never decides disclosure.
+
 Never promotes an unverified claim into an established fact: each lesson's own `confidence`
 (certain/likely/uncertain) and `status` are carried verbatim into every summary, so a hypothesis
 stays labelled a hypothesis. Only `status="active"` lessons are surfaced (`lookup_lessons` filters

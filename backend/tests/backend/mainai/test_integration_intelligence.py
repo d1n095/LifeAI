@@ -146,7 +146,7 @@ def test_lessons_attach_to_agent_task_context_packet(db_session):
 
     ctx = build_agent_task_context(
         task_id="t1", objective="wire provider egress", acceptance_criteria=["egress gated"],
-        repo="d1n095/LifeAI", branch="b", base_sha="deadbeef", trust_zone="INTERNAL",
+        repo="d1n095/LifeAI", branch="b", base_sha="deadbeef", trust_zone="LOCAL_INTERNAL",
         integration_lessons=summaries,
     )
     packet = ctx.to_transmittable_dict()

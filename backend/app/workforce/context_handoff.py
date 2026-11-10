@@ -33,9 +33,12 @@ the existing security primitives rather than reimplementing them.
 from __future__ import annotations
 
 import hashlib
+import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import Any, Callable
+
+from sqlalchemy.orm import Session
 
 from app.workforce.context import (
     EXTERNALISH_ZONES,
@@ -118,28 +121,215 @@ def _iter_strings(value):
             yield from _iter_strings(v)
 
 
+# Structured, controlled-vocabulary fields a lesson summary carries (see
+# integration_intelligence.summarize_integration_lesson) that are not free text and therefore
+# need no per-zone prose disclosure decision (they are still subject to the hard-deny scan).
+_STRUCTURED_LESSON_FIELDS = (
+    "lesson_id",
+    "severity",
+    "confidence",
+    "status",
+    "fix_status",
+    "has_regression_test",
+)
+
+# Free-text / provenance-bearing fields named explicitly in the 2026-11-10 independent-review
+# handoff (PR #380, SHA 7ea2234 and f39a119 FAILs): each one gets an EXPLICIT, individual
+# disclosure decision below — never a blanket `**lesson` copy, which was the root cause both
+# prior remediation attempts left in place.
+_RESTRICTED_LESSON_FIELDS = (
+    "affected_component",
+    "symptom",
+    "root_cause",
+    "fix",
+    "general_rule",
+    "regression_test",
+    "source_ref",
+    "applies_to",
+)
+
+# verification_status / verified are CLAIMS, never facts a caller-supplied dict may assert —
+# see _clamp_verification_claim below. Listed separately so they are never copied verbatim from
+# the input dict under any code path.
+_VERIFICATION_CLAIM_FIELDS = ("verification_status", "verified")
+
+
+def _revalidate_lesson_against_db(db: Session | None, lesson_id: str) -> tuple[str, dict | None]:
+    """Re-fetch the CANONICAL `EngineeringLesson` row by id and rebuild its summary fresh FROM
+    THE DATABASE — the only authority allowed to assert this lesson's content or verification
+    state. A caller-supplied dict (as `build_agent_task_context(integration_lessons=...)`
+    receives) can claim anything; this is what actually confirms it.
+
+    Returns (confirmation, canonical_summary_or_None):
+      - ("confirmed_active", summary)   — the id resolves to a currently-active row; `summary`
+        is a FRESH `summarize_integration_lesson()` result that supersedes the caller's dict.
+      - ("confirmed_inactive", None)    — the id resolves to a row that is no longer `active`
+        (historical/superseded/disputed): the caller's dict must never be treated as current
+        guidance, regardless of what it claims — the lesson is excluded entirely by the caller.
+      - ("unconfirmed", None)           — no `db` was given, the id is not a real lesson UUID, or
+        no such row exists. The caller's dict is neither authenticated nor refuted; its content
+        may still flow (subject to every other check below) but any verification CLAIM in it
+        must be clamped down, never trusted at face value.
+    """
+    if db is None:
+        return "unconfirmed", None
+    try:
+        lid = uuid.UUID(str(lesson_id))
+    except (ValueError, TypeError, AttributeError):
+        return "unconfirmed", None
+
+    from sqlalchemy import select
+
+    from app.models.mainai_execution import EngineeringLesson, EngineeringLessonStatus
+
+    row = db.execute(select(EngineeringLesson).where(EngineeringLesson.id == lid)).scalar_one_or_none()
+    if row is None:
+        return "unconfirmed", None
+    if row.status != EngineeringLessonStatus.active:
+        return "confirmed_inactive", None
+
+    from app.mainai_execution.integration_intelligence import summarize_integration_lesson
+
+    return "confirmed_active", summarize_integration_lesson(row)
+
+
+def _regression_target_is_allowlist_shaped(target) -> bool:
+    """A `regression_test` target must be a relative, non-escaping path — the SAME structural
+    allowlist check already enforced at verification-plan time
+    (`app.mainai_execution.verify.validate_targeted_tests_target`, reused here rather than
+    reinvented). This proves the target is SHAPED like a real repository test path; it does
+    NOT by itself prove the test was ever executed or passed — see `_clamp_verification_claim`'s
+    docstring for the gap this still leaves open."""
+    from app.mainai_execution.verify import VerificationStepError, validate_targeted_tests_target
+
+    try:
+        validate_targeted_tests_target(target)
+        return True
+    except VerificationStepError:
+        return False
+
+
+def _clamp_verification_claim(effective: dict, *, confirmation: str) -> tuple[dict, bool]:
+    """Never let a `verified` / `verification_status` CLAIM in a lesson dict stand on its own
+    say-so (independent-review handoff requirement 3c: "no caller/external agent can self-assert
+    verification_status/verified"). The claim may stand ONLY when ALL of:
+      1. `confirmation == "confirmed_active"` — `_revalidate_lesson_against_db` independently
+         re-derived THIS summary from the live, active `EngineeringLesson` row itself (so the
+         claim was never taken from the caller-supplied dict at all);
+      2. the freshly re-derived `verification_status` is exactly `"verified_by_regression_test"`;
+      3. its `regression_test` target is allowlist-shaped (see `_regression_target_is_allowlist_shaped`).
+    Anything else is clamped down to `verified=False` / `verification_status="unverified"` —
+    including a lesson this function cannot reach a DB for at all (`confirmation ==
+    "unconfirmed"`, e.g. no `db` was passed) — never clamped UP.
+
+    KNOWN REMAINING GAP (flagged, not silently papered over): this proves the lesson's OWN
+    stored `verification_status` column says `verified_by_regression_test` and that its
+    `regression_test` target is a structurally valid path — it does NOT prove that an
+    allowlisted regression test for this EXACT lesson version was actually executed and
+    returned a passing result. That requires a durable, append-only execution-run record
+    (lesson_id + content fingerprint + target + executed_at + passed) that does not exist in
+    this codebase today and that a new table/migration would be needed to add — explicitly out
+    of this PR's own stated scope ("no new migration"). Until that record exists, a lesson's
+    `verification_status` column can still be set by any code path with DB write access without
+    ever having run a test (see test_integration_intelligence.py's `_record()` helper, which
+    does exactly that "post-hoc" for test fixtures). Returns (effective_with_clamped_fields,
+    claim_was_unconfirmed)."""
+    status_claim = effective.get("verification_status")
+    verified_claim = bool(effective.get("verified"))
+    allowlisted = bool(effective.get("regression_test")) and _regression_target_is_allowlist_shaped(
+        effective.get("regression_test")
+    )
+    can_stand = confirmation == "confirmed_active" and status_claim == "verified_by_regression_test" and allowlisted
+    claim_was_unconfirmed = (not can_stand) and (verified_claim or status_claim not in (None, "unverified"))
+    clamped = {
+        **effective,
+        "verified": bool(can_stand),
+        "verification_status": "verified_by_regression_test" if can_stand else "unverified",
+    }
+    return clamped, claim_was_unconfirmed
+
+
+def _minimize_lesson_fields(effective: dict, *, external: bool) -> tuple[dict, list[str]]:
+    """Give EVERY restricted, free-text/provenance-bearing lesson field (the exact list named in
+    the independent-review handoff) an explicit, individual disclosure decision — never a
+    blanket `**lesson` copy, which is the bug both prior remediation attempts (SHA 7ea2234 and
+    f39a119) left in place at this choke point.
+
+    - External/untrusted zones: every restricted field is WITHHELD outright (never
+      partial-redacted-and-guessed — the same fail-closed posture
+      `app.egress_policy.enforce_egress_policy`'s own docstring already documents: "refuse the
+      field, never guess how much of it is safe to keep"). Only the field NAME is recorded as
+      withheld; its value is never copied anywhere (not the packet, not this withheld-field
+      list, not a log).
+    - Internal zones: a field is still withheld individually if ITS OWN value carries a
+      hard-deny marker or injection-shaped text — "untrusted data" is never conflated with "safe
+      to keep verbatim", even for a trusted internal audience.
+
+    Structured, controlled-vocabulary fields and the already-clamped verification-claim fields
+    pass through unchanged (they carry no free text). Returns (field_dict, withheld_field_names).
+    """
+    out: dict = {}
+    for field in _STRUCTURED_LESSON_FIELDS + _VERIFICATION_CLAIM_FIELDS:
+        out[field] = effective.get(field)
+
+    withheld_fields: list[str] = []
+    for field in _RESTRICTED_LESSON_FIELDS:
+        value = effective.get(field)
+        if value in (None, "", []):
+            out[field] = value
+            continue
+        deny = False
+        if external:
+            deny = True
+        else:
+            field_strings = list(_iter_strings(value))
+            if any(any(m in s for m in _HARD_DENY_MARKERS) for s in field_strings):
+                deny = True
+            elif any(looks_like_prompt_injection(s) for s in field_strings):
+                deny = True
+        if deny:
+            withheld_fields.append(field)
+            out[field] = None
+        else:
+            out[field] = value
+    return out, withheld_fields
+
+
 def _sanitize_integration_lessons(
-    lessons, *, trust_zone: str
+    lessons, *, trust_zone: str, db: Session | None = None
 ) -> tuple[list[dict], list[str]]:
     """Trust-zone + authorization filter for integration lessons entering a task packet.
 
     Integration lessons are RETRIEVED, founder-wide, UNTRUSTED data. Before they may ride in a
     packet — especially one bound for an EXTERNAL provider/untrusted remote — each lesson is
-    checked, over ALL its nested fields, and either included-as-labelled-data or EXCLUDED (fail
-    closed). Reuses the existing workforce disclosure/injection primitives; introduces no second
-    store. Returns (safe_lessons, withheld_reasons).
+    checked, over ALL its nested fields INDIVIDUALLY (never a sentinel-only top-level scan, and
+    never a blanket copy of the original dict), and either included-as-labelled-data,
+    field-minimized, or EXCLUDED entirely (fail closed). Reuses the existing workforce
+    disclosure/injection primitives and `app.mainai_execution.lessons`/`.verify`; introduces no
+    second store, no parallel verification mechanism. Returns (safe_lessons, withheld_reasons).
 
-    Rules:
-      - ANY zone: a lesson carrying a NEVER_EGRESS marker or private-key material in ANY nested
-        field is EXCLUDED (never a sentinel-only top-level check).
-      - EXTERNAL zones (EXTERNAL_PROVIDER/UNTRUSTED_REMOTE): the lesson is run through
-        `minimize_for_trust_zone` (disclosure-kind authorization); prose that reads like
-        instructions (`looks_like_prompt_injection`) is EXCLUDED — it cannot be authorized for an
-        external provider. If authorization cannot be established, the lesson is excluded.
-      - Every INCLUDED lesson is marked `untrusted_data=True` (never higher-priority instructions)
-        and `requires_egress_authorization` for external zones — the AUTHORITATIVE outbound gate
-        (`app.egress_policy.enforce_egress_policy`, which writes durable disclosure receipts) must
-        still run before any real external transmission; this filter never substitutes for it.
+    Rules (independent-review handoff, PR #380):
+      1. ANY zone: a lesson carrying a NEVER_EGRESS marker or private-key material in ANY nested
+         field is EXCLUDED entirely (never a sentinel-only top-level check).
+      2. If `db` is given and the lesson's id resolves to a row that is no longer `active`
+         (superseded/historical/disputed), the lesson is EXCLUDED entirely — a stale/superseded
+         lesson is never presented as current guidance, no matter what the caller's dict claims.
+      3. If `db` is given and the id resolves to an ACTIVE row, the row's OWN freshly re-derived
+         summary REPLACES the caller-supplied dict before any further check — closing the gap
+         where a caller hands in arbitrary/tampered field values for a real lesson id.
+      4. EXTERNAL zones (EXTERNAL_PROVIDER/UNTRUSTED_REMOTE, and any UNKNOWN zone, which
+         `classify_trust_zone` already fails closed to UNTRUSTED_REMOTE): the lesson-as-a-whole
+         is run through `minimize_for_trust_zone` (disclosure-kind authorization) and its content
+         is scanned for injection-shaped prose; either denies the WHOLE lesson.
+      5. `verification_status`/`verified` are NEVER copied from the caller's dict — see
+         `_clamp_verification_claim`.
+      6. EVERY restricted/free-text field gets its own disclosure decision — see
+         `_minimize_lesson_fields`; withheld fields are recorded by NAME only, never by value.
+      7. Every INCLUDED lesson is marked `untrusted_data=True` (never higher-priority
+         instructions) and `requires_egress_authorization` for external zones — the AUTHORITATIVE
+         outbound gate (`app.egress_policy.enforce_egress_policy`, which writes durable
+         disclosure receipts) must still run before any real external transmission; this filter
+         never substitutes for it (see `dispatch_agent_task_context` below, which wires it in).
     """
     zone = classify_trust_zone(trust_zone)
     external = zone in EXTERNALISH_ZONES
@@ -150,10 +340,18 @@ def _sanitize_integration_lessons(
             withheld.append("?:not_a_lesson_dict")
             continue
         lid = str(lesson.get("lesson_id", "?"))
-        strings = list(_iter_strings(lesson))
+
+        confirmation, canonical = _revalidate_lesson_against_db(db, lid)
+        if confirmation == "confirmed_inactive":
+            withheld.append(f"{lid}:superseded_or_inactive")
+            continue
+        effective = dict(canonical) if canonical is not None else dict(lesson)
+
+        strings = list(_iter_strings(effective))
         if any(any(m in s for m in _HARD_DENY_MARKERS) for s in strings):
             withheld.append(f"{lid}:never_egress_or_private_key")
             continue
+
         if external:
             _accepted, denied = minimize_for_trust_zone(
                 trust_zone=zone, requested_items=[{"kind": "engineering_lesson", "ref": lid}]
@@ -164,12 +362,20 @@ def _sanitize_integration_lessons(
             if any(looks_like_prompt_injection(s) for s in strings):
                 withheld.append(f"{lid}:prompt_injection_shaped")
                 continue
+
+        effective, claim_was_unconfirmed = _clamp_verification_claim(effective, confirmation=confirmation)
+        if claim_was_unconfirmed:
+            withheld.append(f"{lid}:verification_claim_unconfirmed")
+
+        field_dict, withheld_fields = _minimize_lesson_fields(effective, external=external)
+
         safe.append(
             {
-                **lesson,
+                **field_dict,
                 "untrusted_data": True,
                 "trust_zone": zone,
                 "requires_egress_authorization": external,
+                "withheld_fields": withheld_fields,
             }
         )
     return safe, withheld
@@ -342,6 +548,7 @@ def build_agent_task_context(
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
     context_version: int = 1,
     now: datetime | None = None,
+    db: Session | None = None,
 ) -> AgentTaskContext:
     """Assemble a compact, source-grounded, security-checked packet.
 
@@ -353,6 +560,12 @@ def build_agent_task_context(
         present (the authoritative durable gate remains enforce_egress_policy at transmit time).
     A token optimization may never drop acceptance criteria (criterion 9): an empty
     acceptance_criteria is refused here.
+
+    `db`, if given, lets `integration_lessons` be independently re-verified against the
+    canonical `EngineeringLesson` rows (see `_revalidate_lesson_against_db` /
+    `_clamp_verification_claim`) rather than trusted at face value from the caller's dicts.
+    Omitting it does not widen trust — a lesson's verification CLAIM is clamped down (never
+    up) when it cannot be confirmed this way.
     """
     if not acceptance_criteria:
         raise ContextHandoffError(
@@ -371,7 +584,7 @@ def build_agent_task_context(
     # lesson (over ALL nested fields) against THIS packet's trust zone BEFORE inclusion. Unsafe
     # lessons are excluded (fail closed) and recorded in missing_info, never silently dropped.
     safe_lessons, lesson_withheld = _sanitize_integration_lessons(
-        integration_lessons or (), trust_zone=trust_zone
+        integration_lessons or (), trust_zone=trust_zone, db=db
     )
     missing.extend(f"lesson_withheld:{reason}" for reason in lesson_withheld)
     lessons = tuple(safe_lessons)
@@ -482,3 +695,72 @@ class AgentResultRecord:
         if not evidence_ref:
             raise ContextHandoffError("verification requires an explicit external evidence reference")
         return replace(self, verified=True, verification_evidence=evidence_ref)
+
+
+# --- Egress-before-dispatch: THE transmission boundary (independent-review handoff requirement
+# 4) --------------------------------------------------------------------------------------------
+
+
+def dispatch_agent_task_context(
+    db: Session,
+    *,
+    ctx: AgentTaskContext,
+    owner_id: uuid.UUID,
+    provider: str,
+    model: str,
+    purpose: str,
+    requested_by: str,
+    send: Callable[[dict], Any],
+    task_id: uuid.UUID | None = None,
+    goal_id: uuid.UUID | None = None,
+    job_id: uuid.UUID | None = None,
+) -> Any:
+    """THE boundary a built `AgentTaskContext` must pass through before it reaches any real
+    provider/agent call. No caller may hand `ctx`'s serialized payload to a destination any
+    other way — `send` is only ever invoked FROM HERE, and only after
+    `app.egress_policy.enforce_egress_policy` (the authoritative outbound secret/NEVER_EGRESS
+    gate this module's own header already names) has run over the COMPLETE serialized outbound
+    payload (`ctx.to_transmittable_dict()`) and the exact destination
+    (provider/model/purpose/requested_by), AFTER final context assembly.
+
+    No production call site consuming `AgentTaskContext` exists yet in this codebase (the
+    independent review's own finding) — this function IS that wiring, at the only boundary that
+    makes sense before such a call site exists: the packet-build/transmit choke point itself,
+    not a caller that does not exist yet.
+
+    Fail-closed, with ZERO calls to `send` in every one of these cases:
+      - `enforce_egress_policy` DENIES the call (`EgressDeniedError`) — propagated, never
+        swallowed, matching the identical calling convention every other egress-sensitive call
+        site in this codebase already uses (see `app.provider_planning.service.plan_with_provider`,
+        wrapped in `try/except EgressDeniedError` immediately before the payload would leave the
+        process).
+      - the policy check itself raises ANY other exception (unavailable/erroring) — never
+        treated as "policy satisfied by default"; wrapped and re-raised as
+        `ContextHandoffError`, `send` is never reached.
+    Only the SANITIZED payload `enforce_egress_policy` returns (never the original) is ever
+    passed to `send`.
+    """
+    from app.egress_policy import EgressDeniedError, enforce_egress_policy
+
+    payload = ctx.to_transmittable_dict()
+    try:
+        sanitized = enforce_egress_policy(
+            db,
+            owner_id=owner_id,
+            provider=provider,
+            model=model,
+            purpose=purpose,
+            requested_by=requested_by,
+            payload=payload,
+            task_id=task_id,
+            goal_id=goal_id,
+            job_id=job_id,
+        )
+    except EgressDeniedError:
+        raise
+    except Exception as exc:  # policy unavailable/erroring — fail closed, never dispatch
+        raise ContextHandoffError(
+            f"egress policy unavailable or errored while checking an agent task-context "
+            f"dispatch; refusing to send (fail closed): {exc}"
+        ) from exc
+    return send(sanitized)
