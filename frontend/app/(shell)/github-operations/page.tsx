@@ -17,14 +17,15 @@ export default function GitHubOperationsPage() {
   const [analysis, setAnalysis] = useState<IntegrationAnalysis | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [selectedPrs, setSelectedPrs] = useState("");
+  const [migrationGraph, setMigrationGraph] = useState(false);
   const analysisRequest = useRef(0);
 
-  const loadAnalysis = useCallback(async (numbers: number[] = []) => {
+  const loadAnalysis = useCallback(async (numbers: number[] = [], graph = false) => {
     const requestId = ++analysisRequest.current;
     setAnalysis(null);
     setAnalysisError(null);
     try {
-      const result = await api.githubIntegrationAnalysis(numbers);
+      const result = await api.githubIntegrationAnalysis(numbers, graph);
       if (requestId === analysisRequest.current) setAnalysis(result);
     } catch {
       if (requestId === analysisRequest.current) {
@@ -163,10 +164,14 @@ export default function GitHubOperationsPage() {
               onSubmit={(event) => {
                 event.preventDefault();
                 const parts = selectedPrs.split(",").map((part) => part.trim());
-                if (!selectedPrs.trim()) {
+                if (migrationGraph && (parts.length !== 1 || !/^[1-9]\d*$/.test(parts[0]))) {
+                  analysisRequest.current++;
+                  setAnalysis(null);
+                  setAnalysisError("Migration graph requires exactly one positive PR number.");
+                } else if (!selectedPrs.trim()) {
                   void loadAnalysis();
                 } else if (parts.length <= 8 && parts.every((part) => /^[1-9]\d*$/.test(part) && Number.isSafeInteger(Number(part)))) {
-                  void loadAnalysis(parts.map(Number));
+                  void loadAnalysis(parts.map(Number), migrationGraph);
                 } else {
                   analysisRequest.current++;
                   setAnalysis(null);
@@ -176,6 +181,7 @@ export default function GitHubOperationsPage() {
             >
               <label htmlFor="integration-prs" className="text-sm text-white/60">PR numbers (optional)</label>
               <input id="integration-prs" value={selectedPrs} onChange={(event) => setSelectedPrs(event.target.value)} className="rounded border border-border bg-panel px-2 text-sm" placeholder="237, 363" />
+              <label className="text-sm text-white/60"><input type="checkbox" checked={migrationGraph} onChange={(event) => setMigrationGraph(event.target.checked)} /> Scan migration graph (one PR; up to 128 files)</label>
               <button type="submit" className="rounded border border-border px-3 py-1 text-sm">Analyze</button>
             </form>
             {analysisError && <p role="alert" className="text-sm text-amber-100">{analysisError}</p>}
@@ -188,6 +194,7 @@ export default function GitHubOperationsPage() {
                 {analysis.coverage.inspection_errors.map((item, index) => (
                   <p key={index} className="text-xs text-amber-100">PR {item.number ?? "selection"}: {item.errors.join(", ")} {item.numbers?.join(", ")}</p>
                 ))}
+                {analysis.coverage.migration_graph && <p className="text-xs text-white/50">Migration graph: {analysis.coverage.migration_graph.status} {analysis.coverage.migration_graph.errors.join(", ")}</p>}
                 {analysis.findings.length === 0 && <Empty>No conflicts observed in the inspected data; completeness and readiness remain UNKNOWN.</Empty>}
                 {analysis.findings.map((finding, index) => (
                   <article key={`${finding.kind}-${index}`} className="rounded-lg border border-border bg-panel p-3 text-sm">

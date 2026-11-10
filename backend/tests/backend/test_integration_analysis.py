@@ -274,6 +274,87 @@ async def test_analysis_fetches_pinned_migrations_and_preserves_input(monkeypatc
     assert repr(data) == original
 
 
+@pytest.mark.asyncio
+async def test_complete_migration_graph_detects_missing_parents_heads_duplicates_and_cycles(monkeypatch):
+    item = pr(1, "a" * 40, "branch")
+    sources = {
+        "root.py": 'revision = "root"\ndown_revision = None',
+        "one.py": 'revision = "one"\ndown_revision = "root"',
+        "two.py": 'revision = "two"\ndown_revision = "absent"',
+        "duplicate.py": 'revision = "one"\ndown_revision = "root"',
+        "cycle.py": 'revision = "cycle"\ndown_revision = "cycle"',
+    }
+
+    class Fake:
+        async def get_pull_request(self, number):
+            return {"head": {"sha": item["head_sha"]}}
+
+        async def list_pull_request_files(self, number):
+            return GitHubListResult([], 1, False)
+
+        async def list_migration_directory(self, sha):
+            assert sha == item["head_sha"]
+            return [{"type": "file", "path": f"backend/alembic/versions/{name}"} for name in sources]
+
+        async def get_file_at_commit(self, path, sha):
+            assert sha == item["head_sha"]
+            return sources[path.rsplit("/", 1)[-1]]
+
+    monkeypatch.setattr(analysis, "GitHubClient", Fake)
+    result = await analysis.analyze_integration(observation([item]), [], [1], True)
+    assert {f["kind"] for f in result["findings"]} == {
+        "migration_duplicate_revision", "migration_missing_ancestor", "migration_multiple_heads", "migration_cycle"
+    }
+    assert result["coverage"]["migration_graph"]["status"] == "observed"
+    assert result["candidates"][0]["readiness"] == "BLOCKED"
+
+
+@pytest.mark.asyncio
+async def test_incomplete_migration_graph_never_claims_missing_ancestor_or_multiple_heads():
+    item = pr(1, "a" * 40, "branch")
+
+    class Fake:
+        async def get_pull_request(self, number):
+            return {"head": {"sha": item["head_sha"]}}
+
+        async def list_migration_directory(self, sha):
+            return [{"type": "file", "path": "backend/alembic/versions/a.py"},
+                    {"type": "file", "path": "backend/alembic/versions/b.py"}]
+
+        async def get_file_at_commit(self, path, sha):
+            if path.endswith("a.py"):
+                return 'revision = "a"\ndown_revision = "missing"'
+            raise GitHubClientError("unavailable")
+
+    result = await analysis.inspect_migration_graph(Fake(), item, "d1n095/LifeAI")
+    assert result["status"] == "UNKNOWN"
+    assert result["missing"] == [] and result["heads"] == []
+    assert result["errors"] == ["migration_graph_metadata_unavailable"]
+
+
+@pytest.mark.asyncio
+async def test_migration_graph_disallows_unsupported_metadata_and_invalidates_changed_head():
+    item = pr(1, "a" * 40, "branch")
+
+    class Fake:
+        calls = 0
+
+        async def get_pull_request(self, number):
+            self.calls += 1
+            return {"head": {"sha": "a" * 40 if self.calls == 1 else "b" * 40}}
+
+        async def list_migration_directory(self, sha):
+            return [{"type": "file", "path": "backend/alembic/versions/a.py"}]
+
+        async def get_file_at_commit(self, path, sha):
+            return 'revision = "a"\ndown_revision = None\nbranch_labels = "label"'
+
+    result = await analysis.inspect_migration_graph(Fake(), item, "d1n095/LifeAI")
+    assert result["status"] == "UNKNOWN" and result["migrations"] == []
+    assert "migration_dependency_metadata_unsupported" in result["errors"]
+    assert "head_changed_during_graph" in result["errors"]
+
+
 def test_founder_only_analysis_endpoint_and_bounds(monkeypatch):
     import uuid
     from types import SimpleNamespace
@@ -307,4 +388,5 @@ def test_founder_only_analysis_endpoint_and_bounds(monkeypatch):
     assert response.status_code == 200
     assert response.json()["coverage"]["inspection_errors"][0]["numbers"] == [237, 363]
     assert client.get("/api/github-operations/integration-analysis?pr=0").status_code == 422
+    assert client.get("/api/github-operations/integration-analysis?include_migration_graph=true").status_code == 422
     assert client.get("/api/github-operations/integration-analysis?" + "&".join("pr=1" for _ in range(9))).status_code == 422

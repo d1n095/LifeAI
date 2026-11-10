@@ -18,6 +18,7 @@ from app.integrations.github_client import GitHubClient, GitHubClientError
 
 MAX_ANALYZED_PRS = 8
 MAX_MIGRATIONS_PER_PR = 12
+MAX_GRAPH_MIGRATIONS = 128
 SECURITY_PATHS = (
     "backend/app/workforce/kill_switch.py",
     "backend/app/workforce/authority.py",
@@ -62,6 +63,86 @@ def parse_migration(source: str) -> tuple[str, tuple[str, ...]]:
     if any(not re.fullmatch(r"[A-Za-z0-9_]{1,128}", parent) for parent in result):
         raise ValueError("Invalid parent revision.")
     return revision, result
+
+
+async def inspect_migration_graph(client: GitHubClient, pr: dict, repo: str) -> dict:
+    """Inspect one bounded version directory without executing repository code."""
+    sha, number = pr["head_sha"], pr["number"]
+    result: dict[str, Any] = {"number": number, "head_sha": sha, "status": "UNKNOWN",
+                              "errors": [], "migrations": [], "heads": [], "missing": []}
+    try:
+        before = await client.get_pull_request(number)
+        if ((before.get("head") or {}).get("sha") or "").lower() != sha.lower():
+            result["errors"].append("head_changed_before_graph")
+            return result
+        entries = await client.list_migration_directory(sha)
+        paths = []
+        for item in entries:
+            path = item.get("path")
+            if item.get("type") == "dir":
+                result["errors"].append("nested_migration_directory_unchecked")
+            elif isinstance(path, str) and path.endswith(".py"):
+                if item.get("type") != "file" or not re.fullmatch(
+                    r"backend/alembic/versions/[A-Za-z0-9_.-]+\.py", path
+                ):
+                    result["errors"].append("unsupported_migration_entry")
+                else:
+                    paths.append(path)
+        if len(entries) >= 1000 or len(paths) > MAX_GRAPH_MIGRATIONS:
+            result["errors"].append("migration_graph_limit_reached")
+            return result
+        semaphore = asyncio.Semaphore(4)
+
+        async def read(path: str) -> tuple[dict | None, str | None]:
+            async with semaphore:
+                try:
+                    source = await client.get_file_at_commit(path, sha)
+                    revision, parents = parse_migration(source)
+                    tree = ast.parse(source)
+                    for node in tree.body:
+                        names = node.targets if isinstance(node, ast.Assign) else (
+                            [node.target] if isinstance(node, ast.AnnAssign) else []
+                        )
+                        if any(isinstance(name, ast.Name) and name.id in {"depends_on", "branch_labels"} for name in names):
+                            if node.value is None or ast.literal_eval(node.value) is not None:
+                                return None, "migration_dependency_metadata_unsupported"
+                    return {"revision": revision, "down_revision": list(parents), "path": path,
+                            "url": f"https://github.com/{repo}/blob/{sha}/{quote(path, safe='/')}"}, None
+                except (GitHubClientError, httpx.RequestError, ValueError, SyntaxError, TypeError):
+                    return None, "migration_graph_metadata_unavailable"
+
+        reads = await asyncio.gather(*(read(path) for path in paths))
+        result["migrations"] = [migration for migration, _ in reads if migration is not None]
+        result["errors"].extend(sorted({error for _, error in reads if error}))
+        after = await client.get_pull_request(number)
+        if ((after.get("head") or {}).get("sha") or "").lower() != sha.lower():
+            result["errors"].append("head_changed_during_graph")
+            result["migrations"] = []
+            return result
+        if result["errors"] or not paths:
+            if not paths:
+                result["errors"].append("migration_directory_empty")
+            return result
+        revisions: dict[str, list[dict]] = defaultdict(list)
+        for migration in result["migrations"]:
+            revisions[migration["revision"]].append(migration)
+        result["duplicates"] = sorted(revision for revision, items in revisions.items() if len(items) > 1)
+        parents = {parent for migration in result["migrations"] for parent in migration["down_revision"]}
+        result["missing"] = sorted(parents - revisions.keys())
+        result["heads"] = sorted(revisions.keys() - parents)
+        remaining = {revision: set(parent for item in items for parent in item["down_revision"])
+                     & revisions.keys() for revision, items in revisions.items()}
+        while remaining:
+            roots = {revision for revision, parents_set in remaining.items() if not parents_set}
+            if not roots:
+                break
+            remaining = {revision: parents_set - roots for revision, parents_set in remaining.items()
+                         if revision not in roots}
+        result["cycle_revisions"] = sorted(remaining)
+        result["status"] = "observed"
+    except (GitHubClientError, httpx.RequestError, ValueError, TypeError, KeyError):
+        result["errors"].append("migration_graph_unavailable")
+    return result
 
 
 def _owner(pr: dict, assignments: list[dict], repo: str | None) -> dict:
@@ -312,7 +393,8 @@ def build_integration_graph(
 
 
 async def analyze_integration(
-    github: dict, assignments: list[dict], numbers: list[int] | None = None
+    github: dict, assignments: list[dict], numbers: list[int] | None = None,
+    include_migration_graph: bool = False,
 ) -> dict:
     prs = github.get("pull_requests", [])
     selected = [pr for pr in prs if numbers is None or pr["number"] in numbers][:MAX_ANALYZED_PRS]
@@ -332,6 +414,12 @@ async def analyze_integration(
     result = build_integration_graph(github, inspections, assignments)
 
     def invalidate(number: int) -> None:
+        graph = result["coverage"].get("migration_graph")
+        if graph and graph.get("number") == number:
+            result["coverage"]["migration_graph"] = {
+                "number": number, "status": "UNKNOWN", "errors": ["head_changed_after_graph"]
+            }
+            result["coverage"]["migration_ancestry"] = "UNKNOWN — HEAD changed; refresh required"
         node = next(item for item in result["candidates"] if item["number"] == number)
         node["review_state"] = "unknown_head_changed"
         node["reviews"] = []
@@ -343,7 +431,10 @@ async def analyze_integration(
         ]
         still_conflicting = {
             affected for finding in result["findings"]
-            if finding["kind"] in {"migration_revision_collision", "migration_ancestry_divergence", "closed_dependency"}
+            if finding["kind"] in {
+                "migration_revision_collision", "migration_ancestry_divergence", "closed_dependency",
+                "migration_duplicate_revision", "migration_missing_ancestor", "migration_multiple_heads", "migration_cycle",
+            }
             for affected in finding["pull_requests"]
         }
         for candidate in result["candidates"]:
@@ -356,6 +447,44 @@ async def analyze_integration(
     for inspection in inspections:
         if any(error.startswith("head_changed_") for error in inspection["errors"]):
             invalidate(inspection["number"])
+    if include_migration_graph and len(selected) == 1 and inspections[0]["status"] == "observed":
+        pr = selected[0]
+        graph = await inspect_migration_graph(client, pr, repo)
+        result["coverage"]["migration_graph"] = graph
+        if any(error.startswith("head_changed_") for error in graph["errors"]):
+            invalidate(pr["number"])
+        if graph["status"] == "observed":
+            result["coverage"]["migration_ancestry"] = (
+                "Observed selected HEAD version directory only; configuration and other branches are not verified."
+            )
+            kinds = [
+                ("migration_duplicate_revision", graph.get("duplicates", []), "Duplicate revision IDs"),
+                ("migration_missing_ancestor", graph["missing"], "Missing parent revisions"),
+                ("migration_multiple_heads", graph["heads"] if len(graph["heads"]) > 1 else [], "Multiple revision heads"),
+                ("migration_cycle", graph.get("cycle_revisions", []), "Cyclic or cycle-dependent revisions"),
+            ]
+            for kind, values, label in kinds:
+                if not values:
+                    continue
+                result["findings"].append({
+                    "kind": kind, "certainty": "observed", "pull_requests": [pr["number"]],
+                    "detail": f"{label} in the selected version directory: {', '.join(values)}.",
+                    "evidence": graph["migrations"],
+                    "recommendation": "Coordinate a reviewed migration ancestry without rewriting applied history.",
+                    "owners": [{"number": pr["number"], **_owner(pr, assignments, repo)}],
+                    "tests": ["Test Alembic heads, fresh install and populated upgrade/downgrade."],
+                    "downstream_revalidate": [
+                        node["number"] for node in result["candidates"]
+                        if pr["number"] in node["dependency_chain"]
+                    ],
+                    "reuse": "UNKNOWN — require an independently verified canonical implementation",
+                })
+                node = next(node for node in result["candidates"] if node["number"] == pr["number"])
+                node["readiness"], node["readiness_reason"] = "BLOCKED", "Observed integration conflict."
+    elif include_migration_graph:
+        result["coverage"]["migration_graph"] = {
+            "status": "UNKNOWN", "errors": ["exactly_one_observed_pr_required"]
+        }
     by_branch, _ = _unique_branch_map(prs)
     scan_by_number = {item["number"]: item for item in inspections}
     for pr in selected:

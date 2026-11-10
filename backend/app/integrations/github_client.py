@@ -190,6 +190,17 @@ class GitHubClient:
             f"/repos/{repo}/pulls/{number}/files", params={}, max_pages=2
         )
 
+    async def list_migration_directory(self, sha: str) -> list[dict]:
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+            raise ValueError("An exact commit SHA is required.")
+        repo = self._require_configured()
+        data = await self._read_request(
+            f"/repos/{repo}/contents/backend/alembic/versions?{urlencode({'ref': sha})}"
+        )
+        if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
+            raise GitHubClientError("GitHub migration directory unavailable.")
+        return data
+
     async def get_file_at_commit(self, path: str, sha: str) -> str:
         if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
             raise ValueError("An exact commit SHA is required.")

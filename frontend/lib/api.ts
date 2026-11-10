@@ -948,13 +948,15 @@ export type IntegrationAnalysis = {
     founder_decisions: string;
     engineering_lessons: string;
     independent_security_reviews: string;
+    migration_graph?: { status: string; errors: string[]; heads?: string[]; missing?: string[] };
   };
 };
 
 export const api = {
-  githubIntegrationAnalysis: (numbers: number[] = []) => {
+  githubIntegrationAnalysis: (numbers: number[] = [], migrationGraph = false) => {
     const query = new URLSearchParams();
     numbers.forEach((number) => query.append("pr", String(number)));
+    if (migrationGraph) query.set("include_migration_graph", "true");
     const suffix = query.toString();
     return request<IntegrationAnalysis>(`/api/github-operations/integration-analysis${suffix ? `?${suffix}` : ""}`);
   },

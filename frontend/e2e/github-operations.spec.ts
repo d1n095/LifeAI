@@ -205,6 +205,14 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
   await expect(page.getByRole("region", { name: "Integration analysis" })).toContainText(
     "Owner: #411: UNKNOWN",
   );
+  await page.getByLabel("PR numbers (optional)").fill("411");
+  await page.getByLabel("Scan migration graph (one PR; up to 128 files)").check();
+  const graphRequest = page.waitForRequest((request) =>
+    request.url().includes("/api/github-operations/integration-analysis?") &&
+    request.url().includes("pr=411") && request.url().includes("include_migration_graph=true"),
+  );
+  await page.getByRole("button", { name: "Analyze", exact: true }).click();
+  await graphRequest;
   await expect(page.getByTestId("pull-request-411")).toContainText(`HEAD ${HEAD_SHA}`);
   await expect(page.getByTestId("pull-request-411")).toContainText("DRAFT");
   await expect(page.getByTestId("pull-request-411")).toContainText("Backend tests");
