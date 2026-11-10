@@ -44,6 +44,9 @@ _DEPENDENCY_PATTERN = re.compile(
     r"(?im)^\s*(?:[-*]\s*)?(?:depends\s+on|stacked\s+on|blocked\s+by|requires)"
     r"\s+(?:pull\s+request\s+)?#(\d+)\b"
 )
+_CANONICAL_PR_CLAIM = re.compile(
+    r"(?i)\bcanonical(?:\s+(?:authority|architecture))?\s*[:=]\s*(?:PR\s*)?#(\d+)\b"
+)
 
 
 def _iso(value: Any) -> str | None:
@@ -506,6 +509,9 @@ async def _fetch_github_observation(client: GitHubClient) -> dict[str, Any]:
         detail = details_by_number.get(number)
         dependencies = []
         dependency_numbers = _dependency_numbers(pr.get("body"))
+        canonical_claims = sorted({
+            int(value) for value in _CANONICAL_PR_CLAIM.findall(_safe_text(pr.get("body"), 20000))
+        })
         for dependency_number in dependency_numbers:
             state = dependency_state.get(dependency_number, "unknown")
             dependencies.append(
@@ -536,6 +542,7 @@ async def _fetch_github_observation(client: GitHubClient) -> dict[str, Any]:
                 "updated_at": pr.get("updated_at"),
                 "created_at": pr.get("created_at"),
                 "dependencies": dependencies,
+                "canonical_claims": canonical_claims,
                 "dependency_evidence": {
                     "state": "explicit_dependencies_found" if dependency_numbers else "not_declared_or_unknown",
                     "method": "explicit_pull_request_body",

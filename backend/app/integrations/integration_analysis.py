@@ -66,6 +66,34 @@ def parse_migration(source: str) -> tuple[str, tuple[str, ...]]:
     return revision, result
 
 
+def parse_migration_schema_effects(source: str) -> list[dict]:
+    """Extract literal table-oriented Alembic operations without importing or running code."""
+    effects = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        method = node.func.attr
+        if not isinstance(node.func.value, ast.Name) or node.func.value.id != "op":
+            continue
+        if method in {"create_table", "drop_table", "add_column", "drop_column", "alter_column"}:
+            if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, str):
+                continue
+            table = node.args[0].value
+        elif method == "create_index":
+            if len(node.args) < 2 or not isinstance(node.args[1], ast.Constant) or not isinstance(node.args[1].value, str):
+                continue
+            table = node.args[1].value
+        elif method == "drop_index":
+            table_arg = next((kw.value for kw in node.keywords if kw.arg == "table_name"), None)
+            if not isinstance(table_arg, ast.Constant) or not isinstance(table_arg.value, str):
+                continue
+            table = table_arg.value
+        else:
+            continue
+        effects.append({"table": table, "operation": method})
+    return effects
+
+
 async def inspect_migration_graph(client: GitHubClient, pr: dict, repo: str) -> dict:
     """Inspect one bounded version directory without executing repository code."""
     sha, number = pr["head_sha"], pr["number"]
@@ -99,6 +127,7 @@ async def inspect_migration_graph(client: GitHubClient, pr: dict, repo: str) -> 
                 try:
                     source = await client.get_file_at_commit(path, sha)
                     revision, parents = parse_migration(source)
+                    schema_effects = parse_migration_schema_effects(source)
                     tree = ast.parse(source)
                     for node in tree.body:
                         names = node.targets if isinstance(node, ast.Assign) else (
@@ -108,6 +137,7 @@ async def inspect_migration_graph(client: GitHubClient, pr: dict, repo: str) -> 
                             if node.value is None or ast.literal_eval(node.value) is not None:
                                 return None, "migration_dependency_metadata_unsupported"
                     return {"revision": revision, "down_revision": list(parents), "path": path,
+                            "schema_effects": schema_effects,
                             "content_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
                             "url": f"https://github.com/{repo}/blob/{sha}/{quote(path, safe='/')}"}, None
                 except (GitHubClientError, httpx.RequestError, ValueError, SyntaxError, TypeError):
@@ -142,7 +172,7 @@ async def inspect_migration_graph(client: GitHubClient, pr: dict, repo: str) -> 
                          if revision not in roots}
         result["cycle_revisions"] = sorted(remaining)
         result["status"] = "observed"
-    except (GitHubClientError, httpx.RequestError, ValueError, TypeError, KeyError):
+    except (GitHubClientError, httpx.RequestError, ValueError, TypeError, KeyError, AttributeError):
         result["errors"].append("migration_graph_unavailable")
     return result
 
@@ -174,6 +204,144 @@ def _unique_branch_map(prs: list[dict]) -> tuple[dict[str, dict], list[str]]:
         {branch: items[0] for branch, items in grouped.items() if len(items) == 1},
         sorted(branch for branch, items in grouped.items() if len(items) > 1),
     )
+
+
+def _finalize_findings(result: dict, github: dict) -> None:
+    blocking_kinds = {
+        "migration_revision_collision", "migration_ancestry_divergence", "closed_dependency",
+        "superseded_dependency", "architecture_decision_conflict", "cross_pr_migration_graph_conflict",
+        "migration_duplicate_revision", "migration_missing_ancestor", "migration_multiple_heads",
+        "migration_cycle", "upstream_head_not_in_child", "ci_failure",
+        "merge_conflict", "changes_requested",
+    }
+    severity_by_kind = {kind: "P1" for kind in blocking_kinds}
+    severity_by_kind.update({
+        "stale_review": "P2", "security_ownership_overlap": "P2",
+        "dependency_unobserved": "P2", "upstream_comparison_unavailable": "P2",
+        "ci_failure": "P1", "merge_conflict": "P1", "changes_requested": "P1",
+    })
+    by_number = {pr["number"]: pr for pr in github.get("pull_requests", [])}
+    nodes = result["candidates"]
+    for finding in result["findings"]:
+        direct = set(finding["pull_requests"])
+        finding["downstream_revalidate"] = sorted(
+            node["number"] for node in nodes
+            if node["number"] not in direct and direct.intersection(node["dependency_chain"])
+        )
+        finding["severity"] = severity_by_kind.get(finding["kind"], "P3")
+        finding["status"] = (
+            "UNKNOWN" if finding.get("certainty") == "incomplete_evidence"
+            else "OPEN" if finding.get("certainty") in {
+                "observed", "observed_cross_branch_conflict", "observed_authoritative_conflict"
+            }
+            else "UNKNOWN"
+        )
+        finding["blocks_integration"] = (
+            finding["kind"] in blocking_kinds and finding["status"] == "OPEN"
+        )
+        finding["why_it_matters"] = finding.get("detail", "Integration evidence is incomplete.")
+        finding["corrective_action"] = finding.get("recommendation", "Resolve the evidence gap.")
+        finding["responsible_owner"] = finding.get("owners", [])
+        finding["affected_heads"] = [
+            {
+                "number": number,
+                "head_sha": by_number.get(number, {}).get("head_sha")
+                or next((closed.get("head_sha") for closed in github.get("closed_pull_requests", [])
+                         if closed.get("number") == number), None),
+            }
+            for number in finding.get("pull_requests", [])
+        ]
+    for node in nodes:
+        blockers = [
+            finding for finding in result["findings"]
+            if finding["blocks_integration"] and node["number"] in finding["pull_requests"]
+        ]
+        if blockers:
+            node["readiness"], node["readiness_reason"] = "BLOCKED", blockers[0]["detail"]
+        node["integration_blocked"] = bool(blockers)
+        node["safe_to_integrate"] = "NO" if blockers else "UNKNOWN"
+
+
+def parse_authoritative_registry_decision(
+    text: str, registry_sha: str, open_prs: list[dict], closed_prs: list[dict]
+) -> dict:
+    """Accept only the explicit stop-control decision in the pinned Founder-maintained registry."""
+    rows = text.splitlines()
+    canonical = [
+        (index + 1, line) for index, line in enumerate(rows)
+        if "[#237]" in line and "architecture selected" in line.lower()
+        and "mainai_stop_state" in line and "mainai_stop_events" in line
+    ]
+    superseded = [
+        (index + 1, line) for index, line in enumerate(rows)
+        if "[#243]" in line and re.search(r"(?i)closed.{0,50}superseded by #237", line)
+    ]
+    current = {item["number"]: item for item in open_prs}
+    historic = {item["number"]: item for item in closed_prs}
+    if len(canonical) != 1 or len(superseded) != 1:
+        return {"status": "UNKNOWN", "source_sha": registry_sha, "decisions": []}
+    c_line, c_text = canonical[0]
+    s_line, s_text = superseded[0]
+    c_sha_match = re.search(r"\b[0-9a-f]{40}\b", c_text)
+    s_sha_match = re.search(r"\b[0-9a-f]{40}\b", s_text)
+    c_pr, s_pr = current.get(237), historic.get(243)
+    if (
+        not c_sha_match or not s_sha_match or not c_pr or not s_pr
+        or c_pr.get("head_sha", "").lower() != c_sha_match.group(0)
+        or s_pr.get("head_sha", "").lower() != s_sha_match.group(0)
+        or s_pr.get("state") != "closed_unmerged"
+    ):
+        return {"status": "UNKNOWN", "source_sha": registry_sha, "decisions": []}
+    return {
+        "status": "verified_record",
+        "source_sha": registry_sha,
+        "decisions": [{
+            "id": "stop_control_architecture",
+            "canonical_pr": 237,
+            "canonical_sha": c_pr["head_sha"],
+            "superseded": [{"number": 243, "head_sha": s_pr["head_sha"]}],
+            "evidence": [
+                {"path": "docs/BRANCH_REGISTRY.md", "line": c_line,
+                 "url": f"https://github.com/d1n095/LifeAI/blob/{registry_sha}/docs/BRANCH_REGISTRY.md#L{c_line}"},
+                {"path": "docs/BRANCH_REGISTRY.md", "line": s_line,
+                 "url": f"https://github.com/d1n095/LifeAI/blob/{registry_sha}/docs/BRANCH_REGISTRY.md#L{s_line}"},
+            ],
+        }],
+    }
+
+
+async def fetch_authoritative_registry_decisions(
+    client: GitHubClient, github: dict, repo: str
+) -> dict:
+    branch = github.get("repository", {}).get("default_branch")
+    if not isinstance(branch, str) or not branch:
+        return {"status": "UNKNOWN", "decisions": [], "error": "default_branch_unavailable"}
+    try:
+        source_sha = await client.get_ref(branch)
+        text = await client.get_branch_registry_at_commit(source_sha)
+        if await client.get_ref(branch) != source_sha:
+            return {"status": "UNKNOWN", "decisions": [], "error": "registry_ref_changed"}
+        canonical_pr, superseded_pr = await asyncio.gather(
+            client.get_pull_request(237), client.get_pull_request(243)
+        )
+        canonical = {
+            "number": 237, "head_sha": (canonical_pr.get("head") or {}).get("sha"),
+            "state": "open" if canonical_pr.get("state") == "open" else "closed",
+        }
+        superseded = {
+            "number": 243, "head_sha": (superseded_pr.get("head") or {}).get("sha"),
+            "state": "merged" if superseded_pr.get("merged_at") else "closed_unmerged",
+        }
+        parsed = parse_authoritative_registry_decision(
+            text, source_sha, [canonical], [superseded],
+        )
+        if canonical["state"] != "open":
+            return {"status": "UNKNOWN", "decisions": [], "error": "canonical_candidate_not_open"}
+        if parsed["status"] != "verified_record":
+            parsed["error"] = "explicit_current_decision_record_not_found"
+        return parsed
+    except (GitHubClientError, httpx.RequestError, ValueError, TypeError, KeyError, AttributeError):
+        return {"status": "UNKNOWN", "decisions": [], "error": "canonical_registry_unavailable"}
 
 
 async def _inspect_pr(client: GitHubClient, pr: dict, repo: str) -> dict:
@@ -216,6 +384,7 @@ async def _inspect_pr(client: GitHubClient, pr: dict, repo: str) -> dict:
                 revision, parents = parse_migration(source)
                 result["migrations"].append({
                     "revision": revision, "down_revision": list(parents), "path": path,
+                    "schema_effects": parse_migration_schema_effects(source),
                     "url": f"https://github.com/{repo}/blob/{sha}/{quote(path, safe='/')}",
                 })
             except (GitHubClientError, httpx.RequestError, ValueError, SyntaxError):
@@ -232,7 +401,8 @@ async def _inspect_pr(client: GitHubClient, pr: dict, repo: str) -> dict:
 
 
 def build_integration_graph(
-    github: dict, inspections: list[dict], assignments: list[dict]
+    github: dict, inspections: list[dict], assignments: list[dict],
+    canonical_decisions: dict | None = None,
 ) -> dict:
     prs = github.get("pull_requests", [])
     by_number = {pr["number"]: pr for pr in prs}
@@ -242,6 +412,12 @@ def build_integration_graph(
     )
     scans = {item["number"]: item for item in inspections}
     repo = github.get("repository", {}).get("full_name")
+    canonical_decisions = canonical_decisions or {"status": "UNKNOWN", "decisions": []}
+    superseded_by = {
+        item["number"]: decision["canonical_pr"]
+        for decision in canonical_decisions.get("decisions", [])
+        for item in decision["superseded"]
+    }
     nodes = []
     findings: list[dict] = []
 
@@ -284,9 +460,20 @@ def build_integration_graph(
             })
         for dep in dependencies.values():
             if dep.get("state") == "closed_unmerged":
-                add("closed_dependency", [number], f"Dependency #{dep['number']} is closed without merge.",
-                    [{"url": dep.get("url"), "kind": dep.get("source")}],
-                    "Coordinate with the owners before using this dependency.",
+                replacement = superseded_by.get(dep["number"])
+                kind = "superseded_dependency" if replacement else "closed_dependency"
+                registry_evidence = [
+                    evidence
+                    for decision in canonical_decisions.get("decisions", [])
+                    if decision["canonical_pr"] == replacement
+                    for evidence in decision["evidence"]
+                ]
+                add(kind, [number, dep["number"], *([replacement] if replacement else [])],
+                    f"Dependency #{dep['number']} is closed without merge."
+                    + (f" The canonical registry supersedes it with PR #{replacement}." if replacement else ""),
+                    [{"url": dep.get("url"), "kind": dep.get("source")}, *registry_evidence],
+                    (f"Replace the dependency with the Founder-selected PR #{replacement}, then revalidate downstream."
+                     if replacement else "Coordinate with the owners before using this dependency."),
                     ["Verify the replacement dependency and re-run downstream integration tests."])
             elif dep.get("state") == "unknown":
                 add("dependency_unobserved", [number], f"Dependency #{dep['number']} is not present in the bounded GitHub observation.",
@@ -295,6 +482,22 @@ def build_integration_graph(
                     "Refresh or inspect the referenced PR; do not assume it is merged or available.",
                     ["Verify the dependency's exact current state and SHA before composing branches."],
                     "incomplete_evidence")
+        for claimed_pr in pr.get("canonical_claims", []):
+            canonical_target = superseded_by.get(claimed_pr)
+            if canonical_target is None:
+                continue
+            decision = next(
+                item for item in canonical_decisions["decisions"]
+                if item["canonical_pr"] == canonical_target
+            )
+            add(
+                "architecture_decision_conflict", [number, claimed_pr, canonical_target],
+                f"PR #{number} claims superseded PR #{claimed_pr} as canonical; the Founder-approved registry selects PR #{canonical_target}.",
+                [{"url": pr.get("url"), "kind": "untrusted_candidate_claim"}, *decision["evidence"]],
+                f"Align the proposal with PR #{canonical_target}; do not revive the superseded authority design.",
+                ["Check the candidate against the pinned registry decision and test the canonical service integration."],
+                "observed_authoritative_conflict",
+            )
         reviews = [r for r in pr.get("reviews", []) if r.get("state") in {"APPROVED", "CHANGES_REQUESTED"}]
         stale = [r for r in reviews if r.get("commit_sha") and pr.get("head_sha")
                  and r["commit_sha"].lower() != pr["head_sha"].lower()]
@@ -304,10 +507,36 @@ def build_integration_graph(
                   "head_sha": pr.get("head_sha")} for r in stale],
                 "Request an independent review of the exact current SHA.",
                 ["Verify reviewed SHA matches the current HEAD."])
+        if pr.get("ci_state") == "failed":
+            failed_checks = [
+                {"name": check.get("name"), "state": check.get("state"),
+                 "head_sha": check.get("head_sha"), "url": check.get("url")}
+                for check in [*pr.get("checks", []), *pr.get("workflow_runs", [])]
+                if check.get("state") in {"failure", "cancelled"}
+            ]
+            add("ci_failure", [number], "Current exact-HEAD CI evidence contains a failed or cancelled check.",
+                failed_checks, "Resolve the failed check and verify a successful run on the current exact HEAD.",
+                ["Confirm all required checks pass for the current HEAD SHA."])
+        if pr.get("mergeability", {}).get("state") == "CONFLICTING":
+            add("merge_conflict", [number], "GitHub reports this PR branch conflicts with its base branch.",
+                [{"url": pr.get("url"), "head_sha": pr.get("head_sha"),
+                  "mergeability": pr.get("mergeability")}],
+                "Coordinate a conflict resolution against the current base, then rerun relevant tests.",
+                ["Verify the resolved branch is conflict-free and tests pass at its new exact SHA."])
+        if pr.get("review_state") == "changes_requested_exact_head":
+            add("changes_requested", [number], "A review requests changes on the current exact HEAD.",
+                [{"url": review.get("url"), "reviewed_sha": review.get("commit_sha"),
+                  "state": review.get("state")}
+                 for review in reviews
+                 if review.get("state") == "CHANGES_REQUESTED"
+                 and (review.get("commit_sha") or "").lower() == (pr.get("head_sha") or "").lower()],
+                "Address the current-SHA review feedback and request a new exact-SHA review.",
+                ["Verify the requested changes are addressed and re-review the new HEAD."])
         scan = scans.get(number, {})
         blocked = any(dep.get("state") in {"open", "closed_unmerged"} for dep in dependencies.values())
         blocked = blocked or pr.get("ci_state") == "failed" or pr.get("mergeability", {}).get("state") == "CONFLICTING"
         blocked = blocked or pr.get("review_state") == "changes_requested_exact_head"
+        blocked = blocked or any(claim in superseded_by for claim in pr.get("canonical_claims", []))
         nodes.append({
             "number": number, "head_sha": pr.get("head_sha"), "base_branch": pr.get("base_branch"),
             "url": pr.get("url"), "owner": _owner(pr, assignments, repo),
@@ -321,6 +550,13 @@ def build_integration_graph(
             "readiness_reason": "Observed blocker." if blocked else (
                 "Independent security approval, decision authority and complete migration ancestry not established."
             ),
+            "required_upstream_candidates": [
+                {"number": dep["number"], "state": dep.get("state"),
+                 "head_sha": by_number.get(dep["number"], {}).get("head_sha")
+                 or next((closed.get("head_sha") for closed in github.get("closed_pull_requests", [])
+                          if closed.get("number") == dep["number"]), None)}
+                for dep in dependencies.values()
+            ],
         })
 
     node_by_number = {node["number"]: node for node in nodes}
@@ -337,13 +573,19 @@ def build_integration_graph(
         node["dependency_chain"] = sorted(seen)
 
     migrations: dict[str, list[tuple[int, dict]]] = defaultdict(list)
+    schema_effects: dict[str, list[tuple[int, dict, dict]]] = defaultdict(list)
     file_owners: dict[str, list[int]] = defaultdict(list)
+    schema_file_owners: dict[str, list[int]] = defaultdict(list)
     for scan in inspections:
         for migration in scan.get("migrations", []):
             migrations[migration["revision"]].append((scan["number"], migration))
+            for effect in migration.get("schema_effects", []):
+                schema_effects[effect["table"]].append((scan["number"], migration, effect))
         for path in scan.get("files", []):
             if any(path == prefix or path.startswith(prefix + "/") for prefix in SECURITY_PATHS):
                 file_owners[path].append(scan["number"])
+            if path.startswith(("backend/app/models/", "backend/app/schemas/")) and path.endswith(".py"):
+                schema_file_owners[path].append(scan["number"])
     for revision, entries in migrations.items():
         if len({number for number, _ in entries}) < 2:
             continue
@@ -362,6 +604,20 @@ def build_integration_graph(
                 "Coordinate a single reviewed ancestry without rewriting applied history.",
                 ["Test populated upgrades from each supported historical lineage."],
                 "observed_cross_branch_conflict")
+    for table, entries in schema_effects.items():
+        by_candidate = {number for number, _, _ in entries}
+        if len(by_candidate) < 2:
+            continue
+        add(
+            "schema_change_conflict", sorted(by_candidate),
+            f"Multiple active PRs change schema for table {table}; composed DDL compatibility is unverified.",
+            [{"number": number, "revision": migration["revision"], "path": migration["path"],
+              "operation": effect["operation"], "url": migration["url"]}
+             for number, migration, effect in entries],
+            "Coordinate a single compatible schema transition and migration ancestry before integration.",
+            ["Test fresh install, populated upgrades, constraints, downgrade/upgrade and concurrent application behavior."],
+            "risk",
+        )
     for path, numbers in file_owners.items():
         if len(set(numbers)) > 1:
             add("security_ownership_overlap", numbers, f"Multiple candidates modify {path}.",
@@ -369,19 +625,22 @@ def build_integration_graph(
                  for number in sorted(set(numbers)) if number in by_number],
                 "Owners should agree on an integration plan before composing changes.",
                 ["Re-run security and concurrency tests on the integrated exact SHA."], "risk")
+    for path, numbers in schema_file_owners.items():
+        if len(set(numbers)) > 1:
+            add("schema_change_overlap", sorted(set(numbers)),
+                f"Multiple candidates modify the same schema/model file: {path}.",
+                [{"number": number, "path": path,
+                  "sha": by_number.get(number, {}).get("head_sha"),
+                  "url": f"https://github.com/{repo}/blob/{by_number[number].get('head_sha')}/{quote(path, safe='/')}"
+                  if number in by_number else None}
+                 for number in sorted(set(numbers))],
+                "Compose the exact candidate changes and review the resulting schema constraints and migration compatibility.",
+                ["Run schema/model tests and a fresh plus populated Alembic upgrade on the composed candidate."],
+                "risk")
 
-    blocked_numbers = {number for finding in findings if finding["kind"] in {
-        "migration_revision_collision", "migration_ancestry_divergence", "closed_dependency"
-    } for number in finding["pull_requests"]}
-    for node in nodes:
-        if node["number"] in blocked_numbers:
-            node["readiness"], node["readiness_reason"] = "BLOCKED", "Observed integration conflict."
-    for finding in findings:
-        direct = set(finding["pull_requests"])
-        finding["downstream_revalidate"] = sorted(
-            node["number"] for node in nodes
-            if node["number"] not in direct and direct.intersection(node["dependency_chain"])
-        )
+    _finalize_findings(
+        {"findings": findings, "candidates": nodes}, github
+    )
     return {
         "schema_version": 1, "freshness": github.get("freshness", "unavailable"),
         "observed_at": github.get("observed_at"), "candidates": nodes, "findings": findings,
@@ -394,7 +653,8 @@ def build_integration_graph(
             "ambiguous_head_branches": ambiguous_branches,
             "ambiguous_closed_head_branches": ambiguous_closed_branches,
             "migration_ancestry": "UNKNOWN — request an exact-HEAD graph scan for up to two PRs",
-            "founder_decisions": "NOT_CHECKED — no authenticated approval record was established",
+            "founder_decisions": canonical_decisions.get("status", "UNKNOWN"),
+            "canonical_decisions": canonical_decisions,
             "engineering_lessons": "NOT_CHECKED — external-handoff lesson authorization is blocked",
             "independent_security_reviews": "UNKNOWN — GitHub approvals are not independent acceptance",
         },
@@ -409,7 +669,9 @@ async def analyze_integration(
     selected = [pr for pr in prs if numbers is None or pr["number"] in numbers][:MAX_ANALYZED_PRS]
     repo = github.get("repository", {}).get("full_name")
     if github.get("freshness") in {"stale", "unavailable"} or not repo:
-        result = build_integration_graph(github, [], assignments)
+        result = build_integration_graph(
+            github, [], assignments, {"status": "UNKNOWN", "decisions": [], "error": "live_github_unavailable"}
+        )
         result["coverage"]["inspection_errors"].append({"number": None, "errors": ["live_github_unavailable"]})
         if include_migration_graph:
             result["coverage"]["migration_graph"] = {
@@ -424,7 +686,8 @@ async def analyze_integration(
             return await _inspect_pr(client, pr, repo)
 
     inspections = await asyncio.gather(*(inspect(pr) for pr in selected))
-    result = build_integration_graph(github, inspections, assignments)
+    canonical_decisions = await fetch_authoritative_registry_decisions(client, github, repo)
+    result = build_integration_graph(github, inspections, assignments, canonical_decisions)
 
     def invalidate(number: int) -> None:
         graph_result = result["coverage"].get("migration_graph")
@@ -447,6 +710,7 @@ async def analyze_integration(
             if finding["kind"] in {
                 "migration_revision_collision", "migration_ancestry_divergence", "closed_dependency",
                 "migration_duplicate_revision", "migration_missing_ancestor", "migration_multiple_heads", "migration_cycle",
+                "superseded_dependency", "architecture_decision_conflict",
             }
             for affected in finding["pull_requests"]
         }
@@ -556,6 +820,35 @@ async def analyze_integration(
                     for number in numbers_pair:
                         node = next(node for node in result["candidates"] if node["number"] == number)
                         node["readiness"], node["readiness_reason"] = "BLOCKED", "Observed cross-PR migration graph conflict."
+            changed_effects: dict[str, list[tuple[dict, dict]]] = defaultdict(list)
+            for graph in graphs:
+                for migration in graph["migrations"]:
+                    if migration["path"] not in changed_paths.get(graph["number"], set()):
+                        continue
+                    for effect in migration.get("schema_effects", []):
+                        changed_effects[effect["table"]].append((graph, migration | effect))
+            for table, entries in changed_effects.items():
+                if len({graph["number"] for graph, _ in entries}) < 2:
+                    continue
+                numbers_pair = sorted({graph["number"] for graph, _ in entries})
+                result["findings"].append({
+                    "kind": "cross_pr_schema_change_overlap", "certainty": "risk",
+                    "pull_requests": numbers_pair,
+                    "detail": f"Selected PRs change schema for table {table}; compatibility of the composed DDL is unverified.",
+                    "evidence": [{"number": graph["number"], **migration} for graph, migration in entries],
+                    "recommendation": "Review the combined schema transition and migration order before integration.",
+                    "owners": [
+                        {"number": number, **_owner(
+                            next(p for p in selected if p["number"] == number), assignments, repo
+                        )} for number in numbers_pair
+                    ],
+                    "tests": ["Test fresh install, populated upgrades, constraints and downgrade/upgrade on the composed heads."],
+                    "downstream_revalidate": sorted(
+                        node["number"] for node in result["candidates"]
+                        if set(numbers_pair).intersection(node["dependency_chain"])
+                    ),
+                    "reuse": "UNKNOWN — inspect exact changed migration bodies.",
+                })
     elif include_migration_graph:
         result["coverage"]["migration_graph"] = {
             "status": "UNKNOWN", "graphs": [],
@@ -625,4 +918,5 @@ async def analyze_integration(
             result["coverage"]["inspection_errors"].append({
                 "number": None, "errors": ["requested_pr_not_in_open_observation"], "numbers": missing
             })
+    _finalize_findings(result, github)
     return result

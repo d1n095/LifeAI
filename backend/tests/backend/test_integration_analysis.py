@@ -71,6 +71,37 @@ def test_identical_revision_and_path_is_not_cross_branch_collision():
     assert not any(item["kind"] == "migration_revision_collision" for item in result["findings"])
 
 
+def test_shared_table_schema_effect_is_unknown_risk_not_confirmed_blocker():
+    prs = [pr(1, "a" * 40, "a"), pr(2, "b" * 40, "b")]
+    first, second = scan(1, "a" * 40, "backend/alembic/versions/0069_a.py"), scan(
+        2, "b" * 40, "backend/alembic/versions/0070_b.py"
+    )
+    first["migrations"][0]["revision"] = "0069"
+    second["migrations"][0]["revision"] = "0070"
+    first["migrations"][0]["schema_effects"] = [{"table": "mainai_stop_state", "operation": "create_table"}]
+    second["migrations"][0]["schema_effects"] = [{"table": "mainai_stop_state", "operation": "alter_column"}]
+
+    result = analysis.build_integration_graph(observation(prs), [first, second], [])
+    finding = next(item for item in result["findings"] if item["kind"] == "schema_change_conflict")
+    assert finding["certainty"] == "risk"
+    assert finding["status"] == "UNKNOWN"
+    assert finding["blocks_integration"] is False
+    assert all(candidate["readiness"] == "UNKNOWN" for candidate in result["candidates"])
+
+
+def test_schema_effect_parser_only_extracts_literal_table_operations():
+    effects = analysis.parse_migration_schema_effects(
+        'op.create_table("mainai_stop_state")\n'
+        'op.alter_column("mainai_stop_state", "stopped", nullable=False)\n'
+        'op.create_table(dynamic_table)\n'
+        'op.execute("DROP TABLE mainai_stop_state")'
+    )
+    assert effects == [
+        {"table": "mainai_stop_state", "operation": "create_table"},
+        {"table": "mainai_stop_state", "operation": "alter_column"},
+    ]
+
+
 def test_stale_review_and_closed_unmerged_base_never_become_ready():
     item = pr(244, "c" * 40, "child", base="superseded",
               review_state="approval_stale_head",
@@ -83,6 +114,99 @@ def test_stale_review_and_closed_unmerged_base_never_become_ready():
     assert result["candidates"][0]["dependencies"][0]["number"] == 243
 
 
+def test_failed_exact_head_ci_is_an_evidence_backed_integration_blocker():
+    item = pr(
+        1, "a" * 40, "branch", ci_state="failed",
+        checks=[{"name": "tests", "state": "failure", "head_sha": "a" * 40,
+                 "url": "https://github.com/d1n095/LifeAI/actions/runs/1"}],
+    )
+    result = analysis.build_integration_graph(observation([item]), [], [])
+    finding = next(f for f in result["findings"] if f["kind"] == "ci_failure")
+    assert finding["status"] == "OPEN" and finding["blocks_integration"] is True
+    assert finding["affected_heads"] == [{"number": 1, "head_sha": "a" * 40}]
+    assert finding["evidence"][0]["head_sha"] == "a" * 40
+    assert result["candidates"][0]["safe_to_integrate"] == "NO"
+
+
+def test_founder_registry_decision_overrides_pr_claim_and_blocks_superseded_architecture():
+    registry_sha = "e" * 40
+    registry = "\n".join([
+        "| `cursor/mainai-safe-internal-startup` | [#237](https://github.com/d1n095/LifeAI/pull/237) | **Open; `7878958bfa57fa999122ac3008e9f261233f158e`; architecture selected** | canonical `mainai_stop_state`/`mainai_stop_events` direction |",
+        "| `claude/kill-switch-authority-epoch-race-fix` | [#243](https://github.com/d1n095/LifeAI/pull/243) | **Closed, superseded by #237**; historical HEAD `3a19c7640ec75b5574cc268ed1c8b76ddba4d43e` |",
+    ])
+    decision = analysis.parse_authoritative_registry_decision(
+        registry, registry_sha,
+        [pr(237, SHA_237, "canonical")],
+        [{"number": 243, "head_sha": "3a19c7640ec75b5574cc268ed1c8b76ddba4d43e",
+          "state": "closed_unmerged", "url": "https://github.com/d1n095/LifeAI/pull/243"}],
+    )
+    assert decision["status"] == "verified_record"
+    candidate = pr(244, "c" * 40, "reconciliation", canonical_claims=[243],
+                   dependencies=[{"number": 243, "state": "closed_unmerged",
+                                  "url": "https://github.com/d1n095/LifeAI/pull/243",
+                                  "source": "explicit_dependency_in_pull_request_body"}],
+                   url="https://github.com/d1n095/LifeAI/pull/244")
+    result = analysis.build_integration_graph(
+        observation([candidate]), [], [], canonical_decisions=decision
+    )
+    finding = next(f for f in result["findings"] if f["kind"] == "architecture_decision_conflict")
+    assert finding["status"] == "OPEN" and finding["blocks_integration"] is True
+    assert finding["severity"] == "P1"
+    assert result["candidates"][0]["readiness"] == "BLOCKED"
+    assert result["candidates"][0]["integration_blocked"] is True
+    assert result["candidates"][0]["safe_to_integrate"] == "NO"
+    assert any(f["kind"] == "superseded_dependency" for f in result["findings"])
+    assert any(item["url"].endswith("docs/BRANCH_REGISTRY.md#L1") for item in finding["evidence"])
+
+
+def test_registry_decision_is_unknown_if_record_or_exact_pr_sha_is_stale():
+    registry = (
+        "| [#237] | architecture selected; canonical `mainai_stop_state`/`mainai_stop_events`; "
+        "`1111111111111111111111111111111111111111` |\n"
+        "| [#243] | Closed, superseded by #237; historical HEAD "
+        "`3a19c7640ec75b5574cc268ed1c8b76ddba4d43e` |"
+    )
+    result = analysis.parse_authoritative_registry_decision(
+        registry, "e" * 40, [pr(237, SHA_237, "canonical")],
+        [{"number": 243, "head_sha": "3a19c7640ec75b5574cc268ed1c8b76ddba4d43e",
+          "state": "closed_unmerged"}],
+    )
+    assert result["status"] == "UNKNOWN" and result["decisions"] == []
+
+
+@pytest.mark.asyncio
+async def test_registry_fetch_is_exact_sha_pinned_and_requires_stable_default_ref():
+    registry = (
+        "| [#237] | architecture selected; canonical `mainai_stop_state`/`mainai_stop_events`; "
+        f"`{SHA_237}` |\n"
+        "| [#243] | Closed, superseded by #237; historical HEAD "
+        "`3a19c7640ec75b5574cc268ed1c8b76ddba4d43e` |"
+    )
+
+    class Fake:
+        refs = 0
+        async def get_ref(self, branch):
+            assert branch == "main"
+            self.refs += 1
+            return "e" * 40
+        async def get_branch_registry_at_commit(self, sha):
+            assert sha == "e" * 40
+            return registry
+        async def get_pull_request(self, number):
+            if number == 237:
+                return {"state": "open", "head": {"sha": SHA_237}}
+            return {"state": "closed", "merged_at": None,
+                    "head": {"sha": "3a19c7640ec75b5574cc268ed1c8b76ddba4d43e"}}
+
+    result = await analysis.fetch_authoritative_registry_decisions(
+        Fake(), {**observation([]), "repository": {"full_name": "d1n095/LifeAI",
+                                                     "default_branch": "main"}},
+        "d1n095/LifeAI",
+    )
+    assert result["status"] == "verified_record"
+    assert result["source_sha"] == "e" * 40
+
+
 def test_security_overlap_is_risk_not_confirmed_architecture_decision():
     prs = [pr(237, SHA_237, "canonical"), pr(243, "a" * 40, "alternative")]
     path = "backend/app/workforce/kill_switch.py"
@@ -91,7 +215,7 @@ def test_security_overlap_is_risk_not_confirmed_architecture_decision():
     result = analysis.build_integration_graph(observation(prs), scans, [])
     finding = next(item for item in result["findings"] if item["kind"] == "security_ownership_overlap")
     assert finding["certainty"] == "risk"
-    assert result["coverage"]["founder_decisions"].startswith("NOT_CHECKED")
+    assert result["coverage"]["founder_decisions"] == "UNKNOWN"
     assert "not independent" in result["candidates"][0]["security_review"]
 
 
@@ -318,11 +442,11 @@ async def test_two_exact_pr_graphs_detect_cross_pr_revision_collision(monkeypatc
     prs = [pr(237, SHA_237, "stop"), pr(363, SHA_363, "disclosure")]
     sources = {
         237: {
-            "0069_mainai_stop_controls.py": 'revision = "0069"\ndown_revision = "0068"',
+            "0069_mainai_stop_controls.py": 'revision = "0069"\ndown_revision = "0068"\nop.create_table("shared_table")',
             "0004_legacy.py": 'revision = "0004"\ndown_revision = "0003"\n# branch A',
         },
         363: {
-            "0069_provider_disclosure_local_decision.py": 'revision = "0069"\ndown_revision = "0068"',
+            "0069_provider_disclosure_local_decision.py": 'revision = "0069"\ndown_revision = "0068"\nop.add_column("shared_table", object())',
             "0004_legacy.py": 'revision = "0004"\ndown_revision = "0003"\n# branch B',
         },
     }
@@ -354,6 +478,11 @@ async def test_two_exact_pr_graphs_detect_cross_pr_revision_collision(monkeypatc
     assert finding["pull_requests"] == [237, 363]
     assert {e["revision"] for e in finding["evidence"]} == {"0069"}
     assert {e["number"] for e in finding["evidence"]} == {237, 363}
+    schema_finding = next(
+        f for f in result["findings"] if f["kind"] == "cross_pr_schema_change_overlap"
+    )
+    assert schema_finding["status"] == "UNKNOWN"
+    assert schema_finding["blocks_integration"] is False
     assert all(node["readiness"] == "BLOCKED" for node in result["candidates"])
     assert result["coverage"]["migration_graph"]["status"] == "observed"
 

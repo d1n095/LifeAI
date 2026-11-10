@@ -921,11 +921,15 @@ export type IntegrationAnalysis = {
     url: string | null;
     owner: { github_author: string | null; agent: string | null; status: string };
     dependencies: { number: number; state: string; url?: string | null; source: string }[];
+    required_upstream_candidates?: { number: number; state: string; head_sha: string | null }[];
     review_state: string;
     security_review: string;
     migration_scan: string;
     readiness: "BLOCKED" | "UNKNOWN" | "READY";
     readiness_reason: string;
+    integration_blocked?: boolean;
+    safe_to_integrate?: "NO" | "UNKNOWN" | "YES";
+    canonical_claims?: number[];
   }[];
   findings: {
     kind: string;
@@ -938,6 +942,13 @@ export type IntegrationAnalysis = {
     tests: string[];
     downstream_revalidate: number[];
     reuse: string;
+    severity?: string;
+    status?: "OPEN" | "RESOLVED" | "UNKNOWN";
+    blocks_integration?: boolean;
+    why_it_matters?: string;
+    corrective_action?: string;
+    responsible_owner?: { number: number; agent: string | null; status: string }[];
+    affected_heads?: { number: number; head_sha: string | null }[];
   }[];
   coverage: {
     inspected_pull_requests: number[];

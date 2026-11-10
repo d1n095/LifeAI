@@ -381,7 +381,9 @@ class FakeGitHub:
 @pytest.mark.asyncio
 async def test_snapshot_preserves_exact_sha_ci_dependencies_draft_and_unknown_mergeability(monkeypatch):
     fake = FakeGitHub()
+    fake.open_prs[2]["body"] = "Canonical authority: #243"
     observation = await _fetch_github_observation(fake)
+    assert observation["pull_requests"][2]["canonical_claims"] == [243]
     observation.update(freshness="live", cache_age_seconds=0)
     monkeypatch.setattr(
         github_operations,

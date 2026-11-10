@@ -175,8 +175,37 @@ class GitHubClient:
     async def get_ref(self, branch: str) -> str:
         """Returns the commit SHA a branch currently points at."""
         repo = self._require_configured()
-        data = await self._request("GET", f"/repos/{repo}/git/ref/heads/{branch}")
-        return data["object"]["sha"]
+        if not branch or len(branch) > 255 or branch.startswith("/") or ".." in branch.split("/"):
+            raise ValueError("A valid branch name is required.")
+        data = await self._read_request(
+            f"/repos/{repo}/git/ref/heads/{quote(branch, safe='/')}"
+        )
+        sha = data.get("object", {}).get("sha") if isinstance(data, dict) else None
+        if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+            raise GitHubClientError("GitHub branch reference is unavailable.")
+        return sha
+
+    async def get_branch_registry_at_commit(self, sha: str) -> str:
+        """Read the single canonical project register at an exact repository commit."""
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+            raise ValueError("An exact commit SHA is required.")
+        repo = self._require_configured()
+        data = await self._read_request(
+            f"/repos/{repo}/contents/docs/BRANCH_REGISTRY.md?{urlencode({'ref': sha})}"
+        )
+        if (
+            not isinstance(data, dict) or data.get("encoding") != "base64"
+            or not isinstance(data.get("size"), int) or data["size"] > 262144
+            or not isinstance(data.get("content"), str) or len(data["content"]) > 360000
+        ):
+            raise GitHubClientError("Canonical branch registry is unavailable or exceeds its size limit.")
+        try:
+            content = base64.b64decode("".join(data["content"].split()), validate=True)
+            if len(content) > 262144:
+                raise ValueError("Registry exceeds the size limit.")
+            return content.decode("utf-8")
+        except (TypeError, ValueError, UnicodeDecodeError) as exc:
+            raise GitHubClientError("Canonical branch registry could not be decoded.") from exc
 
     async def get_pull_request(self, number: int) -> dict:
         repo = self._require_configured()

@@ -77,19 +77,28 @@ migration files and four concurrent reads. It reports duplicate revision IDs, mi
 multiple heads and cycles only when every listed migration is parsed and HEAD is stable. Across
 the selected PR graphs it flags differing definitions only when at least one side changed that
 migration in its PR; unrelated historical divergence is not attributed to the candidates.
+For literal table-oriented Alembic operations, it also reports when changed migrations in
+multiple candidates affect the same table. This is a schema-compatibility risk with UNKNOWN
+status, not a confirmed conflict or integration blocker; arbitrary SQL and dynamic table names
+are not inferred. Changed-file analysis likewise identifies shared model/schema files and
+tables as review risks rather than proof of incompatible DDL.
 Unsupported labels or
 `depends_on`, nested directories, incomplete reads, limits, and changed HEADs yield UNKNOWN.
 It does not inspect arbitrary Alembic configuration, other version locations or a composed
 merged tree; those remain unverified. An explicit dependency absent from the bounded open/closed
 PR observation is reported as `dependency_unobserved`, with candidate readiness left UNKNOWN.
-Closed-unmerged references are blockers but are not inferred to be superseded without an
-authoritative supersession record. It cannot establish an authenticated Founder-approved architecture decision,
-identify a supersession from arbitrary PR text, or establish that a previous lesson's remedy
-was independently verified. These are NOT_CHECKED. It does not expose or reuse unverified
-founder-wide lessons (#380 remains blocked). A GitHub approval is not independent security
-acceptance. Findings contain source evidence and generic corrective test criteria; suggested
-owners are UNKNOWN unless an exact-SHA assignment is present. No recommendation grants
-authority or instructs an agent to act.
+The analysis reads `docs/BRANCH_REGISTRY.md` at a pinned default-branch SHA, verifies the
+default-branch ref did not move, and cross-checks the registry's explicit #237/#243 stop-control
+decision against their live exact HEAD SHAs and states. Only that narrowly recognized record
+can establish the `verified_record` status for this decision; unavailable, changed, ambiguous,
+or mismatched evidence remains UNKNOWN. PR body claims are untrusted proposals and become
+conflicts only when contradicted by that verified record. Closed-unmerged references are not
+inferred superseded without an authoritative supersession record. This does not establish
+decisions for other architectures or verify a previous lesson's remedy. It does not expose or
+reuse unverified founder-wide lessons (#380 remains blocked). A GitHub approval is not
+independent security acceptance. Findings contain source evidence and generic corrective test
+criteria; suggested owners are UNKNOWN unless an exact-SHA assignment is present. No
+recommendation grants authority or instructs an agent to act.
 
 `freshness`, `observed_at`, scan limits and errors must be preserved by consumers. Stale or
 unavailable snapshots are not scanned, and no observation is represented as live approval.

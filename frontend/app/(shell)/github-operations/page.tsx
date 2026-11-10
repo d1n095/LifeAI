@@ -205,9 +205,9 @@ export default function GitHubOperationsPage() {
                 {analysis.findings.length === 0 && <Empty>No conflicts observed in the inspected data; completeness and readiness remain UNKNOWN.</Empty>}
                 {analysis.findings.map((finding, index) => (
                   <article key={`${finding.kind}-${index}`} className="rounded-lg border border-border bg-panel p-3 text-sm">
-                    <div className="flex justify-between gap-3"><strong>{finding.detail}</strong><StatusBadge value={finding.certainty} /></div>
-                    <p className="mt-1 text-xs text-white/50">PRs {finding.pull_requests.join(", ")} · {finding.kind}</p>
-                    <p className="mt-1">{finding.recommendation}</p>
+                    <div className="flex justify-between gap-3"><strong>{finding.detail}</strong><StatusBadge value={`${finding.severity ?? "P3"} · ${finding.status ?? "UNKNOWN"}`} /></div>
+                    <p className="mt-1 text-xs text-white/50">PRs {finding.pull_requests.join(", ")} · {finding.kind} · {finding.blocks_integration ? "integration blocked" : "not an established blocker"}</p>
+                    <p className="mt-1">{finding.corrective_action ?? finding.recommendation}</p>
                     <p className="mt-1 text-xs text-white/50">Owner: {finding.owners.map((owner) => `#${owner.number}: ${owner.agent ?? "UNKNOWN"} (${owner.status})`).join("; ")}</p>
                     <p className="mt-1 text-xs text-white/50">Reuse: {finding.reuse}</p>
                     <p className="mt-1 text-xs text-white/50">Tests: {finding.tests.join(" ")}</p>
@@ -227,6 +227,7 @@ export default function GitHubOperationsPage() {
                       <SourceLink href={candidate.url ?? ""} label={`PR #${candidate.number}`} /> · <StatusBadge value={candidate.readiness} />
                       <p className="break-all">HEAD {candidate.head_sha ?? "UNKNOWN"} · base {candidate.base_branch ?? "UNKNOWN"}</p>
                       <p>Dependencies: {candidate.dependencies.map((dep) => `#${dep.number} (${dep.state})`).join(", ") || "UNKNOWN"}</p>
+                      <p>Required upstream: {candidate.required_upstream_candidates?.map((dep) => `#${dep.number} (${dep.state}, ${dep.head_sha ?? "SHA UNKNOWN"})`).join(", ") || "UNKNOWN"} · safe to integrate: {candidate.safe_to_integrate ?? "UNKNOWN"}</p>
                       <p>Owner: {candidate.owner.agent ?? "UNKNOWN"} · Review: {candidate.review_state} · {candidate.security_review}</p>
                       <p>{candidate.readiness_reason}</p>
                     </div>
