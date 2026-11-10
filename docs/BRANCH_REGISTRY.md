@@ -50,44 +50,37 @@ Heads, baser och CI verifierade mot GitHub API. #237, #239 och #243 har inte upp
 
 | Branch | PR | Status / exact HEAD | Bas / beroende | Scope / evidens |
 |---|---|---|---|---|
-| `cursor/mainai-safe-internal-startup` | [#237](https://github.com/d1n095/LifeAI/pull/237) | Öppen, ready; `7878958bfa57fa999122ac3008e9f261233f158e`; independent review **FAIL** | `claude/det-kommer-mer-879lcm` @ `64c07d5` | Cursor: Founder-selected durable stop-state/event direction. Blocked by unlocked recovery-clear race, owner-RLS-limited global revocation if invoked in a tenant session, no verified global-stop app call path, and unprotected stop/event table DML. Exact-SHA backend suite failed at `test_capability_record_active_context_linking`; npm audit failed. |
-| `claude/workforce-kill-switch-owner-scoping` | [#239](https://github.com/d1n095/LifeAI/pull/239) | Öppen, ready; `b248302f0de240fd5b347404ad26ef61b32942aa` | `claude/det-kommer-mer-879lcm` @ `64c07d5` | Claude: owner-scoped kill-switch prerequisite for #243; no latest review. |
-| `claude/kill-switch-authority-epoch-race-fix` | [#243](https://github.com/d1n095/LifeAI/pull/243) | Öppen, ready; `3a19c7640ec75b5574cc268ed1c8b76ddba4d43e`; independent review **FAIL** | #239 @ `b248302` | Claude: DB epoch/locking race fix. All seven exact-SHA normal-grant race scenarios passed; takeover bypasses the grant fence, global revocation is owner-RLS-limited if invoked in a tenant session, no global-stop app call path was found, and the epoch table has no DB mutation fence. Full backend failed at `test_composed_safe_internal_executive_school` because `clear_kill_switch_for_recovery()` lacked required `db`; npm audit failed. Preserve the proven normal-grant locking/tests when reconciling with #237; do not merge its competing migration as-is. |
+| `cursor/mainai-safe-internal-startup` | [#237](https://github.com/d1n095/LifeAI/pull/237) | Öppen, ready; `7878958bfa57fa999122ac3008e9f261233f158e`; architecture selected, implementation **NOT SECURITY-APPROVED** | `claude/det-kommer-mer-879lcm` @ `64c07d5` | Cursor: canonical `mainai_stop_state`/`mainai_stop_events` direction. Independent review blockers: recovery clear is not atomic against a newer stop; global-stop API path is NOT VERIFIED and its all-owner revocation is RLS-limited if called in a tenant-scoped session; stop/event tables have no runtime DB mutation boundary. Founder reports 13/13 real-Postgres grant/stop/takeover fence scenarios passing, but these do not cover the remaining clear/RLS/DB-role blockers. Current required checks fail at backend unit/integration and npm audit. |
+| `claude/workforce-kill-switch-owner-scoping` | [#239](https://github.com/d1n095/LifeAI/pull/239) | Öppen, ready; `b248302f0de240fd5b347404ad26ef61b32942aa` | `claude/det-kommer-mer-879lcm` @ `64c07d5` | Claude: owner-scoping prerequisite for the now-closed #243 lineage; not the canonical #237 implementation. |
+| `claude/kill-switch-authority-epoch-race-fix` | [#243](https://github.com/d1n095/LifeAI/pull/243) | **Closed, superseded by #237**; historical HEAD `3a19c7640ec75b5574cc268ed1c8b76ddba4d43e` | #239 @ `b248302` | Claude: alternate `workforce_authority_epoch` design is not an integration candidate. Retain its normal-grant race scenarios as historical evidence only. Its takeover-fence finding is not an outstanding #237 defect: exact #237 source calls `assert_authority_grant_allowed()` in `alternate_agent_takeover`, and Founder-reported real-Postgres checks covered takeover. Do not reopen or port the alternate state architecture. |
 | `codex/life-founder-alpha-integration` | [#352](https://github.com/d1n095/LifeAI/pull/352) | Öppen, draft; `07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765` | #340 | Codex: frozen Founder Alpha integration base for #360/#363. |
-| `codex/founder-alpha-0069-migration-compat` | [#363](https://github.com/d1n095/LifeAI/pull/363) | Öppen, draft; `1d3fcb0440aca0f460330ecacfb99c15809665fa` | #352 @ `07ce4a1` | Codex: preserves Founder Alpha migration ancestry. Migration check passed, but backend unit/integration failed. Its provider-disclosure `0069` is the parent of `0069_embedding_space_identity` and later Blueprint migrations. |
-| `claude/integration-intelligence-lessons` | [#380](https://github.com/d1n095/LifeAI/pull/380) | Öppen, draft; `f39a1199556337bef8f60637a8e25d01cb40beb2`; independent review **FAIL** | #377 | Claude: new exact-SHA review reproduced owner/project lesson disclosure, heuristic injection bypass and caller-forgeable verification claims; authoritative egress enforcement is absent/unverified. Focused 5 tests passed; backend CI passed, both E2E jobs and npm audit failed. Not approved for external handoff. |
+| `codex/founder-alpha-0069-migration-compat` | [#363](https://github.com/d1n095/LifeAI/pull/363) | Öppen, draft; `1d3fcb0440aca0f460330ecacfb99c15809665fa` | #352 @ `07ce4a1` | Codex: preserves Founder Alpha migration ancestry. Migration check passed; backend unit/integration fails the latest downgrade/upgrade round-trip at the no-op 0073 marker. Its provider-disclosure `0069` is the parent of `0069_embedding_space_identity` and later Blueprint migrations. Reconcile with #237's active `0069` before integration; do not renumber in isolation. |
+| `claude/integration-intelligence-lessons` | [#380](https://github.com/d1n095/LifeAI/pull/380) | Öppen, draft; current HEAD `ba01ac45467c3e9524ce31d33e0884849fdd5967`; prior `f39a119…` **FAIL**, current correction **INDEPENDENT REVIEW PENDING** | #377 | Claude: current correction claims per-field minimization, DB-backed lesson revalidation, and egress-before-send with zero sends on denial/error. Builder reports 24 adversarial tests plus existing suite; this is not independent acceptance. Keep external handoff blocked until exact-SHA review. |
 | `claude/blueprint-readiness-approval-safety` | [#379](https://github.com/d1n095/LifeAI/pull/379) | Öppen, draft; `5685926d8f7e0b75997fc223b52c83afe3b75556` | #378 | Claude: conditional independent PASS only for currently immutable/content-addressed sources; mutable-source generation remains unsupported. |
 
-**Stop-control ownership overlap:** #237 and #243 both change
-`backend/app/workforce/kill_switch.py`, `backend/app/workforce/provider_worker.py`,
-`backend/app/workforce/safe_internal_run.py`, and the executive dashboard/loop/observability
-surfaces. #243 is based on #239, not #237. It must not be updated/rebased preemptively; reconcile
-the behavior only after its declared prerequisite and the selected canonical direction are
-actually integrated.
+**Stop-control ownership / status:** #237's `mainai_stop_state` and `mainai_stop_events` are the
+selected architecture, not a security approval. #243 is closed and superseded; its separate epoch
+table is not to be revived. The earlier overlap in `kill_switch.py`, provider worker, safe-internal
+startup and executive surfaces is historical, not a reason to combine both state models.
 
-**Alembic integration blocker — do not merge these revisions as-is:** #237
-`0069_mainai_stop_controls.py`, #243 `0069_workforce_authority_epoch.py`, and #363
-`0069_provider_disclosure_local_decision.py` each declare `revision = "0069"` and
-`down_revision = "0068"`. The #363 embedding-space revision descends from its provider-disclosure
-`0069`, so preserving that historical ancestry requires coordinated reconciliation of its
-descendants too. These are separate ownership lanes and histories, not safe independent numbering
-changes. The Founder selected #237's durable stop-state/event architecture as the direction,
-subject to independent validation. #243's database row-lock race protection and seven passing
-concurrency scenarios are evidence to preserve, not approval of its duplicate epoch table or
-migration. Coordinate the shared model and a single Alembic lineage with Cursor, Claude, and Codex
-after the prerequisite/base changes are accepted; do not rebase or renumber branches preemptively.
+**Alembic integration blocker — coordinate #237 and #363; do not merge/renumber as-is:** #237
+`0069_mainai_stop_controls.py` and #363 `0069_provider_disclosure_local_decision.py` each declare
+`revision = "0069"` from `0068`. The #363 `0069_embedding_space_identity` and later Blueprint
+migrations descend from its provider-disclosure `0069`, so the coordinated resolution must preserve
+the applied Founder Alpha ancestry and its data-recovery semantics. #243's competing
+`0069_workforce_authority_epoch.py` belongs to the closed, superseded branch and is not part of the
+canonical migration plan. Require the #237 and #363 owners to agree on one safe composed ancestry;
+do not independently renumber files or rewrite already-applied production history.
 
-Independent comments with exact-SHA findings are now published on #237, #243, and #380. For #237
-and #243, the source review did not locally reproduce the PostgreSQL interleavings; treat them as
-confirmed code-path blockers requiring targeted DB regression tests, not as executed attack tests.
-No backend application call site for either candidate's global-stop API was found; therefore that
-operational path is NOT VERIFIED, and the RLS findings are conditional on invocation in a
-tenant-scoped runtime session.
-Their September CI evidence must be rerun against the eventual integrated candidate. Preserve
-#243's passing normal broker-grant race scenarios, but add takeover and runtime-role/RLS coverage.
-#380's earlier `7ea2234` FAIL remains historical; current `f39a119` is also FAIL and blocked for
-external handoff. Its five focused pure tests pass but do not cover the demonstrated disclosure
-and egress gaps.
+Independent exact-SHA findings are published on #237 and #380. #237's grant/stop race and takeover
+fence now have Founder-reported real-Postgres verification (13/13 scenarios); preserve that
+evidence. The unresolved #237 review blockers remain concurrent clear-vs-new-stop, effective
+global-stop/RLS behavior (no application call path was found), and runtime-role protection of stop
+state/event mutations. These need focused DB/runtime-role tests on the corrected candidate.
+#237's current CI still fails backend unit/integration and npm audit. #243 is closed/superseded,
+not an active remediation candidate. #380's `7ea2234` and `f39a119` FAIL verdicts are historical;
+`ba01ac4` is a new correction pending independent exact-SHA verification, and remains blocked for
+external handoff meanwhile.
 
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
