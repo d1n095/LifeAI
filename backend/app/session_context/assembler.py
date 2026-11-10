@@ -96,6 +96,11 @@ class SessionContextBundle:
             "session_id": self.session_id,
             "generated_at": self.generated_at,
             "readiness": self.readiness,
+            # `blocked`/`readiness == BLOCKED` is an OBSERVATION, not an enforced execution
+            # restriction. This assembler is read-only and authorizes nothing; `enforcement` makes
+            # that explicit so a caller never mistakes it for a wired hard-authorization gate.
+            "enforcement": "advisory_observation",
+            "advisory_only": True,
             "blocked": self.blocked,
             "blocked_reasons": list(self.blocked_reasons),
             "sections": [s.to_dict() for s in self.sections],

@@ -204,6 +204,9 @@ def test_session_context_api_boundary(client, superuser_db):
     assert body["owner_id"] == str(founder.id)  # owner-scoped at the boundary
     assert [s["name"] for s in body["sections"]][0] == "startup_readiness"
     assert "blocked" in body and "readiness" in body
+    # BLOCKED is an OBSERVATION, not an enforced execution restriction (no hard gate is advertised).
+    assert body["enforcement"] == "advisory_observation"
+    assert body["advisory_only"] is True
 
 
 def test_session_context_api_requires_authentication(client):
