@@ -76,22 +76,100 @@ def integration_tags(
     return tags
 
 
-# FOUNDER DECISION #380 (2026-11-10): a STORED `verification_status` string (even
-# `"verified_by_regression_test"`) plus an allowlisted `regression_test` NAME is NOT proof a
-# regression test executed and passed against this lesson's version. The model itself warns of this
-# (migration 0063: "naming a regression_test is not itself proof it caught the bug"), and an
-# investigation of the existing CI/evidence architecture found NO mechanism linking a lesson version
-# to a concrete executed test-run outcome. Until such canonical EXECUTABLE evidence exists (a
-# separate, dependency-owned increment — NOT built here), no lesson has executed-run evidence, so the
-# agent-facing summary never claims `verified=true` or presents a lesson as regression-proven. The
-# authoritative packet-level enforcement is `context_handoff._clamp_verification_claim`
-# (condition 4, `_has_executed_regression_run_evidence`); this base summary mirrors that so the
-# direct-summary path (`integration_lessons_for_task_context`) is honest too.
-def _has_executed_regression_run_evidence(lesson) -> bool:
+def _has_executed_regression_run_evidence(db: Session | None, *, lesson_id, regression_test: str | None) -> bool:
+    """FOUNDER DECISION #380 (2026-11-10), evidence-based resolution. A STORED `verification_status`
+    string (even `"verified_by_regression_test"`) plus an allowlisted `regression_test` NAME is NOT
+    proof a regression test executed and passed against this lesson's version (migration 0063:
+    "naming a regression_test is not itself proof it caught the bug"). An earlier revision of this
+    function concluded "no mechanism linking a lesson version to a concrete executed test-run
+    outcome exists" and hard-coded `False` forever. That conclusion was wrong: this codebase already
+    durably records exactly that proof, in two existing places this function reuses rather than
+    inventing a third or a new migration:
+
+      1. `app.mainai_execution.planner.create_plan()`'s `created` `MainAITaskEvent.detail
+         ["lessons_applied"]` — the only existing binding from a lesson id to a real task (written
+         by `app.mainai_execution.lessons.apply_lessons_to_verification_plan`). Without this, a
+         passing test for a DIFFERENT lesson that merely shares a `regression_test` string could
+         never be told apart from genuine evidence — this is what prevents that ("content identity",
+         founder requirement 2/3).
+      2. `app.mainai_execution.execution_job._finalize_task_outcome()`'s `verification_passed`/
+         `verification_failed` `MainAITaskEvent.detail` — the real, subprocess-executed `pytest`
+         outcome for that exact task, per step (`kind`, `passed`, `detail.target`)
+         (`app.mainai_execution.verify`).
+
+    Evidence counts ONLY when ALL of:
+      - a task exists whose `lessons_applied` names this EXACT lesson id (founder requirement 2:
+        content/identity binding — never a target-string coincidence with a different lesson);
+      - that SAME task's LATEST verification outcome (by `created_at` — a later retry supersedes
+        an earlier one on the same task) is `verification_passed` (founder requirement 3: causally
+        linked to the same authorized run; requirement 6: not stale/superseded — a since-regressed
+        pass can never outrank the task's current, final outcome);
+      - that outcome's evidence contains a `targeted_tests` step with `passed is True` and
+        `detail["target"] == regression_test` — the lesson's CURRENT, live value, re-read fresh on
+        every call, never a cached copy (founder requirement 5: target corresponds to the claimed
+        fix; the live-value re-read is also what catches a hypothetical future content edit, since
+        `EngineeringLesson` has no edit path today — see this module's own test coverage).
+
+    Deliberately conservative, never speculative (founder requirement: "never synthesize missing
+    evidence"): `False` (never raises) for no `db`, no `regression_test`, no matching task, or any
+    ambiguous/malformed event detail — "no proof" is always the default, never "assume pass". No new
+    table or migration; reads only `mainai_task_events`, which already exists and is already
+    append-only (DB-trigger enforced, migration 0032). A caller-supplied claim can never reach this
+    function at all — see `context_handoff._clamp_verification_claim` (founder requirement 7)."""
+    if db is None or not regression_test:
+        return False
+
+    from sqlalchemy import select
+
+    from app.models.mainai_execution import MainAITaskEvent, MainAITaskEventType
+
+    lesson_id_str = str(lesson_id)
+    created_rows = db.execute(
+        select(MainAITaskEvent.task_id, MainAITaskEvent.detail).where(MainAITaskEvent.event_type == MainAITaskEventType.created)
+    ).all()
+    candidate_task_ids = [
+        task_id
+        for task_id, detail in created_rows
+        if isinstance(detail, dict) and lesson_id_str in (detail.get("lessons_applied") or [])
+    ]
+    if not candidate_task_ids:
+        return False
+
+    verification_rows = (
+        db.execute(
+            select(MainAITaskEvent.task_id, MainAITaskEvent.event_type, MainAITaskEvent.detail)
+            .where(
+                MainAITaskEvent.task_id.in_(candidate_task_ids),
+                MainAITaskEvent.event_type.in_(
+                    [MainAITaskEventType.verification_passed, MainAITaskEventType.verification_failed]
+                ),
+            )
+            .order_by(MainAITaskEvent.task_id, MainAITaskEvent.created_at.asc())
+        )
+        .all()
+    )
+    # Overwriting in ascending created_at order leaves each task's LATEST verification outcome.
+    latest_outcome_by_task: dict = {}
+    for task_id, event_type, detail in verification_rows:
+        latest_outcome_by_task[task_id] = (event_type, detail)
+
+    for event_type, detail in latest_outcome_by_task.values():
+        if event_type != MainAITaskEventType.verification_passed or not isinstance(detail, dict):
+            continue
+        for step in detail.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            if (
+                step.get("kind") == "targeted_tests"
+                and step.get("passed") is True
+                and isinstance(step.get("detail"), dict)
+                and step["detail"].get("target") == regression_test
+            ):
+                return True
     return False
 
 
-def summarize_integration_lesson(lesson) -> dict:
+def summarize_integration_lesson(lesson, *, db: Session | None = None) -> dict:
     """Compact, honestly-labelled summary that keeps CONFIDENCE, the SELF-ASSERTED VERIFICATION
     CLAIM, EXECUTABLE-EVIDENCE state and EVIDENCE PROVENANCE as SEPARATE meanings (requirement 1):
 
@@ -101,13 +179,14 @@ def summarize_integration_lesson(lesson) -> dict:
       surfaced honestly as a claim, not as proof. A stored `"verified_by_regression_test"` string is
       NOT, on its own, evidence a regression test executed and passed (migration 0063).
     - `verification_evidence` names whether CANONICAL EXECUTABLE evidence backs the claim:
-      `"executable_regression_run"` only when a concrete executed regression-run record exists,
-      otherwise `"self_asserted"`. No such evidence source exists yet, so it is `"self_asserted"`
-      for every lesson today.
+      `"executable_regression_run"` only when `_has_executed_regression_run_evidence` finds a real,
+      durably-recorded, actually-executed-and-passing regression-test run tied to THIS exact lesson
+      id (via `MainAITaskEvent` — see that function), otherwise `"self_asserted"`. Without `db` (no
+      session to query that evidence), always `"self_asserted"` — "cannot confirm" is never reported
+      as "confirmed".
     - `verified` is the agent-facing "is this a regression-PROVEN, current fix?" — true ONLY with
-      executed-run evidence AND an active status, so it is `False` until that evidence mechanism
-      lands (Founder decision #380). Confidence alone never suffices; a stored verification string
-      alone never suffices (requirements 2/3/5).
+      executed-run evidence AND an active status. Confidence alone never suffices; a stored
+      verification string alone never suffices (requirements 2/3/5).
     - `fix_status` distinguishes a `"proposed"` fix, a `"claimed_validated_unproven"` fix (asserts
       regression validation but no executed evidence backs it), and a `"validated_by_regression_test"`
       fix (reserved for executed evidence) (requirement 4).
@@ -120,7 +199,9 @@ def summarize_integration_lesson(lesson) -> dict:
     verification_status = getattr(lesson, "verification_status", None) or "unverified"
     # The STORED claim (self-asserted) — honest input, never by itself promoted to proof.
     claims_regression_validated = verification_status == "verified_by_regression_test"
-    has_executable_evidence = _has_executed_regression_run_evidence(lesson)
+    has_executable_evidence = _has_executed_regression_run_evidence(
+        db, lesson_id=lesson.id, regression_test=lesson.regression_test
+    )
     verified = has_executable_evidence and status == "active"
     if verified:
         fix_status = "validated_by_regression_test"
@@ -200,4 +281,4 @@ def integration_lessons_for_task_context(
         extra_tags=extra_tags,
         limit=max_lessons,
     )
-    return [summarize_integration_lesson(lesson) for lesson in lessons]
+    return [summarize_integration_lesson(lesson, db=db) for lesson in lessons]

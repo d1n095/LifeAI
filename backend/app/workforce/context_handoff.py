@@ -141,16 +141,31 @@ _STRUCTURED_LESSON_FIELDS = (
 # handoff (PR #380, SHA 7ea2234 and f39a119 FAILs): each one gets an EXPLICIT, individual
 # disclosure decision below — never a blanket `**lesson` copy, which was the root cause both
 # prior remediation attempts left in place.
-_RESTRICTED_LESSON_FIELDS = (
-    "affected_component",
-    "symptom",
-    "root_cause",
-    "fix",
-    "general_rule",
-    "regression_test",
-    "source_ref",
-    "applies_to",
-)
+#
+# Priority-1 fix (founder architecture decision, PR #380 third FAIL): NOT every restricted field
+# carries the same disclosure risk. `symptom`/`root_cause`/`fix`/`affected_component`/`source_ref`/
+# `applies_to` are free-form incident narrative and provenance -- they can describe a specific
+# private situation, mention other projects, or simply be too open-ended to safety-review
+# per-field -- so they are NEVER sent to an external zone, full stop, matching the founder's own
+# "fail closed and omit sensitive content" instruction: `EngineeringLesson` carries no
+# owner/project/disclosure-approval metadata today, so there is nothing that could ever authorize
+# sending narrative content externally. `general_rule`/`regression_test` are different in KIND,
+# not just degree: `general_rule` is a short, author-distilled technical rule (not an incident
+# retelling), and `regression_test` is already independently validated elsewhere in this
+# codebase as a structurally-safe repository-relative path
+# (`app.mainai_execution.verify.validate_targeted_tests_target`, reused via
+# `_regression_target_is_allowlist_shaped`) -- exactly the "minimal approved technical rule or
+# regression requirement" the founder's directive asks to prefer over a full historical
+# incident. They may reach an external zone, but ONLY after their OWN individual disclosure
+# check (same hard-deny/injection scan every other field gets, PLUS the allowlist-shape check for
+# `regression_test`, PLUS a hard length cap so "general_rule" can never be used to smuggle a full
+# narrative past the other fields' withholding). `applies_to` tags are explicitly NOT treated as
+# a disclosure grant anywhere in this module -- matching a task's tags only ever affected
+# RETRIEVAL (`app.mainai_execution.lessons.lookup_lessons`), never whether content may leave the
+# process once retrieved.
+_NARRATIVE_LESSON_FIELDS = ("affected_component", "symptom", "root_cause", "fix", "source_ref", "applies_to")
+_MINIMAL_TECHNICAL_LESSON_FIELDS = ("general_rule", "regression_test")
+_MAX_MINIMAL_TECHNICAL_FIELD_LEN = 400
 
 # verification_status / verified are CLAIMS, never facts a caller-supplied dict may assert —
 # see _clamp_verification_claim below. Listed separately so they are never copied verbatim from
@@ -194,7 +209,7 @@ def _revalidate_lesson_against_db(db: Session | None, lesson_id: str) -> tuple[s
 
     from app.mainai_execution.integration_intelligence import summarize_integration_lesson
 
-    return "confirmed_active", summarize_integration_lesson(row)
+    return "confirmed_active", summarize_integration_lesson(row, db=db)
 
 
 def _regression_target_is_allowlist_shaped(target) -> bool:
@@ -213,45 +228,46 @@ def _regression_target_is_allowlist_shaped(target) -> bool:
         return False
 
 
-def _has_executed_regression_run_evidence(effective: dict) -> bool:
-    """FOUNDER DECISION #380 (2026-11-10) — the authoritative resolution of the gap the rest of
-    this function's docstring flags. A stored `verification_status` column plus an allowlist-
-    shaped `regression_test` NAME is NOT proof that an allowlisted regression test for THIS exact
-    lesson version was actually executed and returned a passing result. The durable, append-only
-    execution-run record (lesson_id + content fingerprint + target + executed_at + passed) that
-    WOULD prove it does not exist in this codebase today; adding it needs a new table/migration,
-    an explicitly separate, dependency-owned increment this PR does not build. Until that record
-    exists there is NO executed-run evidence for any lesson, so this is always False and a
-    `verified=true` claim can never be presented to an agent. When that evidence source lands it
-    wires in HERE (consulting the run record for this lesson version), without lowering the bar
-    in the meantime."""
-    return False
+def _has_executed_regression_run_evidence(effective: dict, *, db: Session | None) -> bool:
+    """FOUNDER DECISION #380 (2026-11-10), evidence-based resolution. Delegates to the real,
+    MainAITaskEvent-backed check in
+    `app.mainai_execution.integration_intelligence._has_executed_regression_run_evidence` (see
+    that function's docstring for the full mechanism and the founder's 7 verification
+    requirements it satisfies) — kept as a single implementation, never duplicated, so this
+    packet-level gate and the direct-summary path (`summarize_integration_lesson`) can never
+    silently diverge on what counts as proof."""
+    from app.mainai_execution.integration_intelligence import (
+        _has_executed_regression_run_evidence as _real_check,
+    )
+
+    return _real_check(db, lesson_id=effective.get("lesson_id"), regression_test=effective.get("regression_test"))
 
 
-def _clamp_verification_claim(effective: dict, *, confirmation: str) -> tuple[dict, bool]:
+def _clamp_verification_claim(effective: dict, *, confirmation: str, db: Session | None = None) -> tuple[dict, bool]:
     """Never let a `verified` / `verification_status` CLAIM in a lesson dict stand on its own
     say-so (independent-review handoff requirement 3c: "no caller/external agent can self-assert
     verification_status/verified"), AND never present a lesson as regression-proven without
-    CANONICAL EXECUTABLE evidence (Founder decision #380). The claim may stand ONLY when ALL of:
+    CANONICAL EXECUTABLE evidence (Founder decision #380, evidence-based resolution). The claim
+    may stand ONLY when ALL of:
       1. `confirmation == "confirmed_active"` — `_revalidate_lesson_against_db` independently
          re-derived THIS summary from the live, active `EngineeringLesson` row itself (so the
          claim was never taken from the caller-supplied dict at all);
       2. the freshly re-derived `verification_status` is exactly `"verified_by_regression_test"`;
       3. its `regression_test` target is allowlist-shaped (see `_regression_target_is_allowlist_shaped`);
-      4. an EXECUTED regression-run record backs it (`_has_executed_regression_run_evidence`).
+      4. an EXECUTED regression-run record backs it (`_has_executed_regression_run_evidence`,
+         delegating to the real `MainAITaskEvent`-based check in
+         `app.mainai_execution.integration_intelligence` — a genuine `lessons_applied` +
+         `verification_passed` trail for THIS exact lesson id, never a stored column alone).
     Anything else is clamped down to `verified=False` / `verification_status="unverified"` —
     including a lesson this function cannot reach a DB for at all (`confirmation ==
     "unconfirmed"`, e.g. no `db` was passed) — never clamped UP.
 
-    FORMER GAP, NOW CLOSED BY POLICY: conditions 1–3 only prove the lesson's OWN stored
-    `verification_status` column says `verified_by_regression_test` and that its `regression_test`
-    target is a structurally valid path — they do NOT prove the test for this exact lesson version
-    ran and passed. No execution-run record exists to prove that yet (see
-    `_has_executed_regression_run_evidence`), so condition 4 is unsatisfiable today and the
-    agent-facing representation NEVER claims `verified=true` / regression-proven from a stored
-    string. A lesson's `verification_status` column can still be set post-hoc by any code path
-    with DB write access without ever running a test (see the test fixtures' `_record()` helper);
-    that is exactly why a stored string alone can no longer promote the claim. Returns
+    Conditions 1–3 only prove the lesson's OWN stored `verification_status` column says
+    `verified_by_regression_test` and that its `regression_test` target is a structurally valid
+    path — they do NOT by themselves prove the test for this exact lesson version ran and passed
+    (a lesson's `verification_status` column can still be set post-hoc by any code path with DB
+    write access without ever running a test — see the test fixtures' `_record()` helper). Only
+    condition 4's real event-trail check supplies that proof. Returns
     (effective_with_clamped_fields, claim_was_unconfirmed)."""
     status_claim = effective.get("verification_status")
     verified_claim = bool(effective.get("verified"))
@@ -262,7 +278,7 @@ def _clamp_verification_claim(effective: dict, *, confirmation: str) -> tuple[di
         confirmation == "confirmed_active"
         and status_claim == "verified_by_regression_test"
         and allowlisted
-        and _has_executed_regression_run_evidence(effective)
+        and _has_executed_regression_run_evidence(effective, db=db)
     )
     claim_was_unconfirmed = (not can_stand) and (verified_claim or status_claim not in (None, "unverified"))
     clamped = {
@@ -282,21 +298,43 @@ def _clamp_verification_claim(effective: dict, *, confirmation: str) -> tuple[di
     return clamped, claim_was_unconfirmed
 
 
+def _field_is_injection_or_deny_shaped(value) -> bool:
+    field_strings = list(_iter_strings(value))
+    if any(any(m in s for m in _HARD_DENY_MARKERS) for s in field_strings):
+        return True
+    return any(looks_like_prompt_injection(s) for s in field_strings)
+
+
 def _minimize_lesson_fields(effective: dict, *, external: bool) -> tuple[dict, list[str]]:
     """Give EVERY restricted, free-text/provenance-bearing lesson field (the exact list named in
     the independent-review handoff) an explicit, individual disclosure decision — never a
     blanket `**lesson` copy, which is the bug both prior remediation attempts (SHA 7ea2234 and
     f39a119) left in place at this choke point.
 
-    - External/untrusted zones: every restricted field is WITHHELD outright (never
-      partial-redacted-and-guessed — the same fail-closed posture
-      `app.egress_policy.enforce_egress_policy`'s own docstring already documents: "refuse the
-      field, never guess how much of it is safe to keep"). Only the field NAME is recorded as
-      withheld; its value is never copied anywhere (not the packet, not this withheld-field
-      list, not a log).
-    - Internal zones: a field is still withheld individually if ITS OWN value carries a
-      hard-deny marker or injection-shaped text — "untrusted data" is never conflated with "safe
-      to keep verbatim", even for a trusted internal audience.
+    - `_NARRATIVE_LESSON_FIELDS` (incident narrative + provenance): for an external/untrusted
+      zone, WITHHELD OUTRIGHT, unconditionally (never partial-redacted-and-guessed — the same
+      fail-closed posture `app.egress_policy.enforce_egress_policy`'s own docstring already
+      documents: "refuse the field, never guess how much of it is safe to keep"). There is no
+      metadata on `EngineeringLesson` today that could ever prove a specific narrative field is
+      safe for an external audience (founder architecture decision, PR #380 third FAIL) — so
+      "cannot prove safe" always means "omit," never "send and hope."
+    - `_MINIMAL_TECHNICAL_LESSON_FIELDS` (`general_rule`, `regression_test`): the founder's own
+      "prefer a minimal approved technical rule... over exposing a full historical incident" —
+      these are structurally different from narrative (a distilled rule / an
+      already-independently-validated repository-relative test path, never a story), so they get
+      their OWN per-field check even for an external zone: hard-deny/injection scan (same as
+      internal), a hard length cap (so this can't become a side door for a full narrative dump),
+      and — for `regression_test` specifically — the same structural path-allowlist check
+      `apply_lessons_to_verification_plan` already enforces at plan time
+      (`_regression_target_is_allowlist_shaped`).
+    - Internal zones: EVERY restricted field (narrative and minimal-technical alike) is withheld
+      individually only if ITS OWN value carries a hard-deny marker or injection-shaped text —
+      "untrusted data" is never conflated with "safe to keep verbatim", even for a trusted
+      internal audience.
+    - `applies_to` (a narrative-tier field) is explicitly NEVER treated as a disclosure grant by
+      this function or any caller of it — matching a task's tags only ever affects RETRIEVAL
+      (`app.mainai_execution.lessons.lookup_lessons`), never whether content may leave the
+      process once retrieved.
 
     Structured, controlled-vocabulary fields and the already-clamped verification-claim fields
     pass through unchanged (they carry no free text). Returns (field_dict, withheld_field_names).
@@ -306,25 +344,38 @@ def _minimize_lesson_fields(effective: dict, *, external: bool) -> tuple[dict, l
         out[field] = effective.get(field)
 
     withheld_fields: list[str] = []
-    for field in _RESTRICTED_LESSON_FIELDS:
+
+    for field in _NARRATIVE_LESSON_FIELDS:
         value = effective.get(field)
         if value in (None, "", []):
             out[field] = value
             continue
-        deny = False
         if external:
             deny = True
         else:
-            field_strings = list(_iter_strings(value))
-            if any(any(m in s for m in _HARD_DENY_MARKERS) for s in field_strings):
-                deny = True
-            elif any(looks_like_prompt_injection(s) for s in field_strings):
-                deny = True
+            deny = _field_is_injection_or_deny_shaped(value)
         if deny:
             withheld_fields.append(field)
             out[field] = None
         else:
             out[field] = value
+
+    for field in _MINIMAL_TECHNICAL_LESSON_FIELDS:
+        value = effective.get(field)
+        if value in (None, "", []):
+            out[field] = value
+            continue
+        deny = _field_is_injection_or_deny_shaped(value)
+        if not deny and external:
+            too_long = len(str(value)) > _MAX_MINIMAL_TECHNICAL_FIELD_LEN
+            unsafe_target = field == "regression_test" and not _regression_target_is_allowlist_shaped(value)
+            deny = too_long or unsafe_target
+        if deny:
+            withheld_fields.append(field)
+            out[field] = None
+        else:
+            out[field] = value
+
     return out, withheld_fields
 
 
@@ -396,7 +447,7 @@ def _sanitize_integration_lessons(
                 withheld.append(f"{lid}:prompt_injection_shaped")
                 continue
 
-        effective, claim_was_unconfirmed = _clamp_verification_claim(effective, confirmation=confirmation)
+        effective, claim_was_unconfirmed = _clamp_verification_claim(effective, confirmation=confirmation, db=db)
         if claim_was_unconfirmed:
             withheld.append(f"{lid}:verification_claim_unconfirmed")
 
@@ -756,10 +807,16 @@ def dispatch_agent_task_context(
     payload (`ctx.to_transmittable_dict()`) and the exact destination
     (provider/model/purpose/requested_by), AFTER final context assembly.
 
-    No production call site consuming `AgentTaskContext` exists yet in this codebase (the
-    independent review's own finding) — this function IS that wiring, at the only boundary that
-    makes sense before such a call site exists: the packet-build/transmit choke point itself,
-    not a caller that does not exist yet.
+    PRODUCTION DISPATCH STATUS — EXPLICITLY BLOCKED, re-confirmed at this exact HEAD
+    (independent review's original finding, re-verified directly: a repo-wide grep for either
+    `dispatch_agent_task_context` or `AgentTaskContext` outside this module and its own tests
+    returns NOTHING). No router, worker, or other module in this codebase imports
+    `context_handoff` or calls `send` with this packet's payload today. This function is the
+    wiring a real dispatch owner (the founder's own #338/#339 cycle) will call INTO once it
+    exists — it is deliberately NOT a competing dispatcher built ahead of that ownership, and
+    the tests below exercise it only via a synthetic, clearly-labelled `send` spy, never a real
+    provider call. Do not read passing tests here as "wired into production" — they prove this
+    boundary is correct FOR WHENEVER a real caller is wired to it, not that one exists yet.
 
     Fail-closed, with ZERO calls to `send` in every one of these cases:
       - `enforce_egress_policy` DENIES the call (`EgressDeniedError`) — propagated, never
