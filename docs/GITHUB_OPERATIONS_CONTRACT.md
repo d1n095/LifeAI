@@ -87,21 +87,40 @@ Unsupported labels or
 It does not inspect arbitrary Alembic configuration, other version locations or a composed
 merged tree; those remain unverified. An explicit dependency absent from the bounded open/closed
 PR observation is reported as `dependency_unobserved`, with candidate readiness left UNKNOWN.
-The analysis reads `docs/BRANCH_REGISTRY.md` at a pinned default-branch SHA, verifies the
-default-branch ref did not move, and cross-checks the registry's explicit #237/#243 stop-control
-decision against their live exact HEAD SHAs and states. Only that narrowly recognized record
-can establish the `verified_record` status for this decision; unavailable, changed, ambiguous,
-or mismatched evidence remains UNKNOWN. PR body claims are untrusted proposals and become
-conflicts only when contradicted by that verified record. Closed-unmerged references are not
-inferred superseded without an authoritative supersession record. This does not establish
-decisions for other architectures or verify a previous lesson's remedy. It does not expose or
-reuse unverified founder-wide lessons (#380 remains blocked). A GitHub approval is not
-independent security acceptance. Findings contain source evidence and generic corrective test
-criteria; suggested owners are UNKNOWN unless an exact-SHA assignment is present. No
-recommendation grants authority or instructs an agent to act.
+Architecture decisions are read from the existing founder-only `ProjectNote` store. A record is
+considered only when it is an open `decision` note written by the authenticated Founder and its
+versioned JSON (`lifeai.architecture-decision.v1`) names that same approver, approval/effective
+timestamps, canonical PR and exact HEAD, approved architecture, affected modules, and any
+rejected alternatives with exact PR heads. The response includes the note ID, source citation,
+content digest, version, approver, and bounded PR evidence. The referenced PR heads are re-read
+when absent from the bounded snapshot; mismatches become STALE and failed/incomplete reads remain
+UNKNOWN. Duplicate active decision IDs, malformed records, and unsupported freeform notes do
+not become authority. Registry prose and PR body claims alone are never approval.
 
-`freshness`, `observed_at`, scan limits and errors must be preserved by consumers. Stale or
-unavailable snapshots are not scanned, and no observation is represented as live approval.
+The existing Founder-only `POST /api/admin/memory/notes` is the record-writing path; no new
+decision table is introduced. Its `kind` is `decision`, its source fields cite the approval
+record, and `content` is JSON with `schema`, `decision_id`, `version`, `approver_email`,
+`approved_at`, `effective_at`, `summary`, `affected_modules`, `canonical` (`pull_request`,
+`head_sha`, `architecture`), and `rejected_alternatives` (each with `pull_request`, `head_sha`,
+`label`, and optional `signals`/`rationale`). The route supplies `created_by` from the
+authenticated Founder identity; callers cannot establish authority by setting a JSON approver
+field alone.
+
+PR descriptions are untrusted proposals: a canonical claim or dependency on a rejected PR only
+becomes an architecture conflict when contradicted by a verified Founder decision. Stale
+decision evidence is shown as STALE; an unverified decision remains UNKNOWN. Closed-unmerged
+references are not inferred superseded without an authoritative record. The system does not
+expose or reuse unverified founder-wide lessons (#380 remains blocked). A GitHub approval is not
+independent security acceptance. Findings contain source evidence and corrective test criteria;
+suggested owners are UNKNOWN unless an exact-SHA assignment is present. No recommendation grants
+authority or instructs an agent to act.
+
+`freshness`, `observed_at`, scan limits and errors must be preserved by consumers. Readiness is
+BLOCKED for observed blockers, STALE when relevant heads/reviews/snapshots need refresh, and
+UNKNOWN when evidence is missing or incomplete. Missing reviews are UNKNOWN, not failed reviews.
+READY is reserved for a complete integration assessment and is not a merge, deployment, release,
+or independent security approval. Stale or unavailable snapshots are not scanned as current
+evidence.
 
 `review_state` reports `approved_exact_head` only when a fetched approval's `commit_id` equals
 the current PR head and review pagination is complete. Other states distinguish stale or

@@ -8,8 +8,10 @@ from __future__ import annotations
 import ast
 import asyncio
 import hashlib
+import json
 import re
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -20,6 +22,10 @@ from app.integrations.github_client import GitHubClient, GitHubClientError
 MAX_ANALYZED_PRS = 8
 MAX_MIGRATIONS_PER_PR = 12
 MAX_GRAPH_MIGRATIONS = 128
+MAX_FOUNDER_DECISION_NOTES = 100
+MAX_DECISION_REFERENCES = 16
+MAX_LIVE_DECISION_PR_READS = 16
+MAX_DECISION_NOTE_BYTES = 32768
 SECURITY_PATHS = (
     "backend/app/workforce/kill_switch.py",
     "backend/app/workforce/authority.py",
@@ -195,6 +201,12 @@ def _owner(pr: dict, assignments: list[dict], repo: str | None) -> dict:
     }
 
 
+def _bounded_text(value: Any, limit: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    return "".join(character for character in value[:limit] if character.isprintable() or character in "\n\t")
+
+
 def _unique_branch_map(prs: list[dict]) -> tuple[dict[str, dict], list[str]]:
     grouped: dict[str, list[dict]] = defaultdict(list)
     for pr in prs:
@@ -208,7 +220,7 @@ def _unique_branch_map(prs: list[dict]) -> tuple[dict[str, dict], list[str]]:
 
 def _finalize_findings(result: dict, github: dict) -> None:
     blocking_kinds = {
-        "migration_revision_collision", "migration_ancestry_divergence", "closed_dependency",
+        "migration_revision_collision", "migration_ancestry_divergence", "open_dependency", "closed_dependency",
         "superseded_dependency", "architecture_decision_conflict", "cross_pr_migration_graph_conflict",
         "migration_duplicate_revision", "migration_missing_ancestor", "migration_multiple_heads",
         "migration_cycle", "upstream_head_not_in_child", "ci_failure",
@@ -222,6 +234,8 @@ def _finalize_findings(result: dict, github: dict) -> None:
     })
     by_number = {pr["number"]: pr for pr in github.get("pull_requests", [])}
     nodes = result["candidates"]
+    stale_snapshot = github.get("freshness") == "stale"
+    unavailable_snapshot = github.get("freshness") == "unavailable"
     for finding in result["findings"]:
         direct = set(finding["pull_requests"])
         finding["downstream_revalidate"] = sorted(
@@ -230,7 +244,8 @@ def _finalize_findings(result: dict, github: dict) -> None:
         )
         finding["severity"] = severity_by_kind.get(finding["kind"], "P3")
         finding["status"] = (
-            "UNKNOWN" if finding.get("certainty") == "incomplete_evidence"
+            "UNKNOWN" if finding.get("certainty") == "incomplete_evidence" or unavailable_snapshot
+            else "STALE" if stale_snapshot or finding.get("certainty") == "stale_evidence"
             else "OPEN" if finding.get("certainty") in {
                 "observed", "observed_cross_branch_conflict", "observed_authoritative_conflict"
             }
@@ -258,90 +273,296 @@ def _finalize_findings(result: dict, github: dict) -> None:
         ]
         if blockers:
             node["readiness"], node["readiness_reason"] = "BLOCKED", blockers[0]["detail"]
+        elif stale_snapshot or unavailable_snapshot or any(
+            finding["status"] == "STALE" and node["number"] in finding["pull_requests"]
+            for finding in result["findings"]
+        ) or node.get("review_state") == "unknown_head_changed":
+            node["readiness"], node["readiness_reason"] = (
+                "STALE", "Relevant GitHub or review evidence is stale; refresh before assessing integration."
+            )
+        else:
+            node["readiness"], node["readiness_reason"] = (
+                "UNKNOWN", "No current blocker is established, but complete integration readiness is unverified."
+            )
         node["integration_blocked"] = bool(blockers)
-        node["safe_to_integrate"] = "NO" if blockers else "UNKNOWN"
+        node["safe_to_integrate"] = "NO" if blockers or node["readiness"] == "STALE" else "UNKNOWN"
 
 
-def parse_authoritative_registry_decision(
-    text: str, registry_sha: str, open_prs: list[dict], closed_prs: list[dict]
-) -> dict:
-    """Accept only the explicit stop-control decision in the pinned Founder-maintained registry."""
-    rows = text.splitlines()
-    canonical = [
-        (index + 1, line) for index, line in enumerate(rows)
-        if "[#237]" in line and "architecture selected" in line.lower()
-        and "mainai_stop_state" in line and "mainai_stop_events" in line
-    ]
-    superseded = [
-        (index + 1, line) for index, line in enumerate(rows)
-        if "[#243]" in line and re.search(r"(?i)closed.{0,50}superseded by #237", line)
-    ]
-    current = {item["number"]: item for item in open_prs}
-    historic = {item["number"]: item for item in closed_prs}
-    if len(canonical) != 1 or len(superseded) != 1:
-        return {"status": "UNKNOWN", "source_sha": registry_sha, "decisions": []}
-    c_line, c_text = canonical[0]
-    s_line, s_text = superseded[0]
-    c_sha_match = re.search(r"\b[0-9a-f]{40}\b", c_text)
-    s_sha_match = re.search(r"\b[0-9a-f]{40}\b", s_text)
-    c_pr, s_pr = current.get(237), historic.get(243)
+def _promote_ready_candidates(result: dict, github: dict) -> None:
     if (
-        not c_sha_match or not s_sha_match or not c_pr or not s_pr
-        or c_pr.get("head_sha", "").lower() != c_sha_match.group(0)
-        or s_pr.get("head_sha", "").lower() != s_sha_match.group(0)
-        or s_pr.get("state") != "closed_unmerged"
+        github.get("freshness") != "live"
+        or result["coverage"]["canonical_decisions"].get("status") != "VERIFIED"
     ):
-        return {"status": "UNKNOWN", "source_sha": registry_sha, "decisions": []}
+        return
+    decisions = [
+        decision for decision in result["coverage"]["canonical_decisions"].get("decisions", [])
+        if decision.get("status") == "VERIFIED"
+    ]
+    current_prs = {pr["number"]: pr for pr in github.get("pull_requests", [])}
+    graphs = {
+        graph["number"]: graph
+        for graph in result["coverage"].get("migration_graph", {}).get("graphs", [])
+    }
+    inspections = {scan["number"]: scan for scan in result.get("_inspections", [])}
+    for candidate in result["candidates"]:
+        pr = current_prs.get(candidate["number"])
+        scan = inspections.get(candidate["number"], {})
+        if not pr or scan.get("status") != "observed":
+            continue
+        if (
+            candidate["review_state"] != "approved_exact_head"
+            or pr.get("ci_state") != "success"
+            or pr.get("mergeability", {}).get("state") != "MERGEABLE"
+            or any(dep.get("state") != "merged" for dep in candidate["dependencies"])
+            or any(
+                finding["status"] != "RESOLVED"
+                and candidate["number"] in finding["pull_requests"]
+                for finding in result["findings"]
+            )
+        ):
+            continue
+        if scan.get("migrations") and (
+            candidate["number"] not in graphs or graphs[candidate["number"]].get("status") != "observed"
+        ):
+            continue
+        if not any(
+            decision["canonical"]["pull_request"] == candidate["number"]
+            and decision["canonical"]["head_sha"] == candidate.get("head_sha")
+            for decision in decisions
+        ):
+            continue
+        candidate["readiness"] = "READY"
+        candidate["readiness_reason"] = (
+            "Live exact-HEAD CI, review, mergeability, dependency, migration, and Founder-decision evidence is complete."
+        )
+        candidate["safe_to_integrate"] = "YES"
+
+
+def parse_founder_architecture_decisions(notes: list[Any], founder_email: str) -> dict:
+    """Project explicit Founder-authored ProjectNote decisions into a bounded contract."""
+    decisions: list[dict] = []
+    invalid = 0
+    not_effective = 0
+    truncated = len(notes) >= MAX_FOUNDER_DECISION_NOTES
+    founder = founder_email.strip().casefold()
+    for note in notes[:MAX_FOUNDER_DECISION_NOTES]:
+        get = note.get if isinstance(note, dict) else lambda key, default=None: getattr(note, key, default)
+        if str(get("kind", "")).lower() != "decision" or str(get("status", "")).lower() != "open":
+            continue
+        if str(get("created_by", "")).strip().casefold() != founder:
+            continue
+        try:
+            raw_content = get("content", "")
+            if not isinstance(raw_content, str) or len(raw_content.encode("utf-8")) > MAX_DECISION_NOTE_BYTES:
+                raise ValueError
+            content = json.loads(raw_content)
+            if not isinstance(content, dict):
+                raise ValueError
+            decision_id = content.get("decision_id")
+            version = content.get("version")
+            approver = content.get("approver_email")
+            approved_at = content.get("approved_at")
+            effective_at = content.get("effective_at")
+            canonical = content.get("canonical")
+            alternatives = content.get("rejected_alternatives")
+            affected_modules = content.get("affected_modules")
+            if (
+                content.get("schema") != "lifeai.architecture-decision.v1"
+                or not isinstance(decision_id, str)
+                or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,99}", decision_id)
+                or not isinstance(version, int) or isinstance(version, bool) or version < 1
+                or not isinstance(approver, str) or approver.strip().casefold() != founder
+                or not isinstance(approved_at, str) or not isinstance(effective_at, str)
+                or not isinstance(canonical, dict)
+                or not isinstance(alternatives, list)
+                or len(alternatives) > MAX_DECISION_REFERENCES
+                or not isinstance(affected_modules, list)
+                or not affected_modules
+                or not all(isinstance(item, str) and item.strip() for item in affected_modules)
+            ):
+                raise ValueError
+            approved_time = datetime.fromisoformat(approved_at.replace("Z", "+00:00"))
+            effective_time = datetime.fromisoformat(effective_at.replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            canonical_pr = canonical.get("pull_request")
+            canonical_sha = canonical.get("head_sha")
+            approved_architecture = canonical.get("architecture")
+            if (
+                approved_time.tzinfo is None or effective_time.tzinfo is None
+                or not isinstance(canonical_pr, int) or isinstance(canonical_pr, bool) or canonical_pr <= 0
+                or not isinstance(canonical_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", canonical_sha)
+                or not isinstance(approved_architecture, list)
+                or not approved_architecture
+                or not all(isinstance(item, str) and item.strip() for item in approved_architecture)
+            ):
+                raise ValueError
+            if approved_time > now:
+                raise ValueError
+            if effective_time > now:
+                not_effective += 1
+                continue
+            rejected = []
+            for alternative in alternatives:
+                if not isinstance(alternative, dict):
+                    raise ValueError
+                number, sha = alternative.get("pull_request"), alternative.get("head_sha")
+                signals = alternative.get("signals", [])
+                if (
+                    not isinstance(number, int) or isinstance(number, bool) or number <= 0
+                    or not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha)
+                    or not isinstance(signals, list)
+                    or not all(isinstance(item, str) and item.strip() for item in signals)
+                ):
+                    raise ValueError
+                rejected.append({
+                    "pull_request": number, "head_sha": sha.lower(),
+                    "label": _bounded_text(alternative.get("label"), 240),
+                    "rationale": _bounded_text(alternative.get("rationale"), 500),
+                    "signals": [item.strip().casefold() for item in signals],
+                })
+            source_type, source_ref = get("source_type"), get("source_ref")
+            note_id = str(get("id") or "")
+            if not isinstance(source_type, str) or not isinstance(source_ref, str) or not source_ref.strip() or not note_id:
+                raise ValueError
+            created_at = get("created_at")
+            decisions.append({
+                "decision_id": decision_id,
+                "version": version,
+                "status": "UNVERIFIED",
+                "approver": founder_email,
+                "approved_at": approved_time.isoformat(),
+                "effective_at": effective_time.isoformat(),
+                "summary": _bounded_text(content.get("summary"), 1000),
+                "affected_modules": [_bounded_text(item.strip(), 256) for item in affected_modules],
+                "canonical": {
+                    "pull_request": canonical_pr,
+                    "head_sha": canonical_sha.lower(),
+                    "architecture": [_bounded_text(item.strip(), 256) for item in approved_architecture],
+                },
+                "rejected_alternatives": rejected,
+                "relevant_pull_requests": sorted({
+                    canonical_pr, *(item["pull_request"] for item in rejected),
+                    *(number for number in content.get("relevant_pull_requests", [])[:MAX_DECISION_REFERENCES]
+                      if isinstance(number, int) and not isinstance(number, bool) and number > 0),
+                }),
+                "source": {
+                    "kind": "project_note",
+                    "id": note_id,
+                    "type": _bounded_text(source_type, 80),
+                    "ref": _bounded_text(source_ref, 256),
+                    "source_id": str(get("source_id")) if get("source_id") else None,
+                    "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else None,
+                    "content_sha256": hashlib.sha256(raw_content.encode("utf-8")).hexdigest(),
+                },
+            })
+        except (ValueError, TypeError, AttributeError, UnicodeEncodeError):
+            invalid += 1
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for decision in decisions:
+        grouped[decision["decision_id"]].append(decision)
+    conflicted = {key for key, entries in grouped.items() if len(entries) != 1}
+    for decision in decisions:
+        if decision["decision_id"] not in conflicted:
+            decision["status"] = "PENDING_VALIDATION"
     return {
-        "status": "verified_record",
-        "source_sha": registry_sha,
-        "decisions": [{
-            "id": "stop_control_architecture",
-            "canonical_pr": 237,
-            "canonical_sha": c_pr["head_sha"],
-            "superseded": [{"number": 243, "head_sha": s_pr["head_sha"]}],
-            "evidence": [
-                {"path": "docs/BRANCH_REGISTRY.md", "line": c_line,
-                 "url": f"https://github.com/d1n095/LifeAI/blob/{registry_sha}/docs/BRANCH_REGISTRY.md#L{c_line}"},
-                {"path": "docs/BRANCH_REGISTRY.md", "line": s_line,
-                 "url": f"https://github.com/d1n095/LifeAI/blob/{registry_sha}/docs/BRANCH_REGISTRY.md#L{s_line}"},
-            ],
-        }],
+        "status": "UNKNOWN",
+        "decisions": [item for item in decisions if item["decision_id"] not in conflicted],
+        "errors": (["duplicate_active_decision_id"] if conflicted else [])
+        + (["invalid_or_unapproved_decision_record"] if invalid else [])
+        + (["decision_not_yet_effective"] if not_effective else [])
+        + (["decision_note_limit_reached"] if truncated else []),
     }
 
 
-async def fetch_authoritative_registry_decisions(
-    client: GitHubClient, github: dict, repo: str
+async def validate_founder_architecture_decisions(
+    client: GitHubClient, decision_set: dict, github: dict
 ) -> dict:
-    branch = github.get("repository", {}).get("default_branch")
-    if not isinstance(branch, str) or not branch:
-        return {"status": "UNKNOWN", "decisions": [], "error": "default_branch_unavailable"}
-    try:
-        source_sha = await client.get_ref(branch)
-        text = await client.get_branch_registry_at_commit(source_sha)
-        if await client.get_ref(branch) != source_sha:
-            return {"status": "UNKNOWN", "decisions": [], "error": "registry_ref_changed"}
-        canonical_pr, superseded_pr = await asyncio.gather(
-            client.get_pull_request(237), client.get_pull_request(243)
-        )
-        canonical = {
-            "number": 237, "head_sha": (canonical_pr.get("head") or {}).get("sha"),
-            "state": "open" if canonical_pr.get("state") == "open" else "closed",
+    """Bind each Founder record to live GitHub heads before it can affect readiness."""
+    output = {"status": "UNKNOWN", "decisions": [], "errors": list(decision_set.get("errors", []))}
+    if output["errors"]:
+        output["decisions"] = [
+            {**item, "status": "UNKNOWN"} for item in decision_set.get("decisions", [])
+        ]
+        return output
+    candidate_map = {
+        item["number"]: {
+            "head_sha": item.get("head_sha"),
+            "state": "open",
+        } for item in github.get("pull_requests", [])
+    }
+    candidate_map.update({
+        item["number"]: {
+            "head_sha": item.get("head_sha"),
+            "state": item.get("state"),
+        } for item in github.get("closed_pull_requests", [])
+    })
+    references = {
+        number
+        for decision in decision_set.get("decisions", [])
+        for number in [
+            decision["canonical"]["pull_request"],
+            *(item["pull_request"] for item in decision["rejected_alternatives"]),
+        ]
+    }
+    missing = references - candidate_map.keys()
+    if len(missing) > MAX_LIVE_DECISION_PR_READS:
+        return {
+            **output,
+            "decisions": [{**item, "status": "UNKNOWN"} for item in decision_set.get("decisions", [])],
+            "errors": output["errors"] + ["decision_reference_limit"],
         }
-        superseded = {
-            "number": 243, "head_sha": (superseded_pr.get("head") or {}).get("sha"),
-            "state": "merged" if superseded_pr.get("merged_at") else "closed_unmerged",
-        }
-        parsed = parse_authoritative_registry_decision(
-            text, source_sha, [canonical], [superseded],
+
+    async def read_pull_request(number: int) -> tuple[int, dict | None]:
+        try:
+            data = await client.get_pull_request(number)
+            state = "open" if data.get("state") == "open" else (
+                "merged" if data.get("merged_at") else "closed_unmerged"
+            )
+            return number, {"head_sha": (data.get("head") or {}).get("sha"), "state": state}
+        except (GitHubClientError, httpx.RequestError, ValueError, TypeError, KeyError, AttributeError):
+            return number, None
+
+    if missing:
+        read_results = await asyncio.gather(*(read_pull_request(number) for number in sorted(missing)))
+        candidate_map.update({number: value for number, value in read_results if value is not None})
+    for decision in decision_set.get("decisions", []):
+        mismatched = False
+        unavailable = False
+        canonical = decision["canonical"]
+        refs = [(canonical["pull_request"], canonical["head_sha"], "canonical")]
+        refs.extend(
+            (item["pull_request"], item["head_sha"], "rejected")
+            for item in decision["rejected_alternatives"]
         )
-        if canonical["state"] != "open":
-            return {"status": "UNKNOWN", "decisions": [], "error": "canonical_candidate_not_open"}
-        if parsed["status"] != "verified_record":
-            parsed["error"] = "explicit_current_decision_record_not_found"
-        return parsed
-    except (GitHubClientError, httpx.RequestError, ValueError, TypeError, KeyError, AttributeError):
-        return {"status": "UNKNOWN", "decisions": [], "error": "canonical_registry_unavailable"}
+        for number, expected_sha, kind in refs:
+            observed = candidate_map.get(number)
+            observed_sha = observed.get("head_sha") if observed else None
+            if not isinstance(observed_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", observed_sha):
+                unavailable = True
+                continue
+            if observed_sha.lower() != expected_sha.lower():
+                mismatched = True
+            elif kind == "rejected" and observed["state"] == "merged":
+                mismatched = True
+        decision["status"] = "STALE" if mismatched else (
+            "UNKNOWN" if unavailable else "VERIFIED"
+        )
+        decision["pr_evidence"] = [
+            {"number": number, "expected_sha": expected_sha,
+             "observed_sha": candidate_map.get(number, {}).get("head_sha"),
+             "state": candidate_map.get(number, {}).get("state")}
+            for number, expected_sha, _ in refs
+        ]
+        output["decisions"].append(decision)
+    states = {item["status"] for item in output["decisions"]}
+    output["status"] = (
+        "STALE" if "STALE" in states else
+        "VERIFIED" if states and states == {"VERIFIED"} and not output["errors"] else
+        "UNKNOWN"
+    )
+    if any(value is None for value in (candidate_map.get(number) for number in references)):
+        output["errors"].append("decision_pr_evidence_unavailable")
+    return output
 
 
 async def _inspect_pr(client: GitHubClient, pr: dict, repo: str) -> dict:
@@ -413,10 +634,14 @@ def build_integration_graph(
     scans = {item["number"]: item for item in inspections}
     repo = github.get("repository", {}).get("full_name")
     canonical_decisions = canonical_decisions or {"status": "UNKNOWN", "decisions": []}
+    verified_decisions = [
+        decision for decision in canonical_decisions.get("decisions", [])
+        if decision.get("status") == "VERIFIED"
+    ]
     superseded_by = {
-        item["number"]: decision["canonical_pr"]
-        for decision in canonical_decisions.get("decisions", [])
-        for item in decision["superseded"]
+        item["pull_request"]: decision
+        for decision in verified_decisions
+        for item in decision["rejected_alternatives"]
     }
     nodes = []
     findings: list[dict] = []
@@ -459,19 +684,25 @@ def build_integration_graph(
                 "source": "base_branch", "url": closed_parent.get("url"),
             })
         for dep in dependencies.values():
-            if dep.get("state") == "closed_unmerged":
-                replacement = superseded_by.get(dep["number"])
-                kind = "superseded_dependency" if replacement else "closed_dependency"
-                registry_evidence = [
-                    evidence
-                    for decision in canonical_decisions.get("decisions", [])
-                    if decision["canonical_pr"] == replacement
-                    for evidence in decision["evidence"]
-                ]
+            if dep.get("state") == "open":
+                add(
+                    "open_dependency", [number, dep["number"]],
+                    f"PR #{number} is stacked on open PR #{dep['number']}; that upstream change is not integrated.",
+                    [{"url": dep.get("url"), "kind": dep.get("source"),
+                      "head_sha": by_number.get(dep["number"], {}).get("head_sha")}],
+                    "Keep the dependency explicit; wait for its integration, then revalidate this candidate at its exact HEAD.",
+                    ["Verify the upstream change is merged and present before assessing downstream readiness."],
+                )
+            elif dep.get("state") == "closed_unmerged":
+                decision = superseded_by.get(dep["number"])
+                replacement = decision["canonical"]["pull_request"] if decision else None
+                kind = "superseded_dependency" if decision else "closed_dependency"
+                decision_evidence = [decision["source"]] if decision else []
                 add(kind, [number, dep["number"], *([replacement] if replacement else [])],
                     f"Dependency #{dep['number']} is closed without merge."
-                    + (f" The canonical registry supersedes it with PR #{replacement}." if replacement else ""),
-                    [{"url": dep.get("url"), "kind": dep.get("source")}, *registry_evidence],
+                    + (f" Founder decision {decision['decision_id']} v{decision['version']} supersedes it with PR #{replacement}."
+                       if decision else ""),
+                    [{"url": dep.get("url"), "kind": dep.get("source")}, *decision_evidence],
                     (f"Replace the dependency with the Founder-selected PR #{replacement}, then revalidate downstream."
                      if replacement else "Coordinate with the owners before using this dependency."),
                     ["Verify the replacement dependency and re-run downstream integration tests."])
@@ -482,22 +713,55 @@ def build_integration_graph(
                     "Refresh or inspect the referenced PR; do not assume it is merged or available.",
                     ["Verify the dependency's exact current state and SHA before composing branches."],
                     "incomplete_evidence")
-        for claimed_pr in pr.get("canonical_claims", []):
-            canonical_target = superseded_by.get(claimed_pr)
-            if canonical_target is None:
+        scan = scans.get(number, {})
+        changed_paths = [str(path).casefold() for path in scan.get("files", [])]
+        changed_paths.extend(
+            str(migration.get("path", "")).casefold() for migration in scan.get("migrations", [])
+        )
+        dependency_numbers = {dep["number"] for dep in dependencies.values()}
+        for decision in canonical_decisions.get("decisions", []):
+            alternative = next(
+                (item for item in decision.get("rejected_alternatives", [])
+                 if item["pull_request"] in set(pr.get("canonical_claims", [])) | dependency_numbers),
+                None,
+            )
+            if alternative is None:
+                alternative = next(
+                    (item for item in decision.get("rejected_alternatives", [])
+                     if any(signal in path for signal in item.get("signals", []) for path in changed_paths)),
+                    None,
+                )
+            if alternative is None:
                 continue
-            decision = next(
-                item for item in canonical_decisions["decisions"]
-                if item["canonical_pr"] == canonical_target
-            )
-            add(
-                "architecture_decision_conflict", [number, claimed_pr, canonical_target],
-                f"PR #{number} claims superseded PR #{claimed_pr} as canonical; the Founder-approved registry selects PR #{canonical_target}.",
-                [{"url": pr.get("url"), "kind": "untrusted_candidate_claim"}, *decision["evidence"]],
-                f"Align the proposal with PR #{canonical_target}; do not revive the superseded authority design.",
-                ["Check the candidate against the pinned registry decision and test the canonical service integration."],
-                "observed_authoritative_conflict",
-            )
+            canonical_target = decision["canonical"]["pull_request"]
+            if decision.get("status") == "VERIFIED":
+                add(
+                    "architecture_decision_conflict", [number, alternative["pull_request"], canonical_target],
+                    f"PR #{number} depends on or proposes rejected architecture PR #{alternative['pull_request']}; Founder decision {decision['decision_id']} v{decision['version']} selects PR #{canonical_target}.",
+                    [{"url": pr.get("url"), "kind": "untrusted_candidate_claim_or_dependency"},
+                     decision["source"], *decision.get("pr_evidence", [])],
+                    f"Align the proposal with the approved architecture in decision {decision['decision_id']} v{decision['version']}; do not revive the rejected alternative.",
+                    ["Verify the changed components match the approved architecture and rerun exact-HEAD integration tests."],
+                    "observed_authoritative_conflict",
+                )
+            elif decision.get("status") == "STALE":
+                add(
+                    "architecture_decision_evidence_stale", [number, alternative["pull_request"]],
+                    f"Founder decision {decision['decision_id']} v{decision['version']} is bound to outdated GitHub PR evidence.",
+                    [decision["source"], *decision.get("pr_evidence", [])],
+                    "Refresh or supersede the decision record after verifying the referenced exact PR heads.",
+                    ["Revalidate every canonical and rejected PR SHA before using this decision."],
+                    "stale_evidence",
+                )
+            else:
+                add(
+                    "architecture_decision_unverified", [number, alternative["pull_request"]],
+                    f"PR #{number} references rejected-alternative candidate #{alternative['pull_request']}, but Founder decision provenance is not fully verified.",
+                    [decision.get("source", {}), *decision.get("pr_evidence", [])],
+                    "Record or refresh an explicitly Founder-approved versioned decision; do not infer authority from PR text.",
+                    ["Verify Founder approval, decision source, version, and referenced exact PR heads."],
+                    "incomplete_evidence",
+                )
         reviews = [r for r in pr.get("reviews", []) if r.get("state") in {"APPROVED", "CHANGES_REQUESTED"}]
         stale = [r for r in reviews if r.get("commit_sha") and pr.get("head_sha")
                  and r["commit_sha"].lower() != pr["head_sha"].lower()]
@@ -506,7 +770,7 @@ def build_integration_graph(
                 [{"url": r.get("url"), "reviewed_sha": r.get("commit_sha"),
                   "head_sha": pr.get("head_sha")} for r in stale],
                 "Request an independent review of the exact current SHA.",
-                ["Verify reviewed SHA matches the current HEAD."])
+                ["Verify reviewed SHA matches the current HEAD."], "stale_evidence")
         if pr.get("ci_state") == "failed":
             failed_checks = [
                 {"name": check.get("name"), "state": check.get("state"),
@@ -533,10 +797,18 @@ def build_integration_graph(
                 "Address the current-SHA review feedback and request a new exact-SHA review.",
                 ["Verify the requested changes are addressed and re-review the new HEAD."])
         scan = scans.get(number, {})
-        blocked = any(dep.get("state") in {"open", "closed_unmerged"} for dep in dependencies.values())
-        blocked = blocked or pr.get("ci_state") == "failed" or pr.get("mergeability", {}).get("state") == "CONFLICTING"
-        blocked = blocked or pr.get("review_state") == "changes_requested_exact_head"
-        blocked = blocked or any(claim in superseded_by for claim in pr.get("canonical_claims", []))
+        stale_observation = github.get("freshness") in {"stale", "unavailable"}
+        blocked = not stale_observation and any(
+            dep.get("state") in {"open", "closed_unmerged"} for dep in dependencies.values()
+        )
+        blocked = blocked or (
+            not stale_observation and (
+                pr.get("ci_state") == "failed"
+                or pr.get("mergeability", {}).get("state") == "CONFLICTING"
+                or pr.get("review_state") == "changes_requested_exact_head"
+                or any(claim in superseded_by for claim in pr.get("canonical_claims", []))
+            )
+        )
         nodes.append({
             "number": number, "head_sha": pr.get("head_sha"), "base_branch": pr.get("base_branch"),
             "url": pr.get("url"), "owner": _owner(pr, assignments, repo),
@@ -663,14 +935,20 @@ def build_integration_graph(
 
 async def analyze_integration(
     github: dict, assignments: list[dict], numbers: list[int] | None = None,
-    include_migration_graph: bool = False,
+    include_migration_graph: bool = False, founder_decisions: dict | None = None,
 ) -> dict:
     prs = github.get("pull_requests", [])
     selected = [pr for pr in prs if numbers is None or pr["number"] in numbers][:MAX_ANALYZED_PRS]
     repo = github.get("repository", {}).get("full_name")
+    founder_decisions = founder_decisions or {"status": "UNKNOWN", "decisions": []}
     if github.get("freshness") in {"stale", "unavailable"} or not repo:
         result = build_integration_graph(
-            github, [], assignments, {"status": "UNKNOWN", "decisions": [], "error": "live_github_unavailable"}
+            github, [], assignments, {
+                **founder_decisions,
+                "status": "UNKNOWN",
+                "decisions": [{**item, "status": "UNKNOWN"} for item in founder_decisions.get("decisions", [])],
+                "error": "live_github_unavailable",
+            }
         )
         result["coverage"]["inspection_errors"].append({"number": None, "errors": ["live_github_unavailable"]})
         if include_migration_graph:
@@ -686,8 +964,11 @@ async def analyze_integration(
             return await _inspect_pr(client, pr, repo)
 
     inspections = await asyncio.gather(*(inspect(pr) for pr in selected))
-    canonical_decisions = await fetch_authoritative_registry_decisions(client, github, repo)
-    result = build_integration_graph(github, inspections, assignments, canonical_decisions)
+    validated_decisions = await validate_founder_architecture_decisions(
+        client, founder_decisions, github
+    )
+    result = build_integration_graph(github, inspections, assignments, validated_decisions)
+    result["_inspections"] = inspections
 
     def invalidate(number: int) -> None:
         graph_result = result["coverage"].get("migration_graph")
@@ -919,4 +1200,6 @@ async def analyze_integration(
                 "number": None, "errors": ["requested_pr_not_in_open_observation"], "numbers": missing
             })
     _finalize_findings(result, github)
+    _promote_ready_candidates(result, github)
+    result.pop("_inspections", None)
     return result

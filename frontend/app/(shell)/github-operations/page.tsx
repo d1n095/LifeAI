@@ -191,6 +191,37 @@ export default function GitHubOperationsPage() {
                   Observation {analysis.freshness} · inspected {analysis.coverage.inspected_pull_requests.join(", ") || "NONE"} · limit {analysis.coverage.limit}.
                   {" "}{analysis.coverage.migration_ancestry}. {analysis.coverage.founder_decisions}. {analysis.coverage.engineering_lessons}.
                 </p>
+                <section aria-label="Founder-approved architecture decisions" className="space-y-2 rounded-lg border border-border bg-panel p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="text-sm font-medium">Founder-approved architecture decisions</h3>
+                    <StatusBadge value={analysis.coverage.canonical_decisions?.status ?? "UNKNOWN"} />
+                  </div>
+                  {analysis.coverage.canonical_decisions?.decisions.map((decision) => (
+                    <article key={`${decision.decision_id}-${decision.version}`} className="rounded border border-border p-3 text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <strong>{decision.decision_id} v{decision.version}: {decision.summary}</strong>
+                        <StatusBadge value={decision.status} />
+                      </div>
+                      <p className="mt-1">Approver: {decision.approver} · approved {formatDate(decision.approved_at)} · effective {formatDate(decision.effective_at)}</p>
+                      <p>Canonical: PR #{decision.canonical.pull_request} @ <code>{decision.canonical.head_sha}</code> · {decision.canonical.architecture.join(", ")}</p>
+                      <p>Affected modules: {decision.affected_modules.join(", ")}</p>
+                      <p>Rejected/superseded: {decision.rejected_alternatives.map((alternative) => `PR #${alternative.pull_request} @ ${alternative.head_sha} (${alternative.label})`).join("; ") || "None recorded"}</p>
+                      <p>Relevant PRs: {decision.relevant_pull_requests.map((number) => `#${number}`).join(", ")}</p>
+                      <p>Source: {decision.source.type} · {decision.source.ref} · note {decision.source.id} · content SHA-256 <code>{decision.source.content_sha256}</code></p>
+                      {decision.pr_evidence?.map((evidence) => (
+                        <p key={`${decision.decision_id}-${evidence.number}`} className="break-all">
+                          PR #{evidence.number}: expected {evidence.expected_sha}, observed {evidence.observed_sha ?? "UNKNOWN"} ({evidence.state ?? "UNKNOWN"})
+                        </p>
+                      ))}
+                    </article>
+                  ))}
+                  {(!analysis.coverage.canonical_decisions?.decisions.length) && (
+                    <p className="text-xs text-white/50">No machine-readable, authenticated Founder decision was verified. PR prose and registry statements alone are not approval.</p>
+                  )}
+                  {analysis.coverage.canonical_decisions?.errors?.map((error) => (
+                    <p key={error} className="text-xs text-amber-100">Decision evidence: {error}</p>
+                  ))}
+                </section>
                 {analysis.coverage.inspection_errors.map((item, index) => (
                   <p key={index} className="text-xs text-amber-100">PR {item.number ?? "selection"}: {item.errors.join(", ")} {item.numbers?.join(", ")}</p>
                 ))}

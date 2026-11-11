@@ -933,7 +933,7 @@ export type IntegrationAnalysis = {
     review_state: string;
     security_review: string;
     migration_scan: string;
-    readiness: "BLOCKED" | "UNKNOWN" | "READY";
+    readiness: "READY" | "BLOCKED" | "UNKNOWN" | "STALE";
     readiness_reason: string;
     integration_blocked?: boolean;
     safe_to_integrate?: "NO" | "UNKNOWN" | "YES";
@@ -951,7 +951,7 @@ export type IntegrationAnalysis = {
     downstream_revalidate: number[];
     reuse: string;
     severity?: string;
-    status?: "OPEN" | "RESOLVED" | "UNKNOWN";
+    status?: "OPEN" | "RESOLVED" | "UNKNOWN" | "STALE";
     blocks_integration?: boolean;
     why_it_matters?: string;
     corrective_action?: string;
@@ -965,6 +965,39 @@ export type IntegrationAnalysis = {
     inspection_errors: { number: number | null; errors: string[]; numbers?: number[] }[];
     migration_ancestry: string;
     founder_decisions: string;
+    canonical_decisions?: {
+      status: string;
+      errors?: string[];
+      decisions: {
+        decision_id: string;
+        version: number;
+        status: string;
+        approver: string;
+        approved_at: string;
+        effective_at: string;
+        summary: string;
+        affected_modules: string[];
+        canonical: { pull_request: number; head_sha: string; architecture: string[] };
+        rejected_alternatives: {
+          pull_request: number;
+          head_sha: string;
+          label: string;
+          rationale: string;
+          signals: string[];
+        }[];
+        relevant_pull_requests: number[];
+        source: {
+          kind: string;
+          id: string;
+          type: string;
+          ref: string;
+          source_id: string | null;
+          created_at: string | null;
+          content_sha256: string;
+        };
+        pr_evidence?: { number: number; expected_sha: string; observed_sha: string | null; state: string | null }[];
+      }[];
+    };
     engineering_lessons: string;
     independent_security_reviews: string;
     migration_graph?: {

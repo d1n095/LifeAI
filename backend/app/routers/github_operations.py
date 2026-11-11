@@ -1,13 +1,20 @@
 """Founder-only, read-only GitHub and LifeAI project-state observations."""
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.deps import require_founder
 from app.integrations.github_operations import _get_github_observation, _local_project_state, build_project_snapshot
-from app.integrations.integration_analysis import MAX_ANALYZED_PRS, analyze_integration
+from app.integrations.integration_analysis import (
+    MAX_ANALYZED_PRS,
+    MAX_FOUNDER_DECISION_NOTES,
+    analyze_integration,
+    parse_founder_architecture_decisions,
+)
 from app.limiter import limiter
+from app.models.project_memory import NoteKind, NoteStatus, ProjectNote
 from app.models.user import User
 
 router = APIRouter(
@@ -54,4 +61,13 @@ async def get_integration_analysis(
         raise HTTPException(status_code=422, detail="Migration graph requires one or two selected pull requests.")
     github = await _get_github_observation(force_refresh)
     local = _local_project_state(db, user.id)
-    return await analyze_integration(github, local["assignments"], pr, include_migration_graph)
+    decision_notes = db.execute(
+        select(ProjectNote)
+        .where(ProjectNote.kind == NoteKind.decision, ProjectNote.status == NoteStatus.open)
+        .order_by(ProjectNote.created_at.desc())
+        .limit(MAX_FOUNDER_DECISION_NOTES)
+    ).scalars().all()
+    founder_decisions = parse_founder_architecture_decisions(decision_notes, user.email)
+    return await analyze_integration(
+        github, local["assignments"], pr, include_migration_graph, founder_decisions
+    )

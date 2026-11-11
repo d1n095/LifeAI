@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
 import pytest
 
 from app.integrations import integration_analysis as analysis
 from app.integrations.github_client import GitHubClientError, GitHubListResult
 
 SHA_237 = "7878958bfa57fa999122ac3008e9f261233f158e"
+SHA_243 = "3a19c7640ec75b5574cc268ed1c8b76ddba4d43e"
+SHA_244 = "3ed59b5065e897deba26f1c9ec4febdc4f1ef06d"
 SHA_363 = "1d3fcb0440aca0f460330ecacfb99c15809665fa"
+FOUNDER_EMAIL = "founder@example.test"
 
 
 def pr(number, sha, branch, base="main", **changes):
@@ -36,6 +43,43 @@ def scan(number, sha, path, parent="0068"):
             "url": f"https://github.com/d1n095/LifeAI/blob/{sha}/{path}",
         }],
     }
+
+
+def founder_decision_note(*, created_by=FOUNDER_EMAIL, approver=FOUNDER_EMAIL, **changes):
+    content = {
+        "schema": "lifeai.architecture-decision.v1",
+        "decision_id": "stop-control",
+        "version": 1,
+        "approver_email": approver,
+        "approved_at": "2026-11-10T12:00:00+00:00",
+        "effective_at": "2026-11-10T12:00:00+00:00",
+        "summary": "Use the founder-selected mainai stop-state architecture.",
+        "affected_modules": ["backend/app/workforce/"],
+        "canonical": {
+            "pull_request": 237,
+            "head_sha": SHA_237,
+            "architecture": ["mainai_stop_state", "mainai_stop_events"],
+        },
+        "rejected_alternatives": [{
+            "pull_request": 243,
+            "head_sha": SHA_243,
+            "label": "workforce_authority_epoch",
+            "signals": ["workforce_authority_epoch"],
+        }],
+        "relevant_pull_requests": [244],
+        **changes,
+    }
+    return SimpleNamespace(
+        id="decision-note-1",
+        kind="decision",
+        status="open",
+        content=json.dumps(content),
+        source_type="doc",
+        source_ref="Founder approval: stop-control decision",
+        source_id=None,
+        created_by=created_by,
+        created_at=datetime(2026, 11, 10, tzinfo=timezone.utc),
+    )
 
 
 def test_real_237_363_revision_collision_is_blocked_with_sources():
@@ -114,6 +158,22 @@ def test_stale_review_and_closed_unmerged_base_never_become_ready():
     assert result["candidates"][0]["dependencies"][0]["number"] == 243
 
 
+def test_open_stacked_dependency_is_blocked_not_approved_or_ready():
+    parent = pr(1, "a" * 40, "upstream")
+    child = pr(2, "b" * 40, "downstream", base="upstream")
+    result = analysis.build_integration_graph(observation([parent, child]), [], [])
+    finding = next(
+        item for item in result["findings"]
+        if item["kind"] == "open_dependency" and 2 in item["pull_requests"]
+    )
+    assert finding["status"] == "OPEN" and finding["blocks_integration"] is True
+    assert finding["evidence"][0]["head_sha"] == parent["head_sha"]
+    assert result["candidates"][1]["readiness"] == "BLOCKED"
+    assert result["candidates"][1]["dependencies"] == [{
+        "number": 1, "state": "open", "source": "base_branch", "url": parent["url"],
+    }]
+
+
 def test_failed_exact_head_ci_is_an_evidence_backed_integration_blocker():
     item = pr(
         1, "a" * 40, "branch", ci_state="failed",
@@ -128,83 +188,178 @@ def test_failed_exact_head_ci_is_an_evidence_backed_integration_blocker():
     assert result["candidates"][0]["safe_to_integrate"] == "NO"
 
 
-def test_founder_registry_decision_overrides_pr_claim_and_blocks_superseded_architecture():
-    registry_sha = "e" * 40
-    registry = "\n".join([
-        "| `cursor/mainai-safe-internal-startup` | [#237](https://github.com/d1n095/LifeAI/pull/237) | **Open; `7878958bfa57fa999122ac3008e9f261233f158e`; architecture selected** | canonical `mainai_stop_state`/`mainai_stop_events` direction |",
-        "| `claude/kill-switch-authority-epoch-race-fix` | [#243](https://github.com/d1n095/LifeAI/pull/243) | **Closed, superseded by #237**; historical HEAD `3a19c7640ec75b5574cc268ed1c8b76ddba4d43e` |",
-    ])
-    decision = analysis.parse_authoritative_registry_decision(
-        registry, registry_sha,
-        [pr(237, SHA_237, "canonical")],
-        [{"number": 243, "head_sha": "3a19c7640ec75b5574cc268ed1c8b76ddba4d43e",
-          "state": "closed_unmerged", "url": "https://github.com/d1n095/LifeAI/pull/243"}],
+@pytest.mark.asyncio
+async def test_approved_decision_overrides_untrusted_claim_and_blocks_superseded_architecture():
+    decision = analysis.parse_founder_architecture_decisions(
+        [founder_decision_note()], FOUNDER_EMAIL
     )
-    assert decision["status"] == "verified_record"
-    candidate = pr(244, "c" * 40, "reconciliation", canonical_claims=[243],
-                   dependencies=[{"number": 243, "state": "closed_unmerged",
-                                  "url": "https://github.com/d1n095/LifeAI/pull/243",
-                                  "source": "explicit_dependency_in_pull_request_body"}],
-                   url="https://github.com/d1n095/LifeAI/pull/244")
+    assert decision["status"] == "UNKNOWN"
+    assert decision["decisions"][0]["status"] == "PENDING_VALIDATION"
+    live = observation(
+        [pr(237, SHA_237, "canonical")],
+        closed=[{"number": 243, "head_sha": SHA_243, "state": "closed_unmerged",
+                 "head_branch": "superseded", "url": "https://github.com/d1n095/LifeAI/pull/243"}],
+    )
+
+    class Fake:
+        async def get_pull_request(self, number):
+            raise AssertionError(f"PR #{number} should already be in the observation")
+
+    validated = await analysis.validate_founder_architecture_decisions(Fake(), decision, live)
+    assert validated["status"] == "VERIFIED"
+    candidate = pr(
+        244, SHA_244, "reconciliation", canonical_claims=[243],
+        dependencies=[{"number": 243, "state": "closed_unmerged",
+                       "url": "https://github.com/d1n095/LifeAI/pull/243",
+                       "source": "explicit_dependency_in_pull_request_body"}],
+        url="https://github.com/d1n095/LifeAI/pull/244",
+    )
     result = analysis.build_integration_graph(
-        observation([candidate]), [], [], canonical_decisions=decision
+        observation([candidate], closed=live["closed_pull_requests"]), [], [],
+        canonical_decisions=validated,
     )
     finding = next(f for f in result["findings"] if f["kind"] == "architecture_decision_conflict")
     assert finding["status"] == "OPEN" and finding["blocks_integration"] is True
     assert finding["severity"] == "P1"
     assert result["candidates"][0]["readiness"] == "BLOCKED"
-    assert result["candidates"][0]["integration_blocked"] is True
     assert result["candidates"][0]["safe_to_integrate"] == "NO"
     assert any(f["kind"] == "superseded_dependency" for f in result["findings"])
-    assert any(item["url"].endswith("docs/BRANCH_REGISTRY.md#L1") for item in finding["evidence"])
-
-
-def test_registry_decision_is_unknown_if_record_or_exact_pr_sha_is_stale():
-    registry = (
-        "| [#237] | architecture selected; canonical `mainai_stop_state`/`mainai_stop_events`; "
-        "`1111111111111111111111111111111111111111` |\n"
-        "| [#243] | Closed, superseded by #237; historical HEAD "
-        "`3a19c7640ec75b5574cc268ed1c8b76ddba4d43e` |"
-    )
-    result = analysis.parse_authoritative_registry_decision(
-        registry, "e" * 40, [pr(237, SHA_237, "canonical")],
-        [{"number": 243, "head_sha": "3a19c7640ec75b5574cc268ed1c8b76ddba4d43e",
-          "state": "closed_unmerged"}],
-    )
-    assert result["status"] == "UNKNOWN" and result["decisions"] == []
+    assert finding["evidence"][1]["kind"] == "project_note"
+    assert finding["evidence"][1]["content_sha256"]
 
 
 @pytest.mark.asyncio
-async def test_registry_fetch_is_exact_sha_pinned_and_requires_stable_default_ref():
-    registry = (
-        "| [#237] | architecture selected; canonical `mainai_stop_state`/`mainai_stop_events`; "
-        f"`{SHA_237}` |\n"
-        "| [#243] | Closed, superseded by #237; historical HEAD "
-        "`3a19c7640ec75b5574cc268ed1c8b76ddba4d43e` |"
+async def test_founder_decision_requires_creator_approver_and_exact_current_pr_heads():
+    assert analysis.parse_founder_architecture_decisions(
+        [founder_decision_note(created_by="agent@example.test")], FOUNDER_EMAIL
+    )["decisions"] == []
+    assert analysis.parse_founder_architecture_decisions(
+        [founder_decision_note(approver="agent@example.test")], FOUNDER_EMAIL
+    )["decisions"] == []
+
+    class Fake:
+        async def get_pull_request(self, number):
+            if number == 237:
+                return {"state": "open", "head": {"sha": "f" * 40}}
+            return {"state": "closed", "merged_at": None, "head": {"sha": SHA_243}}
+
+    validated = await analysis.validate_founder_architecture_decisions(
+        Fake(), analysis.parse_founder_architecture_decisions(
+            [founder_decision_note()], FOUNDER_EMAIL
+        ), observation([]),
+    )
+    assert validated["status"] == "STALE"
+    assert validated["decisions"][0]["status"] == "STALE"
+
+
+@pytest.mark.asyncio
+async def test_truncated_founder_decision_set_cannot_authorize_candidates():
+    notes = []
+    for index in range(analysis.MAX_FOUNDER_DECISION_NOTES):
+        note = founder_decision_note()
+        content = json.loads(note.content)
+        content["decision_id"] = f"stop-control-{index}"
+        note.content = json.dumps(content)
+        notes.append(note)
+    parsed = analysis.parse_founder_architecture_decisions(notes, FOUNDER_EMAIL)
+    assert "decision_note_limit_reached" in parsed["errors"]
+
+    class Fake:
+        async def get_pull_request(self, _number):
+            raise AssertionError("Truncated decision evidence must not authorize GitHub reads")
+
+    validated = await analysis.validate_founder_architecture_decisions(
+        Fake(), parsed, observation([])
+    )
+    assert validated["status"] == "UNKNOWN"
+    assert all(item["status"] == "UNKNOWN" for item in validated["decisions"])
+
+
+@pytest.mark.asyncio
+async def test_ready_requires_complete_live_exact_head_evidence_and_founder_decision():
+    candidate = pr(
+        237, SHA_237, "canonical", review_state="approved_exact_head",
+        reviews=[{"state": "APPROVED", "commit_sha": SHA_237}],
+        mergeability={"state": "MERGEABLE"},
+    )
+    live = observation(
+        [candidate],
+        closed=[{"number": 243, "head_sha": SHA_243, "state": "closed_unmerged"}],
+    )
+    decisions = analysis.parse_founder_architecture_decisions(
+        [founder_decision_note()], FOUNDER_EMAIL
     )
 
     class Fake:
-        refs = 0
-        async def get_ref(self, branch):
-            assert branch == "main"
-            self.refs += 1
-            return "e" * 40
-        async def get_branch_registry_at_commit(self, sha):
-            assert sha == "e" * 40
-            return registry
         async def get_pull_request(self, number):
-            if number == 237:
-                return {"state": "open", "head": {"sha": SHA_237}}
-            return {"state": "closed", "merged_at": None,
-                    "head": {"sha": "3a19c7640ec75b5574cc268ed1c8b76ddba4d43e"}}
+            raise AssertionError(f"PR #{number} should already be in the observation")
 
-    result = await analysis.fetch_authoritative_registry_decisions(
-        Fake(), {**observation([]), "repository": {"full_name": "d1n095/LifeAI",
-                                                     "default_branch": "main"}},
-        "d1n095/LifeAI",
+    verified = await analysis.validate_founder_architecture_decisions(Fake(), decisions, live)
+    result = analysis.build_integration_graph(
+        live, [{"number": 237, "status": "observed", "migrations": []}], [], verified
     )
-    assert result["status"] == "verified_record"
-    assert result["source_sha"] == "e" * 40
+    result["_inspections"] = [{"number": 237, "status": "observed", "migrations": []}]
+    analysis._finalize_findings(result, live)
+    analysis._promote_ready_candidates(result, live)
+    assert result["candidates"][0]["readiness"] == "READY"
+    assert result["candidates"][0]["safe_to_integrate"] == "YES"
+
+    result["findings"].append({
+        "kind": "schema_change_conflict",
+        "certainty": "risk",
+        "pull_requests": [237],
+        "detail": "Schema effects need composed-tree verification.",
+        "evidence": [],
+        "recommendation": "Verify the composed schema transition.",
+        "owners": [],
+        "tests": [],
+    })
+    analysis._finalize_findings(result, live)
+    analysis._promote_ready_candidates(result, live)
+    assert result["candidates"][0]["readiness"] == "UNKNOWN"
+    assert result["candidates"][0]["safe_to_integrate"] == "UNKNOWN"
+
+
+def test_unverified_decision_claim_remains_unknown_and_does_not_invent_authority():
+    decision = analysis.parse_founder_architecture_decisions(
+        [founder_decision_note(created_by="agent@example.test")], FOUNDER_EMAIL
+    )
+    candidate = pr(244, SHA_244, "reconciliation", canonical_claims=[243])
+    result = analysis.build_integration_graph(
+        observation([candidate]), [], [], canonical_decisions=decision
+    )
+    assert result["coverage"]["founder_decisions"] == "UNKNOWN"
+    assert not any(f["kind"] == "architecture_decision_conflict" for f in result["findings"])
+    assert result["candidates"][0]["readiness"] == "UNKNOWN"
+
+
+def test_future_effective_founder_decision_does_not_become_authoritative():
+    note = founder_decision_note()
+    content = json.loads(note.content)
+    content["effective_at"] = "2999-01-01T00:00:00+00:00"
+    note.content = json.dumps(content)
+    decision = analysis.parse_founder_architecture_decisions([note], FOUNDER_EMAIL)
+    assert decision["decisions"] == []
+    assert "decision_not_yet_effective" in decision["errors"]
+
+
+def test_stale_review_evidence_is_stale_but_missing_review_is_unknown():
+    stale = pr(1, "a" * 40, "stale", review_state="approval_stale_head",
+               reviews=[{"state": "APPROVED", "commit_sha": "b" * 40}])
+    missing = pr(2, "c" * 40, "missing")
+    result = analysis.build_integration_graph(observation([stale, missing]), [], [])
+    assert result["candidates"][0]["readiness"] == "STALE"
+    assert next(f for f in result["findings"] if f["kind"] == "stale_review")["status"] == "STALE"
+    assert result["candidates"][1]["readiness"] == "UNKNOWN"
+    assert not any(f["kind"] == "ci_failure" for f in result["findings"])
+
+
+def test_stale_github_snapshot_never_promotes_old_failure_or_approval_to_current_blocker():
+    item = pr(1, "a" * 40, "branch", ci_state="failed",
+              review_state="changes_requested_exact_head")
+    result = analysis.build_integration_graph(observation([item], freshness="stale"), [], [])
+    assert result["candidates"][0]["readiness"] == "STALE"
+    assert not any(f["blocks_integration"] for f in result["findings"])
 
 
 def test_security_overlap_is_risk_not_confirmed_architecture_decision():
@@ -219,14 +374,14 @@ def test_security_overlap_is_risk_not_confirmed_architecture_decision():
     assert "not independent" in result["candidates"][0]["security_review"]
 
 
-def test_conflicting_registered_owners_and_unavailable_data_stay_unknown():
+def test_conflicting_registered_owners_and_stale_data_never_become_ready():
     item = pr(1, "a" * 40, "branch")
     assignments = [{"branch": "branch", "head_sha": "a" * 40, "repository": "d1n095/LifeAI", "agent_key": agent}
                    for agent in ("agent-a", "agent-b")]
     result = analysis.build_integration_graph(observation([item], freshness="stale"), [], assignments)
     assert result["candidates"][0]["owner"]["status"] == "conflicting_assignments"
     assert result["candidates"][0]["owner"]["agent"] is None
-    assert result["candidates"][0]["readiness"] == "UNKNOWN"
+    assert result["candidates"][0]["readiness"] == "STALE"
     assert result["freshness"] == "stale"
 
 
@@ -332,7 +487,7 @@ async def test_changed_head_invalidates_snapshot_review_and_ownership(monkeypatc
     result = await analysis.analyze_integration(observation([item]), assignments)
     node = result["candidates"][0]
     assert node["review_state"] == "unknown_head_changed" and node["reviews"] == []
-    assert node["owner"]["status"] == "unknown" and node["readiness"] == "UNKNOWN"
+    assert node["owner"]["status"] == "unknown" and node["readiness"] == "STALE"
     assert not result["findings"]
     assert result["coverage"]["inspection_errors"][0]["errors"] == ["head_changed_before_analysis"]
 
@@ -581,24 +736,48 @@ def test_founder_only_analysis_endpoint_and_bounds(monkeypatch):
     from app.models.user import UserRole
     from app.routers import github_operations as route
 
+    class FakeDB:
+        def execute(self, _statement):
+            return SimpleNamespace(scalars=lambda: SimpleNamespace().all)
+
+    db = FakeDB()
     app = FastAPI()
     app.state.limiter = limiter
     app.include_router(route.router)
-    app.dependency_overrides[get_db] = lambda: object()
+    app.dependency_overrides[get_db] = lambda: db
     monkeypatch.setattr(route, "_local_project_state", lambda db, owner: {"assignments": []})
+    monkeypatch.setattr(
+        db, "execute",
+        lambda _statement: SimpleNamespace(
+            scalars=lambda: SimpleNamespace(all=lambda: [founder_decision_note()])
+        ),
+    )
 
     async def github(_force):
         return observation([])
 
     monkeypatch.setattr(route, "_get_github_observation", github)
+
+    async def analyze(github_observation, assignments, numbers, include_graph, decisions):
+        result = analysis.build_integration_graph(github_observation, [], assignments, decisions)
+        if numbers:
+            result["coverage"]["inspection_errors"].append({
+                "number": None, "errors": ["requested_pr_not_in_open_observation"], "numbers": numbers,
+            })
+        return result
+
+    monkeypatch.setattr(route, "analyze_integration", analyze)
     client = TestClient(app)
     assert client.get("/api/github-operations/integration-analysis").status_code == 401
     app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=uuid.uuid4(), role=UserRole.member)
     assert client.get("/api/github-operations/integration-analysis").status_code == 403
-    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=FOUNDER_USER_ID, role=UserRole.founder)
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        id=FOUNDER_USER_ID, role=UserRole.founder, email=FOUNDER_EMAIL
+    )
     response = client.get("/api/github-operations/integration-analysis?pr=237&pr=363")
     assert response.status_code == 200
     assert response.json()["coverage"]["inspection_errors"][0]["numbers"] == [237, 363]
+    assert response.json()["coverage"]["canonical_decisions"]["decisions"][0]["status"] == "PENDING_VALIDATION"
     assert client.get("/api/github-operations/integration-analysis?pr=0").status_code == 422
     assert client.get("/api/github-operations/integration-analysis?pr=1&pr=1").status_code == 422
     assert client.get("/api/github-operations/integration-analysis?include_migration_graph=true").status_code == 422
