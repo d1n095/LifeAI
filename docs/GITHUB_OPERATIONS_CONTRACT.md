@@ -96,6 +96,8 @@ content digest, version, approver, and bounded PR evidence. The referenced PR he
 when absent from the bounded snapshot; mismatches become STALE and failed/incomplete reads remain
 UNKNOWN. Duplicate active decision IDs, malformed records, and unsupported freeform notes do
 not become authority. Registry prose and PR body claims alone are never approval.
+Future-effective decisions remain UNKNOWN until their effective timestamp, and reaching the
+bounded decision-note limit leaves the decision set UNKNOWN rather than silently truncating it.
 
 The existing Founder-only `POST /api/admin/memory/notes` is the record-writing path; no new
 decision table is introduced. Its `kind` is `decision`, its source fields cite the approval
