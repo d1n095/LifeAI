@@ -141,8 +141,23 @@ jobs:
       # (app/development_operator/service.py) — not installed on the runner image by
       # default. ruff (the other governed-capability binary, run_profile("ruff_check"))
       # comes from requirements-dev.txt above, since it's pip-installable; rg is not.
+      # Bounded retry: runner-image apt mirrors (azure.archive.ubuntu.com etc.) have shown
+      # real, recurring "Temporary failure resolving ..." DNS failures on this exact step
+      # (confirmed directly in failed run logs, not theoretical) -- a transient runner/mirror
+      # issue, not a package or code problem. 3 attempts, 10s apart; still fails loudly (never
+      # silently skips the install) if every attempt is exhausted.
       - name: Install ripgrep (governed search_text capability)
-        run: sudo apt-get update && sudo apt-get install -y ripgrep
+        run: |
+          success=0
+          for i in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y ripgrep && { success=1; break; }
+            echo "apt-get attempt $i failed, retrying in 10s..." >&2
+            sleep 10
+          done
+          if [ "$success" -ne 1 ]; then
+            echo "apt-get failed after 3 attempts" >&2
+            exit 1
+          fi
       # tests/conftest.py creates its own throwaway database and the restricted runtime
       # role (idempotently — mirrors backend/db-init/01-app-role.sh) before applying every
       # Alembic migration; nothing extra to provision here beyond the Postgres server itself.
@@ -1228,8 +1243,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Same bounded-retry rationale as the ripgrep install step above: transient runner
+      # apt-mirror DNS failures, not a package or code problem.
       - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
+        run: |
+          success=0
+          for i in 1 2 3; do
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck && { success=1; break; }
+            echo "apt-get attempt $i failed, retrying in 10s..." >&2
+            sleep 10
+          done
+          if [ "$success" -ne 1 ]; then
+            echo "apt-get failed after 3 attempts" >&2
+            exit 1
+          fi
 
       - name: Shellcheck every script
         # `-x` (follow sourced files) resolves each script's `source "$SCRIPT_DIR/lib.sh"`
