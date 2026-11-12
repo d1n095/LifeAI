@@ -127,6 +127,42 @@ se plandokumentets §8 byggordning) redan finns. Tills dess är `docs/BRANCH_REG
 den här filen den manuella motsvarigheten — och de bör skrivas så att de senare kan ge
 MainAI samma information strukturerat, inte kastas när den dagen kommer.
 
+## Endast fjärrutveckling — grundarens Mac ska inte belastas
+
+**Grundaren har upprepade gånger instruerat att LifeAI-utveckling inte får förbruka lagring,
+minne eller CPU på grundarens egen dator.** Det här gäller varje session/agent som arbetar i
+detta repo, oavsett om det är en människa eller Claude Code, och oavsett vilket verktyg som
+startade sessionen.
+
+Konkret, för varje ny session/agent som börjar arbeta i LifeAI/MainAI-repot:
+
+1. **Kör utveckling fjärrstyrt** — i en molnmiljö (som denna sessionstyp redan gör) eller på
+   den godkända Strato-VPS:en — aldrig som en tung, varaktig process direkt på grundarens
+   Mac. En molnsession i en isolerad container är redan compliant per definition; frågan
+   gäller separata processer/CLI-körningar som körs DIREKT på grundarens dator.
+2. **Pusha färdigt arbete till GitHub** löpande, med exakt commit-SHA rapporterad — arbete
+   som bara finns lokalt (okommitterat, i en worktree, på en opushad branch) är i praktiken
+   oskyddat och ska inte lämnas kvar.
+3. **Undvik varaktiga worktrees och tunga builds** på grundarens Mac. En agent som behöver en
+   isolerad kopia av repot för en deluppgift ska städa den (eller flytta den till en molnmiljö/
+   VPS) så snart deluppgiften är klar — inte lämna den kvar som ett permanent, växande
+   lagringsavtryck.
+4. **Verifiera backup innan städning** — ett lokalt lagrat projektartefakt (worktree, branch,
+   byggcache) får bara tas bort efter att dess innehåll är verifierat identiskt med eller
+   redundant mot en redan pushad GitHub-referens (`git diff <lokal-sha> <fjärr-sha>` tomt,
+   eller motsvarande). Gissa aldrig att något är säkert att ta bort.
+5. **Rapportera miljö och exakt SHA** — varje leverans ska ange var koden kördes (vilken
+   molnmiljö/VPS) och den exakta commit-SHA:n som verifierats pushad, inte bara att "arbetet
+   är klart".
+6. **Destruktiv städning kräver grundarens godkännande av exakta sökvägar** — även när en
+   agent själv är säker på att något är redundant (se punkt 4), ska de exakta
+   borttagningssökvägarna listas och godkännas av grundaren innan borttagning, aldrig
+   blind rekursiv radering.
+
+En agent som saknar åtkomst till grundarens Mac eller till VPS:en från sin egen körmiljö ska
+säga det explicit — aldrig påstå att en migrering eller städning skett när den bara kunnat
+verifiera och pusha det som fanns tillgängligt i den egna arbetsytan.
+
 ## Se även
 
 - `docs/BRANCH_REGISTRY.md` — levande branch-/PR-översikt, uppdateras löpande.
