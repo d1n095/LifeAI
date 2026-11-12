@@ -224,11 +224,17 @@ def test_ci_graph_evidence_excludes_stale_or_unbound_sha_records():
             {"name": "unbound", "state": "success"},
         ],
     )
-    result = analysis.build_integration_graph(observation([item]), [], [])
+    pending = pr(2, "c" * 40, "pending", ci_state="pending", checks=[{
+        "name": "backend tests", "state": "pending", "head_sha": "c" * 40,
+    }])
+    result = analysis.build_integration_graph(observation([item, pending]), [], [])
     assert result["candidates"][0]["ci_state"] == "success"
     assert result["candidates"][0]["ci_evidence"] == [{
         "name": "current", "state": "success", "head_sha": head_sha, "url": None,
     }]
+    assert result["candidates"][1]["ci_state"] == "pending"
+    assert result["candidates"][1]["readiness"] == "UNKNOWN"
+    assert not any(f["kind"] in {"ci_failure", "ci_cancelled"} for f in result["findings"])
 
 
 @pytest.mark.asyncio

@@ -175,6 +175,11 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
           url: "https://github.com/d1n095/LifeAI/pull/411",
           owner: { github_author: "builder", agent: null, status: "unknown" },
           dependencies: [], review_state: "approval_stale_head",
+          ci_state: "cancelled",
+          ci_evidence: [{
+            name: "Backend tests", state: "cancelled", head_sha: HEAD_SHA,
+            url: "https://github.com/d1n095/LifeAI/actions/runs/411",
+          }],
           security_review: "UNKNOWN", migration_scan: "observed",
           readiness: "BLOCKED", readiness_reason: "Observed integration conflict.",
         }],
@@ -205,6 +210,12 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
   );
   await expect(page.getByRole("region", { name: "Integration analysis" })).toContainText(
     "Owner: #411: UNKNOWN",
+  );
+  await page.getByText("Dependency graph and readiness (1)").click();
+  await expect(page.getByText(`Exact-HEAD CI: cancelled · Backend tests: cancelled @ ${HEAD_SHA}`)).toBeVisible();
+  await expect(page.getByRole("link", { name: "Backend tests run" })).toHaveAttribute(
+    "href",
+    "https://github.com/d1n095/LifeAI/actions/runs/411",
   );
   await page.getByLabel("PR numbers (optional)").fill("411");
   await page.getByLabel("Compare migration graphs (1–2 PRs; up to 128 files each)").check();
