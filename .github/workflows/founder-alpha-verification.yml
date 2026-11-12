@@ -132,7 +132,7 @@ jobs:
       - name: Install and start Ollama; pull the test models
         run: |
           set -euo pipefail
-          bash backend/scripts/ci/install_pinned_ollama.sh
+          bash candidate/backend/scripts/ci/install_pinned_ollama.sh
           nohup ollama serve > "$GITHUB_WORKSPACE/ollama.log" 2>&1 &
           for i in $(seq 1 60); do
             curl -sf -o /dev/null "$OLLAMA_BASE_URL/api/tags" && { echo "ollama up"; break; }
