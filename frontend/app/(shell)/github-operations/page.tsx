@@ -263,6 +263,11 @@ export default function GitHubOperationsPage() {
                       <p>Dependencies: {candidate.dependencies.map((dep) => `#${dep.number} (${dep.state})`).join(", ") || "UNKNOWN"}</p>
                       <p>Transitive dependency chain: {candidate.dependency_chain?.map((number) => `#${number}`).join(", ") || "UNKNOWN / none observed"}</p>
                       <p>Required upstream: {candidate.required_upstream_candidates?.map((dep) => `#${dep.number} (${dep.state}, ${dep.head_sha ?? "SHA UNKNOWN"})`).join(", ") || "UNKNOWN"} · safe to integrate: {candidate.safe_to_integrate ?? "UNKNOWN"}</p>
+                      <p>Exact-HEAD CI: {candidate.ci_state} · {candidate.ci_evidence.length ? candidate.ci_evidence.map((check) => `${check.name ?? "check"}: ${check.state ?? "UNKNOWN"} @ ${check.head_sha ?? "SHA UNKNOWN"}`).join("; ") : "No exact-HEAD CI evidence"}
+                        {candidate.ci_evidence.map((check, index) => check.url && (
+                          <span key={`${check.name}-${index}`}> · <SourceLink href={check.url} label={`${check.name ?? "check"} run`} /></span>
+                        ))}
+                      </p>
                       <p>Changed migration revisions: {candidate.migration_dependencies?.map((migration) => `${migration.revision} ← ${migration.down_revision.join(", ") || "root"} (${migration.path})`).join("; ") || "UNKNOWN / none observed"}</p>
                       <p>Owner: {candidate.owner.agent ?? "UNKNOWN"} · Review: {candidate.review_state} · {candidate.security_review}</p>
                       <p>{candidate.readiness_reason}</p>

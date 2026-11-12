@@ -189,6 +189,48 @@ def test_failed_exact_head_ci_is_an_evidence_backed_integration_blocker():
     assert result["candidates"][0]["safe_to_integrate"] == "NO"
 
 
+def test_cancelled_exact_head_ci_is_a_blocker_and_ci_evidence_is_exposed():
+    head_sha = "a" * 40
+    item = pr(
+        1, head_sha, "branch", ci_state="cancelled",
+        checks=[{
+            "name": "backend tests", "state": "cancelled", "head_sha": head_sha,
+            "url": "https://github.com/d1n095/LifeAI/actions/runs/42",
+        }],
+    )
+    result = analysis.build_integration_graph(observation([item]), [], [])
+
+    finding = next(f for f in result["findings"] if f["kind"] == "ci_cancelled")
+    candidate = result["candidates"][0]
+    assert finding["status"] == "OPEN" and finding["severity"] == "P1"
+    assert finding["blocks_integration"] is True
+    assert finding["evidence"] == [{
+        "name": "backend tests", "state": "cancelled", "head_sha": head_sha,
+        "url": "https://github.com/d1n095/LifeAI/actions/runs/42",
+    }]
+    assert candidate["ci_state"] == "cancelled"
+    assert candidate["ci_evidence"] == finding["evidence"]
+    assert candidate["readiness"] == "BLOCKED"
+    assert candidate["safe_to_integrate"] == "NO"
+
+
+def test_ci_graph_evidence_excludes_stale_or_unbound_sha_records():
+    head_sha = "a" * 40
+    item = pr(
+        1, head_sha, "branch", ci_state="success",
+        checks=[
+            {"name": "current", "state": "success", "head_sha": head_sha},
+            {"name": "stale", "state": "failure", "head_sha": "b" * 40},
+            {"name": "unbound", "state": "success"},
+        ],
+    )
+    result = analysis.build_integration_graph(observation([item]), [], [])
+    assert result["candidates"][0]["ci_state"] == "success"
+    assert result["candidates"][0]["ci_evidence"] == [{
+        "name": "current", "state": "success", "head_sha": head_sha, "url": None,
+    }]
+
+
 @pytest.mark.asyncio
 async def test_approved_decision_overrides_untrusted_claim_and_blocks_superseded_architecture():
     decision = analysis.parse_founder_architecture_decisions(

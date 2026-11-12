@@ -931,6 +931,8 @@ export type IntegrationAnalysis = {
     }[];
     required_upstream_candidates?: { number: number; state: string; head_sha: string | null }[];
     review_state: string;
+    ci_state: string;
+    ci_evidence: { name: string | null; state: string | null; head_sha: string | null; url: string | null }[];
     security_review: string;
     migration_scan: string;
     readiness: "READY" | "BLOCKED" | "UNKNOWN" | "STALE";

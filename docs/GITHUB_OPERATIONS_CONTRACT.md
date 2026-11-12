@@ -53,7 +53,10 @@ the bounded observation are reported in `coverage.inspection_errors`.
 The versioned response contains `candidates`, `findings`, and `coverage`. Candidate nodes
 include exact HEAD SHA, base branch, explicit/base-branch dependencies, a transitive
 `dependency_chain`, GitHub review evidence, owner information from exact-SHA registered agent
-assignments, and readiness. GitHub authors are not assumed to be active agents. A missing or
+assignments, current `ci_state`, exact-HEAD `ci_evidence`, and readiness. CI evidence is included
+only when its observed HEAD SHA matches the candidate HEAD. A failed or cancelled current-HEAD
+check is an OPEN integration blocker; pending or unavailable CI remains non-READY without being
+misreported as a failed check. GitHub authors are not assumed to be active agents. A missing or
 ambiguous owner remains UNKNOWN. `BLOCKED` is based on observed failures or dependencies;
 otherwise readiness is `UNKNOWN`, never a release approval.
 

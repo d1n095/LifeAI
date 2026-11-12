@@ -223,14 +223,15 @@ def _finalize_findings(result: dict, github: dict) -> None:
         "migration_revision_collision", "migration_ancestry_divergence", "open_dependency", "closed_dependency",
         "superseded_dependency", "architecture_decision_conflict", "cross_pr_migration_graph_conflict",
         "migration_duplicate_revision", "migration_missing_ancestor", "migration_multiple_heads",
-        "migration_cycle", "upstream_head_not_in_child", "ci_failure",
+        "migration_cycle", "upstream_head_not_in_child", "ci_failure", "ci_cancelled",
         "merge_conflict", "changes_requested",
     }
     severity_by_kind = {kind: "P1" for kind in blocking_kinds}
     severity_by_kind.update({
         "stale_review": "P2", "security_ownership_overlap": "P2",
         "dependency_unobserved": "P2", "upstream_comparison_unavailable": "P2",
-        "ci_failure": "P1", "merge_conflict": "P1", "changes_requested": "P1",
+        "ci_failure": "P1", "ci_cancelled": "P1",
+        "merge_conflict": "P1", "changes_requested": "P1",
     })
     by_number = {pr["number"]: pr for pr in github.get("pull_requests", [])}
     nodes = result["candidates"]
@@ -701,6 +702,7 @@ def build_integration_graph(
 
     for pr in prs:
         number = pr["number"]
+        head_sha = pr.get("head_sha")
         dependencies = {item["number"]: dict(item) for item in pr.get("dependencies", [])}
         parent = by_branch.get(pr.get("base_branch"))
         if parent and parent["number"] != number:
@@ -815,6 +817,16 @@ def build_integration_graph(
             add("ci_failure", [number], "Current exact-HEAD CI evidence contains a failed or cancelled check.",
                 failed_checks, "Resolve the failed check and verify a successful run on the current exact HEAD.",
                 ["Confirm all required checks pass for the current HEAD SHA."])
+        elif pr.get("ci_state") == "cancelled":
+            cancelled_checks = [
+                {"name": check.get("name"), "state": check.get("state"),
+                 "head_sha": check.get("head_sha"), "url": check.get("url")}
+                for check in [*pr.get("checks", []), *pr.get("workflow_runs", [])]
+                if check.get("state") == "cancelled"
+            ]
+            add("ci_cancelled", [number], "Current exact-HEAD CI evidence contains a cancelled check or workflow.",
+                cancelled_checks, "Rerun the cancelled check and verify a successful run on the current exact HEAD.",
+                ["Confirm all required checks pass for the current HEAD SHA."])
         if pr.get("mergeability", {}).get("state") == "CONFLICTING":
             add("merge_conflict", [number], "GitHub reports this PR branch conflicts with its base branch.",
                 [{"url": pr.get("url"), "head_sha": pr.get("head_sha"),
@@ -838,17 +850,32 @@ def build_integration_graph(
         blocked = blocked or (
             not stale_observation and (
                 pr.get("ci_state") == "failed"
+                or pr.get("ci_state") == "cancelled"
                 or pr.get("mergeability", {}).get("state") == "CONFLICTING"
                 or pr.get("review_state") == "changes_requested_exact_head"
                 or any(claim in superseded_by for claim in pr.get("canonical_claims", []))
             )
         )
         nodes.append({
-            "number": number, "head_sha": pr.get("head_sha"), "base_branch": pr.get("base_branch"),
+            "number": number, "head_sha": head_sha, "base_branch": pr.get("base_branch"),
             "url": pr.get("url"), "owner": _owner(pr, assignments, repo),
             "dependencies": list(dependencies.values()), "review_state": pr.get("review_state"),
             "reviews": [{"sha": r.get("commit_sha"), "state": r.get("state"), "url": r.get("url")}
                         for r in reviews],
+            "ci_state": pr.get("ci_state", "unknown"),
+            "ci_evidence": [
+                {
+                    "name": item.get("name"),
+                    "state": item.get("state"),
+                    "head_sha": item.get("head_sha"),
+                    "url": item.get("url"),
+                }
+                for item in [*pr.get("checks", []), *pr.get("workflow_runs", [])]
+                if isinstance(head_sha, str)
+                and re.fullmatch(r"[0-9a-fA-F]{40}", head_sha)
+                and isinstance(item.get("head_sha"), str)
+                and item["head_sha"].casefold() == head_sha.casefold()
+            ],
             "security_review": "UNKNOWN — GitHub review is not independent security acceptance",
             "migration_scan": scan.get("status", "not_scanned"),
             "migration_dependencies": scan.get("migrations", []),
