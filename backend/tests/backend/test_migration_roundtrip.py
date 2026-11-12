@@ -223,6 +223,14 @@ def _schema_snapshot() -> dict:
     inspector = inspect(migration_engine)
     tables = [t for t in inspector.get_table_names() if t != "alembic_version"]
     snapshot = {table: frozenset(col["name"] for col in inspector.get_columns(table)) for table in tables}
+    # Migration identity is itself durable schema state. This matters for intentional
+    # compatibility-marker revisions such as 0073: their upgrade/downgrade changes the exact
+    # authoritative revision even when the application objects are already identical. Omit
+    # the key at base (empty version table) so the full-chain assertion remains a literal {}.
+    with migration_engine.connect() as conn:
+        applied_revisions = frozenset(conn.execute(sa_text("SELECT version_num FROM alembic_version")).scalars())
+    if applied_revisions:
+        snapshot["alembic:versions"] = applied_revisions
     for enum in inspector.get_enums():
         snapshot[f"enum:{enum['name']}"] = frozenset(enum["labels"])
     for table in tables:
