@@ -344,6 +344,17 @@ def test_future_effective_founder_decision_does_not_become_authoritative():
     assert "decision_not_yet_effective" in decision["errors"]
 
 
+def test_founder_decision_parser_accepts_project_note_enum_fields():
+    from app.models.project_memory import NoteKind, NoteStatus
+
+    note = founder_decision_note()
+    note.kind = NoteKind.decision
+    note.status = NoteStatus.open
+    result = analysis.parse_founder_architecture_decisions([note], FOUNDER_EMAIL)
+    assert len(result["decisions"]) == 1
+    assert result["decisions"][0]["decision_id"] == "stop-control"
+
+
 def test_stale_review_evidence_is_stale_but_missing_review_is_unknown():
     stale = pr(1, "a" * 40, "stale", review_state="approval_stale_head",
                reviews=[{"state": "APPROVED", "commit_sha": "b" * 40}])

@@ -347,7 +347,14 @@ def parse_founder_architecture_decisions(notes: list[Any], founder_email: str) -
     founder = founder_email.strip().casefold()
     for note in notes[:MAX_FOUNDER_DECISION_NOTES]:
         get = note.get if isinstance(note, dict) else lambda key, default=None: getattr(note, key, default)
-        if str(get("kind", "")).lower() != "decision" or str(get("status", "")).lower() != "open":
+        kind = get("kind", "")
+        status = get("status", "")
+        kind = getattr(kind, "value", kind)
+        status = getattr(status, "value", status)
+        if (
+            not isinstance(kind, str) or kind.casefold() != "decision"
+            or not isinstance(status, str) or status.casefold() != "open"
+        ):
             continue
         if str(get("created_by", "")).strip().casefold() != founder:
             continue
