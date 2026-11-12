@@ -260,6 +260,11 @@ async def _synthesize_with_active_model(
             owner_id=owner_id,
             purpose="blueprint_synthesis",
             requested_by="routers.blueprint._synthesize_with_active_model",
+            # Security evidence must survive provider failure, an empty response, and any
+            # later rollback of the Blueprint business transaction. The shared provider
+            # boundary commits one content-free receipt before each dispatch and fails closed
+            # before provider.chat() if that independent commit cannot be made.
+            durable_disclosure_receipts=True,
             timeout=_SYNTH_TIMEOUT_SECONDS,
         )
     except EgressDeniedError as exc:

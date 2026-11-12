@@ -463,6 +463,139 @@ def test_blueprint_retrieved_source_secrets_are_redacted_before_external_provide
     assert allowed.sent_content_hash != allowed.attempted_content_hash
 
 
+def test_blueprint_external_dispatch_receipt_is_durable_before_transport_failure(
+    client, superuser_db, _fake_model, monkeypatch
+):
+    """A network attempt may outlive the request transaction, so its content-free authority
+    receipt must already be independently committed before provider.chat() sees the payload.
+    A later transport failure must not erase that evidence or create a partial draft.
+    """
+    from app.providers.openai_provider import OpenAIProvider
+
+    founder_id = _founder_id(superuser_db)
+    source_text = f"Synthetic durable source {uuid.uuid4().hex}"
+    _make_indexed_source(superuser_db, founder_id, "Durable receipt source", text_value=source_text)
+    observed_receipt_ids: list[uuid.UUID] = []
+
+    async def _observe_then_fail(self, messages, model, **kwargs):
+        superuser_db.expire_all()
+        receipt = (
+            superuser_db.query(ProviderDisclosureEvent)
+            .filter_by(owner_id=founder_id, purpose="blueprint_synthesis", decision="allowed")
+            .order_by(ProviderDisclosureEvent.created_at.desc(), ProviderDisclosureEvent.id.desc())
+            .first()
+        )
+        assert receipt is not None
+        assert receipt.provider == self.name
+        assert receipt.model == model
+        assert "authorized for provider dispatch" in receipt.reason
+        assert "provider completion not asserted" in receipt.reason
+        assert source_text not in receipt.reason
+        observed_receipt_ids.append(receipt.id)
+        raise RuntimeError("synthetic transport failure")
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _observe_then_fail)
+    csrf = _login(client)
+    title = f"Transport failure {uuid.uuid4().hex[:8]}"
+    response = client.post(
+        "/api/blueprint/drafts",
+        json={"title": title, "query": "durable source"},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert response.status_code == 503, response.text
+    assert len(observed_receipt_ids) == 1
+    superuser_db.expire_all()
+    assert superuser_db.get(ProviderDisclosureEvent, observed_receipt_ids[0]) is not None
+    assert _draft_rows(superuser_db, founder_id, title) == []
+
+
+def test_blueprint_durable_receipt_survives_empty_response_and_later_business_rollback(
+    client, superuser_db, _fake_model, monkeypatch
+):
+    from app.providers.base import ChatResult
+    from app.providers.openai_provider import OpenAIProvider
+    from app.routers import blueprint as blueprint_router
+
+    founder_id = _founder_id(superuser_db)
+    _make_indexed_source(superuser_db, founder_id, "Empty response source", text_value="Grounded input")
+
+    async def _empty(self, messages, model, **kwargs):
+        return ChatResult(content="", provider=self.name, model=model, raw_usage={})
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _empty)
+    csrf = _login(client)
+    response = client.post(
+        "/api/blueprint/drafts",
+        json={"title": f"Empty {uuid.uuid4().hex[:8]}", "query": "Grounded input"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert response.status_code == 503, response.text
+    empty_receipt = (
+        superuser_db.query(ProviderDisclosureEvent)
+        .filter_by(owner_id=founder_id, purpose="blueprint_synthesis", decision="allowed")
+        .order_by(ProviderDisclosureEvent.created_at.desc(), ProviderDisclosureEvent.id.desc())
+        .first()
+    )
+    assert empty_receipt is not None
+
+    async def _success(self, messages, model, **kwargs):
+        return ChatResult(content="Grounded draft", provider=self.name, model=model, raw_usage={})
+
+    def _rollback_after_dispatch(*args, **kwargs):
+        raise RuntimeError("synthetic business rollback")
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _success)
+    monkeypatch.setattr(blueprint_router, "generate_blueprint_draft", _rollback_after_dispatch)
+    with pytest.raises(RuntimeError, match="synthetic business rollback"):
+        client.post(
+            "/api/blueprint/drafts",
+            json={"title": f"Rollback {uuid.uuid4().hex[:8]}", "query": "Grounded input"},
+            headers={"X-CSRF-Token": csrf},
+        )
+
+    superuser_db.expire_all()
+    receipts = (
+        superuser_db.query(ProviderDisclosureEvent)
+        .filter_by(owner_id=founder_id, purpose="blueprint_synthesis", decision="allowed")
+        .all()
+    )
+    assert len(receipts) >= 2
+    assert all("provider completion not asserted" in receipt.reason for receipt in receipts)
+
+
+def test_blueprint_receipt_commit_failure_blocks_provider_dispatch(
+    client, superuser_db, _fake_model, monkeypatch
+):
+    from app.egress_policy import service as egress_service
+    from app.providers.openai_provider import OpenAIProvider
+
+    founder_id = _founder_id(superuser_db)
+    _make_indexed_source(superuser_db, founder_id, "Receipt failure source", text_value="Grounded input")
+    provider_calls: list[str] = []
+
+    async def _must_not_run(self, messages, model, **kwargs):
+        provider_calls.append(model)
+        raise AssertionError("provider called without durable disclosure receipt")
+
+    def _receipt_session_unavailable():
+        raise RuntimeError("synthetic receipt commit failure")
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _must_not_run)
+    monkeypatch.setattr(egress_service, "_durable_session_factory", _receipt_session_unavailable)
+    csrf = _login(client)
+    title = f"Receipt failure {uuid.uuid4().hex[:8]}"
+    response = client.post(
+        "/api/blueprint/drafts",
+        json={"title": title, "query": "Grounded input"},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert response.status_code == 422, response.text
+    assert provider_calls == []
+    assert _draft_rows(superuser_db, founder_id, title) == []
+
+
 def test_cross_owner_source_isolation_and_founder_only_gate(
     client, superuser_db, make_verified_user, _fake_model
 ):
