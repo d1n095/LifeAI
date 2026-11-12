@@ -184,7 +184,7 @@ jobs:
       - name: Install and start Ollama; pull the test models
         run: |
           set -euo pipefail
-          curl -fsSL https://ollama.com/install.sh | sh
+          bash backend/scripts/ci/install_pinned_ollama.sh
           # Run the server in the background (do not rely on a systemd unit on the runner).
           nohup ollama serve > "$GITHUB_WORKSPACE/ollama.log" 2>&1 &
           for i in $(seq 1 60); do
