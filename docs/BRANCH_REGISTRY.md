@@ -24,7 +24,7 @@ sektioner nedan är inte en fullständig aktuell PR-lista.
 | `claude/provider-egress-ownerless-callers` | [#372](https://github.com/d1n095/LifeAI/pull/372) | **Öppen, draft; oberoende review FAIL** | default (`64c07d5`) | Claude: ownerless-provider-egress. Current SHA `8a155c3`; disclosure receipt rollback durability remains unresolved. |
 | `claude/life-operational-priority-readiness-2026-11-09` | [#373](https://github.com/d1n095/LifeAI/pull/373) | **Öppen, draft** | default (`64c07d5`) | Claude: operational/readiness docs. Current head `8a21e6888b837d56628b3763fc0f4fd56bc9de81`; Copilot published a documentation consistency FAIL review on the prior reviewed head; the new head requires re-review. |
 | `claude/db-bootstrap-password-guard` | [#374](https://github.com/d1n095/LifeAI/pull/374) | **Öppen, draft; independent review pending** | default (`64c07d5`) | Claude: database-role password guard. Current SHA `235ce1d`. |
-| `copilot/github-operations-center` | [#376](https://github.com/d1n095/LifeAI/pull/376) | **Öppen, draft; HEAD `e88fb0626be96aacd3569fa591a312e5f20fcc46`** | default `64c07d5` | Copilot: read-only project-wide GitHub observations, Founder-authenticated architecture-decision verification, and conservative integration readiness. Adds exact repository scoping and real-DB endpoint tests; no migration ownership. No dependency on #338/#339. |
+| `copilot/github-operations-center` | [#376](https://github.com/d1n095/LifeAI/pull/376) | **Öppen, draft; pushed update includes real-DB decision verification** | default `64c07d5` | Copilot: read-only project-wide GitHub observations, Founder-authenticated architecture-decision verification, and conservative integration readiness. Adds exact repository scoping and real-DB endpoint tests; no migration ownership. No dependency on #338/#339. |
 
 **Rekommenderad ordning / väntande beroenden:** #338 före #339; håll dem orörda tills respektive
 ägare och beroende tillåter ändring. #360/#363 ligger på den frysta Founder Alpha-stackens
@@ -43,8 +43,6 @@ runner-/nätverksfel, inte ett testresultat. Ändra inte #344:s runner-policy fr
 I samma run passerade frontend lint/typecheck/build, Alembic, RLS/session och account-lifecycle;
 npm audit rapporterade advisories och required-check aggregate förblev röd.
 
-Remote GitHub-branch för #376 var verifierad på `e8bfe354e8f031cd04a13ead3f636ee19c1a5c04`;
-den nya scoped-databasverifieringen är ännu inte pushad eller CI-verifierad.
 STRATO VPS är inte en tillgänglig remote utvecklingsmiljö i denna session: deployment-guiden
 anger att servern ännu inte har kontaktats och kräver en manuellt provisionerad SSH-identitet
 och host-adress. Ingen VPS-åtkomst eller serverhemlighet antas. #376 använder därför endast
