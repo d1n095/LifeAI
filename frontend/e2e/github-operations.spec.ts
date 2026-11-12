@@ -236,6 +236,6 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
   await expect(page.getByTestId("pull-request-411")).toContainText("Synthetic untrusted comment");
   await expect(page.getByRole("link", { name: "Open source" }).first()).toHaveAttribute(
     "href",
-    "https://github.com/d1n095/LifeAI/actions/runs/411",
+    `https://github.com/d1n095/LifeAI/blob/${HEAD_SHA}/backend/alembic/versions/0069_test.py`,
   );
 });
