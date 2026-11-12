@@ -129,6 +129,13 @@ jobs:
       RL_BASE_URL: http://127.0.0.1:8010
       RL_STATE_FILE: ${{ github.workspace }}/real_local_state.json
     steps:
+      - name: Check out the exact CI policy SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: ci-policy
+          fetch-depth: 1
+
       - name: Check out candidate trunk (#323)
         uses: actions/checkout@v4
         with:
@@ -184,7 +191,9 @@ jobs:
       - name: Install and start Ollama; pull the test models
         run: |
           set -euo pipefail
-          curl -fsSL https://ollama.com/install.sh | sh
+          test "$(git -C ci-policy rev-parse HEAD)" = "$GITHUB_SHA" \
+            || { echo "::error::CI policy checkout does not match event SHA"; exit 1; }
+          bash ci-policy/backend/scripts/ci/install_pinned_ollama.sh
           # Run the server in the background (do not rely on a systemd unit on the runner).
           nohup ollama serve > "$GITHUB_WORKSPACE/ollama.log" 2>&1 &
           for i in $(seq 1 60); do
