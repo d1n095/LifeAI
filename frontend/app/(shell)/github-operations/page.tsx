@@ -202,7 +202,10 @@ export default function GitHubOperationsPage() {
                         <strong>{decision.decision_id} v{decision.version}: {decision.summary}</strong>
                         <StatusBadge value={decision.status} />
                       </div>
-                      <p className="mt-1">Approver: {decision.approver} · approved {formatDate(decision.approved_at)} · effective {formatDate(decision.effective_at)}</p>
+                      <p className="mt-1">Repository: {decision.repository} · approver: {decision.approver} · approved {formatDate(decision.approved_at)} · effective {formatDate(decision.effective_at)}</p>
+                      {decision.repository_evidence && (
+                        <p>Repository scope mismatch: expected {decision.repository_evidence.expected ?? "UNKNOWN"}, recorded {decision.repository_evidence.recorded}</p>
+                      )}
                       <p>Canonical: PR #{decision.canonical.pull_request} @ <code>{decision.canonical.head_sha}</code> · {decision.canonical.architecture.join(", ")}</p>
                       <p>Affected modules: {decision.affected_modules.join(", ")}</p>
                       <p>Rejected/superseded: {decision.rejected_alternatives.map((alternative) => `PR #${alternative.pull_request} @ ${alternative.head_sha} (${alternative.label})`).join("; ") || "None recorded"}</p>

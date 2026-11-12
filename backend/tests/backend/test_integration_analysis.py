@@ -50,6 +50,7 @@ def founder_decision_note(*, created_by=FOUNDER_EMAIL, approver=FOUNDER_EMAIL, *
         "schema": "lifeai.architecture-decision.v1",
         "decision_id": "stop-control",
         "version": 1,
+        "repository": "d1n095/LifeAI",
         "approver_email": approver,
         "approved_at": "2026-11-10T12:00:00+00:00",
         "effective_at": "2026-11-10T12:00:00+00:00",

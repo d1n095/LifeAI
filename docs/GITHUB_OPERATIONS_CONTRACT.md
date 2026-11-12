@@ -89,8 +89,8 @@ merged tree; those remain unverified. An explicit dependency absent from the bou
 PR observation is reported as `dependency_unobserved`, with candidate readiness left UNKNOWN.
 Architecture decisions are read from the existing founder-only `ProjectNote` store. A record is
 considered only when it is an open `decision` note written by the authenticated Founder and its
-versioned JSON (`lifeai.architecture-decision.v1`) names that same approver, approval/effective
-timestamps, canonical PR and exact HEAD, approved architecture, affected modules, and any
+versioned JSON (`lifeai.architecture-decision.v1`) names that same approver, exact `owner/repo`
+scope, approval/effective timestamps, canonical PR and exact HEAD, approved architecture, affected modules, and any
 rejected alternatives with exact PR heads. The response includes the note ID, source citation,
 content digest, version, approver, and bounded PR evidence. The referenced PR heads are re-read
 when absent from the bounded snapshot; mismatches become STALE and failed/incomplete reads remain
@@ -102,11 +102,15 @@ bounded decision-note limit leaves the decision set UNKNOWN rather than silently
 The existing Founder-only `POST /api/admin/memory/notes` is the record-writing path; no new
 decision table is introduced. Its `kind` is `decision`, its source fields cite the approval
 record, and `content` is JSON with `schema`, `decision_id`, `version`, `approver_email`,
-`approved_at`, `effective_at`, `summary`, `affected_modules`, `canonical` (`pull_request`,
+`repository`, `approved_at`, `effective_at`, `summary`, `affected_modules`, `canonical` (`pull_request`,
 `head_sha`, `architecture`), and `rejected_alternatives` (each with `pull_request`, `head_sha`,
 `label`, and optional `signals`/`rationale`). The route supplies `created_by` from the
 authenticated Founder identity; callers cannot establish authority by setting a JSON approver
 field alone.
+
+The decision repository must match the configured GitHub observation. Out-of-scope records are
+shown as `OUT_OF_SCOPE`, are not queried against the configured repository's PR numbers, and
+cannot establish a conflict or promote any candidate to READY.
 
 PR descriptions are untrusted proposals: a canonical claim or dependency on a rejected PR only
 becomes an architecture conflict when contradicted by a verified Founder decision. Stale

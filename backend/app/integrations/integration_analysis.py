@@ -360,6 +360,7 @@ def parse_founder_architecture_decisions(notes: list[Any], founder_email: str) -
                 raise ValueError
             decision_id = content.get("decision_id")
             version = content.get("version")
+            repository = content.get("repository")
             approver = content.get("approver_email")
             approved_at = content.get("approved_at")
             effective_at = content.get("effective_at")
@@ -371,6 +372,8 @@ def parse_founder_architecture_decisions(notes: list[Any], founder_email: str) -
                 or not isinstance(decision_id, str)
                 or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,99}", decision_id)
                 or not isinstance(version, int) or isinstance(version, bool) or version < 1
+                or not isinstance(repository, str)
+                or not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}", repository)
                 or not isinstance(approver, str) or approver.strip().casefold() != founder
                 or not isinstance(approved_at, str) or not isinstance(effective_at, str)
                 or not isinstance(canonical, dict)
@@ -428,6 +431,7 @@ def parse_founder_architecture_decisions(notes: list[Any], founder_email: str) -
             decisions.append({
                 "decision_id": decision_id,
                 "version": version,
+                "repository": repository,
                 "status": "UNVERIFIED",
                 "approver": founder_email,
                 "approved_at": approved_time.isoformat(),
@@ -496,9 +500,20 @@ async def validate_founder_architecture_decisions(
             "state": item.get("state"),
         } for item in github.get("closed_pull_requests", [])
     })
+    repository = github.get("repository", {}).get("full_name")
+    in_scope_decisions = []
+    for decision in decision_set.get("decisions", []):
+        if not isinstance(repository, str) or decision["repository"].casefold() != repository.casefold():
+            decision["status"] = "OUT_OF_SCOPE"
+            decision["repository_evidence"] = {
+                "expected": repository,
+                "recorded": decision["repository"],
+            }
+        else:
+            in_scope_decisions.append(decision)
     references = {
         number
-        for decision in decision_set.get("decisions", [])
+        for decision in in_scope_decisions
         for number in [
             decision["canonical"]["pull_request"],
             *(item["pull_request"] for item in decision["rejected_alternatives"]),
@@ -508,7 +523,12 @@ async def validate_founder_architecture_decisions(
     if len(missing) > MAX_LIVE_DECISION_PR_READS:
         return {
             **output,
-            "decisions": [{**item, "status": "UNKNOWN"} for item in decision_set.get("decisions", [])],
+            "decisions": [
+                {**item, "status": "OUT_OF_SCOPE"}
+                if item["repository"].casefold() != str(repository or "").casefold()
+                else {**item, "status": "UNKNOWN"}
+                for item in decision_set.get("decisions", [])
+            ],
             "errors": output["errors"] + ["decision_reference_limit"],
         }
 
@@ -525,7 +545,11 @@ async def validate_founder_architecture_decisions(
     if missing:
         read_results = await asyncio.gather(*(read_pull_request(number) for number in sorted(missing)))
         candidate_map.update({number: value for number, value in read_results if value is not None})
-    for decision in decision_set.get("decisions", []):
+    output["decisions"].extend(
+        decision for decision in decision_set.get("decisions", [])
+        if decision.get("status") == "OUT_OF_SCOPE"
+    )
+    for decision in in_scope_decisions:
         mismatched = False
         unavailable = False
         canonical = decision["canonical"]
@@ -554,7 +578,10 @@ async def validate_founder_architecture_decisions(
             for number, expected_sha, _ in refs
         ]
         output["decisions"].append(decision)
-    states = {item["status"] for item in output["decisions"]}
+    states = {
+        item["status"] for item in output["decisions"]
+        if item["status"] != "OUT_OF_SCOPE"
+    }
     output["status"] = (
         "STALE" if "STALE" in states else
         "VERIFIED" if states and states == {"VERIFIED"} and not output["errors"] else

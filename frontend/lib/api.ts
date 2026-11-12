@@ -971,7 +971,9 @@ export type IntegrationAnalysis = {
       decisions: {
         decision_id: string;
         version: number;
+        repository: string;
         status: string;
+        repository_evidence?: { expected: string | null; recorded: string };
         approver: string;
         approved_at: string;
         effective_at: string;

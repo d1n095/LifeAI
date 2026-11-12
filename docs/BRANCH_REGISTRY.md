@@ -6,9 +6,9 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-## Verifierade aktiva Founder Alpha- och GitHub Operations Center-lanes (2026-11-09)
+## Verifierade aktiva Founder Alpha- och GitHub Operations Center-lanes (2026-11-12)
 
-Senast kontrollerat mot GitHub API 2026-11-09. Detta är den aktuella, verifierade
+Senast kontrollerat mot GitHub API 2026-11-12. Detta är den aktuella, verifierade
 överlappningskartan för den nya read-only GitHub-intelligence-funktionen; äldre historiska
 sektioner nedan är inte en fullständig aktuell PR-lista.
 
@@ -22,9 +22,9 @@ sektioner nedan är inte en fullständig aktuell PR-lista.
 | `codex/founder-alpha-0069-migration-compat` | [#363](https://github.com/d1n095/LifeAI/pull/363) | **Öppen, draft** | #352 (`07ce4a1`) | Codex: migration ancestry; isolerad från operations-center-koden. |
 | `claude/prod-secret-validation-hardening` | [#371](https://github.com/d1n095/LifeAI/pull/371) | **Öppen, draft; oberoende review FAIL** | default (`64c07d5`) | Claude: production-secret validation. Current SHA `84fcb9f`; weak DB-role password remains unguarded. |
 | `claude/provider-egress-ownerless-callers` | [#372](https://github.com/d1n095/LifeAI/pull/372) | **Öppen, draft; oberoende review FAIL** | default (`64c07d5`) | Claude: ownerless-provider-egress. Current SHA `8a155c3`; disclosure receipt rollback durability remains unresolved. |
-| `claude/life-operational-priority-readiness-2026-11-09` | [#373](https://github.com/d1n095/LifeAI/pull/373) | **Öppen, draft** | default (`64c07d5`) | Claude: operational/readiness docs. Current head `18f378a`; Copilot published a documentation consistency FAIL review on the prior reviewed head; the new head requires re-review. |
+| `claude/life-operational-priority-readiness-2026-11-09` | [#373](https://github.com/d1n095/LifeAI/pull/373) | **Öppen, draft** | default (`64c07d5`) | Claude: operational/readiness docs. Current head `8a21e6888b837d56628b3763fc0f4fd56bc9de81`; Copilot published a documentation consistency FAIL review on the prior reviewed head; the new head requires re-review. |
 | `claude/db-bootstrap-password-guard` | [#374](https://github.com/d1n095/LifeAI/pull/374) | **Öppen, draft; independent review pending** | default (`64c07d5`) | Claude: database-role password guard. Current SHA `235ce1d`. |
-| `copilot/github-operations-center` | [#376](https://github.com/d1n095/LifeAI/pull/376) | **Öppen, draft** | default `64c07d5` | Copilot: read-only project-wide GitHub observations, Founder operations view, and decision-completeness evidence projection. No dependency on #338/#339; future consumers may use its stable API. |
+| `copilot/github-operations-center` | [#376](https://github.com/d1n095/LifeAI/pull/376) | **Öppen, draft; HEAD `e8bfe354e8f031cd04a13ead3f636ee19c1a5c04`** | default `64c07d5` | Copilot: read-only project-wide GitHub observations, Founder-authenticated architecture-decision verification, and conservative integration readiness. Follow-up adds exact repository scoping and real-DB endpoint tests; no migration ownership. No dependency on #338/#339. |
 
 **Rekommenderad ordning / väntande beroenden:** #338 före #339; håll dem orörda tills respektive
 ägare och beroende tillåter ändring. #360/#363 ligger på den frysta Founder Alpha-stackens
@@ -34,11 +34,20 @@ sektioner nedan är inte en fullständig aktuell PR-lista.
 `.github/workflows/ci.yml` till `ubuntu-24.04`. Båda ändringarna behövs för att deras separata
 CI-körningar ska kunna installera Playwright Chromium, men #344 riktar sig mot
 `claude/founder-alpha-blueprint-draft` medan #376 riktar sig mot
-`claude/det-kommer-mer-879lcm`. #376 behåller sin fungerande pin för egen verifiering; ändra
-inte #344 från denna lane. Vid framtida integrering ska den identiska hunkens slutliga
-förekomst verifieras en gång mot basens faktiska SHA, utan att skapa en konkurrerande runner-
-policy. #323 äger npm-audit/dependency-remediation; #376 lämnar dess filer och säkerhetsgate
-orörda.
+`claude/det-kommer-mer-879lcm`. Den exakta #376-körningen `43035391506` körde E2E-jobben på
+`ubuntu-24.04`, men `apt`-installationerna föll på DNS-fel mot Ubuntu-mirror; backend-jobbet
+föll på samma DNS-fel när det installerade `ripgrep` och hann inte köra pytest. Detta är ett
+runner-/nätverksfel, inte ett testresultat. Ändra inte #344:s runner-policy från #376-lanen;
+ägaren ska koordinera eventuell runner-/paketlösning innan en konkurrerande ändring görs.
+`#323` äger npm-audit/dependency-remediation; #376 lämnar dess filer och säkerhetsgate orörda.
+I samma run passerade frontend lint/typecheck/build, Alembic, RLS/session och account-lifecycle;
+npm audit rapporterade advisories och required-check aggregate förblev röd.
+
+Remote GitHub-branch för #376 är verifierad på `e8bfe354e8f031cd04a13ead3f636ee19c1a5c04`.
+STRATO VPS är inte en tillgänglig remote utvecklingsmiljö i denna session: deployment-guiden
+anger att servern ännu inte har kontaktats och kräver en manuellt provisionerad SSH-identitet
+och host-adress. Ingen VPS-åtkomst eller serverhemlighet antas. #376 använder därför endast
+GitHub Actions service-Postgres för de nya DB-integrationstesterna.
 
 Operations Center-branchen är en separat, read-only observationsyta och ska inte dispatcha
 agenter eller konkurrera om #338/#339:s operating-cycle/dispatchlogik.
