@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "mission_branch": "codex/life-founder-alpha-integration",
+  "mission_branch": "codex/founder-alpha-approved-precomposition",
   "candidate_sha_source": "git rev-parse HEAD",
   "first_cycle_go": false,
   "release_candidate": false,
@@ -89,6 +89,27 @@
       "sha": "a0063d4da6bce871dead53fcae26bee546c92859",
       "status": "frozen_waiting_independent_review",
       "required_for_first_start": true
+    },
+    {
+      "name": "blueprint_source_egress_gate",
+      "pr": 360,
+      "sha": "3053ce3149207b6cc7476b75b602df643afcfb75",
+      "status": "implemented_independent_no_defect_isolated",
+      "required_for_first_start": true
+    },
+    {
+      "name": "blueprint_durable_pre_dispatch_receipt",
+      "pr": 384,
+      "sha": "b857e095191bdd1353d46761b2943e892aa70002",
+      "status": "implemented_independent_no_defect_isolated",
+      "required_for_first_start": true
+    },
+    {
+      "name": "pinned_ollama_ci_installer",
+      "pr": 382,
+      "sha": "4b27c67570b0335fe7a0fd28027596a984a56f87",
+      "status": "implemented_independent_no_defect_isolated",
+      "required_for_first_start": true
     }
   ],
   "release_blockers": [
@@ -96,7 +117,8 @@
     "Independent review and frozen handoff of PR #340 exact SHA add0da831c101af7061b7cf6309ce8041ed969aa",
     "Independent review of PR #351 exact SHA a0063d4da6bce871dead53fcae26bee546c92859",
     "Exact-SHA CI and real-local acceptance on this composed integration head",
-    "Founder authorization remains required for merge, deployment and activation"
+    "Founder authorization remains required for merge, deployment and activation",
+    "Independent review of PR #386 exact SHA b8ba9008234bb03cdd50a855735ef0f387a49611 before migration remediation is composed"
   ],
   "deferred_after_first_start": [
     "OCR for scanned PDFs and standalone images",
