@@ -163,6 +163,42 @@ En agent som saknar åtkomst till grundarens Mac eller till VPS:en från sin ege
 säga det explicit — aldrig påstå att en migrering eller städning skett när den bara kunnat
 verifiera och pusha det som fanns tillgängligt i den egna arbetsytan.
 
+### Dokumenterad exponering: grundarens Mac-hostname i git-commit-identitet
+
+En oberoende granskning (2026-11-13) hittade **165 commits** i repots fullständiga historik
+(2026-08-27 till 2026-11-07) vars author-email är `dennistorildson@MacBook-Air-som-tillhor-Dennis.local`
+— git/macOS:s automatiskt genererade standardidentitet (`användarnamn@datornamn.local`) när
+`user.email` aldrig satts explicit i den lokala git-konfigurationen. Datornamnet
+("MacBook-Air-som-tillhor-Dennis") är synligt för alla som kan se commit-historiken, inklusive
+via GitHubs eget UI och API (`git log --all --format='%ae' | grep -c '\.local'` bekräftar
+antalet; sökningen görs på redan pushad, publik commit-metadata — inget nytt avslöjas här som
+inte redan var synligt på GitHub).
+
+**Detta är INTE ett skäl att skriva om publicerad commit-historik.** Att göra det utan
+grundarens explicita godkännande är uttryckligen förbjudet (se den här filens och
+systemets stående git-säkerhetsregler om att aldrig force-pusha eller skriva om historik utan
+tillåtelse) — och skulle under alla omständigheter kräva en force-push till varje berörd
+branch, vilket är en betydligt större och mer riskabel åtgärd än själva exponeringen. Detta
+dokumenterar fyndet och förhindrar återfall; det åtgärdar inte retroaktivt redan publicerade
+commits.
+
+**Förhindra återfall, konkret:**
+1. Varje molnsession som skapar commits i det här repot ska använda en explicit, icke-
+   hostname-baserad `user.email` (redan default-beteendet för en molnsession som själv sätter
+   `git config user.email` innan commit — denna sektion gör det explicit krav, inte bara
+   underförstått).
+2. Om grundaren någonsin committar lokalt från sin egen Mac igen (vilket avsnittet ovan redan
+   avråder från), bör `git config --global user.email` först sättas till en adress som inte
+   läcker datornamnet — t.ex. GitHubs egen "keep my email address private"-adress
+   (`<id>+<username>@users.noreply.github.com`, se GitHub-inställningarna under Settings →
+   Emails) eller en vanlig adress utan maskinnamn. `git config --global user.useConfigOnly true`
+   förhindrar dessutom att git någonsin tyst faller tillbaka till den automatiskt genererade
+   `användare@dator.local`-identiteten om `user.email` glöms bort.
+3. Det här är grundarens egen Mac-konfiguration, inte något en molnsession kan sätta åt
+   honom — en agent utan åtkomst till grundarens dator ska inte påstå att den ändrat den,
+   bara dokumentera fyndet och rekommendationen (se föregående stycke i denna sektion om att
+   aldrig påstå åtgärder utanför den egna körmiljön).
+
 ## Se även
 
 - `docs/BRANCH_REGISTRY.md` — levande branch-/PR-översikt, uppdateras löpande.
