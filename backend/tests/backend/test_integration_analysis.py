@@ -27,6 +27,22 @@ def pr(number, sha, branch, base="main", **changes):
     }
 
 
+def first_start_run(sha, *, run_state="success", job_state="success", latest=True, url=None):
+    return {
+        "name": "Founder Alpha integration (exact SHA, real local)",
+        "head_sha": sha,
+        "state": run_state,
+        "is_latest_for_workflow": latest,
+        "url": url or f"https://github.com/d1n095/LifeAI/actions/runs/{sha[:8]}",
+        "jobs": [{
+            "name": "Founder Alpha real-local acceptance (Ollama + pgvector + filesystem)",
+            "state": job_state,
+            "head_sha": sha,
+            "url": url or f"https://github.com/d1n095/LifeAI/actions/runs/{sha[:8]}",
+        }],
+    }
+
+
 def observation(prs, *, closed=None, freshness="live"):
     return {
         "pull_requests": prs, "closed_pull_requests": closed or [], "freshness": freshness,
@@ -236,6 +252,76 @@ def test_ci_graph_evidence_excludes_stale_or_unbound_sha_records():
     assert result["candidates"][1]["ci_state"] == "pending"
     assert result["candidates"][1]["readiness"] == "UNKNOWN"
     assert not any(f["kind"] in {"ci_failure", "ci_cancelled"} for f in result["findings"])
+
+
+def test_first_start_acceptance_pass_is_exact_head_and_named_workflow_bound():
+    head_sha = "a" * 40
+    item = pr(352, head_sha, "codex/life-founder-alpha-integration",
+              workflow_runs=[first_start_run(head_sha)])
+
+    candidate = analysis.build_integration_graph(observation([item]), [], [])["candidates"][0]
+
+    assert candidate["first_start_acceptance"] == {
+        "status": "PASS",
+        "head_sha": head_sha,
+        "workflow_name": "Founder Alpha integration (exact SHA, real local)",
+        "evidence": [{
+            "name": "Founder Alpha real-local acceptance (Ollama + pgvector + filesystem)",
+            "state": "success",
+            "head_sha": head_sha,
+            "url": f"https://github.com/d1n095/LifeAI/actions/runs/{head_sha[:8]}",
+        }],
+        "reason": "The named real-local Founder Alpha acceptance job passed on the current exact HEAD.",
+    }
+
+
+@pytest.mark.parametrize(("run_state", "job_state", "expected"), [
+    ("failed", "failed", "FAIL"),
+    ("skipped", "skipped", "BLOCKED"),
+    ("pending", "pending", "BLOCKED"),
+])
+def test_first_start_acceptance_distinguishes_failed_and_incomplete_exact_head_runs(
+    run_state, job_state, expected
+):
+    head_sha = "b" * 40
+    item = pr(352, head_sha, "codex/life-founder-alpha-integration",
+              workflow_runs=[first_start_run(head_sha, run_state=run_state, job_state=job_state)])
+
+    candidate = analysis.build_integration_graph(observation([item]), [], [])["candidates"][0]
+
+    assert candidate["first_start_acceptance"]["status"] == expected
+
+
+def test_first_start_acceptance_stays_unknown_for_stale_or_incomplete_evidence():
+    head_sha = "c" * 40
+    stale = pr(352, head_sha, "codex/life-founder-alpha-integration",
+               workflow_runs=[first_start_run("d" * 40)])
+    incomplete = pr(
+        353, head_sha, "other",
+        workflow_runs=[first_start_run(head_sha)],
+        workflow_jobs_truncated=True,
+    )
+
+    candidates = analysis.build_integration_graph(
+        observation([stale, incomplete]), [], []
+    )["candidates"]
+
+    assert [candidate["first_start_acceptance"]["status"] for candidate in candidates] == [
+        "UNKNOWN", "UNKNOWN",
+    ]
+
+
+def test_first_start_acceptance_requires_a_live_github_observation():
+    head_sha = "e" * 40
+    item = pr(352, head_sha, "codex/life-founder-alpha-integration",
+              workflow_runs=[first_start_run(head_sha)])
+
+    candidate = analysis.build_integration_graph(
+        observation([item], freshness="cached_fresh"), [], []
+    )["candidates"][0]
+
+    assert candidate["first_start_acceptance"]["status"] == "UNKNOWN"
+    assert "live GitHub observation" in candidate["first_start_acceptance"]["reason"]
 
 
 def test_blueprint_scope_uses_changed_file_sources_pinned_to_the_exact_head():

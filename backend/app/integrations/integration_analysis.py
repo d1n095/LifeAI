@@ -26,6 +26,8 @@ MAX_FOUNDER_DECISION_NOTES = 100
 MAX_DECISION_REFERENCES = 16
 MAX_LIVE_DECISION_PR_READS = 16
 MAX_DECISION_NOTE_BYTES = 32768
+FOUNDER_ALPHA_WORKFLOW_NAME = "Founder Alpha integration (exact SHA, real local)"
+FOUNDER_ALPHA_ACCEPTANCE_JOB = "Founder Alpha real-local acceptance (Ollama + pgvector + filesystem)"
 SECURITY_PATHS = (
     "backend/app/workforce/kill_switch.py",
     "backend/app/workforce/authority.py",
@@ -685,6 +687,97 @@ def _blueprint_scope(scan: dict, head_sha: str | None, repo: str | None) -> dict
     }
 
 
+def _first_start_acceptance(
+    pr: dict, head_sha: str | None, freshness: str = "live"
+) -> dict:
+    unknown = {
+        "status": "UNKNOWN",
+        "head_sha": None,
+        "workflow_name": FOUNDER_ALPHA_WORKFLOW_NAME,
+        "evidence": [],
+        "reason": "No complete acceptance evidence is bound to the current HEAD.",
+    }
+    if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", head_sha):
+        return unknown
+    if freshness != "live":
+        return {
+            **unknown,
+            "reason": "A live GitHub observation is required; cached, stale, or unavailable data is not current acceptance evidence.",
+        }
+
+    workflow_runs = pr.get("workflow_runs")
+    if not isinstance(workflow_runs, list):
+        return unknown
+    runs = [
+        run for run in workflow_runs
+        if isinstance(run, dict)
+        and run.get("name") == FOUNDER_ALPHA_WORKFLOW_NAME
+        and isinstance(run.get("head_sha"), str)
+        and run["head_sha"].casefold() == head_sha.casefold()
+        and run.get("is_latest_for_workflow") is True
+    ]
+    if not runs:
+        return unknown
+
+    run = runs[0]
+    jobs = run.get("jobs")
+    if not isinstance(jobs, list):
+        return {
+            **unknown,
+            "head_sha": head_sha,
+            "reason": "The exact-HEAD acceptance run is present, but its complete named job evidence is unavailable.",
+        }
+    exact_jobs = [
+        job for job in jobs
+        if isinstance(job, dict)
+        and job.get("name") == FOUNDER_ALPHA_ACCEPTANCE_JOB
+        and isinstance(job.get("head_sha"), str)
+        and job["head_sha"].casefold() == head_sha.casefold()
+    ]
+    if len(exact_jobs) != 1:
+        return {
+            **unknown,
+            "head_sha": head_sha,
+            "reason": "The exact-HEAD acceptance run is present, but its complete named job evidence is unavailable.",
+        }
+
+    job = exact_jobs[0]
+    state = job.get("state")
+    run_state = run.get("state")
+    evidence = [{
+        "name": FOUNDER_ALPHA_ACCEPTANCE_JOB,
+        "state": state,
+        "head_sha": head_sha,
+        "url": job.get("url") or run.get("url"),
+    }]
+    incomplete = any(
+        error in pr.get("detail_errors", [])
+        for error in ("workflow_runs_unavailable", "workflow_jobs_unavailable")
+    ) or pr.get("workflow_jobs_truncated", False) or pr.get("workflow_runs_truncated", False)
+    if incomplete:
+        status = "UNKNOWN"
+        reason = "Acceptance workflow details are incomplete; no PASS or FAIL is inferred."
+    elif run_state == "failed" or state == "failed":
+        status = "FAIL"
+        reason = "The exact-HEAD Founder Alpha acceptance workflow or its acceptance job failed."
+    elif run_state == "success" and state == "success":
+        status = "PASS"
+        reason = "The named real-local Founder Alpha acceptance job passed on the current exact HEAD."
+    elif run_state in {"pending", "cancelled", "skipped"} or state in {"pending", "cancelled", "skipped"}:
+        status = "BLOCKED"
+        reason = "The exact-HEAD acceptance workflow did not complete successfully."
+    else:
+        status = "UNKNOWN"
+        reason = "The exact-HEAD acceptance result is unavailable or unrecognized."
+    return {
+        "status": status,
+        "head_sha": head_sha,
+        "workflow_name": FOUNDER_ALPHA_WORKFLOW_NAME,
+        "evidence": evidence,
+        "reason": reason,
+    }
+
+
 def build_integration_graph(
     github: dict, inspections: list[dict], assignments: list[dict],
     canonical_decisions: dict | None = None,
@@ -891,6 +984,9 @@ def build_integration_graph(
             "dependencies": list(dependencies.values()), "review_state": pr.get("review_state"),
             "reviews": [{"sha": r.get("commit_sha"), "state": r.get("state"), "url": r.get("url")}
                         for r in reviews],
+            "first_start_acceptance": _first_start_acceptance(
+                pr, head_sha, github.get("freshness", "unavailable")
+            ),
             "ci_state": pr.get("ci_state", "unknown"),
             "ci_evidence": [
                 {
@@ -1071,6 +1167,8 @@ async def analyze_integration(
         node = next(item for item in result["candidates"] if item["number"] == number)
         node["review_state"] = "unknown_head_changed"
         node["reviews"] = []
+        node["ci_state"], node["ci_evidence"] = "unknown", []
+        node["first_start_acceptance"] = _first_start_acceptance({}, None)
         node["owner"] = {"github_author": node["owner"]["github_author"], "agent": None, "status": "unknown"}
         node["migration_scan"], node["migration_dependencies"] = "unknown", []
         node["readiness"], node["readiness_reason"] = "UNKNOWN", "HEAD changed during analysis; refresh required."

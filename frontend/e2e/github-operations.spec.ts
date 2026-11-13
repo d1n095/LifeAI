@@ -175,6 +175,17 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
           url: "https://github.com/d1n095/LifeAI/pull/411",
           owner: { github_author: "builder", agent: null, status: "unknown" },
           dependencies: [], review_state: "approval_stale_head",
+          reviews: [{ sha: "b".repeat(40), state: "APPROVED", url: "https://github.com/d1n095/LifeAI/pull/411#review" }],
+          first_start_acceptance: {
+            status: "PASS", head_sha: HEAD_SHA,
+            workflow_name: "Founder Alpha integration (exact SHA, real local)",
+            evidence: [{
+              name: "Founder Alpha real-local acceptance (Ollama + pgvector + filesystem)",
+              state: "success", head_sha: HEAD_SHA,
+              url: "https://github.com/d1n095/LifeAI/actions/runs/411",
+            }],
+            reason: "The named real-local Founder Alpha acceptance job passed on the current exact HEAD.",
+          },
           ci_state: "cancelled",
           ci_evidence: [{
             name: "Backend tests", state: "cancelled", head_sha: HEAD_SHA,
@@ -201,7 +212,8 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
         }],
         coverage: {
           inspected_pull_requests: [411, 412], limit: 8, open_prs_truncated: false,
-          inspection_errors: [], migration_ancestry: "UNKNOWN", founder_decisions: "NOT_CHECKED",
+          inspection_errors: [{ number: null, errors: ["requested_pr_not_in_open_observation"], numbers: [384] }],
+          migration_ancestry: "UNKNOWN", founder_decisions: "NOT_CHECKED",
           engineering_lessons: "NOT_CHECKED", independent_security_reviews: "UNKNOWN",
           migration_graph: { status: "observed", graphs: [], errors: [] },
         },
@@ -212,6 +224,8 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
   await page.waitForURL(`${FRONTEND_URL}/github-operations`);
 
   await expect(page.getByTestId("snapshot-freshness")).toContainText("LIVE");
+  await expect(page.getByRole("alert")).toContainText("Analysis coverage is incomplete");
+  await expect(page.getByRole("alert")).toContainText("#384");
   await expect(page.getByRole("region", { name: "Integration analysis" })).toContainText(
     "Different changed migrations declare revision 0069.",
   );
@@ -221,6 +235,12 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
   await page.getByText("Dependency graph and readiness (1)").click();
   await expect(page.getByText(`Exact-HEAD CI: cancelled · Backend tests: cancelled @ ${HEAD_SHA}`)).toBeVisible();
   await expect(page.getByText("Blueprint source scope: IN_SCOPE")).toBeVisible();
+  await expect(page.getByText("Founder Alpha full first-start acceptance:")).toBeVisible();
+  await expect(page.getByRole("link", { name: "acceptance run" })).toHaveAttribute(
+    "href",
+    "https://github.com/d1n095/LifeAI/actions/runs/411",
+  );
+  await expect(page.getByText("Exact-HEAD GitHub reviews: None observed")).toBeVisible();
   await expect(page.getByRole("link", { name: "backend/app/blueprint/service.py" })).toHaveAttribute(
     "href",
     `https://github.com/d1n095/LifeAI/blob/${HEAD_SHA}/backend/app/blueprint/service.py`,
@@ -250,4 +270,12 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
     "href",
     `https://github.com/d1n095/LifeAI/blob/${HEAD_SHA}/backend/alembic/versions/0069_test.py`,
   );
+  const firstStartSetRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return url.pathname.endsWith("/api/github-operations/integration-analysis") &&
+      url.searchParams.getAll("pr").join(",") === "237,352,360,361,363,382,384" &&
+      url.searchParams.get("force_refresh") === "true";
+  });
+  await page.getByRole("button", { name: "Analyze Founder Alpha first-start PR set" }).click();
+  await firstStartSetRequest;
 });

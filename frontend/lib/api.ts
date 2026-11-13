@@ -796,6 +796,14 @@ export type GitHubOperationsPullRequest = {
   dependency_evidence: { state: string; method: string; source: string | null };
   mergeability: { state: string; mergeable: boolean | null; mergeable_state: string | null };
   review_state: string;
+  reviews?: { sha: string | null; state: string; url: string | null }[];
+  first_start_acceptance?: {
+    status: "PASS" | "FAIL" | "BLOCKED" | "UNKNOWN";
+    head_sha: string | null;
+    workflow_name: string;
+    evidence: { name: string; state: string | null; head_sha: string; url: string | null }[];
+    reason: string;
+  };
   ci_state: string;
   requested_reviewers: string[];
   reviews: {
@@ -1025,10 +1033,11 @@ export type IntegrationAnalysis = {
 };
 
 export const api = {
-  githubIntegrationAnalysis: (numbers: number[] = [], migrationGraph = false) => {
+  githubIntegrationAnalysis: (numbers: number[] = [], migrationGraph = false, forceRefresh = false) => {
     const query = new URLSearchParams();
     numbers.forEach((number) => query.append("pr", String(number)));
     if (migrationGraph) query.set("include_migration_graph", "true");
+    if (forceRefresh) query.set("force_refresh", "true");
     const suffix = query.toString();
     return request<IntegrationAnalysis>(`/api/github-operations/integration-analysis${suffix ? `?${suffix}` : ""}`);
   },

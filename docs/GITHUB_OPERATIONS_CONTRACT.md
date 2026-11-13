@@ -49,6 +49,9 @@ GET requests, never dispatches, mutates branches, invokes providers, or reads le
 Up to eight open PRs may be selected using repeated `pr` parameters. With no selection the
 first eight observed open PRs are inspected. Invalid selections return 422; PRs absent from
 the bounded observation are reported in `coverage.inspection_errors`.
+The UI's Founder Alpha first-start shortcut selects #237, #352, #360, #361, #363, #382, and #384
+through this same bounded read-only endpoint. Missing PRs and incomplete selection coverage are
+shown explicitly; they are not treated as absent blockers or successful candidates.
 
 The versioned response contains `candidates`, `findings`, and `coverage`. Candidate nodes
 include exact HEAD SHA, base branch, explicit/base-branch dependencies, a transitive
@@ -65,6 +68,21 @@ scan; `NOT_IN_SCOPE` is returned only after that complete scan found no matching
 stale, or unbound scans yield `UNKNOWN`. The pinned file links identify changed Blueprint-related
 surfaces; they do not prove that Blueprint behavior works or is ready. The candidate's separate
 integration `readiness` remains authoritative for observed blockers and uncertainty.
+
+The candidate's `first_start_acceptance` is separate from ordinary CI and integration readiness.
+It recognizes only the named `Founder Alpha integration (exact SHA, real local)` workflow and
+its `Founder Alpha real-local acceptance (Ollama + pgvector + filesystem)` job when both are
+bound to the candidate's current exact HEAD, the observation is live, and the run is the latest
+observed for that workflow.
+`PASS` requires both workflow and job success; exact-HEAD failure is `FAIL`; pending, cancelled,
+or skipped execution is `BLOCKED`; missing, stale, or incomplete evidence is `UNKNOWN`. A PASS
+means that the named real-local user-path test ran successfully, not that independent security
+acceptance or release approval exists. GitHub reviews are displayed separately by reviewed SHA;
+they never populate independent security acceptance, which remains UNKNOWN unless an authorized
+independent-review evidence source is implemented. Cached-fresh observations do not produce a
+first-start PASS; use the explicit refresh or first-start PR-set action to request live GitHub data.
+The workflow runs on a GitHub Actions runner with local Ollama, pgvector, and filesystem
+fixtures; it does not assert that the Founder performed a startup on the physical Mac.
 
 For inspected same-repository PRs, the analysis rechecks the HEAD before and after bounded
 changed-file reads. It parses literal Alembic `revision` and `down_revision` assignments

@@ -10,6 +10,8 @@ import {
   IntegrationAnalysis,
 } from "@/lib/api";
 
+const FOUNDER_ALPHA_FIRST_START_PRS = [237, 352, 360, 361, 363, 382, 384];
+
 export default function GitHubOperationsPage() {
   const [snapshot, setSnapshot] = useState<GitHubOperationsSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -20,12 +22,12 @@ export default function GitHubOperationsPage() {
   const [migrationGraph, setMigrationGraph] = useState(false);
   const analysisRequest = useRef(0);
 
-  const loadAnalysis = useCallback(async (numbers: number[] = [], graph = false) => {
+  const loadAnalysis = useCallback(async (numbers: number[] = [], graph = false, forceRefresh = false) => {
     const requestId = ++analysisRequest.current;
     setAnalysis(null);
     setAnalysisError(null);
     try {
-      const result = await api.githubIntegrationAnalysis(numbers, graph);
+      const result = await api.githubIntegrationAnalysis(numbers, graph, forceRefresh);
       if (requestId === analysisRequest.current) setAnalysis(result);
     } catch {
       if (requestId === analysisRequest.current) {
@@ -39,7 +41,7 @@ export default function GitHubOperationsPage() {
     setError(null);
     try {
       setSnapshot(await api.githubOperationsSnapshot(forceRefresh));
-      void loadAnalysis();
+      void loadAnalysis([], false, forceRefresh);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not load project status.");
     } finally {
@@ -183,6 +185,17 @@ export default function GitHubOperationsPage() {
               <input id="integration-prs" value={selectedPrs} onChange={(event) => setSelectedPrs(event.target.value)} className="rounded border border-border bg-panel px-2 text-sm" placeholder="237, 363" />
               <label className="text-sm text-white/60"><input type="checkbox" checked={migrationGraph} onChange={(event) => setMigrationGraph(event.target.checked)} /> Compare migration graphs (1–2 PRs; up to 128 files each)</label>
               <button type="submit" className="rounded border border-border px-3 py-1 text-sm">Analyze</button>
+              <button
+                type="button"
+                className="rounded border border-border px-3 py-1 text-sm"
+                onClick={() => {
+                  setSelectedPrs(FOUNDER_ALPHA_FIRST_START_PRS.join(", "));
+                  setMigrationGraph(false);
+                  void loadAnalysis(FOUNDER_ALPHA_FIRST_START_PRS, false, true);
+                }}
+              >
+                Analyze Founder Alpha first-start PR set
+              </button>
             </form>
             {analysisError && <p role="alert" className="text-sm text-amber-100">{analysisError}</p>}
             {analysis && (
@@ -191,6 +204,13 @@ export default function GitHubOperationsPage() {
                   Observation {analysis.freshness} · inspected {analysis.coverage.inspected_pull_requests.join(", ") || "NONE"} · limit {analysis.coverage.limit}.
                   {" "}{analysis.coverage.migration_ancestry}. {analysis.coverage.founder_decisions}. {analysis.coverage.engineering_lessons}.
                 </p>
+                {analysis.coverage.inspection_errors.length > 0 && (
+                  <p role="alert" className="text-xs text-amber-200">
+                    Analysis coverage is incomplete: {analysis.coverage.inspection_errors.map((item) =>
+                      `${item.number ? `PR #${item.number}` : "Requested PR set"} ${item.errors.join(", ")}${item.numbers?.length ? ` (#${item.numbers.join(", #")})` : ""}`,
+                    ).join("; ")}. Missing evidence is UNKNOWN, not a pass.
+                  </p>
+                )}
                 <section aria-label="Founder-approved architecture decisions" className="space-y-2 rounded-lg border border-border bg-panel p-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <h3 className="text-sm font-medium">Founder-approved architecture decisions</h3>
@@ -263,6 +283,16 @@ export default function GitHubOperationsPage() {
                       <p>Dependencies: {candidate.dependencies.map((dep) => `#${dep.number} (${dep.state})`).join(", ") || "UNKNOWN"}</p>
                       <p>Transitive dependency chain: {candidate.dependency_chain?.map((number) => `#${number}`).join(", ") || "UNKNOWN / none observed"}</p>
                       <p>Required upstream: {candidate.required_upstream_candidates?.map((dep) => `#${dep.number} (${dep.state}, ${dep.head_sha ?? "SHA UNKNOWN"})`).join(", ") || "UNKNOWN"} · safe to integrate: {candidate.safe_to_integrate ?? "UNKNOWN"}</p>
+                      <p>
+                        Founder Alpha full first-start acceptance:{" "}
+                        <StatusBadge value={candidate.first_start_acceptance?.status ?? "UNKNOWN"} />{" "}
+                        {candidate.first_start_acceptance?.reason ?? "No exact-HEAD acceptance evidence observed."}
+                        {candidate.first_start_acceptance?.evidence.map((evidence) => (
+                          <span key={evidence.name}> · {evidence.name} @ {evidence.head_sha}
+                            {evidence.url && <> · <SourceLink href={evidence.url} label="acceptance run" /></>}
+                          </span>
+                        ))}
+                      </p>
                       <p>Exact-HEAD CI: {candidate.ci_state} · {candidate.ci_evidence.length ? candidate.ci_evidence.map((check) => `${check.name ?? "check"}: ${check.state ?? "UNKNOWN"} @ ${check.head_sha ?? "SHA UNKNOWN"}`).join("; ") : "No exact-HEAD CI evidence"}
                         {candidate.ci_evidence.map((check, index) => check.url && (
                           <span key={`${check.name}-${index}`}> · <SourceLink href={check.url} label={`${check.name ?? "check"} run`} /></span>
@@ -276,6 +306,10 @@ export default function GitHubOperationsPage() {
                       </p>
                       <p>Changed migration revisions: {candidate.migration_dependencies?.map((migration) => `${migration.revision} ← ${migration.down_revision.join(", ") || "root"} (${migration.path})`).join("; ") || "UNKNOWN / none observed"}</p>
                       <p>Owner: {candidate.owner.agent ?? "UNKNOWN"} · Review: {candidate.review_state} · {candidate.security_review}</p>
+                      <p>
+                        Exact-HEAD GitHub reviews: {candidate.reviews?.filter((review) => review.sha === candidate.head_sha).map((review) => `${review.state} @ ${review.sha}`).join("; ") || "None observed"}
+                        {" "}· GitHub approval is not independent security acceptance.
+                      </p>
                       <p>{candidate.readiness_reason}</p>
                     </div>
                   ))}
