@@ -224,8 +224,8 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
   await page.waitForURL(`${FRONTEND_URL}/github-operations`);
 
   await expect(page.getByTestId("snapshot-freshness")).toContainText("LIVE");
-  await expect(page.getByRole("alert")).toContainText("Analysis coverage is incomplete");
-  await expect(page.getByRole("alert")).toContainText("#384");
+  await expect(page.locator('p[role="alert"]')).toContainText("Analysis coverage is incomplete");
+  await expect(page.locator('p[role="alert"]')).toContainText("#384");
   await expect(page.getByRole("region", { name: "Integration analysis" })).toContainText(
     "Different changed migrations declare revision 0069.",
   );
