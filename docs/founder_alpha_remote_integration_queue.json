@@ -4,7 +4,7 @@
   "first_cycle_go": false,
   "execution_policy": {
     "source_of_truth": "github",
-    "implementation_compute": "authorized_remote_interactive_only",
+    "implementation_compute": "github_api_with_github_hosted_actions",
     "verification_compute": "github_actions",
     "current_host_allowed_for_development_workloads": false
   },
@@ -23,26 +23,25 @@
       "scope": "durable_blueprint_pre_dispatch_receipt",
       "verdict": "independent_no_defect_isolated",
       "independent_comment_id": 6850901877,
-      "ci_runs": [
-        43225833447,
-        43225792239
-      ]
+      "ci_runs": [43225833447, 43225792239]
     },
     {
-      "pull_request": 363,
-      "commit": "8ac278d5d90c4c5b550aad6741f4bcb9fd193725",
-      "tree": "1273c433e3a5bad11c02c59b3622b8dd86a78c4e",
-      "scope": "historical_0069_migration_compatibility",
-      "verdict": "return_to_builder",
-      "open_gaps": [
-        "non_null_embedding_provenance_value_round_trip",
-        "already_damaged_dual_version_database_recovery",
-        "exact_revision_0069_collision_with_pr_237"
+      "pull_request": 386,
+      "commit": "b8ba9008234bb03cdd50a855735ef0f387a49611",
+      "tree": "4099549a3c14319bf82e71922e1a92638137e2cd",
+      "parent": "8ac278d5d90c4c5b550aad6741f4bcb9fd193725",
+      "scope": "historical_0069_value_preservation_and_damaged_dual_version_recovery",
+      "verdict": "builder_pass_ready_for_independent_review",
+      "closed_gaps": [
+        "non_null_and_null_embedding_provenance_exact_value_round_trip",
+        "audited_idempotent_damaged_dual_version_recovery",
+        "fail_closed_detection_of_pr_237_exact_0069_semantic_collision"
       ],
-      "ci_runs": [
-        43222624957,
-        43222636109
-      ]
+      "remaining_gaps": [
+        "independent_exact_sha_review",
+        "supported_upgrade_lineage_for_pr_237_history"
+      ],
+      "ci_runs": [43490463184, 43494881677, 43494891828]
     },
     {
       "pull_request": 382,
@@ -51,11 +50,7 @@
       "scope": "pinned_ollama_ci_installer",
       "verdict": "independent_no_defect_isolated",
       "independent_comment_id": 6850967538,
-      "ci_runs": [
-        43223172075,
-        43223179331,
-        43223186314
-      ]
+      "ci_runs": [43223172075, 43223179331, 43223186314]
     }
   ],
   "excluded_candidates": [
@@ -73,13 +68,12 @@
   "composition_gate": {
     "status": "blocked",
     "blockers": [
-      "authorized_remote_interactive_compute_unavailable",
-      "pr_363_remote_postgresql_remediation_not_implemented",
+      "pr_386_independent_exact_sha_review_pending",
       "pr_237_exact_0069_lineage_not_reconciled",
       "new_composed_exact_sha_not_independently_certified"
     ],
     "required_order": [
-      "remediate_and_independently_review_pr_363_successor",
+      "independently_review_pr_386",
       "resolve_pr_237_lineage_without_rewriting_published_history",
       "compose_only_approved_exact_shas_on_isolated_remote_branch",
       "verify_single_alembic_head_and_historical_database_paths",
