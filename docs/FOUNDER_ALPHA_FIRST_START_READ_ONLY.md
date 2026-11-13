@@ -36,7 +36,7 @@ Immediate stop: missing model identity, dimension mismatch, unexpected provider 
 
 - [ ] `alembic heads` reports exactly `0073_provider_disclosure_local`.
 - [ ] Current database revision and backup identities are recorded.
-- [ ] A disposable clone successfully upgrades through `0068`, `0069_embedding_space_identity`, `0070_blueprint_drafts`, `0071_blueprint_approval_guard`, `0072_blueprint_approve_identity`, `0073_provider_disclosure_local`.
+- [ ] A disposable clone successfully upgrades through historical `0069_provider_disclosure_local_decision`, `0069_embedding_space_identity`, `0070_blueprint_drafts`, `0071_blueprint_approval_guard`, `0072_blueprint_approve_identity`, `0073_provider_disclosure_local`, preserving populated provider-disclosure and embedding provenance.
 - [ ] Runtime-role privileges, RLS and SECURITY DEFINER ownership match the independently reviewed contract after upgrade.
 - [ ] Downgrade refusal/data-preservation behavior is understood; no destructive downgrade is attempted against real data.
 
