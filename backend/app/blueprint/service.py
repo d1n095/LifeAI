@@ -67,6 +67,7 @@ def generate_blueprint_draft(
     query: str | None = None,
     model_provider: str | None = None,
     model_name: str | None = None,
+    extra_provenance: dict[str, Any] | None = None,
 ) -> BlueprintDraft:
     """Generate a new versioned, source-grounded Blueprint DRAFT. Refuses to create an
     ungrounded draft (no sources). Never mutates originals; never auto-approves."""
@@ -86,7 +87,7 @@ def generate_blueprint_draft(
         {"document_id": str(h["document_id"]), "similarity": h.get("similarity"), "excerpt": _excerpt(h)}
         for h in hits
     ]
-    provenance = {
+    provenance: dict[str, Any] = {
         "ai_generated": True,
         "originals_mutated": False,
         "draft": True,
@@ -94,6 +95,14 @@ def generate_blueprint_draft(
         "grounded_in_sources": True,
         "source_count": len(source_document_ids),
     }
+    if extra_provenance:
+        # Caller-supplied, review-only signals (e.g. retrieved-content injection suspicion —
+        # see routers/blueprint.py's module note) layered on top of the invariants above.
+        # Never allowed to override them: a caller passing e.g. "pending_founder_approval"
+        # here could not actually change the draft's real approval state (that is enforced in
+        # the database, migrations 0071/0072 — see approve_blueprint_draft's docstring), but
+        # this still keeps the recorded provenance honest rather than silently clobberable.
+        provenance.update({k: v for k, v in extra_provenance.items() if k not in provenance})
 
     # P2 — version allocation is max(version)+1 guarded by the unique index
     # (owner_id, title, version). Two concurrent generations for the same title can compute the
