@@ -364,16 +364,21 @@ class FakeGitHub:
         )
 
     async def list_workflow_jobs(self, run_id):
+        steps = [
+            {"name": "Run tests", "status": "completed", "conclusion": "failure"},
+            {"name": "Sensitive long step name " + "x" * 250,
+             "status": "completed", "conclusion": "success"},
+        ]
+        steps.extend(
+            {"name": f"Extra step {index}", "status": "completed", "conclusion": "success"}
+            for index in range(getattr(self, "extra_steps", 0))
+        )
         return GitHubListResult(
             [{
                 "id": 7001, "name": "Unit tests", "status": "completed",
                 "conclusion": "failure",
                 "html_url": "https://github.com/d1n095/LifeAI/actions/runs/9001/job/7001",
-                "steps": [
-                    {"name": "Run tests", "status": "completed", "conclusion": "failure"},
-                    {"name": "Sensitive long step name " + "x" * 250,
-                     "status": "completed", "conclusion": "success"},
-                ],
+                "steps": steps,
             }],
             1,
             False,
@@ -439,6 +444,20 @@ async def test_snapshot_preserves_exact_sha_ci_dependencies_draft_and_unknown_me
     fake.open_prs[0]["head"]["sha"] = fake.head_sha
     updated = await _fetch_github_observation(fake)
     assert updated["pull_requests"][0]["head_sha"] == "e" * 40
+
+
+@pytest.mark.asyncio
+async def test_workflow_step_projection_is_bounded_without_hiding_ci_state():
+    fake = FakeGitHub()
+    fake.extra_steps = 64
+
+    observation = await _fetch_github_observation(fake)
+    pull_request = observation["pull_requests"][0]
+    job = pull_request["workflow_runs"][0]["jobs"][0]
+
+    assert pull_request["workflow_steps_truncated"] is True
+    assert len(job["steps"]) == 64
+    assert pull_request["ci_state"] == "failed"
 
 
 @pytest.mark.asyncio

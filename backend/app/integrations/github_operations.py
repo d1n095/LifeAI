@@ -189,7 +189,7 @@ def _aggregate_ci_state(details: dict[str, Any]) -> str:
         details.get(key)
         for key in (
             "checks_truncated", "workflow_runs_truncated",
-            "workflow_jobs_truncated", "workflow_steps_truncated",
+            "workflow_jobs_truncated",
         )
     ):
         return "unknown"

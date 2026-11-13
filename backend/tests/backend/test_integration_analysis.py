@@ -350,7 +350,7 @@ def test_first_start_acceptance_is_unknown_when_workflow_steps_were_truncated():
 
     assert acceptance["status"] == "UNKNOWN"
     assert all(
-        milestone["status"] == "UNKNOWN"
+        milestone["status"] == "PASS"
         for milestone in acceptance["milestones"]
         if milestone["id"] != "independent_security"
     )
