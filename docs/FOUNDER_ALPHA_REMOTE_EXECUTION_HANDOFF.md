@@ -8,9 +8,9 @@ The active implementation is the durable Blueprint pre-dispatch receipt correcti
 
 | Scope | Branch | Exact commit | Tree / dependency | State |
 | --- | --- | --- | --- | --- |
-| Durable Blueprint egress receipt | `codex/blueprint-egress-durable-receipt` | `b857e095191bdd1353d46761b2943e892aa70002` | tree `9c81825dddf519d2748152d10ea08264d6b32fb7`; parent #360 `3053ce3149207b6cc7476b75b602df643afcfb75` | builder PASS; independent review required |
-| Historical standalone `0069` compatibility | `codex/founder-alpha-0069-migration-compat` | `8ac278d5d90c4c5b550aad6741f4bcb9fd193725` | isolated child of frozen #352 `07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765` | builder PASS; independent review required |
-| Immutable Ollama CI installer | `codex/founder-alpha-ollama-ci-pin` | `4b27c67570b0335fe7a0fd28027596a984a56f87` | isolated child of frozen #352 | builder PASS; independent review required |
+| Durable Blueprint egress receipt | `codex/blueprint-egress-durable-receipt` | `b857e095191bdd1353d46761b2943e892aa70002` | tree `9c81825dddf519d2748152d10ea08264d6b32fb7`; parent #360 `3053ce3149207b6cc7476b75b602df643afcfb75` | independent no-defect verdict at exact SHA; composition required |
+| Historical standalone `0069` compatibility | `codex/founder-alpha-0069-migration-compat` | `8ac278d5d90c4c5b550aad6741f4bcb9fd193725` | isolated child of frozen #352 `07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765` | RETURN TO BUILDER for value-round-trip and damaged-state recovery |
+| Immutable Ollama CI installer | `codex/founder-alpha-ollama-ci-pin` | `4b27c67570b0335fe7a0fd28027596a984a56f87` | isolated child of frozen #352 | independent no-defect verdict at exact SHA |
 | Gate/first-start evidence | `codex/founder-alpha-final-gate-package` | this document's branch head | evidence only | review package; no execution authority |
 
 ## Remote executable evidence
@@ -21,15 +21,16 @@ The active implementation is the durable Blueprint pre-dispatch receipt correcti
 
 ## Independent review handoff
 
-Claude or another independent reviewer must examine the exact frozen commits. The builder must not certify its own work.
+Claude independently examined #384 and #382 at their exact frozen commits and found no defect. #363 remains a builder task and must later be examined by a different reviewer.
 
-1. #384: prove the owner-bound content-free receipt is committed and independently visible before provider invocation; receipt survives transport failure, empty response, and later business rollback; receipt failure prevents provider invocation; inherited NEVER_EGRESS and redaction invariants remain intact.
-2. #363: reproduce fresh install and historical exact-`0069` upgrades; verify the serial migration ancestry, provider-disclosure preservation, embedding provenance, downgrade behavior, and a single head.
-3. #382: verify the pinned Ollama release identity, checksum-before-extraction behavior, exact-SHA checkout, architecture restriction, and absence of mutable installer execution.
+1. #384 (completed, comment `6850901877`): verified the owner-bound content-free receipt is committed and independently visible before provider invocation; receipt survives transport failure, empty response, and later business rollback; receipt failure prevents provider invocation; inherited NEVER_EGRESS and redaction invariants remain intact.
+2. #363 (open): reproduce fresh install and historical exact-`0069` upgrades; verify the serial migration ancestry, provider-disclosure preservation, embedding provenance, downgrade behavior, and a single head.
+3. #382 (completed, comment `6850967538`): verified the pinned Ollama release identity, checksum-before-extraction behavior, exact-SHA checkout, architecture restriction, and absence of mutable installer execution.
 
 ## Remaining blockers
 
-- Independent exact-SHA PASS is absent for #384, #363, and #382.
+- #363 lacks remediation and independent PASS for populated provenance-value round trip and damaged dual-version recovery.
+- #237 and Founder Alpha currently reuse exact Alembic revision `0069` for different schema effects; deterministic composition is impossible until explicitly reconciled.
 - The three isolated corrections have not been deterministically composed into a new Founder Alpha integration candidate.
 - The current Codex session has no authorized remote development compute environment. GitHub Actions can verify pushed commits but is not an interactive implementation environment.
 - No merge, deployment, provider activation, Recall activation, real-file ingestion, or first-cycle authorization exists.
