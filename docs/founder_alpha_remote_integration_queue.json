@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "snapshot_date": "2026-11-13",
+  "first_cycle_go": false,
+  "execution_policy": {
+    "source_of_truth": "github",
+    "implementation_compute": "authorized_remote_interactive_only",
+    "verification_compute": "github_actions",
+    "current_host_allowed_for_development_workloads": false
+  },
+  "frozen_base": {
+    "pull_request": 352,
+    "commit": "07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765",
+    "tree": "cc454df61bcfd0eccaf98ccb0b057fa823acf96c",
+    "verdict": "fail_not_ready"
+  },
+  "isolated_candidates": [
+    {
+      "pull_request": 384,
+      "commit": "b857e095191bdd1353d46761b2943e892aa70002",
+      "tree": "9c81825dddf519d2748152d10ea08264d6b32fb7",
+      "parent": "3053ce3149207b6cc7476b75b602df643afcfb75",
+      "scope": "durable_blueprint_pre_dispatch_receipt",
+      "verdict": "independent_no_defect_isolated",
+      "independent_comment_id": 6850901877,
+      "ci_runs": [
+        43225833447,
+        43225792239
+      ]
+    },
+    {
+      "pull_request": 363,
+      "commit": "8ac278d5d90c4c5b550aad6741f4bcb9fd193725",
+      "tree": "1273c433e3a5bad11c02c59b3622b8dd86a78c4e",
+      "scope": "historical_0069_migration_compatibility",
+      "verdict": "return_to_builder",
+      "open_gaps": [
+        "non_null_embedding_provenance_value_round_trip",
+        "already_damaged_dual_version_database_recovery",
+        "exact_revision_0069_collision_with_pr_237"
+      ],
+      "ci_runs": [
+        43222624957,
+        43222636109
+      ]
+    },
+    {
+      "pull_request": 382,
+      "commit": "4b27c67570b0335fe7a0fd28027596a984a56f87",
+      "tree": "b7ecd8f8eee8ba0a854a55e68145fa2631dff704",
+      "scope": "pinned_ollama_ci_installer",
+      "verdict": "independent_no_defect_isolated",
+      "independent_comment_id": 6850967538,
+      "ci_runs": [
+        43223172075,
+        43223179331,
+        43223186314
+      ]
+    }
+  ],
+  "excluded_candidates": [
+    {
+      "pull_request": 361,
+      "commit": "124ba9e4c1d29f369732211a56c52e6a360acf11",
+      "reason": "frozen_competing_blueprint_egress_candidate_do_not_compose"
+    },
+    {
+      "pull_request": 237,
+      "commit": "7878958bfa57fa999122ac3008e9f261233f158e",
+      "reason": "conflicting_exact_0069_revision_and_unresolved_stop_security_findings"
+    }
+  ],
+  "composition_gate": {
+    "status": "blocked",
+    "blockers": [
+      "authorized_remote_interactive_compute_unavailable",
+      "pr_363_remote_postgresql_remediation_not_implemented",
+      "pr_237_exact_0069_lineage_not_reconciled",
+      "new_composed_exact_sha_not_independently_certified"
+    ],
+    "required_order": [
+      "remediate_and_independently_review_pr_363_successor",
+      "resolve_pr_237_lineage_without_rewriting_published_history",
+      "compose_only_approved_exact_shas_on_isolated_remote_branch",
+      "verify_single_alembic_head_and_historical_database_paths",
+      "run_complete_remote_founder_alpha_acceptance",
+      "obtain_independent_exact_sha_security_verdict"
+    ]
+  },
+  "mandatory_remote_acceptance": [
+    "founder_only_login",
+    "authorized_local_model_selection",
+    "real_ollama_inference",
+    "conversation_restart_persistence",
+    "controlled_file_upload_and_immutable_original",
+    "parsing_indexing_and_grounded_retrieval",
+    "source_grounded_blueprint_generation",
+    "immutable_blueprint_versions_and_founder_approval",
+    "provider_failure_rollback_and_durable_egress_receipts",
+    "database_worker_backup_restore_and_controlled_shutdown"
+  ]
+}
