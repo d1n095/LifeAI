@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-11-08T14:30:00Z",
+  "generated_at": "2026-11-12T13:00:00Z",
   "first_cycle_go": false,
   "product": {
     "pull_request": 352,
@@ -43,11 +43,29 @@
     ]
   },
   "active_remediation": {
-    "pull_request": 360,
-    "commit": "3053ce3149207b6cc7476b75b602df643afcfb75",
-    "scope": "owner-aware Blueprint source egress enforcement",
+    "pull_request": 384,
+    "commit": "b857e095191bdd1353d46761b2943e892aa70002",
+    "parent_pull_request": 360,
+    "parent_commit": "3053ce3149207b6cc7476b75b602df643afcfb75",
+    "scope": "owner-aware Blueprint source egress enforcement with durable pre-dispatch receipts",
     "status": "builder_candidate_requires_independent_review"
   },
+  "additional_remediations": [
+    {
+      "pull_request": 363,
+      "commit": "8ac278d5d90c4c5b550aad6741f4bcb9fd193725",
+      "scope": "historical standalone 0069 upgrade compatibility and provenance preservation",
+      "status": "builder_pass_requires_independent_review",
+      "runs": [43222624957, 43222636109]
+    },
+    {
+      "pull_request": 382,
+      "commit": "4b27c67570b0335fe7a0fd28027596a984a56f87",
+      "scope": "checksum-pinned Ollama CI installation",
+      "status": "builder_pass_requires_independent_review",
+      "runs": [43223172075, 43223179331, 43223186314]
+    }
+  ],
   "supporting_evidence": {
     "preflight": {
       "pull_request": 356,
@@ -101,7 +119,7 @@
     }
   },
   "blocking_gates": [
-    "independent exact-SHA PASS for the Blueprint source-egress correction",
+    "independent exact-SHA PASS for Blueprint source-egress and durable pre-dispatch receipt corrections",
     "data-preserving upgrade compatibility from historical standalone revision 0069",
     "independent exact-SHA PASS for the remediated Founder Alpha composition"
   ],
