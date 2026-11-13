@@ -48,7 +48,20 @@
     "parent_pull_request": 360,
     "parent_commit": "3053ce3149207b6cc7476b75b602df643afcfb75",
     "scope": "owner-aware Blueprint source egress enforcement with durable pre-dispatch receipts",
-    "status": "builder_candidate_requires_independent_review"
+    "status": "builder_pass_requires_independent_review",
+    "ci_runs": [
+      43225833447,
+      43225792239
+    ],
+    "backend_jobs": [
+      131208643137,
+      131208504666
+    ],
+    "backend_result": {
+      "passed": 2379,
+      "skipped": 1,
+      "failed": 0
+    }
   },
   "additional_remediations": [
     {
@@ -56,14 +69,21 @@
       "commit": "8ac278d5d90c4c5b550aad6741f4bcb9fd193725",
       "scope": "historical standalone 0069 upgrade compatibility and provenance preservation",
       "status": "builder_pass_requires_independent_review",
-      "runs": [43222624957, 43222636109]
+      "runs": [
+        43222624957,
+        43222636109
+      ]
     },
     {
       "pull_request": 382,
       "commit": "4b27c67570b0335fe7a0fd28027596a984a56f87",
       "scope": "checksum-pinned Ollama CI installation",
       "status": "builder_pass_requires_independent_review",
-      "runs": [43223172075, 43223179331, 43223186314]
+      "runs": [
+        43223172075,
+        43223179331,
+        43223186314
+      ]
     }
   ],
   "supporting_evidence": {
