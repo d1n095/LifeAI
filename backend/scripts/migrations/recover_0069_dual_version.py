@@ -125,7 +125,7 @@ def validate_state(state: RecoveryState) -> str:
 
 
 def recover(conn: Connection, *, apply: bool) -> dict[str, object]:
-    conn.set_session(isolation_level="SERIALIZABLE", readonly=not apply, autocommit=False)
+    conn.set_session(isolation_level="SERIALIZABLE", readonly=False, autocommit=False)
     try:
         with conn.cursor() as cursor:
             cursor.execute("LOCK TABLE alembic_version IN ACCESS EXCLUSIVE MODE")
