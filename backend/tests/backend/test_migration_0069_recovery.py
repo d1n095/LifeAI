@@ -135,7 +135,7 @@ def test_non_null_and_null_provenance_values_survive_downgrade_reupgrade_exactly
                     "SELECT document_chunk_id, embedding_model, embedding_native_dim "
                     "FROM _alembic_0069_embedding_space_identity_backup ORDER BY document_chunk_id"
                 )
-                assert cursor.fetchall() == [(known_id, "nomic-embed-text:v1.5", 768)]
+                assert cursor.fetchall() == [(str(known_id), "nomic-embed-text:v1.5", 768)]
                 cursor.execute(
                     """
                     SELECT count(*) FROM information_schema.columns
@@ -155,8 +155,8 @@ def test_non_null_and_null_provenance_values_survive_downgrade_reupgrade_exactly
                 )
                 assert sorted(cursor.fetchall()) == sorted(
                     [
-                        (known_id, "nomic-embed-text:v1.5", 768),
-                        (legacy_id, None, None),
+                        (str(known_id), "nomic-embed-text:v1.5", 768),
+                        (str(legacy_id), None, None),
                     ]
                 )
                 cursor.execute("SELECT to_regclass('_alembic_0069_embedding_space_identity_backup')")
@@ -187,8 +187,8 @@ def test_dual_version_recovery_is_dry_run_then_atomic_audited_and_idempotent():
                 )
                 assert sorted(cursor.fetchall()) == sorted(
                     [
-                        (known_id, "nomic-embed-text:v1.5", 768),
-                        (legacy_id, None, None),
+                        (str(known_id), "nomic-embed-text:v1.5", 768),
+                        (str(legacy_id), None, None),
                     ]
                 )
                 cursor.execute(
