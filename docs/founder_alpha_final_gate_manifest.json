@@ -1,0 +1,167 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-11-12T13:00:00Z",
+  "first_cycle_go": false,
+  "product": {
+    "pull_request": 352,
+    "commit": "07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765",
+    "tree": "cc454df61bcfd0eccaf98ccb0b057fa823acf96c",
+    "migration_head": "0073_provider_disclosure_local",
+    "independent_verdict": "fail_not_ready"
+  },
+  "security_dependencies": [
+    {
+      "pull_request": 351,
+      "commit": "a0063d4da6bce871dead53fcae26bee546c92859",
+      "scope": "original retrieval integrity",
+      "verdict": "pass_scoped",
+      "limitation": "reviewer did not locally rerun candidate"
+    },
+    {
+      "pull_request": 349,
+      "commit": "6598559b138e0b7b4b9af0a2da80d25b1df8d6f8",
+      "scope": "embedding identity and migration provenance",
+      "verdict": "pass_isolated",
+      "limitation": "serial migration composition requires independent review at PR 352"
+    },
+    {
+      "pull_request": 340,
+      "commit": "add0da831c101af7061b7cf6309ce8041ed969aa",
+      "scope": "Blueprint approval, source authority, version allocation and source egress",
+      "verdict": "fail_p1_high",
+      "review": "https://github.com/d1n095/LifeAI/pull/340#pullrequestreview-5818138627",
+      "finding": "retrieved source excerpts bypass owner-aware egress policy before provider invocation"
+    }
+  ],
+  "product_review": {
+    "review": "https://github.com/d1n095/LifeAI/pull/352#pullrequestreview-5818155966",
+    "verdict": "fail_not_ready",
+    "findings": [
+      "P1 HIGH: Blueprint source egress bypass",
+      "historical standalone 0069 upgrade not verified by the reviewed candidate",
+      "P3 LOW: mutable unpinned Ollama installer in CI"
+    ]
+  },
+  "active_remediation": {
+    "pull_request": 384,
+    "commit": "b857e095191bdd1353d46761b2943e892aa70002",
+    "parent_pull_request": 360,
+    "parent_commit": "3053ce3149207b6cc7476b75b602df643afcfb75",
+    "scope": "owner-aware Blueprint source egress enforcement with durable pre-dispatch receipts",
+    "status": "independent_no_defect_isolated_composition_required",
+    "ci_runs": [
+      43225833447,
+      43225792239
+    ],
+    "backend_jobs": [
+      131208643137,
+      131208504666
+    ],
+    "backend_result": {
+      "passed": 2379,
+      "skipped": 1,
+      "failed": 0
+    },
+    "independent_evidence": {
+      "comment_id": 6850901877,
+      "verdict": "no_defect_found",
+      "reviewer": "Claude Code"
+    }
+  },
+  "additional_remediations": [
+    {
+      "pull_request": 363,
+      "commit": "8ac278d5d90c4c5b550aad6741f4bcb9fd193725",
+      "scope": "historical standalone 0069 upgrade compatibility and provenance preservation",
+      "status": "return_to_builder",
+      "runs": [
+        43222624957,
+        43222636109
+      ],
+      "open_gaps": [
+        "non_null_provenance_value_round_trip",
+        "damaged_dual_version_recovery",
+        "exact_0069_collision_with_pr_237"
+      ]
+    },
+    {
+      "pull_request": 382,
+      "commit": "4b27c67570b0335fe7a0fd28027596a984a56f87",
+      "scope": "checksum-pinned Ollama CI installation",
+      "status": "independent_no_defect_isolated",
+      "runs": [
+        43223172075,
+        43223179331,
+        43223186314
+      ],
+      "independent_evidence": {
+        "comment_id": 6850967538,
+        "verdict": "no_defect_found",
+        "reviewer": "Claude Code"
+      }
+    }
+  ],
+  "supporting_evidence": {
+    "preflight": {
+      "pull_request": 356,
+      "commit": "2adae19288fbf59b91b224ed2ffab927be4ed3b3",
+      "run": 42476047042,
+      "result": "pass"
+    },
+    "vps_recovery": {
+      "pull_request": 357,
+      "commit": "ca9f8289390bdc0a8fb7021da00b1a4a26c4b6a2",
+      "run": 42484553449,
+      "run_result": "pass",
+      "bound_product_commit": "07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765",
+      "bound_product_tree": "cc454df61bcfd0eccaf98ccb0b057fa823acf96c",
+      "jobs": [
+        {
+          "id": 128743550344,
+          "name": "Strato VPS compose topology — build, run, verify",
+          "result": "pass",
+          "log_sha256": "347c4dbe437f2e05249969be27f57eba571735201a2a237155a866d5b20877cd"
+        },
+        {
+          "id": 128743550376,
+          "name": "VPS backup.sh / restore.sh — archive structure, checksums, and restore behavior",
+          "result": "pass",
+          "log_sha256": "ca442021183ddf34fc90183da07302186841a28c11334bc3f1cd73b9b6605111"
+        },
+        {
+          "id": 128743550504,
+          "name": "VPS deploy.sh / rollback.sh — real deploy, failure, and rollback cycle",
+          "result": "pass",
+          "log_sha256": "1a8dc4a1b5faa20ab7268d82947c5ec2d2963c05e8ebd5a01e6151a32ef9ce5e"
+        },
+        {
+          "id": 128743550489,
+          "name": "Backend — unit/integration tests",
+          "result": "pass_2373_skipped_1",
+          "log_sha256": "3750bdb4c9e99e58af5d128a2fb7e582b6b6b56a385e6f79dc80b7f85f601e93"
+        },
+        {
+          "id": 128743551489,
+          "name": "VPS bootstrap scripts — shellcheck + dry-run",
+          "result": "skipped_uncovered"
+        },
+        {
+          "id": 128743551635,
+          "name": "Combined container — build, run, verify",
+          "result": "skipped"
+        }
+      ]
+    }
+  },
+  "blocking_gates": [
+    "remote PostgreSQL correction and independent PASS for PR 363 provenance/recovery gaps",
+    "explicit reconciliation of conflicting exact revision 0069 in PR 237 and Founder Alpha history",
+    "independent exact-SHA PASS for the remediated Founder Alpha composition"
+  ],
+  "production_only_gaps": [
+    "VPS bootstrap scripts on current Ubuntu 26 / ShellCheck 0.11 runner",
+    "real STRATO host, DNS and TLS",
+    "production-scoped credentials",
+    "off-host backup and restore"
+  ]
+}

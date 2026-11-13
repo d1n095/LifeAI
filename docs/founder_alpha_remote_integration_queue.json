@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "snapshot_date": "2026-11-13",
+  "first_cycle_go": false,
+  "execution_policy": {
+    "source_of_truth": "github",
+    "implementation_compute": "github_api_with_github_hosted_actions",
+    "verification_compute": "github_actions",
+    "current_host_allowed_for_development_workloads": false
+  },
+  "frozen_base": {
+    "pull_request": 352,
+    "commit": "07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765",
+    "tree": "cc454df61bcfd0eccaf98ccb0b057fa823acf96c",
+    "verdict": "fail_not_ready"
+  },
+  "isolated_candidates": [
+    {
+      "pull_request": 384,
+      "commit": "b857e095191bdd1353d46761b2943e892aa70002",
+      "tree": "9c81825dddf519d2748152d10ea08264d6b32fb7",
+      "parent": "3053ce3149207b6cc7476b75b602df643afcfb75",
+      "scope": "durable_blueprint_pre_dispatch_receipt",
+      "verdict": "independent_no_defect_isolated",
+      "independent_comment_id": 6850901877,
+      "ci_runs": [43225833447, 43225792239]
+    },
+    {
+      "pull_request": 386,
+      "commit": "b8ba9008234bb03cdd50a855735ef0f387a49611",
+      "tree": "4099549a3c14319bf82e71922e1a92638137e2cd",
+      "parent": "8ac278d5d90c4c5b550aad6741f4bcb9fd193725",
+      "scope": "historical_0069_value_preservation_and_damaged_dual_version_recovery",
+      "verdict": "builder_pass_ready_for_independent_review",
+      "closed_gaps": [
+        "non_null_and_null_embedding_provenance_exact_value_round_trip",
+        "audited_idempotent_damaged_dual_version_recovery",
+        "fail_closed_detection_of_pr_237_exact_0069_semantic_collision"
+      ],
+      "remaining_gaps": [
+        "independent_exact_sha_review",
+        "supported_upgrade_lineage_for_pr_237_history"
+      ],
+      "ci_runs": [43490463184, 43494881677, 43494891828]
+    },
+    {
+      "pull_request": 382,
+      "commit": "4b27c67570b0335fe7a0fd28027596a984a56f87",
+      "tree": "b7ecd8f8eee8ba0a854a55e68145fa2631dff704",
+      "scope": "pinned_ollama_ci_installer",
+      "verdict": "independent_no_defect_isolated",
+      "independent_comment_id": 6850967538,
+      "ci_runs": [43223172075, 43223179331, 43223186314]
+    }
+  ],
+  "excluded_candidates": [
+    {
+      "pull_request": 361,
+      "commit": "124ba9e4c1d29f369732211a56c52e6a360acf11",
+      "reason": "frozen_competing_blueprint_egress_candidate_do_not_compose"
+    },
+    {
+      "pull_request": 237,
+      "commit": "7878958bfa57fa999122ac3008e9f261233f158e",
+      "reason": "conflicting_exact_0069_revision_and_unresolved_stop_security_findings"
+    }
+  ],
+  "composition_gate": {
+    "status": "blocked",
+    "blockers": [
+      "pr_386_independent_exact_sha_review_pending",
+      "pr_237_exact_0069_lineage_not_reconciled",
+      "new_composed_exact_sha_not_independently_certified"
+    ],
+    "required_order": [
+      "independently_review_pr_386",
+      "resolve_pr_237_lineage_without_rewriting_published_history",
+      "compose_only_approved_exact_shas_on_isolated_remote_branch",
+      "verify_single_alembic_head_and_historical_database_paths",
+      "run_complete_remote_founder_alpha_acceptance",
+      "obtain_independent_exact_sha_security_verdict"
+    ]
+  },
+  "mandatory_remote_acceptance": [
+    "founder_only_login",
+    "authorized_local_model_selection",
+    "real_ollama_inference",
+    "conversation_restart_persistence",
+    "controlled_file_upload_and_immutable_original",
+    "parsing_indexing_and_grounded_retrieval",
+    "source_grounded_blueprint_generation",
+    "immutable_blueprint_versions_and_founder_approval",
+    "provider_failure_rollback_and_durable_egress_receipts",
+    "database_worker_backup_restore_and_controlled_shutdown"
+  ]
+}
