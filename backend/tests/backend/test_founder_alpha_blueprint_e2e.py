@@ -89,20 +89,30 @@ def _active_embedding_space(superuser_db) -> tuple[str, int]:
     return model, len(MATCHING_VECTOR)
 
 
-def _make_indexed_source(superuser_db, owner_id, title: str, *, vector=None, text: str | None = None) -> Document:
+def _make_indexed_source(
+    superuser_db,
+    owner_id,
+    title: str,
+    *,
+    vector=None,
+    text: str | None = None,
+    active_truth_status: ActiveTruthStatus = ActiveTruthStatus.active,
+) -> Document:
     """An uploaded, indexed immutable original: a Document (the original record, with a fixed
     checksum) + a DocumentChunk (the index entry) stamped with the active embedding space, so
     real owner-scoped pgvector retrieval ranks it exactly as a genuinely-ingested chunk.
 
     `text` lets a test control the exact chunk content (e.g. an adversarial excerpt) while
     keeping every other wiring — checksum, embedding space, RLS owner — identical to a real
-    ingested document; defaults to the same placeholder body existing callers already rely on."""
+    ingested document; defaults to the same placeholder body existing callers already rely on.
+    `active_truth_status` lets a test mark a source historical/proposed/superseded/disputed
+    (Founder Knowledge Studio — app/models/document.py) to exercise the Trust Engine wiring."""
     model, native_dim = _active_embedding_space(superuser_db)
     document = Document(
         title=title,
         source=DocumentSource.upload,
         uploaded_by=owner_id,
-        active_truth_status=ActiveTruthStatus.active,
+        active_truth_status=active_truth_status,
         checksum=uuid.uuid4().hex,
         original_filename=f"{title}.txt",
     )
@@ -550,3 +560,111 @@ def test_blueprint_regenerate_also_flags_injection_suspected_sources(client, sup
     )
     assert res2.status_code == 201, res2.text
     assert res2.json()["provenance"].get("injection_suspected_source_ids") == [str(doc2.id)]
+
+
+# --- Mission 2 (Life MainAI Intelligence program): wire the existing Trust Engine
+# (app/rag/trust.py — already used by chat.py) into Blueprint generation, so a
+# historical/proposed/superseded/disputed source and a recorded source contradiction are
+# never presented to the model, or recorded in provenance, exactly like an ordinary active,
+# uncontested one. ---
+
+
+def test_blueprint_active_source_is_not_relabeled_and_trust_is_high(client, superuser_db, _fake_model):
+    """Negative control: an ordinary active source with a strong match gets no status label
+    in the prompt and the Trust Engine's own 'high' confidence, unmodified."""
+    from app.routers.blueprint import _UNTRUSTED_SOURCE_BEGIN
+
+    founder_id = _founder_id(superuser_db)
+    title = f"ActiveTrust {uuid.uuid4().hex[:6]}"
+    _make_indexed_source(superuser_db, founder_id, title, text="Current requirement, unchanged.")
+    csrf = _login(client)
+
+    res = client.post(
+        "/api/blueprint/drafts",
+        json={"title": title, "query": "källa"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert res.status_code == 201, res.text
+    assert res.json()["provenance"]["trust_level"] == "high"
+    assert res.json()["provenance"]["trust_top_source_status"] in (None, "active")
+    assert res.json()["provenance"]["trust_conflicts_detected"] is False
+
+    sent_messages = _fake_model["messages"][-1]
+    user_msg = next(m.content for m in sent_messages if m.role == "user")
+    assert "KÄLLSTATUS" not in user_msg
+    assert _UNTRUSTED_SOURCE_BEGIN in user_msg
+
+
+def test_blueprint_superseded_source_degrades_trust_and_is_labeled_in_prompt(
+    client, superuser_db, _fake_model
+):
+    """A source the founder has explicitly marked superseded must never be synthesised from
+    as if it were current: the Trust Engine degrades confidence off a strong similarity
+    score, and the actual prompt sent to the model carries an explicit per-source status
+    label — not just a value recorded after the fact in provenance."""
+    from app.models.document import ActiveTruthStatus
+
+    founder_id = _founder_id(superuser_db)
+    title = f"Superseded {uuid.uuid4().hex[:6]}"
+    _make_indexed_source(
+        superuser_db,
+        founder_id,
+        title,
+        text="The old pricing model was flat-rate.",
+        active_truth_status=ActiveTruthStatus.superseded,
+    )
+    csrf = _login(client)
+
+    res = client.post(
+        "/api/blueprint/drafts",
+        json={"title": title, "query": "källa"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert res.status_code == 201, res.text
+    provenance = res.json()["provenance"]
+    assert provenance["trust_top_source_status"] == "superseded"
+    # A bare 1.0-similarity match would otherwise be "high" (see app/rag/trust.py's
+    # HIGH_THRESHOLD) — the superseded status must pull it down, not leave it unchanged.
+    assert provenance["trust_level"] != "high"
+
+    sent_messages = _fake_model["messages"][-1]
+    user_msg = next(m.content for m in sent_messages if m.role == "user")
+    system_msg = next(m.content for m in sent_messages if m.role == "system")
+    assert "KÄLLSTATUS: superseded" in user_msg
+    assert "ERSATT" in system_msg  # app/rag/trust.py's STATUS_INSTRUCTIONS["superseded"]
+
+
+def test_blueprint_contradicting_sources_are_flagged_as_conflicting(client, superuser_db, _fake_model):
+    """Two retrieved sources the founder has explicitly linked as contradicting each other
+    (a `contradicts` SourceRelationship) must be surfaced as a conflict — never silently
+    averaged into one confident-sounding draft."""
+    from app.models.source_relationship import RelationshipType, SourceRelationship
+
+    founder_id = _founder_id(superuser_db)
+    title = f"Conflict {uuid.uuid4().hex[:6]}"
+    doc_a = _make_indexed_source(superuser_db, founder_id, f"{title} A", text="Launch date is March.")
+    doc_b = _make_indexed_source(superuser_db, founder_id, f"{title} B", text="Launch date is June.")
+    superuser_db.add(
+        SourceRelationship(
+            owner_id=founder_id,
+            from_source_id=doc_a.id,
+            to_source_id=doc_b.id,
+            relationship_type=RelationshipType.contradicts,
+        )
+    )
+    superuser_db.commit()
+    csrf = _login(client)
+
+    res = client.post(
+        "/api/blueprint/drafts",
+        json={"title": title, "query": "källa"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert res.status_code == 201, res.text
+    assert res.json()["provenance"]["trust_conflicts_detected"] is True
+    sorted_ids = sorted(res.json()["provenance"]["trust_conflicting_document_ids"][0])
+    assert sorted_ids == sorted([str(doc_a.id), str(doc_b.id)])
+
+    sent_messages = _fake_model["messages"][-1]
+    system_msg = next(m.content for m in sent_messages if m.role == "system")
+    assert "MOTSÄGELSER" in system_msg  # app/rag/trust.py's CONFLICT_INSTRUCTION
