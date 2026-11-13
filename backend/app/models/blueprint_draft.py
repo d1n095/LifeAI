@@ -37,3 +37,8 @@ class BlueprintDraft(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     approved_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Migration 0073 — idempotent generation + crash-safe lease (see that migration's
+    # docstring). Both NULL for any row created without a caller-supplied idempotency key,
+    # which is every row created before this migration and every call that doesn't pass one.
+    idempotency_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

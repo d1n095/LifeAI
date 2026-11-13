@@ -24,9 +24,11 @@ the composition logic, and the real local-model synthesis is exercised end-to-en
 from __future__ import annotations
 
 import uuid
-from typing import Any, Callable
+from collections.abc import Callable
+from datetime import datetime, timedelta
+from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -36,11 +38,29 @@ from app.models.blueprint_draft import BlueprintDraft
 # THIS specific constraint is the only IntegrityError the version-allocation loop may retry.
 _VERSION_UNIQUE_CONSTRAINT = "ix_blueprint_drafts_owner_title_version"
 
+# Migration 0073 — the partial unique index enforcing one row per (owner_id, idempotency_key).
+_IDEMPOTENCY_UNIQUE_CONSTRAINT = "ix_blueprint_drafts_owner_idempotency_key"
+
+# Generous relative to _SYNTH_TIMEOUT_SECONDS (240s, routers/blueprint.py) plus margin for the
+# retrieval step before it and the finalize step after — a lease this long expiring still means
+# the holder is genuinely gone (crashed process, killed worker), not just a slow real model call.
+GENERATING_LEASE_SECONDS = 300.0
+
 Synthesizer = Callable[[str, str | None, list[dict[str, Any]]], str]
 
 
 class BlueprintError(Exception):
     pass
+
+
+class BlueprintGenerationInProgress(Exception):
+    """Raised when a DIFFERENT, still-live request already holds the claim for this
+    (owner_id, idempotency_key) — this caller must not dispatch a second provider call; the
+    router surfaces this as a 409 so the client knows to poll/wait rather than blindly retry."""
+
+    def __init__(self, existing: BlueprintDraft):
+        self.existing = existing
+        super().__init__(f"blueprint generation already in progress (draft {existing.id})")
 
 
 def _excerpt(hit: dict[str, Any]) -> str:
@@ -55,6 +75,147 @@ def latest_version(db: Session, *, owner_id: uuid.UUID, title: str) -> int:
         )
     ).scalars().all()
     return max(rows) if rows else 0
+
+
+def claim_blueprint_generation(
+    db: Session, *, owner_id: uuid.UUID, title: str, idempotency_key: str | None
+) -> tuple[BlueprintDraft | None, bool]:
+    """The idempotency entry point — called BEFORE any provider dispatch, never after, which
+    is what actually prevents a duplicate real model call (not just a duplicate DB row).
+
+    Returns (row, should_generate):
+      * idempotency_key is None -> (None, True): no idempotency requested, unchanged legacy
+        behavior — the caller proceeds exactly as it always has.
+      * A fresh claim (new key, or a stolen expired/failed one) -> (placeholder_row, True):
+        the caller now owns this row and MUST call finalize_blueprint_generation() on
+        success or fail_blueprint_generation() on failure — never leave it unresolved.
+      * An already-resolved request under this key (status 'draft'/'approved') ->
+        (existing_row, False): idempotent replay, the caller must NOT call the provider
+        again and should return this row as-is.
+
+    Raises BlueprintGenerationInProgress if a DIFFERENT caller's claim is still live (status
+    'generating', lease not yet expired) — there is nothing to return but "try again later",
+    so this is an exception, not a (row, False) tuple, mirroring how EgressDeniedError and
+    other hard-refusal conditions elsewhere in this codebase are raised rather than returned.
+    """
+    if idempotency_key is None:
+        return None, True
+
+    now = datetime.utcnow()  # noqa: DTZ003 - naive UTC, matching created_at's own column/default
+    placeholder = BlueprintDraft(
+        owner_id=owner_id,
+        title=title,
+        version=latest_version(db, owner_id=owner_id, title=title) + 1,
+        status="generating",
+        body="",
+        source_document_ids=[],
+        source_refs=[],
+        provenance={},
+        idempotency_key=idempotency_key,
+        lease_expires_at=now + timedelta(seconds=GENERATING_LEASE_SECONDS),
+    )
+    try:
+        with db.begin_nested():  # SAVEPOINT — a conflict here must not poison the outer txn
+            db.add(placeholder)
+            db.flush()
+        return placeholder, True
+    except IntegrityError as exc:
+        orig = getattr(exc, "orig", None)
+        pgcode = getattr(orig, "pgcode", None)
+        constraint = getattr(getattr(orig, "diag", None), "constraint_name", None)
+        if not (pgcode == "23505" and constraint == _IDEMPOTENCY_UNIQUE_CONSTRAINT):
+            raise  # a real error (e.g. the version race above) — never swallowed as idempotency
+
+    existing = db.execute(
+        select(BlueprintDraft).where(
+            BlueprintDraft.owner_id == owner_id, BlueprintDraft.idempotency_key == idempotency_key
+        )
+    ).scalar_one()
+
+    if existing.status == "failed":
+        # Terminal but explicitly retryable (Mission 3: "explicit retry/recovery semantics") —
+        # reclaim unconditionally rather than making a failed request permanently un-retryable
+        # under the same key.
+        existing.status = "generating"
+        existing.lease_expires_at = now + timedelta(seconds=GENERATING_LEASE_SECONDS)
+        db.flush()
+        return existing, True
+
+    if existing.status == "generating":
+        if existing.lease_expires_at is not None and existing.lease_expires_at > now:
+            raise BlueprintGenerationInProgress(existing)
+        # Lease expired (the original holder crashed/restarted — Mission 3: "worker restarts",
+        # "expired request leases"). Steal it with an atomic, race-safe UPDATE: the WHERE
+        # clause re-checks the expiry at the moment of the write, so if a second stealer races
+        # this one, exactly one UPDATE matches a row and the other sees zero rows affected —
+        # never both believing they hold the lease.
+        result = db.execute(
+            update(BlueprintDraft)
+            .where(BlueprintDraft.id == existing.id, BlueprintDraft.lease_expires_at < now)
+            .values(lease_expires_at=now + timedelta(seconds=GENERATING_LEASE_SECONDS))
+        )
+        db.flush()
+        db.refresh(existing)
+        if result.rowcount == 0:
+            # Someone else won the steal race between our read and our write.
+            raise BlueprintGenerationInProgress(existing)
+        return existing, True
+
+    # status in ("draft", "approved"): already resolved — idempotent replay, no provider call.
+    return existing, False
+
+
+def finalize_blueprint_generation(
+    db: Session,
+    *,
+    row: BlueprintDraft,
+    body: str,
+    source_hits: list[dict[str, Any]],
+    model_provider: str | None,
+    model_name: str | None,
+    extra_provenance: dict[str, Any] | None = None,
+) -> BlueprintDraft:
+    """Completes a row previously returned by claim_blueprint_generation() with
+    should_generate=True, once the provider has actually produced a body. Moves it from
+    'generating' to 'draft' — the same terminal state generate_blueprint_draft() reaches
+    directly for the no-idempotency-key path, so downstream code never needs to distinguish
+    how a 'draft' row came to exist."""
+    source_document_ids = sorted({str(h["document_id"]) for h in source_hits})
+    provenance: dict[str, Any] = {
+        "ai_generated": True,
+        "originals_mutated": False,
+        "draft": True,
+        "pending_founder_approval": True,
+        "grounded_in_sources": True,
+        "source_count": len(source_document_ids),
+    }
+    if extra_provenance:
+        provenance.update({k: v for k, v in extra_provenance.items() if k not in provenance})
+
+    row.status = "draft"
+    row.body = body
+    row.source_document_ids = source_document_ids
+    row.source_refs = [
+        {"document_id": str(h["document_id"]), "similarity": h.get("similarity"), "excerpt": _excerpt(h)}
+        for h in source_hits
+    ]
+    row.model_provider = model_provider
+    row.model_name = model_name
+    row.provenance = provenance
+    row.lease_expires_at = None
+    db.flush()
+    return row
+
+
+def fail_blueprint_generation(db: Session, *, row: BlueprintDraft, error: str) -> None:
+    """Durably records that a claimed generation failed — never left silently dangling in
+    'generating' until its lease eventually expires (Mission 9: "no silent loss of ... state").
+    A later request with the same idempotency_key can retry (see claim_blueprint_generation's
+    'failed' branch)."""
+    row.status = "failed"
+    row.lease_expires_at = None
+    row.provenance = {**(row.provenance or {}), "generation_error": error[:500]}
+    db.flush()
 
 
 def generate_blueprint_draft(

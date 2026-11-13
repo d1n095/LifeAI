@@ -30,13 +30,17 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, field_validator
 from sqlalchemy.orm import Session
 
 from app.blueprint.service import (
     BlueprintError,
+    BlueprintGenerationInProgress,
     approve_blueprint_draft,
+    claim_blueprint_generation,
+    fail_blueprint_generation,
+    finalize_blueprint_generation,
     generate_blueprint_draft,
     get_blueprint_draft,
     list_blueprint_drafts,
@@ -81,12 +85,31 @@ _SYNTH_EXCERPT_CHARS = 400
 _SYNTH_TIMEOUT_SECONDS = 240.0
 
 
+def _bounded_idempotency_key(v: str | None) -> str | None:
+    """Shared validator: a caller-supplied idempotency key (Mission 3 — see
+    app/blueprint/service.py's claim_blueprint_generation) must be present-and-non-empty or
+    entirely absent — never an empty string, which would be ambiguous with "no key"."""
+    if v is None:
+        return None
+    v = v.strip()
+    if not v:
+        return None
+    if len(v) > 200:
+        raise ValueError("idempotency_key too long")
+    return v
+
+
 class GenerateDraftIn(BaseModel):
     title: str
     # Free text only. There is deliberately NO source_document_ids field: sources are derived
     # from retrieval, never supplied by the client (see module docstring).
     query: str | None = None
     top_k: int = _DEFAULT_TOP_K
+    # Optional: a caller-supplied key that makes a retried identical request (double-click,
+    # network timeout retry) return the SAME draft instead of dispatching a second real model
+    # call and creating a second version. Omitting it keeps the exact pre-Mission-3 behavior —
+    # every call is always a fresh generation.
+    idempotency_key: str | None = None
 
     @field_validator("title")
     @classmethod
@@ -113,12 +136,18 @@ class GenerateDraftIn(BaseModel):
             return 1
         return min(v, _MAX_TOP_K)
 
+    @field_validator("idempotency_key")
+    @classmethod
+    def _validate_idempotency_key(cls, v: str | None) -> str | None:
+        return _bounded_idempotency_key(v)
+
 
 class RegenerateDraftIn(BaseModel):
     # Regeneration reuses the existing draft's title (a new version of the same Blueprint);
     # the only thing the caller may steer is the grounding query and breadth.
     query: str | None = None
     top_k: int = _DEFAULT_TOP_K
+    idempotency_key: str | None = None
 
     @field_validator("query")
     @classmethod
@@ -134,6 +163,11 @@ class RegenerateDraftIn(BaseModel):
         if v < 1:
             return 1
         return min(v, _MAX_TOP_K)
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def _validate_idempotency_key(cls, v: str | None) -> str | None:
+        return _bounded_idempotency_key(v)
 
 
 class SourceRefOut(BaseModel):
@@ -344,82 +378,153 @@ async def _synthesize_with_active_model(
     return body, provider_name, model_name, suspected_document_ids
 
 
-async def _generate(db: Session, *, owner_id: uuid.UUID, title: str, query: str | None, top_k: int) -> BlueprintDraft:
-    grounding_query = query or title
+async def _generate(
+    db: Session,
+    *,
+    owner_id: uuid.UUID,
+    title: str,
+    query: str | None,
+    top_k: int,
+    idempotency_key: str | None = None,
+) -> tuple[BlueprintDraft, bool]:
+    """Returns (row, created): created is False for an idempotent replay of an
+    already-resolved request (status 'draft'/'approved' under the same idempotency_key) —
+    the caller returned 200, never a second provider dispatch; True for every other case
+    (including this call's own fresh generation), which the caller returns as 201.
+
+    Mission 3 — idempotency/concurrency: see app/blueprint/service.py's
+    claim_blueprint_generation() docstring for the full state machine. The claim (if any) is
+    taken and committed BEFORE retrieve_context()/the provider call below — that ordering is
+    the entire point: it is what actually prevents a duplicate real model dispatch, not just
+    a duplicate database row. BlueprintGenerationInProgress (a different, still-live caller
+    already holds this key) surfaces as 409, never silently retried or merged."""
     try:
-        hits = await retrieve_context(db, owner_id, grounding_query, top_k=top_k)
-    except EgressDeniedError as exc:
+        claim_row, should_generate = claim_blueprint_generation(
+            db, owner_id=owner_id, title=title, idempotency_key=idempotency_key
+        )
+    except BlueprintGenerationInProgress as exc:
+        db.commit()  # release this call's own (empty) transaction cleanly
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Frågan kan inte användas för extern inbäddning enligt egress-policyn.",
+            status_code=status.HTTP_409_CONFLICT,
+            detail="En generering med samma idempotency_key pågår redan.",
         ) from exc
-
-    grounded = [h for h in hits if h.get("document_id")]
-    if not grounded:
-        # No indexed source matched — refuse rather than synthesise an ungrounded draft.
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                "Inga indexerade källor matchade — ett Blueprint-utkast måste vara grundat i "
-                "minst en av dina egna indexerade källor."
-            ),
-        )
-    # Carry the retrieval score through under the key the service records for traceability.
-    for h in grounded:
-        if h.get("similarity") is None and h.get("score") is not None:
-            h["similarity"] = h["score"]
-
-    # Trust Engine (app/rag/trust.py) — the exact same source-level + claim-level conflict
-    # detection and confidence assessment chat.py already applies to retrieved context,
-    # wired into Blueprint generation too. Computed over ALL grounded hits (not just the
-    # ones that make it into the trimmed synthesis prompt) so a superseded/disputed source
-    # that retrieval ranked lower still shows up in the draft's own provenance even if the
-    # prompt-trimming step (see _SYNTH_PROMPT_MAX_SOURCES) left it out of the model's input.
-    conflicting_pairs = detect_conflicts(db, owner_id, [h["document_id"] for h in grounded])
-    trust = assess_confidence(grounded, conflicting_pairs)
-    if not trust.conflicts_detected and detect_claim_conflicts(
-        db, owner_id, [h["chunk_id"] for h in grounded if h.get("chunk_id")]
-    ):
-        trust.conflicts_detected = True
-
-    body, provider_name, model_name, suspected_document_ids = await _synthesize_with_active_model(
-        db, title=title, query=query, hits=grounded, trust=trust
-    )
+    if claim_row is not None:
+        db.commit()  # the claim (or the idempotent-replay read) is durable before we proceed
+        db.refresh(claim_row)
+    if not should_generate:
+        return claim_row, False  # type: ignore[return-value]  # already resolved — no provider call
 
     try:
-        row = generate_blueprint_draft(
-            db,
-            owner_id=owner_id,
-            title=title,
-            source_hits=grounded,
-            synthesizer=lambda _t, _q, _h: body,
-            query=query,
-            model_provider=provider_name,
-            model_name=model_name,
-            extra_provenance={
-                "injection_suspected_source_ids": suspected_document_ids,
-                "trust_level": trust.level,
-                "trust_top_source_status": trust.top_source_status,
-                "trust_conflicts_detected": trust.conflicts_detected,
-                "trust_conflicting_document_ids": trust.conflicting_document_ids,
-            },
+        grounding_query = query or title
+        try:
+            hits = await retrieve_context(db, owner_id, grounding_query, top_k=top_k)
+        except EgressDeniedError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Frågan kan inte användas för extern inbäddning enligt egress-policyn.",
+            ) from exc
+
+        grounded = [h for h in hits if h.get("document_id")]
+        if not grounded:
+            # No indexed source matched — refuse rather than synthesise an ungrounded draft.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "Inga indexerade källor matchade — ett Blueprint-utkast måste vara grundat i "
+                    "minst en av dina egna indexerade källor."
+                ),
+            )
+        # Carry the retrieval score through under the key the service records for traceability.
+        for h in grounded:
+            if h.get("similarity") is None and h.get("score") is not None:
+                h["similarity"] = h["score"]
+
+        # Trust Engine (app/rag/trust.py) — the exact same source-level + claim-level conflict
+        # detection and confidence assessment chat.py already applies to retrieved context,
+        # wired into Blueprint generation too. Computed over ALL grounded hits (not just the
+        # ones that make it into the trimmed synthesis prompt) so a superseded/disputed source
+        # that retrieval ranked lower still shows up in the draft's own provenance even if the
+        # prompt-trimming step (see _SYNTH_PROMPT_MAX_SOURCES) left it out of the model's input.
+        conflicting_pairs = detect_conflicts(db, owner_id, [h["document_id"] for h in grounded])
+        trust = assess_confidence(grounded, conflicting_pairs)
+        if not trust.conflicts_detected and detect_claim_conflicts(
+            db, owner_id, [h["chunk_id"] for h in grounded if h.get("chunk_id")]
+        ):
+            trust.conflicts_detected = True
+
+        body, provider_name, model_name, suspected_document_ids = await _synthesize_with_active_model(
+            db, title=title, query=query, hits=grounded, trust=trust
         )
+
+        extra_provenance = {
+            "injection_suspected_source_ids": suspected_document_ids,
+            "trust_level": trust.level,
+            "trust_top_source_status": trust.top_source_status,
+            "trust_conflicts_detected": trust.conflicts_detected,
+            "trust_conflicting_document_ids": trust.conflicting_document_ids,
+        }
+        if claim_row is not None:
+            row = finalize_blueprint_generation(
+                db,
+                row=claim_row,
+                body=body,
+                source_hits=grounded,
+                model_provider=provider_name,
+                model_name=model_name,
+                extra_provenance=extra_provenance,
+            )
+        else:
+            row = generate_blueprint_draft(
+                db,
+                owner_id=owner_id,
+                title=title,
+                source_hits=grounded,
+                synthesizer=lambda _t, _q, _h: body,
+                query=query,
+                model_provider=provider_name,
+                model_name=model_name,
+                extra_provenance=extra_provenance,
+            )
     except BlueprintError as exc:
+        if claim_row is not None:
+            fail_blueprint_generation(db, row=claim_row, error=str(exc))
+            db.commit()
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    except HTTPException as exc:
+        # Retrieval refusal, ungrounded-source refusal, or a provider failure from
+        # _synthesize_with_active_model — every one of them means this claim must not be left
+        # dangling as 'generating' until its lease eventually expires (Mission 9: no silent
+        # loss of state). A later retry under the same key gets a fresh attempt immediately,
+        # not a multi-minute wait for the lease to time out.
+        if claim_row is not None:
+            fail_blueprint_generation(db, row=claim_row, error=str(exc.detail))
+            db.commit()
+        raise
     db.commit()
     db.refresh(row)
-    return row
+    return row, True
 
 
 @router.post("/drafts", response_model=BlueprintDraftOut, status_code=status.HTTP_201_CREATED)
 async def create_draft(
     payload: GenerateDraftIn,
+    response: Response,
     db: Session = Depends(get_db),
     user: User = Depends(require_founder),
 ) -> BlueprintDraftOut:
-    row = await _generate(
-        db, owner_id=user.id, title=payload.title, query=payload.query, top_k=payload.top_k
+    row, created = await _generate(
+        db,
+        owner_id=user.id,
+        title=payload.title,
+        query=payload.query,
+        top_k=payload.top_k,
+        idempotency_key=payload.idempotency_key,
     )
+    # 201 only for this call's own fresh generation; 200 for an idempotent replay of an
+    # already-resolved request under the same idempotency_key (Mission 3) — nothing new was
+    # created, so the decorator's default 201 would be misleading.
+    if not created:
+        response.status_code = status.HTTP_200_OK
     return _to_out(row)
 
 
@@ -449,6 +554,7 @@ def get_draft(
 async def regenerate_draft(
     draft_id: uuid.UUID,
     payload: RegenerateDraftIn,
+    response: Response,
     db: Session = Depends(get_db),
     user: User = Depends(require_founder),
 ) -> BlueprintDraftOut:
@@ -457,9 +563,16 @@ async def regenerate_draft(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Blueprint-utkast hittades inte.")
     # A new, immutable version of the SAME blueprint (same title); the prior version is
     # untouched. Regeneration never promotes or mutates an approved version.
-    row = await _generate(
-        db, owner_id=user.id, title=existing.title, query=payload.query, top_k=payload.top_k
+    row, created = await _generate(
+        db,
+        owner_id=user.id,
+        title=existing.title,
+        query=payload.query,
+        top_k=payload.top_k,
+        idempotency_key=payload.idempotency_key,
     )
+    if not created:
+        response.status_code = status.HTTP_200_OK
     return _to_out(row)
 
 
