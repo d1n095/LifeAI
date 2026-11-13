@@ -929,6 +929,11 @@ export type IntegrationAnalysis = {
       url: string;
       schema_effects?: { table: string; operation: string }[];
     }[];
+    blueprint_scope?: {
+      status: "IN_SCOPE" | "NOT_IN_SCOPE" | "UNKNOWN";
+      head_sha: string | null;
+      evidence: { path: string; url: string }[];
+    };
     required_upstream_candidates?: { number: number; state: string; head_sha: string | null }[];
     review_state: string;
     ci_state: string;

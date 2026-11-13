@@ -268,6 +268,12 @@ export default function GitHubOperationsPage() {
                           <span key={`${check.name}-${index}`}> · <SourceLink href={check.url} label={`${check.name ?? "check"} run`} /></span>
                         ))}
                       </p>
+                      <p>
+                        Blueprint source scope: {candidate.blueprint_scope?.status ?? "UNKNOWN"}
+                        {candidate.blueprint_scope?.evidence.map((source) => (
+                          <span key={source.path}> · <SourceLink href={source.url} label={source.path} /></span>
+                        ))}
+                      </p>
                       <p>Changed migration revisions: {candidate.migration_dependencies?.map((migration) => `${migration.revision} ← ${migration.down_revision.join(", ") || "root"} (${migration.path})`).join("; ") || "UNKNOWN / none observed"}</p>
                       <p>Owner: {candidate.owner.agent ?? "UNKNOWN"} · Review: {candidate.review_state} · {candidate.security_review}</p>
                       <p>{candidate.readiness_reason}</p>

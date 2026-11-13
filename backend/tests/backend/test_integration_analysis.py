@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from urllib.parse import quote
 
 import pytest
 
@@ -235,6 +236,81 @@ def test_ci_graph_evidence_excludes_stale_or_unbound_sha_records():
     assert result["candidates"][1]["ci_state"] == "pending"
     assert result["candidates"][1]["readiness"] == "UNKNOWN"
     assert not any(f["kind"] in {"ci_failure", "ci_cancelled"} for f in result["findings"])
+
+
+def test_blueprint_scope_uses_changed_file_sources_pinned_to_the_exact_head():
+    blueprint_sha = "add0da831c101af7061b7cf6309ce8041ed969aa"
+    item = pr(340, blueprint_sha, "claude/founder-alpha-blueprint-draft")
+    inspection = {
+        "number": 340,
+        "head_sha": blueprint_sha,
+        "status": "observed",
+        "errors": [],
+        "files": [
+            "backend/app/blueprint/service.py",
+            "backend/tests/backend/test_founder_alpha_blueprint_e2e.py",
+            "frontend/app/(shell)/blueprint/page.tsx",
+        ],
+        "migrations": [],
+    }
+
+    candidate = analysis.build_integration_graph(
+        observation([item]), [inspection], []
+    )["candidates"][0]
+
+    assert candidate["blueprint_scope"] == {
+        "status": "IN_SCOPE",
+        "head_sha": blueprint_sha,
+        "evidence": [
+            {
+                "path": path,
+                "url": f"https://github.com/d1n095/LifeAI/blob/{blueprint_sha}/{quote(path, safe='/')}",
+            }
+            for path in inspection["files"]
+        ],
+    }
+    assert candidate["readiness"] == "UNKNOWN"
+
+
+@pytest.mark.parametrize("inspection", [
+    {
+        "number": 340, "head_sha": "a" * 40, "status": "partial",
+        "files": ["backend/app/blueprint/service.py"],
+    },
+    {
+        "number": 340, "head_sha": "b" * 40, "status": "observed",
+        "files": ["backend/app/blueprint/service.py"],
+    },
+])
+def test_blueprint_scope_is_unknown_for_incomplete_or_stale_head_evidence(inspection):
+    head_sha = "a" * 40
+    item = pr(340, head_sha, "claude/founder-alpha-blueprint-draft")
+    inspection["number"] = item["number"]
+
+    candidate = analysis.build_integration_graph(
+        observation([item]), [inspection], []
+    )["candidates"][0]
+
+    assert candidate["blueprint_scope"] == {
+        "status": "UNKNOWN", "head_sha": None, "evidence": [],
+    }
+
+
+def test_blueprint_scope_reports_not_in_scope_only_after_complete_file_observation():
+    head_sha = "c" * 40
+    item = pr(1, head_sha, "ordinary-change")
+    inspection = {
+        "number": 1, "head_sha": head_sha, "status": "observed",
+        "errors": [], "files": ["backend/app/users.py"], "migrations": [],
+    }
+
+    candidate = analysis.build_integration_graph(
+        observation([item]), [inspection], []
+    )["candidates"][0]
+
+    assert candidate["blueprint_scope"] == {
+        "status": "NOT_IN_SCOPE", "head_sha": head_sha, "evidence": [],
+    }
 
 
 @pytest.mark.asyncio

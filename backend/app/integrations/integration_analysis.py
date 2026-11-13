@@ -656,6 +656,35 @@ async def _inspect_pr(client: GitHubClient, pr: dict, repo: str) -> dict:
     return result
 
 
+def _blueprint_scope(scan: dict, head_sha: str | None, repo: str | None) -> dict:
+    observed_sha = scan.get("head_sha")
+    if (
+        scan.get("status") != "observed"
+        or not isinstance(head_sha, str)
+        or not re.fullmatch(r"[0-9a-fA-F]{40}", head_sha)
+        or not isinstance(observed_sha, str)
+        or observed_sha.casefold() != head_sha.casefold()
+        or not isinstance(repo, str)
+    ):
+        return {"status": "UNKNOWN", "head_sha": None, "evidence": []}
+
+    paths = sorted({
+        path for path in scan.get("files", [])
+        if isinstance(path, str) and "blueprint" in path.casefold()
+    })
+    return {
+        "status": "IN_SCOPE" if paths else "NOT_IN_SCOPE",
+        "head_sha": head_sha,
+        "evidence": [
+            {
+                "path": path,
+                "url": f"https://github.com/{repo}/blob/{head_sha}/{quote(path, safe='/')}",
+            }
+            for path in paths
+        ],
+    }
+
+
 def build_integration_graph(
     github: dict, inspections: list[dict], assignments: list[dict],
     canonical_decisions: dict | None = None,
@@ -879,6 +908,7 @@ def build_integration_graph(
             "security_review": "UNKNOWN — GitHub review is not independent security acceptance",
             "migration_scan": scan.get("status", "not_scanned"),
             "migration_dependencies": scan.get("migrations", []),
+            "blueprint_scope": _blueprint_scope(scan, head_sha, repo),
             "readiness": "BLOCKED" if blocked else "UNKNOWN",
             "readiness_reason": "Observed blocker." if blocked else (
                 "Independent security approval, decision authority and complete migration ancestry not established."

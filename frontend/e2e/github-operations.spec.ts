@@ -181,6 +181,13 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
             url: "https://github.com/d1n095/LifeAI/actions/runs/411",
           }],
           security_review: "UNKNOWN", migration_scan: "observed",
+          blueprint_scope: {
+            status: "IN_SCOPE", head_sha: HEAD_SHA,
+            evidence: [{
+              path: "backend/app/blueprint/service.py",
+              url: `https://github.com/d1n095/LifeAI/blob/${HEAD_SHA}/backend/app/blueprint/service.py`,
+            }],
+          },
           readiness: "BLOCKED", readiness_reason: "Observed integration conflict.",
         }],
         findings: [{
@@ -213,6 +220,11 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
   );
   await page.getByText("Dependency graph and readiness (1)").click();
   await expect(page.getByText(`Exact-HEAD CI: cancelled · Backend tests: cancelled @ ${HEAD_SHA}`)).toBeVisible();
+  await expect(page.getByText("Blueprint source scope: IN_SCOPE")).toBeVisible();
+  await expect(page.getByRole("link", { name: "backend/app/blueprint/service.py" })).toHaveAttribute(
+    "href",
+    `https://github.com/d1n095/LifeAI/blob/${HEAD_SHA}/backend/app/blueprint/service.py`,
+  );
   await expect(page.getByRole("link", { name: "Backend tests run" })).toHaveAttribute(
     "href",
     "https://github.com/d1n095/LifeAI/actions/runs/411",

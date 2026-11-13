@@ -59,6 +59,12 @@ check is an OPEN integration blocker; pending or unavailable CI remains non-READ
 misreported as a failed check. GitHub authors are not assumed to be active agents. A missing or
 ambiguous owner remains UNKNOWN. `BLOCKED` is based on observed failures or dependencies;
 otherwise readiness is `UNKNOWN`, never a release approval.
+Each candidate also reports `blueprint_scope`: exact-HEAD changed-file evidence whose path
+contains `blueprint`. `IN_SCOPE` means such paths were observed in a complete, stable changed-file
+scan; `NOT_IN_SCOPE` is returned only after that complete scan found no matching path. Incomplete,
+stale, or unbound scans yield `UNKNOWN`. The pinned file links identify changed Blueprint-related
+surfaces; they do not prove that Blueprint behavior works or is ready. The candidate's separate
+integration `readiness` remains authoritative for observed blockers and uncertainty.
 
 For inspected same-repository PRs, the analysis rechecks the HEAD before and after bounded
 changed-file reads. It parses literal Alembic `revision` and `down_revision` assignments
