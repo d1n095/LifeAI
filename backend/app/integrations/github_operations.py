@@ -187,7 +187,10 @@ def _aggregate_ci_state(details: dict[str, Any]) -> str:
         return "unknown"
     if any(
         details.get(key)
-        for key in ("checks_truncated", "workflow_runs_truncated", "workflow_jobs_truncated")
+        for key in (
+            "checks_truncated", "workflow_runs_truncated",
+            "workflow_jobs_truncated", "workflow_steps_truncated",
+        )
     ):
         return "unknown"
     if any(error in details["detail_errors"] for error in (
@@ -231,6 +234,7 @@ async def _discover_pull_request_details(client: GitHubClient, pull_request: dic
         "comments": [],
         "checks": [],
         "workflow_runs": [],
+        "workflow_steps_truncated": False,
         "latest_commit": None,
         "head_sha": sha if valid_sha else None,
         "head_branch": detail_head.get("ref"),
@@ -357,6 +361,11 @@ async def _discover_pull_request_details(client: GitHubClient, pull_request: dic
                     result["workflow_jobs_truncated"] = (
                         result["workflow_jobs_truncated"] or jobs_result.truncated
                     )
+                    result["workflow_steps_truncated"] = result["workflow_steps_truncated"] or any(
+                        len(job.get("steps", [])) > 64
+                        for job in jobs_result.items
+                        if isinstance(job.get("steps", []), list)
+                    )
                     jobs = [
                         {
                             "id": job.get("id"),
@@ -368,6 +377,17 @@ async def _discover_pull_request_details(client: GitHubClient, pull_request: dic
                             "url": job.get("html_url"),
                             "started_at": job.get("started_at"),
                             "completed_at": job.get("completed_at"),
+                            "steps": [
+                                {
+                                    "name": _safe_text(step.get("name"), 200),
+                                    "state": _check_state(step),
+                                }
+                                for step in (
+                                    job.get("steps")
+                                    if isinstance(job.get("steps"), list) else []
+                                )[:64]
+                                if isinstance(step, dict)
+                            ],
                         }
                         for job in jobs_result.items
                     ]
@@ -562,6 +582,9 @@ async def _fetch_github_observation(client: GitHubClient) -> dict[str, Any]:
                 "comments": detail["comments"] if detail else [],
                 "checks": detail["checks"] if detail else [],
                 "workflow_runs": detail["workflow_runs"] if detail else [],
+                "workflow_steps_truncated": (
+                    detail.get("workflow_steps_truncated", False) if detail else False
+                ),
                 "latest_commit": detail["latest_commit"] if detail else None,
                 "detail_errors": detail["detail_errors"] if detail else ["not_fetched_resource_limit"],
                 "details_truncated": (
@@ -571,6 +594,7 @@ async def _fetch_github_observation(client: GitHubClient) -> dict[str, Any]:
                         or detail.get("checks_truncated")
                         or detail.get("workflow_runs_truncated")
                         or detail.get("workflow_jobs_truncated")
+                        or detail.get("workflow_steps_truncated")
                     )
                     if detail
                     else False

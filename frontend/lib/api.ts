@@ -775,6 +775,7 @@ export type GitHubOperationsCheck = {
   app_id?: number | null;
   app_name?: string | null;
   is_latest_for_check?: boolean;
+  steps?: { name: string | null; state: string }[];
 };
 
 export type GitHubOperationsPullRequest = {
@@ -821,6 +822,7 @@ export type GitHubOperationsPullRequest = {
   latest_commit: { sha: string; message: string; committed_at: string | null; url: string | null } | null;
   detail_errors: string[];
   details_truncated: boolean;
+  workflow_steps_truncated?: boolean;
 };
 
 export type GitHubOperationsSnapshot = {
@@ -942,6 +944,13 @@ export type IntegrationAnalysis = {
       head_sha: string | null;
       workflow_name: string;
       evidence: { name: string; state: string | null; head_sha: string; url: string | null }[];
+      milestones: {
+        id: string;
+        label: string;
+        status: "PASS" | "FAIL" | "BLOCKED" | "UNKNOWN";
+        head_sha: string | null;
+        evidence: { name: string; state: string | null; url: string | null }[];
+      }[];
       reason: string;
     };
     ci_state: string;

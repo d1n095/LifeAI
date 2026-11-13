@@ -19,7 +19,7 @@ import httpx
 
 from app.integrations.github_client import GitHubClient, GitHubClientError
 
-MAX_ANALYZED_PRS = 8
+MAX_ANALYZED_PRS = 12
 MAX_MIGRATIONS_PER_PR = 12
 MAX_GRAPH_MIGRATIONS = 128
 MAX_FOUNDER_DECISION_NOTES = 100
@@ -695,10 +695,16 @@ def _first_start_acceptance(
         "head_sha": None,
         "workflow_name": FOUNDER_ALPHA_WORKFLOW_NAME,
         "evidence": [],
+        "milestones": _first_start_milestones([], None, None),
         "reason": "No complete acceptance evidence is bound to the current HEAD.",
     }
     if not isinstance(head_sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", head_sha):
         return unknown
+    unknown = {
+        **unknown,
+        "head_sha": head_sha,
+        "milestones": _first_start_milestones([], head_sha, None),
+    }
     if freshness != "live":
         return {
             **unknown,
@@ -744,6 +750,7 @@ def _first_start_acceptance(
     job = exact_jobs[0]
     state = job.get("state")
     run_state = run.get("state")
+    steps = job.get("steps")
     evidence = [{
         "name": FOUNDER_ALPHA_ACCEPTANCE_JOB,
         "state": state,
@@ -753,16 +760,32 @@ def _first_start_acceptance(
     incomplete = any(
         error in pr.get("detail_errors", [])
         for error in ("workflow_runs_unavailable", "workflow_jobs_unavailable")
-    ) or pr.get("workflow_jobs_truncated", False) or pr.get("workflow_runs_truncated", False)
-    if incomplete:
-        status = "UNKNOWN"
-        reason = "Acceptance workflow details are incomplete; no PASS or FAIL is inferred."
-    elif run_state == "failed" or state == "failed":
+    ) or pr.get("workflow_jobs_truncated", False) or pr.get(
+        "workflow_runs_truncated", False
+    ) or pr.get("workflow_steps_truncated", False)
+    milestones = _first_start_milestones(
+        steps if isinstance(steps, list) else [], head_sha, evidence[0]["url"]
+    )
+    required_milestones = [item["status"] for item in milestones if item["id"] != "independent_security"]
+    if run_state == "failed" or state == "failed":
         status = "FAIL"
         reason = "The exact-HEAD Founder Alpha acceptance workflow or its acceptance job failed."
+    elif incomplete or not isinstance(steps, list):
+        status = "UNKNOWN"
+        reason = "Acceptance workflow details are incomplete; no PASS or FAIL is inferred."
     elif run_state == "success" and state == "success":
-        status = "PASS"
-        reason = "The named real-local Founder Alpha acceptance job passed on the current exact HEAD."
+        if "FAIL" in required_milestones:
+            status = "FAIL"
+            reason = "A required exact-HEAD first-start acceptance milestone failed."
+        elif "BLOCKED" in required_milestones:
+            status = "BLOCKED"
+            reason = "A required exact-HEAD first-start acceptance milestone did not complete."
+        elif all(item == "PASS" for item in required_milestones):
+            status = "PASS"
+            reason = "All mapped real-local first-start milestones passed on the current exact HEAD."
+        else:
+            status = "UNKNOWN"
+            reason = "The acceptance job passed, but one or more first-start milestone details are unavailable."
     elif run_state in {"pending", "cancelled", "skipped"} or state in {"pending", "cancelled", "skipped"}:
         status = "BLOCKED"
         reason = "The exact-HEAD acceptance workflow did not complete successfully."
@@ -774,8 +797,99 @@ def _first_start_acceptance(
         "head_sha": head_sha,
         "workflow_name": FOUNDER_ALPHA_WORKFLOW_NAME,
         "evidence": evidence,
+        "milestones": milestones,
         "reason": reason,
     }
+
+
+_FIRST_START_MILESTONES = (
+    (
+        "secure_startup",
+        "Secure startup and restricted runtime",
+        (
+            "Apply S1A runtime privilege policy",
+            "Start real backend + worker (real Ollama providers)",
+        ),
+    ),
+    (
+        "document_import",
+        "Document import and ingestion",
+        ("Acceptance — pre-restart (chat, upload, index, retrieve, generate Blueprint, version)",),
+    ),
+    (
+        "immutable_original_retrieval",
+        "Immutable original retrieval after restart",
+        ("Acceptance — post-restart (persistence + Founder approval)",),
+    ),
+    (
+        "source_indexing_retrieval",
+        "Source indexing and retrieval",
+        ("Acceptance — pre-restart (chat, upload, index, retrieve, generate Blueprint, version)",),
+    ),
+    (
+        "local_models",
+        "Real local-model availability",
+        ("Install and start Ollama; pull the test models",),
+    ),
+    (
+        "blueprint_generation",
+        "Blueprint generation and versioning",
+        ("Acceptance — pre-restart (chat, upload, index, retrieve, generate Blueprint, version)",),
+    ),
+    (
+        "founder_approval_restart",
+        "Restart persistence and Founder approval",
+        ("Acceptance — post-restart (persistence + Founder approval)",),
+    ),
+    (
+        "database_compatibility",
+        "Database and migration compatibility",
+        (
+            "Verify immutable composition manifest and single migration head",
+            "Apply migrations (alembic upgrade head)",
+            "Model-independent schema/RLS/identity checks (real pgvector)",
+        ),
+    ),
+)
+
+
+def _first_start_milestones(steps: list, head_sha: str | None, url: str | None) -> list[dict]:
+    step_map = {
+        step.get("name"): step
+        for step in steps
+        if isinstance(step, dict) and isinstance(step.get("name"), str)
+    }
+    milestones = []
+    for milestone_id, label, required_steps in _FIRST_START_MILESTONES:
+        matched = [step_map.get(name) for name in required_steps]
+        if any(step and step.get("state") == "failed" for step in matched):
+            status = "FAIL"
+        elif any(step is None for step in matched):
+            status = "UNKNOWN"
+        elif all(step.get("state") == "success" for step in matched if step):
+            status = "PASS"
+        elif any(step.get("state") in {"pending", "cancelled", "skipped"} for step in matched if step):
+            status = "BLOCKED"
+        else:
+            status = "UNKNOWN"
+        milestones.append({
+            "id": milestone_id,
+            "label": label,
+            "status": status,
+            "head_sha": head_sha,
+            "evidence": [
+                {"name": name, "state": step.get("state") if step else None, "url": url}
+                for name, step in zip(required_steps, matched)
+            ],
+        })
+    milestones.append({
+        "id": "independent_security",
+        "label": "Independent security acceptance",
+        "status": "UNKNOWN",
+        "head_sha": head_sha,
+        "evidence": [],
+    })
+    return milestones
 
 
 def build_integration_graph(

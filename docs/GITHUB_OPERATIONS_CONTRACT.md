@@ -46,10 +46,11 @@ reported as `not_declared_or_unknown`; it does not prove that no prerequisite ex
 `GET /api/github-operations/integration-analysis[?pr=237&pr=363]` is Founder-only and
 rate-limited. It uses the same configured repository and snapshot; it makes read-only GitHub
 GET requests, never dispatches, mutates branches, invokes providers, or reads lesson prose.
-Up to eight open PRs may be selected using repeated `pr` parameters. With no selection the
-first eight observed open PRs are inspected. Invalid selections return 422; PRs absent from
+Up to twelve open PRs may be selected using repeated `pr` parameters. With no selection the
+first twelve observed open PRs are inspected. Invalid selections return 422; PRs absent from
 the bounded observation are reported in `coverage.inspection_errors`.
-The UI's Founder Alpha first-start shortcut selects #237, #352, #360, #361, #363, #382, and #384
+The UI's Founder Alpha first-start shortcut selects #237, #340, #349, #351, #352, #360, #361,
+#363, #382, and #384
 through this same bounded read-only endpoint. Missing PRs and incomplete selection coverage are
 shown explicitly; they are not treated as absent blockers or successful candidates.
 
@@ -74,7 +75,10 @@ It recognizes only the named `Founder Alpha integration (exact SHA, real local)`
 its `Founder Alpha real-local acceptance (Ollama + pgvector + filesystem)` job when both are
 bound to the candidate's current exact HEAD, the observation is live, and the run is the latest
 observed for that workflow.
-`PASS` requires both workflow and job success; exact-HEAD failure is `FAIL`; pending, cancelled,
+`PASS` requires both workflow and job success plus complete success evidence for mapped named
+workflow steps (secure startup, document import, immutable-original retrieval after restart,
+indexing/retrieval, local-model setup, Blueprint generation, Founder approval after restart, and
+database compatibility); exact-HEAD failure is `FAIL`; pending, cancelled,
 or skipped execution is `BLOCKED`; missing, stale, or incomplete evidence is `UNKNOWN`. A PASS
 means that the named real-local user-path test ran successfully, not that independent security
 acceptance or release approval exists. GitHub reviews are displayed separately by reviewed SHA;
@@ -83,6 +87,10 @@ independent-review evidence source is implemented. Cached-fresh observations do 
 first-start PASS; use the explicit refresh or first-start PR-set action to request live GitHub data.
 The workflow runs on a GitHub Actions runner with local Ollama, pgvector, and filesystem
 fixtures; it does not assert that the Founder performed a startup on the physical Mac.
+Workflow job-step names and states are bounded to 64 per job and sanitized; a truncated step list
+cannot establish a first-start PASS. A successful stage confirms only the workflow-defined
+assertions for that named stage; unrelated green CI jobs do not establish startup readiness,
+provider availability, or original integrity.
 
 For inspected same-repository PRs, the analysis rechecks the HEAD before and after bounded
 changed-file reads. It parses literal Alembic `revision` and `down_revision` assignments

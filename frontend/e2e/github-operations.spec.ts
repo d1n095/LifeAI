@@ -184,6 +184,17 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
               state: "success", head_sha: HEAD_SHA,
               url: "https://github.com/d1n095/LifeAI/actions/runs/411",
             }],
+            milestones: [{
+              id: "secure_startup", label: "Secure startup and restricted runtime",
+              status: "PASS", head_sha: HEAD_SHA,
+              evidence: [{
+                name: "Apply S1A runtime privilege policy", state: "success",
+                url: "https://github.com/d1n095/LifeAI/actions/runs/411",
+              }],
+            }, {
+              id: "independent_security", label: "Independent security acceptance",
+              status: "UNKNOWN", head_sha: HEAD_SHA, evidence: [],
+            }],
             reason: "The named real-local Founder Alpha acceptance job passed on the current exact HEAD.",
           },
           ci_state: "cancelled",
@@ -240,6 +251,8 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
     "href",
     "https://github.com/d1n095/LifeAI/actions/runs/411",
   );
+  await expect(page.getByText("Secure startup and restricted runtime:")).toBeVisible();
+  await expect(page.getByText("Independent security acceptance:")).toBeVisible();
   await expect(page.getByText("Exact-HEAD GitHub reviews: None observed")).toBeVisible();
   await expect(page.getByRole("link", { name: "backend/app/blueprint/service.py" })).toHaveAttribute(
     "href",
@@ -273,7 +286,7 @@ test("GitHub Operations Center renders the API's exact PR, CI, dependency, and f
   const firstStartSetRequest = page.waitForRequest((request) => {
     const url = new URL(request.url());
     return url.pathname.endsWith("/api/github-operations/integration-analysis") &&
-      url.searchParams.getAll("pr").join(",") === "237,352,360,361,363,382,384" &&
+      url.searchParams.getAll("pr").join(",") === "237,340,349,351,352,360,361,363,382,384" &&
       url.searchParams.get("force_refresh") === "true";
   });
   await page.getByRole("button", { name: "Analyze Founder Alpha first-start PR set" }).click();

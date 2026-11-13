@@ -28,6 +28,16 @@ def pr(number, sha, branch, base="main", **changes):
 
 
 def first_start_run(sha, *, run_state="success", job_state="success", latest=True, url=None):
+    step_names = [
+        "Apply S1A runtime privilege policy",
+        "Start real backend + worker (real Ollama providers)",
+        "Acceptance — pre-restart (chat, upload, index, retrieve, generate Blueprint, version)",
+        "Install and start Ollama; pull the test models",
+        "Acceptance — post-restart (persistence + Founder approval)",
+        "Verify immutable composition manifest and single migration head",
+        "Apply migrations (alembic upgrade head)",
+        "Model-independent schema/RLS/identity checks (real pgvector)",
+    ]
     return {
         "name": "Founder Alpha integration (exact SHA, real local)",
         "head_sha": sha,
@@ -39,6 +49,7 @@ def first_start_run(sha, *, run_state="success", job_state="success", latest=Tru
             "state": job_state,
             "head_sha": sha,
             "url": url or f"https://github.com/d1n095/LifeAI/actions/runs/{sha[:8]}",
+            "steps": [{"name": name, "state": job_state} for name in step_names],
         }],
     }
 
@@ -261,18 +272,19 @@ def test_first_start_acceptance_pass_is_exact_head_and_named_workflow_bound():
 
     candidate = analysis.build_integration_graph(observation([item]), [], [])["candidates"][0]
 
-    assert candidate["first_start_acceptance"] == {
-        "status": "PASS",
-        "head_sha": head_sha,
-        "workflow_name": "Founder Alpha integration (exact SHA, real local)",
-        "evidence": [{
-            "name": "Founder Alpha real-local acceptance (Ollama + pgvector + filesystem)",
-            "state": "success",
-            "head_sha": head_sha,
-            "url": f"https://github.com/d1n095/LifeAI/actions/runs/{head_sha[:8]}",
-        }],
-        "reason": "The named real-local Founder Alpha acceptance job passed on the current exact HEAD.",
-    }
+    acceptance = candidate["first_start_acceptance"]
+    assert acceptance["status"] == "PASS"
+    assert acceptance["head_sha"] == head_sha
+    assert acceptance["workflow_name"] == "Founder Alpha integration (exact SHA, real local)"
+    assert all(
+        milestone["status"] == "PASS"
+        for milestone in acceptance["milestones"]
+        if milestone["id"] != "independent_security"
+    )
+    assert next(
+        item for item in acceptance["milestones"] if item["id"] == "independent_security"
+    )["status"] == "UNKNOWN"
+    assert acceptance["evidence"][0]["head_sha"] == head_sha
 
 
 @pytest.mark.parametrize(("run_state", "job_state", "expected"), [
@@ -322,6 +334,66 @@ def test_first_start_acceptance_requires_a_live_github_observation():
 
     assert candidate["first_start_acceptance"]["status"] == "UNKNOWN"
     assert "live GitHub observation" in candidate["first_start_acceptance"]["reason"]
+
+
+def test_first_start_acceptance_is_unknown_when_workflow_steps_were_truncated():
+    head_sha = "2" * 40
+    item = pr(
+        352, head_sha, "codex/life-founder-alpha-integration",
+        workflow_runs=[first_start_run(head_sha)],
+        workflow_steps_truncated=True,
+    )
+
+    acceptance = analysis.build_integration_graph(observation([item]), [], [])[
+        "candidates"
+    ][0]["first_start_acceptance"]
+
+    assert acceptance["status"] == "UNKNOWN"
+    assert all(
+        milestone["status"] == "UNKNOWN"
+        for milestone in acceptance["milestones"]
+        if milestone["id"] != "independent_security"
+    )
+
+
+def test_first_start_acceptance_is_unknown_when_required_milestone_step_is_missing():
+    head_sha = "f" * 40
+    run = first_start_run(head_sha)
+    run["jobs"][0]["steps"] = [
+        step for step in run["jobs"][0]["steps"]
+        if step["name"] != "Apply S1A runtime privilege policy"
+    ]
+    item = pr(352, head_sha, "codex/life-founder-alpha-integration",
+              workflow_runs=[run])
+
+    acceptance = analysis.build_integration_graph(observation([item]), [], [])[
+        "candidates"
+    ][0]["first_start_acceptance"]
+
+    assert acceptance["status"] == "UNKNOWN"
+    startup = next(item for item in acceptance["milestones"] if item["id"] == "secure_startup")
+    assert startup["status"] == "UNKNOWN"
+
+
+def test_first_start_acceptance_marks_a_failed_milestone_as_fail():
+    head_sha = "1" * 40
+    run = first_start_run(head_sha)
+    run["jobs"][0]["steps"] = [
+        {**step, "state": "failed"}
+        if step["name"] == "Apply S1A runtime privilege policy" else step
+        for step in run["jobs"][0]["steps"]
+    ]
+    item = pr(352, head_sha, "codex/life-founder-alpha-integration",
+              workflow_runs=[run])
+
+    acceptance = analysis.build_integration_graph(observation([item]), [], [])[
+        "candidates"
+    ][0]["first_start_acceptance"]
+
+    assert acceptance["status"] == "FAIL"
+    assert next(item for item in acceptance["milestones"] if item["id"] == "secure_startup")[
+        "status"
+    ] == "FAIL"
 
 
 def test_blueprint_scope_uses_changed_file_sources_pinned_to_the_exact_head():
@@ -1003,4 +1075,11 @@ def test_founder_only_analysis_endpoint_and_bounds(monkeypatch):
     assert client.get("/api/github-operations/integration-analysis?pr=0").status_code == 422
     assert client.get("/api/github-operations/integration-analysis?pr=1&pr=1").status_code == 422
     assert client.get("/api/github-operations/integration-analysis?include_migration_graph=true").status_code == 422
-    assert client.get("/api/github-operations/integration-analysis?" + "&".join("pr=1" for _ in range(9))).status_code == 422
+    assert client.get(
+        "/api/github-operations/integration-analysis?"
+        + "&".join(f"pr={number}" for number in range(1, 13))
+    ).status_code == 200
+    assert client.get(
+        "/api/github-operations/integration-analysis?"
+        + "&".join(f"pr={number}" for number in range(1, 14))
+    ).status_code == 422

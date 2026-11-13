@@ -365,7 +365,16 @@ class FakeGitHub:
 
     async def list_workflow_jobs(self, run_id):
         return GitHubListResult(
-            [{"id": 7001, "name": "Unit tests", "status": "completed", "conclusion": "failure", "html_url": "https://github.com/d1n095/LifeAI/actions/runs/9001/job/7001"}],
+            [{
+                "id": 7001, "name": "Unit tests", "status": "completed",
+                "conclusion": "failure",
+                "html_url": "https://github.com/d1n095/LifeAI/actions/runs/9001/job/7001",
+                "steps": [
+                    {"name": "Run tests", "status": "completed", "conclusion": "failure"},
+                    {"name": "Sensitive long step name " + "x" * 250,
+                     "status": "completed", "conclusion": "success"},
+                ],
+            }],
             1,
             False,
         )
@@ -410,6 +419,10 @@ async def test_snapshot_preserves_exact_sha_ci_dependencies_draft_and_unknown_me
     assert pr_by_number[101]["checks"][0]["state"] == "failed"
     assert pr_by_number[101]["ci_state"] == "failed"
     assert pr_by_number[101]["workflow_runs"][0]["jobs"][0]["state"] == "failed"
+    assert pr_by_number[101]["workflow_runs"][0]["jobs"][0]["steps"] == [
+        {"name": "Run tests", "state": "failed"},
+        {"name": "Sensitive long step name " + "x" * 175, "state": "success"},
+    ]
     assert pr_by_number[101]["dependencies"][0]["state"] == "open"
     assert pr_by_number[102]["dependencies"][0]["state"] == "merged"
     assert pr_by_number[102]["review_state"] == "approved_exact_head"

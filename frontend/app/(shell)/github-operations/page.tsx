@@ -10,7 +10,7 @@ import {
   IntegrationAnalysis,
 } from "@/lib/api";
 
-const FOUNDER_ALPHA_FIRST_START_PRS = [237, 352, 360, 361, 363, 382, 384];
+const FOUNDER_ALPHA_FIRST_START_PRS = [237, 340, 349, 351, 352, 360, 361, 363, 382, 384];
 
 export default function GitHubOperationsPage() {
   const [snapshot, setSnapshot] = useState<GitHubOperationsSnapshot | null>(null);
@@ -172,12 +172,12 @@ export default function GitHubOperationsPage() {
                   setAnalysisError("Cross-PR migration graph requires one or two positive PR numbers.");
                 } else if (!selectedPrs.trim()) {
                   void loadAnalysis();
-                } else if (parts.length <= 8 && parts.every((part) => /^[1-9]\d*$/.test(part) && Number.isSafeInteger(Number(part)))) {
+                } else if (parts.length <= 12 && parts.every((part) => /^[1-9]\d*$/.test(part) && Number.isSafeInteger(Number(part)))) {
                   void loadAnalysis(parts.map(Number), migrationGraph);
                 } else {
                   analysisRequest.current++;
                   setAnalysis(null);
-                  setAnalysisError("Enter up to eight comma-separated positive PR numbers.");
+                  setAnalysisError("Enter up to twelve comma-separated positive PR numbers.");
                 }
               }}
             >
@@ -293,6 +293,17 @@ export default function GitHubOperationsPage() {
                           </span>
                         ))}
                       </p>
+                      {candidate.first_start_acceptance?.milestones.map((milestone) => (
+                        <p key={milestone.id} className="ml-3">
+                          {milestone.label}: <StatusBadge value={milestone.status} />{" "}
+                          {milestone.evidence.map((evidence) => (
+                            <span key={evidence.name}>
+                              {evidence.name} ({evidence.state ?? "UNKNOWN"})
+                              {evidence.url && <> · <SourceLink href={evidence.url} label="evidence" /></>}
+                            </span>
+                          ))}
+                        </p>
+                      ))}
                       <p>Exact-HEAD CI: {candidate.ci_state} · {candidate.ci_evidence.length ? candidate.ci_evidence.map((check) => `${check.name ?? "check"}: ${check.state ?? "UNKNOWN"} @ ${check.head_sha ?? "SHA UNKNOWN"}`).join("; ") : "No exact-HEAD CI evidence"}
                         {candidate.ci_evidence.map((check, index) => check.url && (
                           <span key={`${check.name}-${index}`}> · <SourceLink href={check.url} label={`${check.name ?? "check"} run`} /></span>
