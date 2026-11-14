@@ -142,18 +142,13 @@ def test_renew_lease_cannot_resurrect_an_expired_claim(superuser_db, make_verifi
     assert refreshed.lease_expires_at == expired_at
 
 
-def test_worker_id_is_unique_per_process_lifetime_even_with_same_configured_slot(monkeypatch):
+def test_import_claim_id_is_unique_even_for_same_process_and_worker_slot():
     import app.worker as worker_module
 
-    class Settings:
-        worker_id = "stable-deployment-slot"
+    first = worker_module._import_claim_id("stable-deployment-slot")
+    reclaimed = worker_module._import_claim_id("stable-deployment-slot")
 
-    monkeypatch.setattr(worker_module, "_WORKER_PROCESS_INSTANCE_ID", "a" * 32)
-    first = worker_module._worker_id(Settings())
-    monkeypatch.setattr(worker_module, "_WORKER_PROCESS_INSTANCE_ID", "b" * 32)
-    restarted = worker_module._worker_id(Settings())
-
-    assert first != restarted
+    assert first != reclaimed
     assert first.startswith("stable-deployment-slot:")
     assert len(first) <= 128
 

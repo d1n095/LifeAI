@@ -81,7 +81,6 @@ from app.request_context import current_user_id
 from app.rag.zip_import import ZipSecurityError
 
 logger = logging.getLogger("mainai.worker")
-_WORKER_PROCESS_INSTANCE_ID = uuid.uuid4().hex
 
 # knowledge_import_jobs has FORCE ROW LEVEL SECURITY (see alembic/versions/0006), scoped to
 # `owner_id = current_setting('app.current_user_id')` — correct for a single request acting
@@ -95,11 +94,12 @@ _ClaimSession = sessionmaker(bind=migration_engine)
 
 
 def _worker_id(settings) -> str:
-    # A configured name/hostname identifies a deployment slot, not one process lifetime. A
-    # fresh nonce prevents a restarted process from satisfying the stale predecessor's
-    # locked_by fence merely because both share the same hostname.
-    base = settings.worker_id or socket.gethostname()
-    return f"{base[:94]}:{_WORKER_PROCESS_INSTANCE_ID}"
+    return settings.worker_id or socket.gethostname()
+
+
+def _import_claim_id(worker_id: str) -> str:
+    """A unique fencing identity for one import claim, including same-process reclaims."""
+    return f"{worker_id[:94]}:{uuid.uuid4().hex}"
 
 
 async def process_claimed_job(
@@ -857,7 +857,12 @@ class Worker:
             # second scan covers crash/retry graphs that became terminal without that gate.
             self._finalize_mainai_execution_goals(claim_db)
             self._advance_mainai_execution_tasks(claim_db)
-            claimed = claim_next_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
+            import_claim_id = _import_claim_id(self.worker_id)
+            claimed = claim_next_job(
+                claim_db,
+                import_claim_id,
+                self.settings.worker_lease_seconds,
+            )
             mainai_claimed = None if claimed is not None else claim_next_mainai_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
         finally:
             claim_db.close()
@@ -867,7 +872,7 @@ class Worker:
             logger.info("Worker %s: hämtade jobb %s.", self.worker_id, job_id)
             db = SessionLocal()
             try:
-                await process_claimed_job(db, job_id, owner_id, self.worker_id)
+                await process_claimed_job(db, job_id, owner_id, import_claim_id)
             finally:
                 db.close()
             return True
