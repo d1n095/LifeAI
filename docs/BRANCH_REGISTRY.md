@@ -6,6 +6,29 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Section B startpunkt: github_client.py repo-brett läs-API (2026-11-14)
+
+**Ny, isolerad branch: `claude/github-client-repo-evidence`** (PR #395, bas:
+`claude/det-kommer-mer-879lcm` direkt). Continuous Build Directive, Sektion B ("MainAI
+engineering coordinator") kräver att BEFINTLIG infrastruktur utökas innan något nytt byggs.
+En oberoende kartläggning (se separat registerpost om PR #394 ovan/nedan för samma datum,
+om den hunnit landas i den här grenen vid läsning) av Safe Planner (`app/safe_planner/
+service.py`), Work Driver (`app/development_driver/service.py`), Supervisor Goal Lease
+(`app/development_supervisor/lease.py`), godkännande-grinden (`app/mainai_execution/
+approval.py`), Dead Agent Recovery och den generella `mainai_jobs`-tabellen fann att nästan
+allt Sektion B/C behöver redan finns — UTOM en konkret lucka: `app/integrations/
+github_client.py` kan bara slå upp EN specifik ref/PR i taget, inte hela repot.
+
+**Tillägg (enbart läsning, inget skriv-/mergekapacitet tillagt):** `list_pull_requests()`,
+`list_issues()` (filtrerar bort PR:er som GitHubs `/issues`-endpoint annars blandar in),
+`list_commits()`. Avsiktligt litet — detta är enbart bevisinsamling, inte själva
+koordinator-/arbetskö-logiken (den hör till `app/safe_planner/service.py`s
+`plan_founder_request()`, en separat, senare ändring när den här bevisytan finns att mata
+in i). Isolerad från både Blueprint-kedjan (#387–#390/#393) och Playwright/ubuntu-26.04-
+CI-fixen (#394).
+
+---
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en
