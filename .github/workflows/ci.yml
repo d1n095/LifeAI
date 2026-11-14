@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     # Agent coding branches need the same required checks as mainline pushes.
     # Explicit prefixes (not a catch-all) — GitHub branch filters have no brace-expansion.
@@ -307,7 +308,7 @@ jobs:
   # ---------------------------------------------------------------------------------------
   e2e-tests:
     name: E2E — Playwright (full stack)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -422,7 +423,7 @@ jobs:
             curl -sf -o /dev/null http://127.0.0.1:8010/api/health && break
             sleep 1
           done
-      - run: npx playwright test e2e/auth.spec.ts e2e/security.spec.ts e2e/account.spec.ts --project=chromium
+      - run: npx playwright test e2e/auth.spec.ts e2e/security.spec.ts e2e/account.spec.ts e2e/github-operations.spec.ts e2e/library-ops-status.spec.ts e2e/mainai-execution-control.spec.ts --project=chromium
         working-directory: frontend
       - name: Stop backend
         if: always()
@@ -473,7 +474,7 @@ jobs:
   # ---------------------------------------------------------------------------------------
   same-origin-proxy-test:
     name: E2E — same-origin proxy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -608,7 +609,7 @@ jobs:
   # ---------------------------------------------------------------------------------------
   combined-container-verify:
     name: Combined container — build, run, verify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: github.ref == 'refs/heads/claude/verify-combined-container' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm'
     services:
       postgres:

@@ -894,6 +894,7 @@ class MainAIGoalOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     title: str
+    original_instruction: str
     status: str
     risk_level: str
     approval_policy: str

@@ -77,18 +77,29 @@ function formatAge(seconds: number | null): string {
 function LibraryOpsStatusBar() {
   const [status, setStatus] = useState<LibraryOpsStatus | null>(null);
   const [statusError, setStatusError] = useState(false);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(true);
+  const [refreshRequest, setRefreshRequest] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    let inFlight = false;
     async function poll() {
+      if (inFlight) return;
+      inFlight = true;
+      if (!cancelled) setRefreshing(true);
       try {
         const s = await api.getLibraryOpsStatus();
         if (!cancelled) {
           setStatus(s);
           setStatusError(false);
+          setLastUpdatedAt(new Date().toISOString());
         }
       } catch {
         if (!cancelled) setStatusError(true);
+      } finally {
+        inFlight = false;
+        if (!cancelled) setRefreshing(false);
       }
     }
     poll();
@@ -97,9 +108,35 @@ function LibraryOpsStatusBar() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, []);
+  }, [refreshRequest]);
 
-  if (statusError || !status) return null; // silent — this is a supplementary diagnostic, not a blocking error
+  if (!status) {
+    return (
+      <div
+        className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-100"
+        role={statusError ? "alert" : "status"}
+        aria-label="Bearbetningsstatus"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span>
+            {statusError
+              ? "Bearbetningsstatus är inte tillgänglig. Worker- och köstatus är okända."
+              : "Hämtar status för worker och dokumentkö…"}
+          </span>
+          {statusError && (
+            <button
+              type="button"
+              onClick={() => setRefreshRequest((value) => value + 1)}
+              disabled={refreshing}
+              className="rounded border border-amber-200/30 px-2 py-1 disabled:opacity-50"
+            >
+              Försök igen
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   const problems: string[] = [];
   if (!status.worker_reachable) problems.push("Workern svarar inte");
@@ -109,27 +146,54 @@ function LibraryOpsStatusBar() {
   return (
     <div
       className={`rounded-lg border px-4 py-2 text-xs flex flex-wrap items-center gap-x-4 gap-y-1 ${
-        problems.length > 0 ? "border-amber-500/30 bg-amber-500/10 text-amber-200" : "border-border bg-panel text-white/50"
+        problems.length > 0 || statusError
+          ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
+          : "border-border bg-panel text-white/50"
       }`}
       aria-label="Bearbetningsstatus"
+      aria-live="polite"
     >
       <span className="flex items-center gap-1.5">
         <span
           className={`inline-block h-2 w-2 rounded-full ${status.worker_reachable ? "bg-emerald-400" : "bg-red-400"}`}
           aria-hidden="true"
         />
-        {status.worker_reachable ? "Worker aktiv" : "Worker onåbar"}
+        {statusError
+          ? `Senast känd workerstatus: ${status.worker_reachable ? "aktiv" : "onåbar"}`
+          : status.worker_reachable
+            ? "Worker aktiv"
+            : "Worker onåbar"}
       </span>
       <span>Kö: {status.queue_length}</span>
-      <span>Bearbetar: {status.running_jobs}</span>
+      <span>Jobb registrerade som kör: {status.running_jobs}</span>
       {status.oldest_pending_age_seconds !== null && <span>Äldsta väntande: {formatAge(status.oldest_pending_age_seconds)}</span>}
       <span>Misslyckade (24h): {status.failed_last_24h}</span>
       <span>Ledigt lagringsutrymme: {formatBytes(status.free_disk_bytes)}</span>
+      <span>
+        Senaste registrerade heartbeat:{" "}
+        {status.last_heartbeat_at ? new Date(status.last_heartbeat_at).toLocaleString("sv-SE") : "ingen registrerad"}
+      </span>
+      <span>
+        Status hämtad: {lastUpdatedAt ? new Date(lastUpdatedAt).toLocaleString("sv-SE") : "okänd"}
+      </span>
+      {statusError && (
+        <span role="alert" className="font-medium">
+          Uppdateringen misslyckades; visad status kan vara inaktuell.
+        </span>
+      )}
       {problems.length > 0 && (
         <span role="alert" className="font-medium">
           {problems.join(" · ")}
         </span>
       )}
+      <button
+        type="button"
+        onClick={() => setRefreshRequest((value) => value + 1)}
+        disabled={refreshing}
+        className="rounded border border-border px-2 py-1 disabled:opacity-50"
+      >
+        {refreshing ? "Uppdaterar…" : "Uppdatera status"}
+      </button>
     </div>
   );
 }

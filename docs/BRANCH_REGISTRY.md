@@ -6,6 +6,115 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Verifierade aktiva Founder Alpha- och GitHub Operations Center-lanes (2026-11-14)
+
+Senast kontrollerat mot GitHub API 2026-11-14. Detta är den aktuella, verifierade
+överlappningskartan för den nya read-only GitHub-intelligence-funktionen; äldre historiska
+sektioner nedan är inte en fullständig aktuell PR-lista.
+
+| Branch | PR | Status | Bas / beroende | Scope / ägare |
+|---|---|---|---|---|
+| `claude/frontend-npm-audit-baseline-consolidation` | [#323](https://github.com/d1n095/LifeAI/pull/323) | **Öppen, ready-for-review** | `claude/det-kommer-mer-879lcm` | Claude: frontend npm-audit remediation; owns dependency and lockfile changes. #376 does not alter dependencies or weaken the audit gate. |
+| `claude/ci-e2e-runner-pin` | [#344](https://github.com/d1n095/LifeAI/pull/344) | **Öppen, draft** | `claude/founder-alpha-blueprint-draft` @ `db83ab9166a4d31fb88db41f66ea039d4947da4f` | Claude: pins the three browser-installing CI jobs to `ubuntu-24.04`; exact `.github/workflows/ci.yml` overlap with #376. |
+| `claude/founder-alpha-blueprint-draft` | [#340](https://github.com/d1n095/LifeAI/pull/340) | **Öppen, ready-for-review; HEAD `add0da831c101af7061b7cf6309ce8041ed969aa`; exact-head required checks pass** | `claude/embedding-space-local-model` @ `fdf364735bc0e7f0e39ebccef928145304100659` | Claude: source-grounded, versioned Founder Blueprint draft and approval flow; required upstream embedding and original-integrity evidence includes #349/#351. |
+| `codex/pr333-embedding-identity-provenance-fix` | [#349](https://github.com/d1n095/LifeAI/pull/349) | **Öppen, draft; HEAD `6598559b138e0b7b4b9af0a2da80d25b1df8d6f8`; observed exact-head required checks pass** | `claude/embedding-space-local-model` @ `fdf364735bc0e7f0e39ebccef928145304100659` | Codex: embedding identity/provenance correction; prerequisite evidence for interpreting Founder Alpha embeddings; not independently approved by CI. |
+| `codex/pr329-original-integrity-remediation` | [#351](https://github.com/d1n095/LifeAI/pull/351) | **Öppen, draft; HEAD `a0063d4da6bce871dead53fcae26bee546c92859`; observed exact-head required checks pass** | `claude/library-original-retrieval` @ `830ab4d9cf2edab27c6a91787988f5fbff1593da` | Codex: content-addressed verification for legacy immutable originals; prerequisite to claiming original retrieval integrity. |
+| `claude/coordination-operating-cycle-github-fed` | [#338](https://github.com/d1n095/LifeAI/pull/338) | **Öppen, ready-for-review** | #314 (`3aa2bec`) | GitHub-fed operating-cycle task selection; äger `agent_coordination/github_fed_cycle.py`, inte `integrations/github_client.py`. |
+| `claude/coordination-authorized-dispatch` | [#339](https://github.com/d1n095/LifeAI/pull/339) | **Öppen, ready-for-review** | #338 (`d92e01d`) | Authorized agent dispatch; äger `authorized_dispatch_step.py`. Väntar på #338. |
+| `codex/founder-alpha-blueprint-egress-remediation` | [#360](https://github.com/d1n095/LifeAI/pull/360) | **Öppen, ready-for-review; HEAD `3053ce3149207b6cc7476b75b602df643afcfb75`** | #352 @ `07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765` | Codex: Blueprint egress/receipts; child of #352, exact-head CI green in observed checks; independent review remains separately required. |
+| `copilot/founder-alpha-blueprint-egress` | [#361](https://github.com/d1n095/LifeAI/pull/361) | **Öppen, draft; HEAD `124ba9e4c1d29f369732211a56c52e6a360acf11`** | #352 @ `07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765` | Copilot: parallel Blueprint source-egress correction against the same parent and overlapping `blueprint.py` surface as #360; coordinate before combining. Exact-head checks observed green; no independent security acceptance inferred. |
+| `codex/founder-alpha-0069-migration-compat` | [#363](https://github.com/d1n095/LifeAI/pull/363) | **Öppen, ready-for-review; HEAD `8ac278d5d90c4c5b550aad6741f4bcb9fd193725`** | #352 @ `07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765` | Codex: migration ancestry; isolerad från operations-center-koden. |
+| `copilot/founder-alpha-migration-compat` | — | **Fryst preservation checkpoint; HEAD `92aecda0b7ed87b5ae07020300463c79ac834cbd`; ingen PR** | Historical experiment; overlaps #363 and is not an integration candidate | Copilot: preserves an earlier migration-compatibility experiment and its regression tests. Do not merge or cherry-pick without coordinating with #363's owner and revalidating the migration ancestry. |
+| `claude/prod-secret-validation-hardening` | [#371](https://github.com/d1n095/LifeAI/pull/371) | **Öppen, draft; oberoende review FAIL** | default (`64c07d5`) | Claude: production-secret validation. Current SHA `84fcb9f`; weak DB-role password remains unguarded. |
+| `claude/provider-egress-ownerless-callers` | [#372](https://github.com/d1n095/LifeAI/pull/372) | **Öppen, draft; oberoende review FAIL** | default (`64c07d5`) | Claude: ownerless-provider-egress. Current SHA `8a155c3`; disclosure receipt rollback durability remains unresolved. |
+| `claude/life-operational-priority-readiness-2026-11-09` | [#373](https://github.com/d1n095/LifeAI/pull/373) | **Öppen, draft** | default (`64c07d5`) | Claude: operational/readiness docs. Current head `8a21e6888b837d56628b3763fc0f4fd56bc9de81`; Copilot published a documentation consistency FAIL review on the prior reviewed head; the new head requires re-review. |
+| `claude/db-bootstrap-password-guard` | [#374](https://github.com/d1n095/LifeAI/pull/374) | **Öppen, draft; independent review pending** | default (`64c07d5`) | Claude: database-role password guard. Current SHA `235ce1d`. |
+| `copilot/github-operations-center` | [#376](https://github.com/d1n095/LifeAI/pull/376) | **Open, draft; prior application SHA `8570077ab5ef711c4baa1d2a96b9f942895fdf18` passed exact-SHA run `43572234302` (17 passed, 1 skipped in full-stack E2E). Runtime capability increment at application SHA `cc1f35a736126c4db2f1c8e083f4b93e3ae6a7cf` passed exact-SHA workflow-dispatch run `43617655021`: backend 2359 passed/1 skipped; full-stack Playwright 20 passed/1 skipped plus 2 rate-limit tests; frontend lint/typecheck/build, migration, RLS/session, account-lifecycle, and same-origin proxy jobs passed. npm-audit (unallowlisted advisories; #323 ownership) and aggregate required checks remain failed; no code-related failures. Registry-only follow-up is documentation-only.** | `claude/det-kommer-mer-879lcm` @ `64c07d5b0c4821bfb175700283021aa6e95cb61c` | Copilot: read-only Operations Center and Founder-facing controls over existing execution/job contracts; does not add provider/session adapters, queue, lease mechanism, or manual resume API. Unsupported external-session/start/pause/resume and lease identity are explicitly marked unavailable. |
+| `claude/remote-only-dev-rule` | [#383](https://github.com/d1n095/LifeAI/pull/383) | **Öppen, draft; HEAD `b4308a55`; policy awaits review** | `claude/det-kommer-mer-879lcm` @ `64c07d5b` | Claude: adds remote-only development and cleanup safeguards to `CLAUDE.md`. Keep this as the single policy source; ensure all agent entrypoints consume it and explicitly include Founder approval before production deployment. |
+| `claude/session-context-assembler` | [#381](https://github.com/d1n095/LifeAI/pull/381) | **Öppen, draft; HEAD `9c61bbcc494e13af989e1d277b9828e15c35ac78`** | default `64c07d5b0c4821bfb175700283021aa6e95cb61c` | Claude: read-only session-start context assembly reusing existing memory, continuity and readiness; no new store. |
+| `codex/blueprint-egress-durable-receipt` | [#384](https://github.com/d1n095/LifeAI/pull/384) | **Öppen, ready-for-review; HEAD `b857e095191bdd1353d46761b2943e892aa70002`** | #360 @ `3053ce3149207b6cc7476b75b602df643afcfb75` | Codex: durable owner-bound Blueprint provider-dispatch receipt; child of #360, exact-head CI green in observed checks. |
+| `codex/founder-alpha-ollama-ci-pin` | [#382](https://github.com/d1n095/LifeAI/pull/382) | **Öppen, ready-for-review; HEAD `4b27c67570b0335fe7a0fd28027596a984a56f87`; exact-SHA first-start workflow PASS (`43223179331`), while backend unit/integration and aggregate CI fail** | #352 @ `07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765` | Codex: pins and verifies the Ollama release artifact for the Founder Alpha CI workflow. Keep full first-start acceptance distinct from the separate failing backend CI check. |
+| `claude/ci-apt-install-retry` | [#385](https://github.com/d1n095/LifeAI/pull/385) | **Öppen, draft; HEAD `449bf623d312ddbab03023cc485428b68c9f182f`** | default `64c07d5b0c4821bfb175700283021aa6e95cb61c` | Claude: bounded retries for two `apt-get` installation steps affected by transient mirror DNS failures. |
+
+**Rekommenderad ordning / väntande beroenden:** #338 före #339; hold until their owners and
+dependency permit changes. #352's exact-SHA real-local acceptance PASS applies to #352 only;
+#382 has a separate exact-SHA acceptance PASS (`43223179331`). Other descendants do not inherit
+either result. #360 and #361 are parallel, overlapping egress
+corrections against #352 and require owner coordination before composition; #384 depends on #360.
+#363 and #382 also depend on #352. #237 and #363 both claim Alembic revision `0069`; their owners
+must coordinate the composed history before either integration. #371/#372 have not been approved;
+#374 awaits independent review.
+
+**Verifierad överlappning:** #344 och #376 ändrar samma tre `runs-on`-rader i
+`.github/workflows/ci.yml` till `ubuntu-24.04`. Båda ändringarna behövs för att deras separata
+CI-körningar ska kunna installera Playwright Chromium, men #344 riktar sig mot
+`claude/founder-alpha-blueprint-draft` medan #376 riktar sig mot
+`claude/det-kommer-mer-879lcm`. Den exakta #376-körningen `43035391506` körde E2E-jobben på
+`ubuntu-24.04`, men `apt`-installationerna föll på DNS-fel mot Ubuntu-mirror; backend-jobbet
+föll på samma DNS-fel när det installerade `ripgrep` och hann inte köra pytest. Detta är ett
+runner-/nätverksfel, inte ett testresultat. Ändra inte #344:s runner-policy från #376-lanen;
+ägaren ska koordinera eventuell runner-/paketlösning innan en konkurrerande ändring görs.
+`#323` äger npm-audit/dependency-remediation; #376 lämnar dess filer och säkerhetsgate orörda.
+I samma run passerade frontend lint/typecheck/build, Alembic, RLS/session och account-lifecycle;
+npm audit rapporterade advisories och required-check aggregate förblev röd.
+På #376 HEAD `936af7bc5c1fd65fdf7be70e270b74a7431e7380` passerade GitHub Actions-run
+`43179009740`: backend PostgreSQL-paketet `2343 passed, 1 skipped`; alla fyra nya
+Founder-decision DB-fallen, enum-regressionstestet, Alembic, frontend lint/build, RLS/session,
+account-lifecycle och båda Playwright/E2E-jobben passerade. Setup-problemen med `ripgrep` och
+Playwright-installation reproducerades inte. Endast npm-audit/aggregate är rött på advisories,
+fortfarande inom #323:s ägarskap. Den föregående DB-runnen `43175154845` hittade en verklig
+parserdefekt: ORM-`NoteKind`/`NoteStatus` enumvärden ignorerades; #376:s uppföljningsfix
+normaliserar `.value` och regressionstesterna passerar.
+
+STRATO VPS är inte en tillgänglig remote utvecklingsmiljö i denna session: deployment-guiden
+anger att servern ännu inte har kontaktats och kräver en manuellt provisionerad SSH-identitet
+och host-adress. Ingen VPS-åtkomst eller serverhemlighet antas. #376 använder därför endast
+GitHub Actions service-Postgres för de nya DB-integrationstesterna.
+
+Operations Center-branchen är en separat, read-only observationsyta och ska inte dispatcha
+agenter eller konkurrera om #338/#339:s operating-cycle/dispatchlogik.
+
+## Verifierade stop-control- och migrationsblockerare (2026-11-10)
+
+Heads, baser och CI verifierade mot GitHub API. #237, #239 och #243 har inte uppdaterats sedan
+1–2 september; deras checks är därför gammal evidens, inte aktuell release-verifiering.
+
+| Branch | PR | Status / exact HEAD | Bas / beroende | Scope / evidens |
+|---|---|---|---|---|
+| `cursor/mainai-safe-internal-startup` | [#237](https://github.com/d1n095/LifeAI/pull/237) | Öppen, ready; `7878958bfa57fa999122ac3008e9f261233f158e`; architecture selected, implementation **NOT SECURITY-APPROVED** | `claude/det-kommer-mer-879lcm` @ `64c07d5` | Cursor: canonical `mainai_stop_state`/`mainai_stop_events` direction. Independent review blockers: recovery clear is not atomic against a newer stop; global-stop API path is NOT VERIFIED and its all-owner revocation is RLS-limited if called in a tenant-scoped session; stop/event tables have no runtime DB mutation boundary. Founder reports 13/13 real-Postgres grant/stop/takeover fence scenarios passing, but these do not cover remaining blockers. Current exact-head backend unit/integration and npm-audit checks fail. |
+| `claude/workforce-kill-switch-owner-scoping` | [#239](https://github.com/d1n095/LifeAI/pull/239) | Öppen, ready; `b248302f0de240fd5b347404ad26ef61b32942aa` | `claude/det-kommer-mer-879lcm` @ `64c07d5` | Claude: owner-scoping prerequisite for the now-closed #243 lineage; not the canonical #237 implementation. |
+| `claude/kill-switch-authority-epoch-race-fix` | [#243](https://github.com/d1n095/LifeAI/pull/243) | **Closed, superseded by #237**; historical HEAD `3a19c7640ec75b5574cc268ed1c8b76ddba4d43e` | #239 @ `b248302` | Claude: alternate `workforce_authority_epoch` design is not an integration candidate. Retain its normal-grant race scenarios as historical evidence only. Its takeover-fence finding is not an outstanding #237 defect: exact #237 source calls `assert_authority_grant_allowed()` in `alternate_agent_takeover`, and Founder-reported real-Postgres checks covered takeover. Do not reopen or port the alternate state architecture. |
+| `codex/life-founder-alpha-integration` | [#352](https://github.com/d1n095/LifeAI/pull/352) | Öppen, draft; `07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765`; full real-local first-start acceptance **PASS** on this exact SHA in run `42426029291` | #340 @ `add0da831c101af7061b7cf6309ce8041ed969aa` | Codex: frozen Founder Alpha integration base for #360/#361/#363/#382. Workflow covered real Ollama, pgvector, filesystem, pre/post-restart chat/upload/index/retrieval/Blueprint generation/versioning/Founder approval. PASS is not independent security acceptance or release approval. |
+| `codex/founder-alpha-0069-migration-compat` | [#363](https://github.com/d1n095/LifeAI/pull/363) | Öppen, ready-for-review; HEAD `8ac278d5d90c4c5b550aad6741f4bcb9fd193725` | #352 @ `07ce4a1d02d0eaa326acb53c0cb1d0a4708ee765` | Codex: preserves Founder Alpha migration ancestry. The previously recorded downgrade/upgrade failure was against older HEAD `1d3fcb0440aca0f460330ecacfb99c15809665fa`; latest HEAD CI is not verified here. Its provider-disclosure `0069` is the parent of `0069_embedding_space_identity` and later Blueprint migrations. Reconcile with #237's active `0069` before integration; do not renumber in isolation. |
+| `claude/integration-intelligence-lessons` | [#380](https://github.com/d1n095/LifeAI/pull/380) | Öppen, draft; current HEAD `ba01ac45467c3e9524ce31d33e0884849fdd5967`; independent review **FAIL** | #377 | Claude: prior discarded-minimization bug is fixed in source and the dispatch helper checks egress before its callback. Required owner/project authorization is still absent; verified status is not tied to canonical executed-test evidence; production dispatch/prompt path is absent. Focused adversarial tests could not run locally (`pytest` unavailable); latest run `42784898443` has E2E/build/security checks passing, backend unit/integration still pending, and npm audit failing. External handoff remains blocked. |
+| `claude/blueprint-readiness-approval-safety` | [#379](https://github.com/d1n095/LifeAI/pull/379) | Öppen, draft; `5685926d8f7e0b75997fc223b52c83afe3b75556` | #378 | Claude: conditional independent PASS only for currently immutable/content-addressed sources; mutable-source generation remains unsupported. |
+
+**Stop-control ownership / status:** #237's `mainai_stop_state` and `mainai_stop_events` are the
+selected architecture, not a security approval. #243 is closed and superseded; its separate epoch
+table is not to be revived. The earlier overlap in `kill_switch.py`, provider worker, safe-internal
+startup and executive surfaces is historical, not a reason to combine both state models.
+
+**Alembic integration blocker — coordinate #237 and #363; do not merge/renumber as-is:** #237
+`0069_mainai_stop_controls.py` and #363 `0069_provider_disclosure_local_decision.py` each declare
+`revision = "0069"` from `0068`. The #363 `0069_embedding_space_identity` and later Blueprint
+migrations descend from its provider-disclosure `0069`, so the coordinated resolution must preserve
+the applied Founder Alpha ancestry and its data-recovery semantics. #243's competing
+`0069_workforce_authority_epoch.py` belongs to the closed, superseded branch and is not part of the
+canonical migration plan. Require the #237 and #363 owners to agree on one safe composed ancestry;
+do not independently renumber files or rewrite already-applied production history.
+
+Independent exact-SHA findings are published on #237 and #380. #237's grant/stop race and takeover
+fence now have Founder-reported real-Postgres verification (13/13 scenarios); preserve that
+evidence. The unresolved #237 review blockers remain concurrent clear-vs-new-stop, effective
+global-stop/RLS behavior (no application call path was found), and runtime-role protection of stop
+state/event mutations. These need focused DB/runtime-role tests on the corrected candidate.
+#237's current CI still fails backend unit/integration and npm audit. #243 is closed/superseded,
+not an active remediation candidate. #380's `7ea2234` and `f39a119` FAIL verdicts are historical;
+the exact-SHA review of `ba01ac4` also returns FAIL against the required owner/project and
+verification-evidence invariants. Its minimized external fields and helper-level egress check are
+present in source, but focused tests could not execute locally and production dispatch is absent.
+It remains blocked for external handoff.
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en

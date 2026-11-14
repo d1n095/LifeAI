@@ -614,6 +614,7 @@ export const RETRYABLE_MAINAI_JOB_STATUSES: MainAIJobStatus[] = ["failed"];
 export type MainAIGoal = {
   id: string;
   title: string;
+  original_instruction: string;
   status: string;
   risk_level: string;
   approval_policy: string;
@@ -736,7 +737,324 @@ export type MainAIGoalReport = {
   generated_at: string;
 };
 
+export type DecisionCompleteness = {
+  category: string;
+  status: "COMPLETE" | "INCOMPLETE" | "NOT_CHECKED";
+  factors_evaluated: { name: string; value: number; source_ref: string; observed_at: string }[];
+  factors_missing: string[];
+  factors_stale: string[];
+  factors_freshness_unknown: string[];
+  factors_not_applicable: string[];
+  factors_assumed_or_unsourced: string[];
+  impact_unknown_for: string[];
+  mandatory_constraints: Record<
+    string,
+    { status: string; reason?: string; source_ref?: string; observed_at?: string }
+  >;
+  alternatives: {
+    status: string;
+    items: { description?: string; source_ref?: string; observed_at?: string }[];
+  };
+  priority: {
+    status: string;
+    horizon: string | null;
+    score: number | null;
+    explanation: Record<string, unknown> | null;
+    engine: string;
+  };
+  reevaluation: { status: string; previous_decision_ref: string | null; evidence_delta: unknown[]; reason: string };
+  research: { status: string; reason: string };
+  authority_granted: false;
+};
+
+export type GitHubOperationsCheck = {
+  name: string | null;
+  status: string | null;
+  conclusion: string | null;
+  state: string;
+  url: string | null;
+  app_id?: number | null;
+  app_name?: string | null;
+  is_latest_for_check?: boolean;
+  steps?: { name: string | null; state: string }[];
+};
+
+export type GitHubOperationsPullRequest = {
+  number: number;
+  title: string;
+  state: string;
+  draft: boolean;
+  author: string | null;
+  url: string | null;
+  head_branch: string | null;
+  head_sha: string | null;
+  base_branch: string | null;
+  base_sha: string | null;
+  updated_at: string | null;
+  head_sha_changed_since_list: boolean;
+  head_sha_changed_during_detail: boolean;
+  head_sha_rechecked_at: string | null;
+  dependencies: { number: number; state: string; blocked: boolean; url: string; source: string }[];
+  dependency_evidence: { state: string; method: string; source: string | null };
+  mergeability: { state: string; mergeable: boolean | null; mergeable_state: string | null };
+  review_state: string;
+  ci_state: string;
+  requested_reviewers: string[];
+  reviews: {
+    id: number | null;
+    author: string | null;
+    state: string;
+    commit_sha: string | null;
+    submitted_at: string | null;
+    url: string | null;
+  }[];
+  comments: { id: number | null; author: string | null; created_at: string | null; body: string; url: string | null; untrusted_content: true }[];
+  checks: GitHubOperationsCheck[];
+  workflow_runs: {
+    id: number;
+    name: string | null;
+    status: string | null;
+    conclusion: string | null;
+    url: string | null;
+    head_sha: string | null;
+    is_latest_for_workflow: boolean;
+    jobs: GitHubOperationsCheck[];
+  }[];
+  latest_commit: { sha: string; message: string; committed_at: string | null; url: string | null } | null;
+  detail_errors: string[];
+  details_truncated: boolean;
+  workflow_steps_truncated?: boolean;
+};
+
+export type GitHubOperationsSnapshot = {
+  schema_version: number;
+  repository: { full_name: string | null; url: string | null; default_branch?: string; availability: string };
+  observation: {
+    freshness: "live" | "cached_fresh" | "stale" | "unavailable";
+    observed_at: string | null;
+    cache_age_seconds: number | null;
+    error_category: string | null;
+    pagination: Record<string, number | boolean>;
+  };
+  pull_requests: GitHubOperationsPullRequest[];
+  closed_pull_requests: { number: number; state: string; url: string | null; updated_at: string | null }[];
+  capabilities: {
+    id: string;
+    key: string;
+    domain: string;
+    status: string;
+    status_reason: string | null;
+    last_verified_at: string | null;
+    verification_evidence_id: string | null;
+    known_limitations: string[];
+    test_state: string;
+    source: { href: string };
+  }[];
+  agents: {
+    id: string;
+    key: string;
+    name: string;
+    registry_status: string;
+    runtime_status: string;
+    availability_reason: string;
+    adapter_kind: string;
+    heartbeat_at: string | null;
+    source: { href: string };
+  }[];
+  assignments: {
+    id: string;
+    agent_key: string;
+    role: string;
+    status: string;
+    runtime_status: string;
+    branch: string | null;
+    head_sha: string | null;
+    block_reason: string | null;
+    source: { href: string };
+  }[];
+  agent_results: {
+    id: string;
+    assignment_id: string;
+    evidence_kind: string;
+    review_kind: string;
+    deterministic: boolean;
+    verification_status: "not_independently_verified";
+    observed_at: string | null;
+    tests_passed: boolean | null;
+    tests_run: number | null;
+    tests_failed: number | null;
+    duration_seconds: number | null;
+    cost_tokens: number | null;
+    cost_usd: number | null;
+    ci_conclusion: string | null;
+    source: { kind: string; id: string; source_ref: string; href: string };
+  }[];
+  goals: { id: string; title: string; status: string; created_at: string | null; source: { href: string } }[];
+  tasks: { id: string; description: string; status: string; blocker_reason: string | null; source: { href: string } }[];
+  work_candidates: {
+    id: string;
+    title: string;
+    status: string;
+    priority: string;
+    classifier_confidence: number | null;
+    decision_completeness: DecisionCompleteness;
+    source: { href: string };
+  }[];
+  decision_debt: { items: { note_id: string; status: string; impact: string; preview: string }[] };
+  blockers: { kind: string; status: string; title: string; source: string; evidence: string }[];
+  recommendations: {
+    kind: string;
+    title: string;
+    status: string;
+    source: string;
+    reason?: string;
+    decision_completeness?: DecisionCompleteness;
+  }[];
+  activity: { kind: string; title: string; timestamp: string | null; source: string | null; head_sha: string | null }[];
+};
+
+export type IntegrationAnalysis = {
+  schema_version: number;
+  freshness: string;
+  observed_at: string | null;
+  candidates: {
+    number: number;
+    head_sha: string | null;
+    base_branch: string | null;
+    url: string | null;
+    owner: { github_author: string | null; agent: string | null; status: string };
+    dependencies: { number: number; state: string; url?: string | null; source: string }[];
+    dependency_chain?: number[];
+    migration_dependencies?: {
+      revision: string;
+      down_revision: string[];
+      path: string;
+      url: string;
+      schema_effects?: { table: string; operation: string }[];
+    }[];
+    blueprint_scope?: {
+      status: "IN_SCOPE" | "NOT_IN_SCOPE" | "UNKNOWN";
+      head_sha: string | null;
+      evidence: { path: string; url: string }[];
+    };
+    required_upstream_candidates?: { number: number; state: string; head_sha: string | null }[];
+    review_state: string;
+    reviews?: { sha: string | null; state: string; url: string | null }[];
+    first_start_acceptance?: {
+      status: "PASS" | "FAIL" | "BLOCKED" | "UNKNOWN";
+      head_sha: string | null;
+      workflow_name: string;
+      evidence: { name: string; state: string | null; head_sha: string; url: string | null }[];
+      milestones: {
+        id: string;
+        label: string;
+        status: "PASS" | "FAIL" | "BLOCKED" | "UNKNOWN";
+        head_sha: string | null;
+        evidence: { name: string; state: string | null; url: string | null }[];
+      }[];
+      reason: string;
+    };
+    ci_state: string;
+    ci_evidence: { name: string | null; state: string | null; head_sha: string | null; url: string | null }[];
+    security_review: string;
+    migration_scan: string;
+    readiness: "READY" | "BLOCKED" | "UNKNOWN" | "STALE";
+    readiness_reason: string;
+    integration_blocked?: boolean;
+    safe_to_integrate?: "NO" | "UNKNOWN" | "YES";
+    canonical_claims?: number[];
+  }[];
+  findings: {
+    kind: string;
+    certainty: string;
+    pull_requests: number[];
+    detail: string;
+    evidence: { url?: string | null; path?: string; revision?: string; head_sha?: string; reviewed_sha?: string }[];
+    recommendation: string;
+    owners: { number: number; github_author: string | null; agent: string | null; status: string }[];
+    tests: string[];
+    downstream_revalidate: number[];
+    reuse: string;
+    severity?: string;
+    status?: "OPEN" | "RESOLVED" | "UNKNOWN" | "STALE";
+    blocks_integration?: boolean;
+    why_it_matters?: string;
+    corrective_action?: string;
+    responsible_owner?: { number: number; agent: string | null; status: string }[];
+    affected_heads?: { number: number; head_sha: string | null }[];
+  }[];
+  coverage: {
+    inspected_pull_requests: number[];
+    limit: number;
+    open_prs_truncated: boolean;
+    inspection_errors: { number: number | null; errors: string[]; numbers?: number[] }[];
+    migration_ancestry: string;
+    founder_decisions: string;
+    canonical_decisions?: {
+      status: string;
+      errors?: string[];
+      decisions: {
+        decision_id: string;
+        version: number;
+        repository: string;
+        status: string;
+        repository_evidence?: { expected: string | null; recorded: string };
+        approver: string;
+        approved_at: string;
+        effective_at: string;
+        summary: string;
+        affected_modules: string[];
+        canonical: { pull_request: number; head_sha: string; architecture: string[] };
+        rejected_alternatives: {
+          pull_request: number;
+          head_sha: string;
+          label: string;
+          rationale: string;
+          signals: string[];
+        }[];
+        relevant_pull_requests: number[];
+        source: {
+          kind: string;
+          id: string;
+          type: string;
+          ref: string;
+          source_id: string | null;
+          created_at: string | null;
+          content_sha256: string;
+        };
+        pr_evidence?: { number: number; expected_sha: string; observed_sha: string | null; state: string | null }[];
+      }[];
+    };
+    engineering_lessons: string;
+    independent_security_reviews: string;
+    migration_graph?: {
+      status: string;
+      errors?: string[];
+      graphs?: {
+        number: number;
+        head_sha: string;
+        status: string;
+        errors: string[];
+        heads?: string[];
+        missing?: string[];
+      }[];
+    };
+  };
+};
+
 export const api = {
+  githubIntegrationAnalysis: (numbers: number[] = [], migrationGraph = false, forceRefresh = false) => {
+    const query = new URLSearchParams();
+    numbers.forEach((number) => query.append("pr", String(number)));
+    if (migrationGraph) query.set("include_migration_graph", "true");
+    if (forceRefresh) query.set("force_refresh", "true");
+    const suffix = query.toString();
+    return request<IntegrationAnalysis>(`/api/github-operations/integration-analysis${suffix ? `?${suffix}` : ""}`);
+  },
+  githubOperationsSnapshot: (forceRefresh = false) =>
+    request<GitHubOperationsSnapshot>(
+      `/api/github-operations/snapshot${forceRefresh ? "?force_refresh=true" : ""}`,
+    ),
   login: (email: string, password: string) =>
     request<CurrentUser>("/api/auth/login", {
       method: "POST",
