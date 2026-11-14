@@ -51,6 +51,23 @@ upprepa samma kommentar om och om igen eller gissa mig till en snabb fix. Kvarst
 OLÖST, synligt gap tills grundaren eller Codex bedömer det — ingen egen branch/PR öppnad för
 det ännu.
 
+## Grundardirektiv 2026-11-14: "Turn Life into a working engineering coordinator"
+
+Nytt, explicit direktiv efter #401: bygg en sammanhängande koordineringsväg ovanpå BEFINTLIG
+infrastruktur (Safe Planner, Work Driver, Supervisor Goal Lease, durable MainAI job/
+checkpoint, GitHub-bevis). Löste explicit den öppna arkitekturfrågan från #396/#397: en
+dedikerad, smal evidensmellanlagringsprojektion är auktoriserad eftersom work_candidates-
+kedjan inte kan representera GitHub-bevis utan att bryta grundarkunskaps-invarianten.
+
+**`claude/coordinator-evidence-staging`** (PR #403, bas: #396) — ny tabell
+`github_evidence_candidates`, samma "signal producer ≠ truth writer"-mönster som
+`work_candidates`, men identifierad via source_repo/source_kind/source_number istället för en
+grundarkunskaps-FK. Fullständig RLS/erasure-integration (app/rls.py, app/account/erasure.py).
+
+**Kvarstående delar av direktivet (ej byggda än):** next-task-selection (B), minimal-context-
+promptbyggare (C), checkpoint-reconciliation mot verifierad CI/PR-status (D, nästa steg),
+recovery/idempotent omfördelning (E). Ingen deploy/merge, `first_cycle_go=false` oförändrat.
+
 ## Section B startpunkt: github_client.py repo-brett läs-API (2026-11-14)
 
 **Ny, isolerad branch: `claude/github-client-repo-evidence`** (PR #395, bas:

@@ -538,6 +538,13 @@ _MAINAI_EXECUTION_TABLES = (
     # transitions in place (unreviewed -> authorized/dismissed/superseded), never rewritten
     # content, deletion only through the SECURITY DEFINER erasure path.
     "work_candidates",
+    # Life MainAI Intelligence program (Continuous Build Directive, Section B): github_evidence_
+    # candidates plays the SAME structural role work_candidates already plays -- a mutable row
+    # whose status transitions in place (unreviewed -> authorized/dismissed), observation fields
+    # (title/signals/source_url/observed_at) refreshed in place on every re-scan, deletion only
+    # through the SECURITY DEFINER erasure path. See app.models.github_evidence's own docstring
+    # for why this is a SEPARATE table from work_candidates rather than reusing it.
+    "github_evidence_candidates",
     # Migration 0057 (Life Execution Authorization Envelope): execution_scope_proposals and
     # execution_authorization_envelopes play the SAME structural role -- mutable rows whose
     # status transitions in place, deletion only through the SECURITY DEFINER erasure path.
@@ -986,6 +993,8 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_project_entities_children() TO mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON work_candidates FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_work_candidates_children() TO mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON github_evidence_candidates FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_github_evidence_children() TO mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON execution_scope_proposals FROM mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON execution_authorization_envelopes FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_execution_authorization_children() TO mainai_app"))
@@ -1068,6 +1077,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("project_entity_relationships", frozenset({"SELECT", "INSERT"})),
             ("project_entity_aliases", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("work_candidates", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("github_evidence_candidates", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("execution_scope_proposals", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("execution_authorization_envelopes", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("engineering_lesson_guard_observations", frozenset({"SELECT", "INSERT"})),
