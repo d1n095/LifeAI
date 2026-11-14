@@ -131,17 +131,20 @@ def test_mainai_app_role_cannot_insert_a_system_activation_authorization(db_sess
 # proof: a directly-constructed LocalCLIAdapter, never touching get_real_adapter(), still
 # cannot execute without both FIRST_CYCLE_GO and a current system_activation row.
 
-def _ready_running_assignment(db, *, owner_id, cwd):
+def _ready_assignment(db, *, owner_id, cwd):
+    """Returns an assignment already at `ready` -- `create_work_assignment()`'s own
+    `_refresh_dependency_state()` call promotes a dependency-free assignment there
+    automatically (see its docstring; this is NOT `planned`). `dispatch_assignment()` itself
+    owns the `ready -> waiting_agent -> running` transition, so this helper must never advance
+    the assignment past `ready` itself -- doing so would make `agent_availability()`'s own
+    concurrency count see this assignment as already active and reject it as
+    `AGENT_UNAVAILABLE` before the gate under test is ever reached."""
     goal = create_goal(db, owner_id=owner_id, title="Bypass test goal", original_instruction="x", created_by="test")
     agent = _agent(db, "bypass-test")
     assignment = create_work_assignment(
         db, owner_id=owner_id, goal_id=goal.id, task_id=None, agent_id=agent.id, role="builder", read_write_mode="read_only",
         repository_identity="lifeai", allowed_paths=["backend/app/**"], requested_by="test",
     )
-    from app.agent_coordination.service import transition_status
-
-    transition_status(db, assignment=assignment, new_status="ready")
-    transition_status(db, assignment=assignment, new_status="running")
     db.commit()
     return assignment, agent
 
@@ -159,7 +162,7 @@ async def test_a_directly_constructed_adapter_handed_to_dispatch_assignment_stil
     monkeypatch.delenv("FIRST_CYCLE_GO", raising=False)
     owner = _owner(superuser_db)
     superuser_db.commit()
-    assignment, agent = _ready_running_assignment(superuser_db, owner_id=owner.id, cwd=str(tmp_path))
+    assignment, agent = _ready_assignment(superuser_db, owner_id=owner.id, cwd=str(tmp_path))
 
     adapter = LocalCLIAdapter(
         provider_key="bypass-test", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5, db=superuser_db,
@@ -185,7 +188,7 @@ async def test_a_directly_constructed_adapter_succeeds_once_both_conditions_are_
 
     owner = _owner(superuser_db)
     superuser_db.commit()
-    assignment, agent = _ready_running_assignment(superuser_db, owner_id=owner.id, cwd=str(tmp_path))
+    assignment, agent = _ready_assignment(superuser_db, owner_id=owner.id, cwd=str(tmp_path))
 
     adapter = LocalCLIAdapter(
         provider_key="bypass-test", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5, db=superuser_db,
