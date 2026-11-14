@@ -207,6 +207,45 @@ def test_get_real_adapter_returns_not_configured_when_disabled(monkeypatch):
     assert isinstance(adapter, NotConfiguredAdapter)
 
 
+def test_get_real_adapter_stays_not_configured_without_first_cycle_go_even_when_fully_enabled(monkeypatch, tmp_path):
+    """The new first_cycle_go gate (Founder directive 2026-11-14): every OTHER precondition
+    satisfied (enabled, executable found, args_template configured) must still fall back to
+    NotConfiguredAdapter -- never a real adapter -- until the founder's own external release
+    decision is set. Confirms get_real_adapter()'s "never raises" contract is unchanged."""
+    import shutil
+
+    import app.agent_coordination.adapter_config as adapter_config_module
+
+    real_true_path = shutil.which("true")
+    monkeypatch.setattr(adapter_config_module.shutil, "which", lambda name: real_true_path if name == "codex" else None)
+    monkeypatch.setenv("LIFE_AGENT_ADAPTER_ENABLED__CODEX", "true")
+    monkeypatch.setenv("LIFE_AGENT_ADAPTER_ARGS__CODEX", "--version")
+    monkeypatch.delenv("FIRST_CYCLE_GO", raising=False)
+
+    adapter = get_real_adapter("codex", cwd=str(tmp_path))
+
+    assert isinstance(adapter, NotConfiguredAdapter)
+
+
+def test_get_real_adapter_returns_a_real_adapter_once_first_cycle_go_is_set(monkeypatch, tmp_path):
+    """The positive case: with every precondition AND first_cycle_go satisfied, the factory
+    finally returns the real LocalCLIAdapter -- proving the gate is additive, not a silent
+    always-block."""
+    import shutil
+
+    import app.agent_coordination.adapter_config as adapter_config_module
+
+    real_true_path = shutil.which("true")
+    monkeypatch.setattr(adapter_config_module.shutil, "which", lambda name: real_true_path if name == "codex" else None)
+    monkeypatch.setenv("LIFE_AGENT_ADAPTER_ENABLED__CODEX", "true")
+    monkeypatch.setenv("LIFE_AGENT_ADAPTER_ARGS__CODEX", "--version")
+    monkeypatch.setenv("FIRST_CYCLE_GO", "true")
+
+    adapter = get_real_adapter("codex", cwd=str(tmp_path))
+
+    assert isinstance(adapter, LocalCLIAdapter)
+
+
 # ============================================================================ Requirement 4:
 # LocalCLIAdapter's bounded subprocess MECHANISM, proven with harmless real binaries -- never
 # a real coding agent CLI.

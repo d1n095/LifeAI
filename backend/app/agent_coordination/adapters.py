@@ -261,11 +261,15 @@ class LocalCLIAdapter:
 def get_real_adapter(provider_key: str, *, cwd: str, env: dict[str, str] | None = None) -> "AgentAdapter":
     """The founder-controlled factory: returns a real `LocalCLIAdapter` ONLY when
     `app.agent_coordination.adapter_config.real_adapter_config()` confirms every precondition
-    (enabled, executable found, an explicit args_template configured); returns
-    `NotConfiguredAdapter` -- the same honest, fail-closed default -- in every other case.
-    NEVER silently substitutes a fake/mock adapter; callers that want deterministic test
-    behavior construct their own fake explicitly (see
-    tests/backend/mainai/test_agent_dispatch_foundation.py's own `_FakeAgentAdapter`).
+    (enabled, executable found, an explicit args_template configured) AND the founder's own
+    external `first_cycle_go` release decision (`app.agent_coordination.activation_gate.
+    first_cycle_go()`) is satisfied; returns `NotConfiguredAdapter` -- the same honest,
+    fail-closed default -- in every other case, including this new one. NEVER silently
+    substitutes a fake/mock adapter; callers that want deterministic test behavior construct
+    their own fake explicitly (see tests/backend/mainai/test_agent_dispatch_foundation.py's own
+    `_FakeAgentAdapter`). This function's own contract (never raises, always returns an
+    adapter) is unchanged by the `first_cycle_go` check -- it is treated as just one more
+    precondition, not a new failure mode.
 
     When `env` is not explicitly supplied, defaults to
     `app.agent_coordination.adapter_config.resolve_adapter_env(provider_key)` -- the founder's
@@ -273,10 +277,14 @@ def get_real_adapter(provider_key: str, *, cwd: str, env: dict[str, str] | None 
     this process's full environment. Passing `env={}` explicitly still means "no environment at
     all," exactly as before -- only an OMITTED `env` triggers the allowlist default."""
 
-    from app.agent_coordination.adapter_config import real_adapter_config, resolve_adapter_env
+    from app.agent_coordination.activation_gate import first_cycle_go
+    from app.agent_coordination.adapter_config import (
+        real_adapter_config,
+        resolve_adapter_env,
+    )
 
     config = real_adapter_config(provider_key)
-    if config is None:
+    if config is None or not first_cycle_go():
         return NotConfiguredAdapter(provider_key=provider_key)
     executable, args_template, timeout_seconds = config
     resolved_env = resolve_adapter_env(provider_key) if env is None else env
