@@ -2,7 +2,14 @@
 app/agent_orchestration.py) and, as of the MainAI Execution Loop V0.1 executor
 (app/mainai_execution/execution_job.py), real repo edits.
 
-  - read: get_ref, get_pull_request, list_check_runs
+  - read, single-ref/single-PR: get_ref, get_pull_request, list_pull_requests_for_head,
+    list_check_runs
+  - read, repo-wide (Continuous Build Directive, Section B — "MainAI engineering
+    coordinator": read verified GitHub evidence, identify open tasks, understand
+    dependencies/ownership, propose a prioritized work queue): list_pull_requests,
+    list_issues, list_commits. Deliberately only reading — a coordinator PROPOSING a work
+    queue from this evidence is a planning concern (app/safe_planner/service.py), not
+    something this client decides or acts on itself.
   - write (only ever called when settings.github_write_enabled is True — see
     prepare_github_pr()): create_branch, create_or_update_file, create_pull_request,
     update_pull_request
@@ -97,6 +104,51 @@ class GitHubClient:
         repo = self._require_configured()
         data = await self._request("GET", f"/repos/{repo}/commits/{ref}/check-runs")
         return data.get("check_runs", [])
+
+    async def list_pull_requests(
+        self, *, state: str = "open", base: str | None = None, per_page: int = 30, page: int = 1
+    ) -> list[dict]:
+        """Repo-wide pull-request listing — the counterpart to list_pull_requests_for_head()'s
+        narrow "does this exact head/base pair already exist" lookup. A coordinator proposing a
+        prioritized work queue from real GitHub evidence (Continuous Build Directive, Section B)
+        needs to see every open PR across the repo, not just one specific pair — e.g. to detect
+        that two open PRs touch the same files/branch lineage before proposing new work on top
+        of either. `per_page`/`page` are passed straight through to GitHub's own pagination
+        (max 100 per page, GitHub's own limit — not enforced here, since this client has never
+        clamped caller-supplied values elsewhere either; a caller asking for more than 100 just
+        gets GitHub's own 100-item page, not an error)."""
+        repo = self._require_configured()
+        params = f"state={state}&per_page={per_page}&page={page}"
+        if base:
+            params += f"&base={base}"
+        return await self._request("GET", f"/repos/{repo}/pulls?{params}")
+
+    async def list_issues(
+        self, *, state: str = "open", labels: str | None = None, per_page: int = 30, page: int = 1
+    ) -> list[dict]:
+        """Repo-wide issue listing. GitHub's own `/issues` endpoint returns pull requests mixed
+        in with real issues (a PR IS an issue in GitHub's own data model, distinguishable only
+        by the presence of a `pull_request` key on the returned item) — filtered out here so a
+        caller building a work-queue proposal from "open issues" never has to remember that
+        quirk itself and accidentally double-counts a PR as also being an issue."""
+        repo = self._require_configured()
+        params = f"state={state}&per_page={per_page}&page={page}"
+        if labels:
+            params += f"&labels={labels}"
+        data = await self._request("GET", f"/repos/{repo}/issues?{params}")
+        return [item for item in data if "pull_request" not in item]
+
+    async def list_commits(self, *, sha: str | None = None, per_page: int = 30, page: int = 1) -> list[dict]:
+        """Recent commit history for a branch/ref (`sha` accepts a branch name or a commit SHA,
+        per GitHub's own `/commits` semantics — omit for the repo's default branch). Lets a
+        coordinator see what has actually landed recently as real, checkable evidence, rather
+        than re-deriving it one get_commit() call at a time from a branch tip it would first
+        have to already know."""
+        repo = self._require_configured()
+        params = f"per_page={per_page}&page={page}"
+        if sha:
+            params += f"&sha={sha}"
+        return await self._request("GET", f"/repos/{repo}/commits?{params}")
 
     # --- Write (only called when settings.github_write_enabled is True) -----------------
 
