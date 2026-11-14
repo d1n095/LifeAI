@@ -6,6 +6,18 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Koordinatordirektivet — merge-ordning och status (2026-11-14, uppdaterad)
+
+Stackad kedja, mergas i denna ordning (varje branch bas på den föregående):
+`claude/coordinator-evidence-staging` (#403, Item B-grund) → `claude/coordinator-checkpoint-
+reconciliation` (#404, Item D) → `claude/coordinator-task-selection` (#405, Item B/C).
+Ingen av dessa är mergad än; ingen blockerar något utanför kedjan. #405:s `select_next_task()`
+anropar `app.mainai_execution.graph.next_ready_task()` direkt (fanns redan — dubblerades
+inte) och lutar sig på `app.worker.py`s redan levande retry-tick för Item E:s "due retry"-fall
+istället för en egen fråga. Item E i övrigt: redan fullt implementerat av befintlig
+Supervisor Goal Lease-infrastruktur, ingen ny kod behövs — kort dokumenterat här, inte i egen
+branch. Items F/G ej påbörjade.
+
 ## Section B, nästa steg: stateless GitHub-bevisrapport (2026-11-14)
 
 **Ny branch: `claude/github-work-queue-evidence-report`** (PR #396, bas: `claude/github-
