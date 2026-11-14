@@ -14,8 +14,15 @@ RLS: `mainai_app` (the restricted runtime role every request/worker actually run
 REVOKEd everything except SELECT on this table — no application code path, however it is
 reached, can ever INSERT, UPDATE or DELETE a row here. The only way a row exists is an
 out-of-band action against the migration/admin connection, never the running application.
-`app/rls.py`'s `apply_mainai_execution_privileges()` re-verifies this exact fact at every
-boot, the same discipline already applied to every other privilege-narrowed table.
+
+The REVOKE itself is deliberately NOT in this migration: `mainai_app` is a cluster-level role
+created by a separate bootstrap step (`db-init/01-app-role.sh`), not by any migration, and is
+not guaranteed to exist yet when migrations run in isolation (e.g. the CI "Alembic migration
+check" job runs `alembic upgrade head` against a fresh database with no such role). Every
+other privilege-narrowed table in this codebase follows the same rule — see
+`app/rls.py`'s `apply_mainai_execution_privileges()`, which performs AND re-verifies this exact
+REVOKE at every boot, the same discipline already applied to every other privilege-narrowed
+table (that function is where this table's own REVOKE statement lives, not here).
 """
 
 from alembic import op
@@ -45,9 +52,6 @@ def upgrade() -> None:
                 OR (status = 'revoked' AND revoked_at IS NOT NULL AND revoked_by IS NOT NULL)
             )
         );
-
-        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
-            ON system_activation_authorizations FROM mainai_app;
         """
     )
 

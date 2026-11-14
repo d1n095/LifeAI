@@ -967,6 +967,17 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_mainai_execution_children() TO mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON agent_work_assignment_events FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_agent_coordination_children() TO mainai_app"))
+        # Migration 0069 (System Activation Authorization): SELECT only -- no application code
+        # path, however reached, may ever write a row here (see that migration's own module
+        # docstring and app.models.agent_coordination.SystemActivationAuthorization). The REVOKE
+        # lives here rather than in the migration itself because mainai_app may not exist yet
+        # when migrations run in isolation (e.g. the "Alembic migration check" CI job).
+        conn.execute(
+            text(
+                "REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER "
+                "ON system_activation_authorizations FROM mainai_app"
+            )
+        )
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON capability_observation_events FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_capability_reality_children() TO mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_memory_notes FROM mainai_app"))
