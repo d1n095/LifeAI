@@ -14,7 +14,7 @@ sektioner nedan är inte en fullständig aktuell PR-lista.
 
 | Branch | PR | Status | Bas / beroende | Scope / ägare |
 |---|---|---|---|---|
-| `claude/frontend-npm-audit-baseline-consolidation` | [#323](https://github.com/d1n095/LifeAI/pull/323) | **Öppen, ready-for-review** | `claude/det-kommer-mer-879lcm` | Claude: frontend npm-audit remediation; owns dependency and lockfile changes. #376 does not alter dependencies or weaken the audit gate. |
+| `claude/frontend-npm-audit-baseline-consolidation` | [#323](https://github.com/d1n095/LifeAI/pull/323) | **Open, ready-for-review; HEAD `04b27e9585ea9def58d24407f7000a51577c89bf`; audit and aggregate checks pass; no review or assignee** | `claude/det-kommer-mer-879lcm` | Frontend npm-audit baseline remediation and Playwright runner pin. PR author is `d1n095`; no separate assignee is recorded. #376 does not alter dependencies or weaken the audit gate. |
 | `claude/ci-e2e-runner-pin` | [#344](https://github.com/d1n095/LifeAI/pull/344) | **Öppen, draft** | `claude/founder-alpha-blueprint-draft` @ `db83ab9166a4d31fb88db41f66ea039d4947da4f` | Claude: pins the three browser-installing CI jobs to `ubuntu-24.04`; exact `.github/workflows/ci.yml` overlap with #376. |
 | `claude/founder-alpha-blueprint-draft` | [#340](https://github.com/d1n095/LifeAI/pull/340) | **Öppen, ready-for-review; HEAD `add0da831c101af7061b7cf6309ce8041ed969aa`; exact-head required checks pass** | `claude/embedding-space-local-model` @ `fdf364735bc0e7f0e39ebccef928145304100659` | Claude: source-grounded, versioned Founder Blueprint draft and approval flow; required upstream embedding and original-integrity evidence includes #349/#351. |
 | `codex/pr333-embedding-identity-provenance-fix` | [#349](https://github.com/d1n095/LifeAI/pull/349) | **Öppen, draft; HEAD `6598559b138e0b7b4b9af0a2da80d25b1df8d6f8`; observed exact-head required checks pass** | `claude/embedding-space-local-model` @ `fdf364735bc0e7f0e39ebccef928145304100659` | Codex: embedding identity/provenance correction; prerequisite evidence for interpreting Founder Alpha embeddings; not independently approved by CI. |
@@ -67,10 +67,20 @@ worker process and lease expiry, plus read-only recovery outcomes from the exist
 API. Raw recovery evidence stays hidden; no new execution controls are added. Exact-SHA CI run
 `43624482616` completed: backend 2359 passed/1 skipped; full-stack Playwright 22 passed/1
 skipped plus 2 rate-limit tests; frontend lint/typecheck/build, migration, RLS/session,
-account-lifecycle, and same-origin proxy checks passed. npm-audit and aggregate required checks
-remain failed on advisories owned by #323. A coordination question on the canonical
-assignment/attempt/authorization mapping was posted to #406; external-agent controls remain
-blocked on that contract.
+account-lifecycle, and same-origin proxy checks passed. The sole non-aggregate failed job was
+`Frontend — npm audit`: `npm ci` reported 24 advisories (17 moderate, 6 high, 1 critical), and
+the policy script rejected unallowlisted high/critical advisories; `All required checks passed`
+failed only as the aggregate of that failure. #323 is the existing deps-only remediation
+candidate on the same shared baseline: it updates Next/eslint-config-next and targeted
+transitive dependencies without weakening the gate, and its audit plus aggregate checks pass.
+It remains open and has no independent review or assignee, so remediation is not integrated or
+accepted yet. #376
+changes no package manifest, lockfile, or audit policy and can continue independent work, but
+its required gate remains blocked until #323 is independently reviewed and merged; then
+revalidate #376 against the updated base. The documentation-only PR event for checkpoint SHA
+`c5f17bf9d8e2a206386f06de43a76e01bf8d0b68` is `action_required` with no jobs started, not a
+test result. A coordination question on the canonical assignment/attempt/authorization mapping
+was posted to #406; external-agent controls remain blocked on that contract.
 
 **Verifierad överlappning:** #344 och #376 ändrar samma tre `runs-on`-rader i
 `.github/workflows/ci.yml` till `ubuntu-24.04`. Båda ändringarna behövs för att deras separata
