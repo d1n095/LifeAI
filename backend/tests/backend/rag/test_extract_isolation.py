@@ -54,6 +54,7 @@ def test_child_receives_no_parent_secrets_or_attacker_filename(
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "PYTHONHASHSEED": "0",
+        "PYTHONDONTWRITEBYTECODE": "1",
     }
     assert captured["command"][-1] == "input.txt"
     assert captured["shell"] is None
