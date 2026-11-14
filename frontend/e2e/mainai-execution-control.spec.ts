@@ -131,7 +131,7 @@ test.describe("MainAI execution control surface", () => {
     await expect(page.getByText("Kontroll targeted_tests: godkänd")).toBeVisible();
     await expect(page.getByText("PRIVATE_RAW_TEST_OUTPUT_SENTINEL")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Begär avbrytning" })).toBeVisible();
-    await expect(page.getByText(/ingen manuell resume-API/)).toBeVisible();
+    await expect(page.getByText(/inget manuellt resume-API/)).toBeVisible();
   });
 
   test("uses the owner-scoped job cancellation request only after Founder confirmation", async ({ page }) => {
