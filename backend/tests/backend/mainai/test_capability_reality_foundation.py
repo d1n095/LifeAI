@@ -155,7 +155,7 @@ def test_list_capability_gaps_excludes_verified_available_and_includes_everythin
 # duplication: the agent_coordination bridge.
 
 def test_sync_agent_adapter_capability_never_reports_verified_available_even_when_locally_installed(superuser_db):
-    """All three real providers may genuinely be installed on the machine running this test
+    """Every registered real provider may genuinely be installed on the machine running this test
     (see test_agent_real_execution_bridge.py's own test_no_real_provider_is_enabled_by_default)
     -- this proves the mission's own hard rule: an executable existing, even a genuinely
     enabled one, is still never verification on its own."""
