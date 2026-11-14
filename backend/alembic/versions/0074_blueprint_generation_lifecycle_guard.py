@@ -37,7 +37,7 @@ exact trigger body.
 
 from alembic import op
 
-revision = "0074_blueprint_generation_lifecycle_guard"
+revision = "0074_blueprint_lifecycle_guard"
 down_revision = "0073_blueprint_draft_idempotency"
 branch_labels = None
 depends_on = None
