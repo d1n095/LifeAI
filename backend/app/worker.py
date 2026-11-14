@@ -42,7 +42,7 @@ from app.jobs.handlers.corpus_review import run_corpus_review_job
 from app.jobs.handlers.message_sequence_backfill import MESSAGE_SEQUENCE_BACKFILL_JOB_TYPE, run_message_sequence_backfill_job
 from app.jobs.handlers.message_source_backfill import MESSAGE_SOURCE_BACKFILL_JOB_TYPE, run_message_source_backfill_job
 from app.jobs.heartbeat import record_worker_heartbeat
-from app.jobs.lease import claim_next_job
+from app.jobs.lease import ImportJobLeaseLostError, claim_next_job, renew_lease
 from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.jobs.service import mark_failed, record_claimed
@@ -81,6 +81,7 @@ from app.request_context import current_user_id
 from app.rag.zip_import import ZipSecurityError
 
 logger = logging.getLogger("mainai.worker")
+_WORKER_PROCESS_INSTANCE_ID = uuid.uuid4().hex
 
 # knowledge_import_jobs has FORCE ROW LEVEL SECURITY (see alembic/versions/0006), scoped to
 # `owner_id = current_setting('app.current_user_id')` — correct for a single request acting
@@ -94,10 +95,19 @@ _ClaimSession = sessionmaker(bind=migration_engine)
 
 
 def _worker_id(settings) -> str:
-    return settings.worker_id or socket.gethostname()
+    # A configured name/hostname identifies a deployment slot, not one process lifetime. A
+    # fresh nonce prevents a restarted process from satisfying the stale predecessor's
+    # locked_by fence merely because both share the same hostname.
+    base = settings.worker_id or socket.gethostname()
+    return f"{base[:94]}:{_WORKER_PROCESS_INSTANCE_ID}"
 
 
-async def process_claimed_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID) -> None:
+async def process_claimed_job(
+    db: Session,
+    job_id: uuid.UUID,
+    owner_id: uuid.UUID,
+    worker_id: str | None = None,
+) -> None:
     """Runs run_import_job to completion for one already-claimed job, retrying transient
     orchestration-level failures with STEG 11's existing backoff policy (app/jobs/retry.py) —
     a straight port of the retry loop that used to live inside library_import.py's
@@ -106,18 +116,41 @@ async def process_claimed_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUI
     written to the job row itself, exactly as before."""
     while True:
         try:
-            await run_import_job(db, job_id, owner_id)
+            await run_import_job(db, job_id, owner_id, claim_worker_id=worker_id)
+            return
+        except ImportJobLeaseLostError:
+            # Never translate a stale worker's loss of authority into a retry or terminal
+            # status. The current claimant (or a future reclaim) alone owns subsequent writes.
+            db.rollback()
+            logger.warning("Import %s: lease lost; stale worker stops without mutation.", job_id)
             return
         except Exception as exc:  # noqa: BLE001 - the job row is the only place this failure can safely surface
             db.rollback()
             job = db.get(ImportJob, job_id)
             if job is None:
                 return
+            if worker_id is not None and not renew_lease(
+                db,
+                job_id,
+                worker_id,
+                get_settings().worker_lease_seconds,
+                commit=False,
+            ):
+                db.rollback()
+                logger.warning(
+                    "Import %s: exception arrived after lease loss; refusing stale outcome write.",
+                    job_id,
+                )
+                return
+            db.refresh(job)
             transient = is_transient_error(exc)
             job.last_failure_transient = transient
             if transient and job.attempt_count + 1 < job.max_attempts:
                 job.attempt_count += 1
-                job.status = ImportJobStatus.pending
+                # Keep this authoritative claim while the bounded in-process backoff runs.
+                # Marking it pending here would let another worker claim the same job before
+                # this loop retries it.
+                job.status = ImportJobStatus.running
                 db.add(job)
                 db.commit()
                 delay = compute_backoff_seconds(job.attempt_count)
@@ -834,7 +867,7 @@ class Worker:
             logger.info("Worker %s: hämtade jobb %s.", self.worker_id, job_id)
             db = SessionLocal()
             try:
-                await process_claimed_job(db, job_id, owner_id)
+                await process_claimed_job(db, job_id, owner_id, self.worker_id)
             finally:
                 db.close()
             return True
