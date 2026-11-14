@@ -6,6 +6,20 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Blueprint Mission 5: Founder-decision/correction recognition (2026-11-14)
+
+**Ny branch: `claude/blueprint-founder-decision-recognition`** (PR #398, bas: #393
+`claude/blueprint-evaluation-harness` — sjätte lagret i samma `_generate()`-kedja som
+#387→#388→#389→#390→#393). Rekommenderad mergeordning oförändrad, nu förlängd: #387 → #388 →
+#389 → #390 → #393 → #398.
+
+Stängde direktivets sista öppna Blueprint-intelligensuppgift utan ny datamodell: `app.models.
+document.KnowledgeClassification.decisions` + `app.routers.workbench`s befintliga "decision"-
+sparningsväg + att varje retrieval-hit redan bar `classification` (app/rag/vector_store.py)
+fanns redan — Blueprint läste bara aldrig det fältet. En "korrigering" är bara en nyare
+`decisions`-källa, där den gamla redan märks `[KÄLLSTATUS: superseded]` via den BEFINTLIGA
+Mission 2-mekanismen (#388) — inget nytt begrepp behövdes. Se PR #398 för detaljer.
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en
