@@ -61,6 +61,14 @@ resume/instruction; unsupported controls remain unavailable. #397 and #403–#40
 extend existing lifecycle/evidence paths but do not by themselves resolve that runtime-control
 decision.
 
+**#376 current increment (2026-11-14):** application SHA
+`60910d56670d5bacc295b264936258beebd34810` adds Founder-gated visibility of the MainAI job's
+worker process and lease expiry, plus read-only recovery outcomes from the existing recovery
+API. Raw recovery evidence stays hidden; no new execution controls are added. Exact-SHA CI run
+`43624482616` is in progress. A coordination question on the canonical assignment/attempt/
+authorization mapping was posted to #406; external-agent controls remain blocked on that
+contract.
+
 **Verifierad överlappning:** #344 och #376 ändrar samma tre `runs-on`-rader i
 `.github/workflows/ci.yml` till `ubuntu-24.04`. Båda ändringarna behövs för att deras separata
 CI-körningar ska kunna installera Playwright Chromium, men #344 riktar sig mot
