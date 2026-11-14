@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     # Agent coding branches need the same required checks as mainline pushes.
     # Explicit prefixes (not a catch-all) — GitHub branch filters have no brace-expansion.
