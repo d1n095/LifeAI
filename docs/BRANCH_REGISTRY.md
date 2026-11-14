@@ -8145,3 +8145,112 @@ lease-omverifiering före varje durabel skrivning. **P1 (icke-blockerande, för 
 "Autonomous Gap → Child-Task Generation")**: `create_plan()` är full-supersession-bara — ingen
 primitiv för att foga in EN ny child-task under en befintlig plan utan att kansellera alla
 syskon-tasks; måste byggas innan den funktionen kan börjas.
+
+## KÄND LUCKA I REGISTRET (upptäckt 2026-11-14) — PR #60–#407 ej katalogiserade här
+
+Det här dokumentets senaste post innan den här raden är daterad 2026-08-31 (PR-numrering runt
+#236). Mellan den posten och "Founder Security Review — PR #408–#410" nedan har ett okänt
+antal ytterligare brancher/PR:er (minst upp till #407, baserat på PR-numreringen för de tre
+nedan) skapats, mergats och/eller stängts UTAN att det syns här. Den här luckan upptäcktes
+medan registret uppdaterades för #408–#410 — den flaggas explicit istället för att tystas
+ner eller gissas igen, i linje med `CLAUDE.md`s eget krav ("Om registret är föråldrat ...
+uppdatera det INNAN du fortsätter"). Att rekonstruera hela #60–#407-spannet är ett separat,
+betydande arbete (kräver `mcp__github__list_pull_requests`/`pull_request_read` över hela
+intervallet) som INTE ingick i den säkerhetsgranskning som gav upphov till #408–#410, och görs
+därför inte här — men bör göras som egen uppgift innan registret igen kan litas på som en
+fullständig karta.
+
+## Founder Security Review — PR #408–#410 (2026-11-14)
+
+Grundardirektiv "FOUNDER SECURITY REVIEW — PR #408–#410", byggt vidare på ett tidigare
+"FOUNDER DIRECTIVE — RESOLVE EXECUTION AUTHORITY AND SECURITY GAPS"-direktiv. Fem prioriteter:
+(1) aktiveringsgrind-täckning, (2) separera auktorisering från konfiguration, (3) Security
+Kernel-verklighet (RLS ≠ fullständig isolering), (4) kanonisk exekveringsintegration
+(`MainAITask`/`mainai_jobs` förblir auktoritativ), (5) verifiering mot riktig databas/CI.
+Grundarens Founder Alpha förblir explicit NOT READY och `first_cycle_go` förblir avstängd —
+inget av detta mergas eller deployas som del av granskningen.
+
+### PR #408 — `claude/first-cycle-go-activation-gate` — Priority 1 + 2 (aktiveringsgrind + auktorisering)
+
+**Status: CI grön, redo för granskning. Ej mergad.**
+
+- Stänger Priority 1:s verkliga bypass: `dispatch_assignment()` tog en caller-konstruerad
+  `AgentAdapter` och anropade aldrig `get_real_adapter()` internt — en direkt-konstruerad
+  `LocalCLIAdapter` kringgick alltså varje grind som bara satt i fabriken. Fixat genom att
+  flytta grinden till adapterns egen `start_assignment()` — den lägsta punkten utan något
+  sätt att anropa runt den.
+- Stänger Priority 2: ny `system_activation_authorizations`-tabell (migration 0069),
+  SELECT-bara för `mainai_app` (ingen applikationskodväg kan någonsin INSERTa/UPDATEa/DELETEa
+  en rad — enda sättet en rad existerar är en out-of-band admin-åtgärd). Ny
+  `require_system_activation_authority(db, *, action)` kräver BÅDE `FIRST_CYCLE_GO=true` OCH
+  en aktuell, icke-utgången rad i tabellen — ingen av de två ensam räcker.
+- Huvudkommit: `0c88e228` (föregås av `304a03b9` → `8798aa09` → `0c88e228` på samma branch;
+  de två senare var egna fix-commits inom samma PR, se nedan).
+- **Två riktiga CI-fynd hittade och fixade under den här granskningen, inte bara
+  dokumentationsarbete:**
+  1. `8798aa09`: migration 0069:s egen `REVOKE ... FROM mainai_app`-sats fick
+     "Backend — Alembic migration check" att faila med
+     `psycopg2.errors.UndefinedObject: role "mainai_app" does not exist` — den jobbet kör
+     migrationer mot en färsk databas där `mainai_app`-rollen (skapad av ett separat
+     `db-init/01-app-role.sh`-bootstrap-steg) inte ännu finns. Fixat genom att flytta REVOKE:n
+     till `app/rls.py`s `apply_mainai_execution_privileges()` istället — exakt samma mönster
+     varje annan privilege-narrowed tabell i kodbasen redan följer; ingen migration refererar
+     `mainai_app` direkt av just det här skälet.
+  2. `0c88e228`: `tests/backend/mainai/test_system_activation_authorization.py`s egen
+     `_ready_running_assignment()`-hjälpfunktion förtransitionerade assignment:en hela vägen
+     till `running` INNAN `dispatch_assignment()` anropades — vilket gjorde att
+     `agent_availability()`s concurrency-räkning redan såg assignment:en som aktiv och
+     avvisade den som `AGENT_UNAVAILABLE` INNAN grinden som faktiskt testades nåddes alls
+     (samma grundfakta som PR #409:s fix nedan byggde på: `create_work_assignment()` lyfter
+     redan en beroendefri assignment till `ready` automatiskt). Fixat genom att låta
+     hjälpfunktionen (nu `_ready_assignment()`) stanna vid `ready` och låta
+     `dispatch_assignment()` själv äga `ready -> waiting_agent -> running`-övergången.
+- **Verifierat grönt i riktig CI (inte lokalt, ingen Postgres i den här sessionens sandbox):**
+  "Backend — Alembic migration check" grön på båda parallella körningar; "Backend —
+  unit/integration tests" grön på båda (25–30 min körtid, inklusive de nya
+  `test_system_activation_authorization.py`-testerna: bypass-beviset, positiv kontroll, båda
+  negativa kontrollerna för "env var ensam"/"DB-bevis ensam"); "Backend — RLS &
+  session-security tests" och "Backend — account lifecycle & rate-limit tests" gröna.
+- **Kända, orelaterade CI-avvikelser (inte nya, inte den här PR:ns fel):** "Frontend — npm
+  audit" (redan spårad `next`-pinning-sårbarhet, se `CLAUDE.md`s eget exempel om PR #9) och
+  "E2E — Playwright/same-origin proxy" (samma driftmönster syns identiskt på #409/#410, alltså
+  miljödrift, inte en regression från den här branchen).
+
+### PR #409 — `claude/compromised-worker-authority-tests` — Priority 5 (verifiering)
+
+**Status: CI grön (bortsett från samma kända drift ovan), redo för granskning. Ej mergad.**
+Huvudkommit: `105013e8`.
+
+- Kompromissad-worker-eskaleringstester. Två RIKTIGA CI-fynd hittade och fixade (inte
+  gissningar): (1) `apply_dispatch_result()` → `record_assignment_execution()` kräver
+  `assignment.task_id` (NOT NULL på `IntelligenceExecution.task_id`) — testhjälparens
+  `task_id=None`-default fixat till obligatoriskt param + en riktig gated/non-gated
+  task-uppsättning; (2) en felaktig förväntan att en färsk assignment startar vid `planned`
+  — den lyfts faktiskt automatiskt till `ready` av `create_work_assignment()`s egen
+  `_refresh_dependency_state()`. Båda fixade i samma commit.
+- `tests/security/test_rls_isolation_agent_work_assignments.py`: cross-owner read/write-
+  isolering, opåverkad av ovanstående (anropar aldrig `apply_dispatch_result()`).
+
+### PR #410 — `claude/execution-authority-canonical-mapping` — Priority 3 + 4 (Security Kernel-verklighet + kanonisk integration)
+
+**Status: dokumentation, CI grön (bortsett från samma kända drift). Ej mergad.**
+Huvudkommit: `a5e5e5d2`.
+
+- Utökar `docs/LIFE_EXECUTION_AUTHORITY_CANONICAL_MAPPING.md` med Priority 3:s
+  täckningskarta (databas/RLS existerar och är verkligt enforced; credential-/sandbox-/
+  filesystem-/nätverksisolering saknas idag; cross-tenant är RLS-scopad till DB:n, inget mer)
+  och Priority 4:s minimala integrationskontrakt för `AgentWorkAssignment` ↔ kanonisk
+  exekvering (ny nullable `mainai_job_id`-FK, single-creator-same-transaction-regel,
+  `task_id` blir obligatorisk för den här vägen och återanvänder `require_task_approval()`,
+  cancellation/checkpoints/auditability förblir `MainAITask.cancel_task()`/
+  `MainAICheckpoint`s ansvar — inget parallellt godkännande- eller ägarskapssystem).
+  Medvetet design-only, ingen implementation, som direktivet bad om.
+
+### Rekommenderad mergeordning och beroenden
+
+Inga inbördes kodberoenden mellan #408/#409/#410 — alla tre är grenade direkt från
+`claude/det-kommer-mer-879lcm` och kan mergas i valfri ordning eller parallellt. #408 bör
+granskas först eftersom #409/#410 båda bygger vidare på resonemang #408 introducerar
+(aktiveringsgrinden respektive dess egna testers mönster), men ingen av dem är tekniskt
+blockerad av att vänta på en annan. Ingen branch väntar på ett beroende — inget att notera
+under "Merge-regeln" för den här omgången.
