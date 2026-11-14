@@ -38,7 +38,7 @@ from app.request_context import current_user_id as current_user_id_var
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_version import KnowledgeVersion
 from app.rag.claims import extract_claims_for_document
-from app.rag.extract_isolated import extract_text_isolated
+from app.rag.extract_isolated import extract_text_isolated as extract_text
 from app.rag.ingest import index_document
 from app.rag import media_import
 from app.rag.zip_import import ZipSecurityError, sha256_bytes, validate_and_extract_zip
@@ -290,7 +290,7 @@ async def _resume_incomplete_document(
         db.add(document)
         db.commit()
         try:
-            text_content = extract_text_isolated(filename, content)
+            text_content = extract_text(filename, content)
         except Exception as exc:  # noqa: BLE001 - same per-file-failure handling as a first attempt
             document.status = IndexStatus.extraction_failed
             document.error_message = f"Kunde inte extrahera text: {exc}"
@@ -591,7 +591,7 @@ async def _import_one_file(
         db.add(document)
         db.commit()
         try:
-            text_content = extract_text_isolated(filename, content)
+            text_content = extract_text(filename, content)
         except Exception as exc:  # noqa: BLE001 - one file's extraction failure must not abort the batch
             # P1: reclassified from the old undifferentiated `failed`  the file's CONTENT is
             # the problem here, not the provider or storage, so this is terminal too (see
