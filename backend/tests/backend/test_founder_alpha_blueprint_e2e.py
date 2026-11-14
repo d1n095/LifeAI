@@ -26,13 +26,13 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from sqlalchemy import func, select
-
 from app.config import get_settings
 from app.models.blueprint_draft import BlueprintDraft
 from app.models.document import ActiveTruthStatus, Document, DocumentSource
 from app.models.document_chunk import DocumentChunk
 from app.models.user import User
+from sqlalchemy import func, select
+from sqlalchemy import text as sa_text
 
 FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
@@ -668,3 +668,202 @@ def test_blueprint_contradicting_sources_are_flagged_as_conflicting(client, supe
     sent_messages = _fake_model["messages"][-1]
     system_msg = next(m.content for m in sent_messages if m.role == "system")
     assert "MOTSÄGELSER" in system_msg  # app/rag/trust.py's CONFLICT_INSTRUCTION
+
+
+# --- Mission 3 (Life MainAI Intelligence program): Blueprint generation idempotency — a
+# client retry (double-click, network timeout) must not dispatch a second real model call
+# or create a second version. See app/blueprint/service.py's claim_blueprint_generation()
+# docstring for the full state machine this exercises. ---
+
+
+def test_blueprint_no_idempotency_key_is_unaffected(client, superuser_db, _fake_model):
+    """Baseline regression: omitting idempotency_key must behave exactly as before Mission 3
+    — every call is its own fresh generation, no dedup applied."""
+    founder_id = _founder_id(superuser_db)
+    title = f"NoKey {uuid.uuid4().hex[:6]}"
+    _make_indexed_source(superuser_db, founder_id, title, text="Source.")
+    csrf = _login(client)
+
+    res1 = client.post("/api/blueprint/drafts", json={"title": title}, headers={"X-CSRF-Token": csrf})
+    res2 = client.post("/api/blueprint/drafts", json={"title": title}, headers={"X-CSRF-Token": csrf})
+    assert res1.status_code == 201 and res2.status_code == 201
+    assert res1.json()["id"] != res2.json()["id"]
+    assert _fake_model["calls"] == 2
+
+
+def test_blueprint_idempotency_key_replay_skips_second_model_call(client, superuser_db, _fake_model):
+    """The core Mission 3 scenario: a client retry (same idempotency_key) after the first
+    request already succeeded must return the SAME draft, with HTTP 200 (nothing new
+    created), and must NOT dispatch a second real model call."""
+    founder_id = _founder_id(superuser_db)
+    title = f"Replay {uuid.uuid4().hex[:6]}"
+    _make_indexed_source(superuser_db, founder_id, title, text="Source.")
+    csrf = _login(client)
+    key = f"idem-{uuid.uuid4()}"
+
+    res1 = client.post(
+        "/api/blueprint/drafts", json={"title": title, "idempotency_key": key}, headers={"X-CSRF-Token": csrf}
+    )
+    assert res1.status_code == 201, res1.text
+    assert _fake_model["calls"] == 1
+
+    res2 = client.post(
+        "/api/blueprint/drafts", json={"title": title, "idempotency_key": key}, headers={"X-CSRF-Token": csrf}
+    )
+    assert res2.status_code == 200, res2.text  # nothing new created
+    assert res2.json()["id"] == res1.json()["id"]
+    assert res2.json()["version"] == res1.json()["version"]
+    assert _fake_model["calls"] == 1  # the retry never reached the provider
+
+    rows = _draft_rows(superuser_db, founder_id, title)
+    assert len(rows) == 1  # exactly one row, no duplicate version
+
+
+def test_blueprint_failed_synthesis_marks_claim_failed_not_left_dangling(client, superuser_db, _fake_model):
+    """An interrupted/failed synthesis under an idempotency key must be durably recorded as
+    failed, not left in 'generating' until a multi-minute lease eventually expires."""
+    founder_id = _founder_id(superuser_db)
+    title = f"FailedClaim {uuid.uuid4().hex[:6]}"
+    _make_indexed_source(superuser_db, founder_id, title, text="Source.")
+    csrf = _login(client)
+    key = f"idem-fail-{uuid.uuid4()}"
+
+    _fake_model["fail"] = True
+    res = client.post(
+        "/api/blueprint/drafts", json={"title": title, "idempotency_key": key}, headers={"X-CSRF-Token": csrf}
+    )
+    assert res.status_code == 503, res.text
+
+    from app.models.blueprint_draft import BlueprintDraft
+
+    row = superuser_db.execute(
+        select(BlueprintDraft).where(
+            BlueprintDraft.owner_id == founder_id, BlueprintDraft.idempotency_key == key
+        )
+    ).scalar_one()
+    assert row.status == "failed"
+    assert "generation_error" in row.provenance
+    assert row.lease_expires_at is None
+
+
+def test_blueprint_retry_after_failure_with_same_key_succeeds(client, superuser_db, _fake_model):
+    """Explicit retry/recovery semantics: a retry under the same key after a failed attempt
+    must get a fresh real attempt, not be stuck behind the earlier failure forever."""
+    founder_id = _founder_id(superuser_db)
+    title = f"RetryAfterFail {uuid.uuid4().hex[:6]}"
+    _make_indexed_source(superuser_db, founder_id, title, text="Source.")
+    csrf = _login(client)
+    key = f"idem-retry-{uuid.uuid4()}"
+
+    _fake_model["fail"] = True
+    res1 = client.post(
+        "/api/blueprint/drafts", json={"title": title, "idempotency_key": key}, headers={"X-CSRF-Token": csrf}
+    )
+    assert res1.status_code == 503, res1.text
+
+    _fake_model["fail"] = False
+    res2 = client.post(
+        "/api/blueprint/drafts", json={"title": title, "idempotency_key": key}, headers={"X-CSRF-Token": csrf}
+    )
+    assert res2.status_code == 201, res2.text
+    assert res2.json()["status"] == "draft"
+    assert _fake_model["calls"] == 2  # one failed attempt, one real retry — not deduplicated
+
+
+def test_claim_blueprint_generation_steals_an_expired_lease(superuser_db, make_verified_user):
+    """A worker/process restart mid-synthesis must not permanently strand the idempotency key
+    behind a dead claim — once its lease expires, a later attempt reclaims it."""
+    from datetime import datetime, timedelta
+
+    from app.blueprint.service import claim_blueprint_generation
+
+    user, _ = make_verified_user()
+    key = f"idem-expired-{uuid.uuid4()}"
+    row, claimed = claim_blueprint_generation(
+        superuser_db, owner_id=user.id, title="Expired lease", idempotency_key=key
+    )
+    assert claimed is True
+    row.lease_expires_at = datetime.utcnow() - timedelta(seconds=1)  # noqa: DTZ003 - simulate a dead holder, naive UTC to match the column
+    superuser_db.commit()
+
+    stolen_row, claimed_again = claim_blueprint_generation(
+        superuser_db, owner_id=user.id, title="Expired lease", idempotency_key=key
+    )
+    assert claimed_again is True
+    assert stolen_row.id == row.id
+    assert stolen_row.lease_expires_at > datetime.utcnow()  # noqa: DTZ003 - naive UTC, matching the column
+
+
+def test_claim_blueprint_generation_live_lease_raises_in_progress(superuser_db, make_verified_user):
+    """A DIFFERENT caller's still-live claim must be refused, not silently joined or retried —
+    the router surfaces this as 409."""
+    from app.blueprint.service import (
+        BlueprintGenerationInProgress,
+        claim_blueprint_generation,
+    )
+
+    user, _ = make_verified_user()
+    key = f"idem-live-{uuid.uuid4()}"
+    claim_blueprint_generation(superuser_db, owner_id=user.id, title="Live lease", idempotency_key=key)
+    superuser_db.commit()
+
+    with pytest.raises(BlueprintGenerationInProgress):
+        claim_blueprint_generation(superuser_db, owner_id=user.id, title="Live lease", idempotency_key=key)
+
+
+def test_claim_blueprint_generation_concurrent_same_key_exactly_one_wins(superuser_db, make_verified_user):
+    """Real two-session Postgres concurrency, not manual signalling: two threads race the
+    exact same idempotency key through a threading.Barrier, each on its OWN SessionLocal()
+    connection (the same idiom as test_partial_plan_insertion.py's concurrent-insert test).
+    Exactly one must win the fresh claim; the other must see it as in-progress."""
+    import threading
+
+    from app.blueprint.service import (
+        BlueprintGenerationInProgress,
+        claim_blueprint_generation,
+    )
+    from app.db import SessionLocal
+    from app.request_context import current_user_id as current_user_id_var
+
+    user, _ = make_verified_user()
+    user_id = user.id
+    key = f"idem-race-{uuid.uuid4()}"
+    barrier = threading.Barrier(2, timeout=5)
+    results: list[str] = []
+    errors: list[str] = []
+
+    def _worker():
+        session = SessionLocal()
+        try:
+            current_user_id_var.set(str(user_id))
+            session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user_id)})
+            barrier.wait()
+            try:
+                _row, claimed = claim_blueprint_generation(
+                    session, owner_id=user_id, title="Race", idempotency_key=key
+                )
+                session.commit()
+                results.append("claimed" if claimed else "replayed")
+            except BlueprintGenerationInProgress:
+                session.commit()
+                results.append("in_progress")
+        except Exception as exc:  # noqa: BLE001 - captured for the assertion below
+            errors.append(repr(exc))
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=_worker), threading.Thread(target=_worker)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert errors == [], f"neither concurrent call may raise unexpectedly, got: {errors}"
+    assert sorted(results) == ["claimed", "in_progress"], (
+        f"exactly one caller claims the fresh row, the other sees it as in-progress, got: {results}"
+    )
+
+    row_count = superuser_db.execute(
+        sa_text("SELECT count(*) FROM blueprint_drafts WHERE idempotency_key = :key"), {"key": key}
+    ).scalar()
+    assert row_count == 1, "exactly one row, no duplicate created by the race"
