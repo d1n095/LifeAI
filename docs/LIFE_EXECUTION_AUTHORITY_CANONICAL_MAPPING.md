@@ -78,16 +78,64 @@ name to exist, the natural candidate to rename/document as such is `app/rls.py` 
 boot-time privilege-verification step in `apply_mainai_execution_privileges()` — not a new
 component.
 
+## Minimal integration contract for `AgentWorkAssignment` ↔ canonical execution (Priority 4)
+
+A second Founder security review asked for the minimal contract design, not an implementation
+(kept out of this PR on purpose — a real architecture change belongs in its own reviewable
+increment, same discipline as everything else recorded here). Concretely:
+
+1. **One new column**: `AgentWorkAssignment.mainai_job_id` — nullable `UUID REFERENCES
+   mainai_jobs(id) ON DELETE SET NULL`. Nullable because every assignment today (100%) has no
+   such backing job; only assignments created via the future migration path below would ever
+   set it. This is the join point Copilot's own question on #406 asked for, and the answer
+   today is "it doesn't exist yet" — this column is what would make it exist.
+2. **Single creator, same transaction**: the NEW task_type's dispatch handler in
+   `execution_job.py` (not any other caller) is the only place that creates an
+   `AgentWorkAssignment` row, and does so in the SAME transaction as the `mainai_jobs` row it
+   backs — never created ahead of time or speculatively. This is what prevents split-brain
+   state: an `AgentWorkAssignment` with `mainai_job_id` set is never orphaned from the job
+   that owns it, because the two rows are born together or not at all.
+3. **No parallel approval**: `task_id` becomes REQUIRED (not optional) for any assignment
+   created through this path — `evaluate_dispatch_readiness()` already delegates to
+   `require_task_approval()` exactly when `task_id` is set (`dispatch.py`'s own documented
+   behavior, item 5). Nothing new is built; the existing gate is simply never bypassable by
+   leaving `task_id` unset for this specific creation path.
+4. **Ownership stays with MainAITask for cancellation, checkpoints, auditability**:
+   `MainAITask.cancel_task()` (`executor.py:285`) remains the ONE entry point; for a task
+   backed by an `AgentWorkAssignment`, its cooperative-cancel branch would additionally call
+   `agent_coordination.service.transition_status(assignment, "cancelled")` as one more step of
+   the SAME cancellation, never a second, independently-triggerable cancel path.
+   `MainAICheckpoint` remains canonical; `AgentWorkAssignment.status` becomes a read-only
+   reflection of where the external agent is, never a second source of truth about whether the
+   work itself is done. Both `MainAITaskEvent` and `AgentWorkAssignmentEvent` continue to
+   exist afterward — the job owns "what happened to the work," the assignment owns "which
+   external agent handled it" — but only the new dispatch handler writes both, in that order,
+   inside one transaction.
+
+This keeps `MainAITask`/`mainai_jobs` as the sole execution authority exactly as decided above;
+`agent_coordination` becomes a backing mechanism it can delegate to, never a second one.
+
 ## Code touched under this directive so far (exact SHAs)
 
-- PR #408 (`claude/first-cycle-go-activation-gate`, `b05114f`): `first_cycle_go` real,
-  fail-closed gate, wired into `get_real_adapter()`.
-- PR #409 (`claude/compromised-worker-authority-tests`, `ccbe63e`): RLS isolation test for
+- PR #408 (`claude/first-cycle-go-activation-gate`, now `304a03b`): `first_cycle_go` fail-closed
+  gate -- extended past its first pass (`b05114f`, env-var-only) after a security review found
+  that insufficient. Now: the enforcement point lives in `LocalCLIAdapter.start_assignment()`
+  itself (closing the `dispatch_assignment()` bypass a call-graph trace found -- that function
+  takes an adapter as a caller-supplied parameter and never calls `get_real_adapter()`), and a
+  new `system_activation_authorizations` table (migration 0069, `mainai_app` REVOKEd to
+  SELECT-only, no `authorize_*` function anywhere in application code) supplies the durable
+  evidence an env var alone can no longer substitute for. Both conditions required, re-checked
+  fresh on every real invocation attempt.
+- PR #409 (`claude/compromised-worker-authority-tests`, now `105013e`): RLS isolation test for
   `agent_work_assignments` (gap found: in RLS's owner-scoped list since migration 0046, no
   dedicated test until now); regression tests proving `apply_dispatch_result()` cannot grant
-  MainAITask approval or escalate past the state machine.
-- This document, plus a reply on PR #406's comment thread converging with Copilot's own
-  independent proposal.
+  MainAITask approval or escalate past the state machine. Original push (`ccbe63e`) had two
+  real CI failures -- both investigated via the actual job logs and fixed (`105013e`):
+  `apply_dispatch_result()` structurally requires a real `task_id`, and a dependency-free
+  assignment starts at `ready`, not `planned`.
+- This document (Priority 4's integration contract added in this revision), plus a reply on
+  PR #406's comment thread converging with Copilot's own independent proposal.
 
 No merge, deploy, or release-authority change made. Founder Alpha remains NOT READY until
-independently verified, per the directive's own instruction.
+independently verified, per the directive's own instruction. `FIRST_CYCLE_GO` is not set and
+no `system_activation_authorizations` row exists anywhere as a result of this work.
