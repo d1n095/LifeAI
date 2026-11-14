@@ -6,6 +6,32 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Grundardirektivet "Resolve execution authority and security gaps" (2026-11-14)
+
+Tre nya, isolerade brancher, alla baserade direkt på `claude/det-kommer-mer-879lcm` (ingen
+beroende mellan dem):
+
+- `claude/first-cycle-go-activation-gate` (PR #408): `first_cycle_go` som verklig,
+  fail-closed spärr, kopplad till `get_real_adapter()`.
+- `claude/compromised-worker-authority-tests` (PR #409): RLS-isoleringstest för
+  `agent_work_assignments` (fanns i RLS-listan sedan migration 0046, men ingen egen testfil
+  förrän nu) + regressionstest som bevisar att `apply_dispatch_result()` inte kan ge
+  MainAITask-godkännande eller kringgå tillståndsmaskinen.
+- `claude/execution-authority-canonical-mapping` (denna branch): `docs/
+  LIFE_EXECUTION_AUTHORITY_CANONICAL_MAPPING.md` — det konkreta kanoniska-auktoritet-beslutet
+  direktivet bad om: `MainAITask`/`mainai_jobs` (`app.mainai_execution`) är kanonisk
+  task-livscykel/exekveringsauktoritet (enda som är live, godkännande-grindad, RLS-skyddad
+  idag); `agent_coordination` får en konkret migrationsgräns (ny FK + ny task_type, inte
+  byggd än); `app.workforce` får ingen migrationsgräns (strukturellt blockerad från verklig
+  provider-anrop, kör bara en stub) — beslut om dess framtid lämnas till grundaren.
+  Korrigerar också #407:s mjukare "Security Kernel saknas"-slutsats: RLS är bekräftat
+  OBEROENDE auktoritativ (den vanliga request-anslutningen kan strukturellt inte kringgå RLS,
+  eftersom den aldrig innehar den privilegierade rollen), inte bara "närmaste funktionella
+  motsvarighet".
+
+Svarade dessutom direkt på Copilots koordineringskommentar på PR #406 (deras förslag till
+kanonisk mappning konvergerar med ovanstående — bekräftat, inte motsagt).
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en
