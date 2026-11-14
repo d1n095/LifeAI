@@ -6,6 +6,26 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Känd, repo-bred CI-blockad: npm audit-drift, EJ fixad här (2026-11-14)
+
+Upptäckt som bieffekt av att jaga CI på PR #389/#390/#393/#394: jobbet "Frontend — npm audit"
+(`frontend/scripts/check-npm-audit.js`) misslyckas just nu på VARJE PR, oavsett diff —
+bekräftat på #390/#393/#394, inklusive #394 som enbart rör `.github/workflows/ci.yml` och den
+här filen. Skriptets allowlist täcker idag bara 3 advisory-source-ID:n för EN historisk fynd
+(brace-expansion, GHSA-mh99-v99m-4gvg, dokumenterad i `docs/SECURITY_BLOCKERS.md`) — verklig
+`npm audit` rapporterar nu 24 icke-allowlistade high/critical advisory-källor över många olika
+GHSA-ID:n, ren drift sedan allowlisten senast rördes.
+
+**Medvetet INTE fixad i någon av mina aktiva brancher.** Att göra det rätt kräver paket-för-
+paket-triage (version-bump vs. motiverad allowlist-post i `docs/SECURITY_BLOCKERS.md` per
+fynd) — verkligt säkerhetsomdöme, inte en enrads-infrastrukturpinning som Playwright/ubuntu-
+26.04-fixen (#394) ovan. Det ligger närmare Founder Alpha-säkerhetsspåret (Codex's ägarskap
+per `CLAUDE.md`s/direktivets rollfördelning) än Blueprint-intelligens-/MainAI-koordinator-
+spåret jag driver. Flaggat en gång per öppen PR (#389/#390/#393/#394) + här, i stället för att
+upprepa samma kommentar om och om igen eller gissa mig till en snabb fix. Kvarstår som ett
+OLÖST, synligt gap tills grundaren eller Codex bedömer det — ingen egen branch/PR öppnad för
+det ännu.
+
 ## Section B startpunkt: github_client.py repo-brett läs-API (2026-11-14)
 
 **Ny, isolerad branch: `claude/github-client-repo-evidence`** (PR #395, bas:
