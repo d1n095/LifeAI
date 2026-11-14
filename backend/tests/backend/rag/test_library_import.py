@@ -15,12 +15,14 @@ import io
 import threading
 import uuid
 import zipfile
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from app.config import get_settings
 from app.db import SessionLocal
+from app.jobs.lease import ImportJobLeaseLostError
 from app.models.document import ActiveTruthStatus, Document, IndexStatus, KnowledgeClassification
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_version import KnowledgeVersion
@@ -129,6 +131,80 @@ def _make_job(db_session, owner_id, raw: bytes = b"", filename: str = "test.txt"
     db_session.add(job)
     db_session.commit()
     return job
+
+
+@pytest.mark.asyncio
+async def test_import_refuses_stale_claim_before_reading_or_indexing(
+    db_session, make_verified_user
+):
+    user, _ = make_verified_user()
+    job = _make_job(db_session, user.id, b"must never be processed by stale worker", "stale.txt")
+    job.status = ImportJobStatus.running
+    job.locked_by = "current-worker"
+    job.lease_expires_at = datetime.utcnow() + timedelta(seconds=120)
+    db_session.commit()
+
+    with pytest.raises(ImportJobLeaseLostError):
+        await run_import_job(
+            db_session,
+            job.id,
+            user.id,
+            claim_worker_id="stale-worker",
+        )
+    db_session.rollback()
+
+    db_session.expire_all()
+    refreshed = db_session.get(ImportJob, job.id)
+    assert refreshed.status == ImportJobStatus.running
+    assert refreshed.locked_by == "current-worker"
+    assert db_session.query(Document).filter_by(import_job_id=job.id).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_import_stops_at_first_file_boundary_when_live_lease_is_lost(
+    db_session, make_verified_user, monkeypatch
+):
+    from app.rag.library_import import FileOutcome
+
+    user, _ = make_verified_user()
+    raw = _make_zip({"first.txt": b"first", "second.txt": b"second"})
+    job = _make_job(db_session, user.id, raw, "two-files.zip")
+    job.status = ImportJobStatus.running
+    job.locked_by = "worker-a"
+    job.lease_expires_at = datetime.utcnow() + timedelta(seconds=120)
+    db_session.commit()
+
+    renewal_calls = 0
+
+    def _lease_then_takeover(*args, **kwargs):
+        nonlocal renewal_calls
+        renewal_calls += 1
+        return renewal_calls < 5
+
+    processed: list[str] = []
+
+    async def _record_one(*args, **kwargs):
+        filename = args[4]
+        processed.append(filename)
+        return FileOutcome(filename=filename, status="indexed")
+
+    monkeypatch.setattr("app.rag.library_import.renew_lease", _lease_then_takeover)
+    monkeypatch.setattr("app.rag.library_import._import_one_file", _record_one)
+
+    with pytest.raises(ImportJobLeaseLostError):
+        await run_import_job(
+            db_session,
+            job.id,
+            user.id,
+            claim_worker_id="worker-a",
+        )
+    db_session.rollback()
+
+    assert processed == ["first.txt"]
+    db_session.expire_all()
+    refreshed = db_session.get(ImportJob, job.id)
+    assert refreshed.status == ImportJobStatus.running
+    assert refreshed.completed_at is None
 
 
 @pytest.mark.asyncio

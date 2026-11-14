@@ -121,6 +121,69 @@ def test_renew_lease_extends_the_lease_only_for_the_owning_worker(superuser_db, 
     claim_db.close()
 
 
+def test_renew_lease_cannot_resurrect_an_expired_claim(superuser_db, make_verified_user):
+    user, _ = make_verified_user()
+    job = _make_pending_job(superuser_db, user.id)
+    expired_at = datetime.utcnow() - timedelta(seconds=5)
+    job.status = ImportJobStatus.running
+    job.locked_by = "stale-worker"
+    job.lease_expires_at = expired_at
+    superuser_db.commit()
+
+    claim_db = _ClaimSession()
+    try:
+        assert renew_lease(claim_db, job.id, "stale-worker", 120) is False
+    finally:
+        claim_db.close()
+
+    superuser_db.expire_all()
+    refreshed = superuser_db.get(ImportJob, job.id)
+    assert refreshed.locked_by == "stale-worker"
+    assert refreshed.lease_expires_at == expired_at
+
+
+def test_import_claim_id_is_unique_even_for_same_process_and_worker_slot():
+    import app.worker as worker_module
+
+    first = worker_module._import_claim_id("stable-deployment-slot")
+    reclaimed = worker_module._import_claim_id("stable-deployment-slot")
+
+    assert first != reclaimed
+    assert first.startswith("stable-deployment-slot:")
+    assert len(first) <= 128
+
+
+@pytest.mark.asyncio
+async def test_stale_worker_cannot_record_failure_after_lease_loss(
+    superuser_db, make_verified_user, monkeypatch
+):
+    from app.jobs.lease import ImportJobLeaseLostError
+    from app.worker import process_claimed_job
+
+    user, _ = make_verified_user()
+    job = _make_pending_job(superuser_db, user.id)
+    job.status = ImportJobStatus.running
+    job.locked_by = "current-worker"
+    job.lease_expires_at = datetime.utcnow() + timedelta(seconds=120)
+    superuser_db.commit()
+
+    async def _lost(*args, **kwargs):
+        raise ImportJobLeaseLostError(job.id, "stale-worker")
+
+    monkeypatch.setattr("app.worker.run_import_job", _lost)
+    db = _ClaimSession()
+    try:
+        await process_claimed_job(db, job.id, user.id, "stale-worker")
+    finally:
+        db.close()
+
+    superuser_db.expire_all()
+    refreshed = superuser_db.get(ImportJob, job.id)
+    assert refreshed.status == ImportJobStatus.running
+    assert refreshed.locked_by == "current-worker"
+    assert refreshed.failure_reason is None
+
+
 def test_two_workers_racing_the_same_pending_jobs_never_claim_the_same_job(superuser_db, make_verified_user):
     """The actual FOR UPDATE SKIP LOCKED guarantee, exercised under real concurrency (two
     threads, two separate connections) rather than simulated — the mechanism this whole

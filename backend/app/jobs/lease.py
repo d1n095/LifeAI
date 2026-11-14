@@ -60,6 +60,18 @@ from sqlalchemy.orm import Session
 from app.models.import_job import CLAIMABLE_IMPORT_JOB_STATUSES
 from app.storage.references import acquire_owner_erasure_lock
 
+
+class ImportJobLeaseLostError(Exception):
+    """The import worker no longer owns a live claim and must stop without writing state."""
+
+    def __init__(self, job_id: uuid.UUID, worker_id: str):
+        self.job_id = job_id
+        self.worker_id = worker_id
+        super().__init__(
+            f"Import job {job_id}: live lease is no longer held by worker '{worker_id}'."
+        )
+
+
 _CANDIDATE_SQL = text("""
     SELECT id, owner_id FROM knowledge_import_jobs
     WHERE status = ANY(:claimable_statuses)
@@ -123,21 +135,33 @@ def claim_next_job(
     return None
 
 
-def renew_lease(db: Session, job_id: uuid.UUID, worker_id: str, lease_seconds: int) -> bool:
+def renew_lease(
+    db: Session,
+    job_id: uuid.UUID,
+    worker_id: str,
+    lease_seconds: int,
+    *,
+    commit: bool = True,
+) -> bool:
     """The heartbeat: extends a still-in-progress job's lease so it isn't mistaken for
     abandoned and reclaimed by another worker while genuinely still being worked on. Scoped
-    to `locked_by = :worker_id` so a worker whose lease already expired and was reclaimed by
-    someone else can't accidentally renew a claim it no longer actually holds — returns False
-    in that case (0 rows matched), which callers treat as "stop, someone else owns this job
-    now" rather than a fatal error (see app/rag/library_import.py's per-file heartbeat)."""
+    to the worker id, running status, and an unexpired lease. A stale worker can therefore not
+    resurrect its own expired claim even before a replacement happens to reclaim it. Returns
+    False without changing the row whenever any fence is stale; callers must stop immediately
+    and leave recovery to the next authoritative claim."""
     result = db.execute(
         text("""
             UPDATE knowledge_import_jobs
             SET lease_expires_at = now() + make_interval(secs => :lease_seconds),
                 last_heartbeat_at = now()
-            WHERE id = :job_id AND locked_by = :worker_id
+            WHERE id = :job_id
+              AND locked_by = :worker_id
+              AND status = 'running'
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at >= now()
         """),
         {"job_id": str(job_id), "worker_id": worker_id, "lease_seconds": lease_seconds},
     )
-    db.commit()
+    if commit:
+        db.commit()
     return result.rowcount > 0
