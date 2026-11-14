@@ -299,6 +299,35 @@ _CONTINUITY_INSTRUCTION = (
     "en tidigare version."
 )
 
+# Incremental document understanding (Life MainAI Intelligence program): the complement to
+# long-term context continuity above. Continuity carries the PREVIOUS DRAFT's prose forward;
+# this instruction points at what changed in the EVIDENCE itself since that draft was written
+# — a source whose Document.updated_at (app/rag/vector_store.py's _hit_dict, already present
+# on every hit) is newer than the previous version's created_at is new or has been edited
+# since Life last looked at this title. Without this, a regeneration could read a just-updated
+# source and a stale previous draft side by side with no signal telling it which one is fresher
+# evidence — it would have to guess, or (worse) silently prefer the continuity text just
+# because _CONTINUITY_INSTRUCTION said to build on it where "still reasonable". This closes
+# that gap explicitly: a source marked new/changed always gets checked against the previous
+# draft's claims, never the other way around.
+_INCREMENTAL_UPDATE_INSTRUCTION = (
+    "OBS: Minst en källa nedan är märkt [NY/UPPDATERAD SEDAN FÖREGÅENDE VERSION] — dess "
+    "innehåll har tillkommit eller ändrats efter att den föregående Blueprint-versionen "
+    "skrevs. Granska särskilt om denna källa kompletterar, uppdaterar eller motsäger något "
+    "som stod i den föregående versionen, och uppdatera draften därefter. En nyare källa väger "
+    "tyngre än den föregående versionens text om de två står emot varandra — aldrig tvärtom."
+)
+
+
+def _parse_iso(value: str) -> datetime | None:
+    """Best-effort ISO-8601 parse for `_hit_dict`'s own `.isoformat()` output — never raises;
+    a malformed/unexpected value degrades to "not new/updated" (None) rather than crashing
+    generation over a label that is informational, not safety-critical."""
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
 
 def _synthesis_prompt(
     title: str,
@@ -307,15 +336,17 @@ def _synthesis_prompt(
     duplicate_of: dict[str, str] | None = None,
     previous_version: int | None = None,
     previous_body: str | None = None,
-) -> tuple[str, list[str], list[str]]:
+    previous_created_at: datetime | None = None,
+) -> tuple[str, list[str], list[str], list[str]]:
     """Build the synthesis instruction from the retrieved sources. The model is asked to
     write strictly from the supplied excerpts and to NOT invent facts not present in them —
     the draft is an interpretation OF the originals, not free generation.
 
-    Returns (prompt_text, injection_suspected_document_ids, founder_decision_document_ids):
-    neither list ever gates generation, both are only threaded through to the draft's
-    provenance for the founder's own review — see this module's note above
-    `_UNTRUSTED_SOURCE_BEGIN` and `_FOUNDER_DECISION_INSTRUCTION`.
+    Returns (prompt_text, injection_suspected_document_ids, founder_decision_document_ids,
+    new_or_updated_document_ids): none of these lists ever gate generation, all are only
+    threaded through to the draft's provenance for the founder's own review — see this
+    module's notes above `_UNTRUSTED_SOURCE_BEGIN`, `_FOUNDER_DECISION_INSTRUCTION` and
+    `_INCREMENTAL_UPDATE_INSTRUCTION`.
 
     `duplicate_of` (Mission 4) maps a document_id to the OTHER grounded document_id it is
     recorded as a `duplicates` SourceRelationship of — labeled per excerpt, the same way a
@@ -332,7 +363,14 @@ def _synthesis_prompt(
     is included as its own clearly-separate, clearly-labeled block: NOT one of the numbered,
     untrusted SOURCE excerpts (it is the model's own prior output, not founder-provided
     evidence), and explicitly NOT a license to repeat a claim the current sources no longer
-    support — see `_CONTINUITY_INSTRUCTION`."""
+    support — see `_CONTINUITY_INSTRUCTION`.
+
+    `previous_created_at` (incremental document understanding): the same prior version's
+    `created_at`, compared per-excerpt against `document_updated_at` (app/rag/vector_store.py's
+    `_hit_dict`, already present on every hit) — a source edited or added after the previous
+    draft was written is labeled so the model knows which evidence is fresher than the
+    continuity text above, not just fresher than other sources. Only meaningful alongside
+    `previous_body`; with no prior version there is nothing to be "since" yet."""
     duplicate_of = duplicate_of or {}
     lines = [
         "You are helping the project's founder draft an initial project Blueprint.",
@@ -368,12 +406,24 @@ def _synthesis_prompt(
             "has recorded them as duplicates of each other. Treat them as ONE piece of evidence, "
             "never as two independent sources agreeing with each other."
         )
-    lines.append("")
     # Use only the most-relevant few sources in the prompt (hits arrive best-first from
     # retrieval), each trimmed — see _SYNTH_PROMPT_MAX_SOURCES/_SYNTH_EXCERPT_CHARS. All grounded
     # sources are still recorded in the draft's source_refs by the service; this bounds only what
     # the local model has to read so generation finishes within the timeout.
     prompt_hits = hits[:_SYNTH_PROMPT_MAX_SOURCES]
+    # Incremental document understanding: computed once, over the same prompt_hits the model
+    # actually sees, and reused both to decide whether the instruction is worth adding at all
+    # and to label each matching excerpt below — never re-parsed per excerpt.
+    new_or_updated_document_ids: set[str] = set()
+    if previous_created_at:
+        for h in prompt_hits:
+            updated_raw = h.get("document_updated_at")
+            updated_at = _parse_iso(updated_raw) if updated_raw else None
+            if updated_at and updated_at > previous_created_at:
+                new_or_updated_document_ids.add(str(h.get("document_id")))
+    if new_or_updated_document_ids:
+        lines.append(_INCREMENTAL_UPDATE_INSTRUCTION)
+    lines.append("")
     if len(hits) > len(prompt_hits):
         lines.append(f"(Showing the {len(prompt_hits)} most relevant of {len(hits)} grounded sources.)")
     lines.append("Sources:")
@@ -403,10 +453,13 @@ def _synthesis_prompt(
         if is_decision:
             decision_document_ids.append(document_id)
         decision_note = " [GRUNDARBESLUT]" if is_decision else ""
-        lines.append(f"[{i}] (document {document_id}){decision_note}{status_note}{dup_note} {_UNTRUSTED_SOURCE_BEGIN}")
+        new_note = " [NY/UPPDATERAD SEDAN FÖREGÅENDE VERSION]" if document_id in new_or_updated_document_ids else ""
+        lines.append(
+            f"[{i}] (document {document_id}){decision_note}{status_note}{dup_note}{new_note} {_UNTRUSTED_SOURCE_BEGIN}"
+        )
         lines.append(excerpt)
         lines.append(_UNTRUSTED_SOURCE_END)
-    return "\n".join(lines), suspected_document_ids, decision_document_ids
+    return "\n".join(lines), suspected_document_ids, decision_document_ids, sorted(new_or_updated_document_ids)
 
 
 async def _synthesize_with_active_model(
@@ -419,12 +472,13 @@ async def _synthesize_with_active_model(
     duplicate_of: dict[str, str] | None = None,
     previous_version: int | None = None,
     previous_body: str | None = None,
-) -> tuple[str, str | None, str | None, list[str], list[str]]:
+    previous_created_at: datetime | None = None,
+) -> tuple[str, str | None, str | None, list[str], list[str], list[str]]:
     """Call the active local chat model to synthesise the draft body. Returns
     (body, provider_name, model_name, injection_suspected_document_ids,
-    founder_decision_document_ids). Raises HTTPException(503) when no usable chat model is
-    configured or the provider fails — an honest 'model unavailable', never a fabricated
-    body."""
+    founder_decision_document_ids, new_or_updated_document_ids). Raises HTTPException(503)
+    when no usable chat model is configured or the provider fails — an honest 'model
+    unavailable', never a fabricated body."""
     try:
         provider, model = resolve_active(db, role="chat")
     except Exception as exc:  # NotConfigured / resolution failure
@@ -435,8 +489,14 @@ async def _synthesize_with_active_model(
 
     from app.providers.base import Message
 
-    prompt, suspected_document_ids, decision_document_ids = _synthesis_prompt(
-        title, query, hits, duplicate_of=duplicate_of, previous_version=previous_version, previous_body=previous_body
+    prompt, suspected_document_ids, decision_document_ids, new_or_updated_document_ids = _synthesis_prompt(
+        title,
+        query,
+        hits,
+        duplicate_of=duplicate_of,
+        previous_version=previous_version,
+        previous_body=previous_body,
+        previous_created_at=previous_created_at,
     )
     # Trust Engine (app/rag/trust.py), the same mechanism chat.py already uses: confidence
     # derived from the strongest retrieved source, degraded for historical/proposed/
@@ -479,7 +539,7 @@ async def _synthesize_with_active_model(
     # falling back to the resolved identity.
     provider_name = getattr(result, "provider", None) or getattr(provider, "name", None) or provider.__class__.__name__
     model_name = getattr(result, "model", None) or model
-    return body, provider_name, model_name, suspected_document_ids, decision_document_ids
+    return body, provider_name, model_name, suspected_document_ids, decision_document_ids, new_or_updated_document_ids
 
 
 async def _generate(
@@ -573,15 +633,18 @@ async def _generate(
         # generation, which correctly means no continuity instruction is added at all below.
         previous = latest_resolved_draft(db, owner_id=owner_id, title=title)
 
-        body, provider_name, model_name, suspected_document_ids, decision_document_ids = await _synthesize_with_active_model(
-            db,
-            title=title,
-            query=query,
-            hits=grounded,
-            trust=trust,
-            duplicate_of=duplicate_of,
-            previous_version=previous.version if previous else None,
-            previous_body=previous.body if previous else None,
+        body, provider_name, model_name, suspected_document_ids, decision_document_ids, new_or_updated_document_ids = (
+            await _synthesize_with_active_model(
+                db,
+                title=title,
+                query=query,
+                hits=grounded,
+                trust=trust,
+                duplicate_of=duplicate_of,
+                previous_version=previous.version if previous else None,
+                previous_body=previous.body if previous else None,
+                previous_created_at=previous.created_at if previous else None,
+            )
         )
 
         extra_provenance = {
@@ -595,6 +658,11 @@ async def _generate(
             # given as continuity context — None means this was a brand-new title with no
             # prior resolved version, the honest answer, not a silently-omitted field.
             "continued_from_version": previous.version if previous else None,
+            # Incremental document understanding: which grounded sources were new or edited
+            # (Document.updated_at) after the previous version was written — always [] when
+            # there is no previous version, since nothing can be "since" a version that
+            # doesn't exist.
+            "new_or_updated_source_ids": new_or_updated_document_ids,
             # Mission 5 — Founder-decision/correction recognition: which grounded sources the
             # founder explicitly saved as a decision (app/models/document.py's
             # KnowledgeClassification.decisions), so the founder's own review of the draft can

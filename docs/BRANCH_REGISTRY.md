@@ -6,6 +6,22 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Blueprint-intelligensbacklogen KLAR: inkrementell dokumentförståelse (2026-11-14)
+
+**Ny branch: `claude/blueprint-incremental-document-understanding`** (PR #401, bas: #399
+`claude/blueprint-context-continuity` — åttonde lagret). Mergeordning: #387 → #388 → #389 →
+#390 → #393 → #398 → #399 → #401.
+
+Komplementet till kontextkontinuitet: `app.rag.vector_store._hit_dict()` fick ett nytt,
+rent additivt fält `document_updated_at` (gäller ALLA retrieval-anrop, inte bara Blueprint,
+eftersom `search()`/`hybrid_search()` båda redan går via samma funktion). Blueprint märker nu
+en källa som tillkommit/ändrats EFTER föregående version som `[NY/UPPDATERAD SEDAN
+FÖREGÅENDE VERSION]` och instruerar modellen att en sådan källa väger tyngre än
+kontinuitetstexten, aldrig tvärtom. Se PR #401 för detaljer.
+
+**Detta slutför direktivets Blueprint-intelligensbacklog (Sektion A):** Mission 1–5
+(#387–#390, #398), utvärderingssviten (#393), kontextkontinuitet (#399), och denna.
+
 ## Blueprint: långsiktig kontextkontinuitet över regenereringar (2026-11-14)
 
 **Ny branch: `claude/blueprint-context-continuity`** (PR #399, bas: #398
