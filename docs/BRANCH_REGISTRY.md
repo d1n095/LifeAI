@@ -6,6 +6,31 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Section B, nästa steg: stateless GitHub-bevisrapport (2026-11-14)
+
+**Ny branch: `claude/github-work-queue-evidence-report`** (PR #396, bas: `claude/github-
+client-repo-evidence`/#395 — äkta beroende, inte bara bekvämlighet, eftersom modulen
+anropar #395:s nya `list_pull_requests()`/`list_issues()`/`list_check_runs()` direkt).
+
+**Öppen arkitekturfråga till grundaren (INTE avgjord här):** Jag utredde att återanvända
+`app.work_candidates` (det befintliga "signal producer ≠ truth writer"-mönstret — se
+migration 0054–0056) för att göra GitHub-bevis till en grundarbar granskningsbar kandidat,
+men förkastade det: `WorkCandidate.source_entity_id` är en composite-FK in i
+`project_entities`, som enbart nås via `InterpretationProposal` ← `KnowledgeClaim` —
+hela den kedjan är avsiktligt begränsad till GRUNDARENS EGEN KUNSKAP, inte levande extern
+systemstatus som en GitHub-PR. Att tvinga in GitHub-bevis i den kedjan (t.ex. en påhittad
+`KnowledgeClaim` enbart för att tillfredsställa FK:n) hade återanvänt tabellens FORM medan
+den invariant den byggdes för att upprätthålla bryts — exakt den typen av genväg CLAUDE.md:s
+isolerings-/återanvändningsprincip varnar för.
+
+**Beslut som krävs av grundaren (eller Codex för den säkerhetsrelevanta delen):** Ska
+GitHub-bevis-härledda förslag få sin EGEN grundarbara mellanlagringstabell (en syster till
+`work_candidates`, samma godkännande-grind-mönster, annan källmodell)? Det ändrar hur arbete
+kommer in i goal-skapande-pipelinen — exakt den typ av "unresolved authority decision" som
+direktivet säger ska pausas på, inte avgöras enväldigt. Tills det beslutet finns gör #396
+BARA läsning: `build_github_work_queue_report()` returnerar fakta (draft/stale/ci_red/
+ci_green/merge_conflict) om öppna PR:er/issues, skriver ingenting, skapar inget mål.
+
 ## Känd, repo-bred CI-blockad: npm audit-drift, EJ fixad här (2026-11-14)
 
 Upptäckt som bieffekt av att jaga CI på PR #389/#390/#393/#394: jobbet "Frontend — npm audit"
