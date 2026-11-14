@@ -27,6 +27,10 @@ branch_labels = None
 depends_on = None
 
 _MARKER = "_alembic_0074_0069_lineage"
+_LINEAGE_CONSTRAINTS = {
+    "founder_alpha_provider_disclosure": "ck_alembic_0074_origin_founder_alpha",
+    "pr237_mainai_stop_controls": "ck_alembic_0074_origin_pr237",
+}
 _STOP_TABLES = ("mainai_stop_state", "mainai_stop_events")
 _DISCLOSURE_CONSTRAINTS = {
     "ck_provider_disclosure_events_decision",
@@ -155,6 +159,38 @@ def _classify(bind: sa.Connection) -> str:
     raise RuntimeError("ambiguous exact-0069 schema effects; refusing silent combination")
 
 
+def _marker_source_lineage(bind: sa.Connection) -> str:
+    """Read immutable schema provenance, cross-checking mutable detail when present.
+
+    Test and maintenance cleanup legitimately truncates application-adjacent tables.  The
+    source lineage therefore lives in a migration-owned CHECK-constraint name, not solely in
+    a row which can disappear.  A surviving row must agree with that schema anchor.
+    """
+    names = {
+        str(row[0])
+        for row in bind.execute(
+            sa.text(
+                """
+                SELECT conname FROM pg_constraint
+                 WHERE conrelid = CAST(:table AS regclass)
+                   AND conname = ANY(:names)
+                """
+            ),
+            {"table": f"public.{_MARKER}", "names": list(_LINEAGE_CONSTRAINTS.values())},
+        )
+    }
+    matches = [lineage for lineage, name in _LINEAGE_CONSTRAINTS.items() if name in names]
+    if len(matches) != 1:
+        raise RuntimeError("lineage marker constraint is missing or ambiguous; downgrade refused")
+    source_lineage = matches[0]
+    row_lineage = bind.execute(
+        sa.text(f"SELECT source_lineage FROM {_MARKER} WHERE singleton = 1")
+    ).scalar_one_or_none()
+    if row_lineage is not None and row_lineage != source_lineage:
+        raise RuntimeError("lineage marker row conflicts with schema provenance; downgrade refused")
+    return source_lineage
+
+
 def _apply_provider_locality() -> None:
     op.execute(
         """
@@ -206,6 +242,10 @@ def upgrade() -> None:
             "source_lineage IN ('founder_alpha_provider_disclosure', 'pr237_mainai_stop_controls')",
             name="ck_alembic_0074_source_lineage",
         ),
+        sa.CheckConstraint(
+            f"source_lineage = '{source_lineage}'",
+            name=_LINEAGE_CONSTRAINTS[source_lineage],
+        ),
     )
     detail = json.dumps(
         {
@@ -255,9 +295,7 @@ def downgrade() -> None:
     bind = op.get_bind()
     if not _table_exists(bind, _MARKER):
         raise RuntimeError("lineage marker is missing; downgrade cannot prove source history")
-    source_lineage = bind.execute(
-        sa.text(f"SELECT source_lineage FROM {_MARKER} WHERE singleton = 1")
-    ).scalar_one_or_none()
+    source_lineage = _marker_source_lineage(bind)
     if source_lineage == "pr237_mainai_stop_controls":
         raise RuntimeError(
             "cannot downgrade bridged PR #237 history: exact revision 0069 has incompatible semantics"

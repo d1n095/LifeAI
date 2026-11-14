@@ -275,6 +275,24 @@ def test_ambiguous_combined_0069_effects_fail_closed():
         with psycopg2.connect(database_url) as conn:
             with conn.cursor() as cursor:
                 cursor.execute("SELECT version_num FROM alembic_version")
-                assert cursor.fetchone()[0] == "0073_provider_disclosure_local"
+                # All revisions after the starting exact-0069 state share one Alembic
+                # transaction, so the bridge refusal rolls the entire upgrade back.
+                assert cursor.fetchone()[0] == "0069"
+                cursor.execute("SELECT to_regclass('_alembic_0074_0069_lineage')")
+                assert cursor.fetchone() == (None,)
+
+
+def test_canonical_lineage_anchor_survives_data_cleanup_for_safe_downgrade():
+    with _disposable_database("lifeai_canonical_0069_bridge") as database_url:
+        _run_alembic(database_url, "upgrade", "head")
+        with psycopg2.connect(database_url) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("TRUNCATE _alembic_0074_0069_lineage")
+
+        _run_alembic(database_url, "downgrade", "0073_provider_disclosure_local")
+        with psycopg2.connect(database_url) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT version_num FROM alembic_version")
+                assert cursor.fetchone() == ("0073_provider_disclosure_local",)
                 cursor.execute("SELECT to_regclass('_alembic_0074_0069_lineage')")
                 assert cursor.fetchone() == (None,)
