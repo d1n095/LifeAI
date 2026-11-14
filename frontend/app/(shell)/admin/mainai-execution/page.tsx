@@ -10,6 +10,7 @@ import {
   MainAIGoalReport,
   MainAIJobDetail,
   MainAIPlan,
+  MainAIRecoveryRecord,
   MainAITaskDetail,
   MainAITaskWait,
 } from "@/lib/api";
@@ -165,6 +166,9 @@ export default function MainAIExecutionPage() {
   const [linkedJob, setLinkedJob] = useState<MainAIJobDetail | null>(null);
   const [linkedJobError, setLinkedJobError] = useState<string | null>(null);
   const [taskWaits, setTaskWaits] = useState<MainAITaskWait[]>([]);
+  const [taskRecovery, setTaskRecovery] = useState<MainAIRecoveryRecord[] | null>(null);
+  const [taskRecoveryLoading, setTaskRecoveryLoading] = useState(false);
+  const [taskRecoveryError, setTaskRecoveryError] = useState<string | null>(null);
   const [report, setReport] = useState<MainAIGoalReport | null>(null);
   const [plans, setPlans] = useState<MainAIPlan[] | null>(null);
   const [disputedLessons, setDisputedLessons] = useState<EngineeringLesson[]>([]);
@@ -173,6 +177,7 @@ export default function MainAIExecutionPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const latestGoalRequestId = useRef(0);
+  const latestTaskRequestId = useRef(0);
 
   async function refreshGoals() {
     try {
@@ -209,15 +214,23 @@ export default function MainAIExecutionPage() {
   }
 
   async function openTask(id: string) {
+    const requestId = ++latestTaskRequestId.current;
     try {
       const task = await api.mainaiExecutionTaskDetail(id);
+      if (requestId !== latestTaskRequestId.current) return;
       setSelectedTask(task);
       setLinkedJob(null);
       setLinkedJobError(null);
-      const [waitsResult, jobResult] = await Promise.allSettled([
+      setTaskWaits([]);
+      setTaskRecovery(null);
+      setTaskRecoveryLoading(true);
+      setTaskRecoveryError(null);
+      const [waitsResult, jobResult, recoveryResult] = await Promise.allSettled([
         api.mainaiExecutionTaskWaits(id),
         task.mainai_job_id ? api.mainaiJobDetail(task.mainai_job_id) : Promise.resolve(null),
+        api.mainaiExecutionTaskRecovery(id),
       ]);
+      if (requestId !== latestTaskRequestId.current) return;
       if (waitsResult.status === "fulfilled") setTaskWaits(waitsResult.value);
       else {
         setTaskWaits([]);
@@ -225,8 +238,17 @@ export default function MainAIExecutionPage() {
       }
       if (jobResult.status === "fulfilled") setLinkedJob(jobResult.value);
       else setLinkedJobError(jobResult.reason instanceof Error ? jobResult.reason.message : "Jobbdetaljer kunde inte hämtas.");
+      setTaskRecoveryLoading(false);
+      if (recoveryResult.status === "fulfilled") setTaskRecovery(recoveryResult.value);
+      else {
+        setTaskRecoveryError(recoveryResult.reason instanceof Error ? recoveryResult.reason.message : "Återhämtningshistoriken kunde inte hämtas.");
+        setTaskRecovery(null);
+      }
     } catch (e: any) {
-      setError(e.message);
+      if (requestId === latestTaskRequestId.current) {
+        setTaskRecoveryLoading(false);
+        setError(e.message);
+      }
     }
   }
 
@@ -672,6 +694,17 @@ export default function MainAIExecutionPage() {
                     <div className="space-y-1 text-xs text-white/60">
                       <div>Fas: {linkedJob.current_phase ?? "inte rapporterad"}</div>
                       <div>
+                        Worker-process: {linkedJob.locked_by ?? "ingen lease-innehavare registrerad"} · detta identifierar worker-processen,
+                        inte en extern agent-session.
+                      </div>
+                      <div>
+                        Lease löper ut:{" "}
+                        {linkedJob.lease_expires_at ? new Date(linkedJob.lease_expires_at).toLocaleString("sv-SE") : "ingen utgångstid registrerad"}
+                      </div>
+                      <div>
+                        Modellbackend: {[linkedJob.provider, linkedJob.model].filter(Boolean).join(" · ") || "inte rapporterad"}
+                      </div>
+                      <div>
                         Senaste jobb-heartbeat:{" "}
                         {linkedJob.last_heartbeat_at ? new Date(linkedJob.last_heartbeat_at).toLocaleString("sv-SE") : "ingen registrerad"}
                       </div>
@@ -685,7 +718,6 @@ export default function MainAIExecutionPage() {
                       </div>
                       {linkedJob.public_message && <div>{linkedJob.public_message}</div>}
                       {linkedJob.error_category && <div className="text-red-300">Feltyp: {linkedJob.error_category}</div>}
-                      <div>Worker-ID och lease-utgång: unavailable i nuvarande jobb-API.</div>
                     </div>
                     {CANCELLABLE_MAINAI_JOB_STATUSES.includes(linkedJob.status) && (
                       <button
@@ -735,6 +767,37 @@ export default function MainAIExecutionPage() {
                   </ul>
                 </div>
               )}
+
+              <section className="space-y-2" aria-label="Återhämtningshistorik">
+                <div className="text-xs uppercase tracking-wide text-white/40">
+                  Återhämtningshistorik {taskRecovery ? `(${taskRecovery.length})` : ""}
+                </div>
+                {taskRecoveryLoading ? (
+                  <p className="text-xs text-white/40">Hämtar beständig återhämtningshistorik…</p>
+                ) : taskRecoveryError ? (
+                  <p role="status" className="text-xs text-amber-200">Återhämtningshistoriken kunde inte verifieras: {taskRecoveryError}</p>
+                ) : taskRecovery && taskRecovery.length > 0 ? (
+                  <ul className="space-y-2 max-h-48 overflow-y-auto">
+                    {taskRecovery.map((record) => (
+                      <li key={record.id} className="rounded-lg border border-border/60 p-3 text-xs">
+                        <div className="flex flex-wrap justify-between gap-2 text-white/50">
+                          <span>{record.classification ?? "Oklassificerad"} · {record.status}</span>
+                          <span>{new Date(record.created_at).toLocaleString("sv-SE")}</span>
+                        </div>
+                        <div className="mt-1 text-white/60">Försök från jobb: {record.job_id}</div>
+                        {record.salvage_action && <div className="mt-1 text-white/60">Återställningsåtgärd: {record.salvage_action}</div>}
+                        {record.takeover_executor && <div className="mt-1 text-white/60">Återställnings-worker: {record.takeover_executor}</div>}
+                        {record.takeover_job_id && <div className="mt-1 break-all text-white/60">Nytt jobb: {record.takeover_job_id}</div>}
+                        {record.manual_review_required && <div className="mt-1 text-amber-200">Grundargranskning krävs innan fortsättning.</div>}
+                        {record.blocker && <div className="mt-1 text-amber-200">Blockerare: {record.blocker}</div>}
+                        <p className="mt-1 text-white/30">Rått återhämtningsunderlag visas inte i denna vy.</p>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-xs text-white/30">Ingen beständig återhämtning har registrerats.</p>
+                )}
+              </section>
 
               <div className="space-y-2">
                 <div className="text-xs uppercase tracking-wide text-white/40">Checkpoints ({selectedTask.checkpoints.length})</div>

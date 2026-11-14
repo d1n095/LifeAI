@@ -7,6 +7,8 @@ const FOUNDER_PASSWORD = process.env.E2E_FOUNDER_PASSWORD || "TestFounderPasswor
 const GOAL_ID = "00000000-0000-0000-0000-000000000101";
 const TASK_ID = "00000000-0000-0000-0000-000000000102";
 const JOB_ID = "00000000-0000-0000-0000-000000000103";
+const RECOVERY_ID = "00000000-0000-0000-0000-000000000106";
+const TAKEOVER_JOB_ID = "00000000-0000-0000-0000-000000000107";
 
 const goal = {
   id: GOAL_ID,
@@ -74,6 +76,8 @@ function makeJob(status: "running" | "completed" = "running", cancelRequested = 
     created_at: "2026-11-14T10:02:00Z",
     started_at: "2026-11-14T10:02:00Z",
     last_heartbeat_at: "2026-11-14T10:03:30Z",
+    locked_by: status === "running" ? "worker-process-1" : null,
+    lease_expires_at: status === "running" ? "2026-11-14T10:05:30Z" : null,
     completed_at: status === "completed" ? "2026-11-14T10:04:00Z" : null,
     progress_current: 1,
     progress_total: 3,
@@ -108,6 +112,9 @@ test.describe("MainAI execution control surface", () => {
     await page.route(`**/api/mainai/execution/tasks/${TASK_ID}/waits`, (route) =>
       route.fulfill({ status: 200, contentType: "application/json", body: "[]" })
     );
+    await page.route(`**/api/mainai/execution/tasks/${TASK_ID}/recovery`, (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: "[]" })
+    );
     await page.route(`**/api/mainai/execution/tasks/${TASK_ID}`, (route) =>
       route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(task) })
     );
@@ -126,7 +133,9 @@ test.describe("MainAI execution control surface", () => {
     await expect(page.getByLabel("Uppdragsbrief")).toContainText("Inga dokument-/källreferenser registrerade.");
     await expect(page.getByLabel("Uppdragsbrief")).toContainText("Granulär leverantörs-/agentprofil: unavailable");
     await expect(page.getByLabel("Körningssession och kapacitet")).toContainText("Senaste jobb-heartbeat:");
-    await expect(page.getByLabel("Körningssession och kapacitet")).toContainText("Worker-ID och lease-utgång: unavailable");
+    await expect(page.getByLabel("Körningssession och kapacitet")).toContainText("Worker-process: worker-process-1");
+    await expect(page.getByLabel("Körningssession och kapacitet")).toContainText("Lease löper ut:");
+    await expect(page.getByLabel("Körningssession och kapacitet")).toContainText("Modellbackend: inte rapporterad");
     await expect(page.getByLabel("Körningssession och kapacitet")).toContainText("Starta: automatisk");
     await expect(page.getByLabel("Körningssession och kapacitet")).toContainText("Begär avbrytning: stöds");
     await expect(page.getByLabel("Körningssession och kapacitet")).toContainText("Pausa: unavailable");
@@ -135,6 +144,70 @@ test.describe("MainAI execution control surface", () => {
     await expect(page.getByText("PRIVATE_RAW_TEST_OUTPUT_SENTINEL")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Begär avbrytning" })).toBeVisible();
     await expect(page.getByText(/manuell resume-operation finns inte/)).toBeVisible();
+  });
+
+  test("shows stale lease and durable recovery outcome without exposing raw recovery evidence", async ({ page }) => {
+    await page.route(`**/api/mainai/execution/tasks/${TASK_ID}`, (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...task, liveness: "stalled" }) })
+    );
+    await page.route(`**/api/mainai/jobs/${JOB_ID}`, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ...makeJob(), lease_expires_at: "2026-11-14T09:00:00Z" }),
+      })
+    );
+    await page.route(`**/api/mainai/execution/tasks/${TASK_ID}/recovery`, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([
+          {
+            id: RECOVERY_ID,
+            task_id: TASK_ID,
+            job_id: JOB_ID,
+            detected_at: "2026-11-14T09:01:00Z",
+            classification: "CHECKPOINTED_WORK",
+            evidence: { raw: "PRIVATE_RAW_RECOVERY_EVIDENCE_SENTINEL" },
+            salvage_action: "resume_from_checkpoint",
+            takeover_executor: "worker-process-2",
+            takeover_job_id: TAKEOVER_JOB_ID,
+            status: "taken_over",
+            blocker: null,
+            manual_review_required: false,
+            completed_at: "2026-11-14T09:02:00Z",
+            created_at: "2026-11-14T09:01:00Z",
+          },
+        ]),
+      })
+    );
+
+    await page.goto(`${FRONTEND_URL}/admin/mainai-execution`, { waitUntil: "networkidle" });
+    await page.getByRole("row", { name: /Founder-owned goal/ }).click();
+    await page.locator("li").filter({ hasText: "repo_edit" }).first().click();
+
+    await expect(page.getByText("Fastnat (lease utgången)").first()).toBeVisible();
+    await expect(page.getByLabel("Körningssession och kapacitet")).toContainText("worker-process-1");
+    await expect(page.getByLabel("Återhämtningshistorik")).toContainText("CHECKPOINTED_WORK · taken_over");
+    await expect(page.getByLabel("Återhämtningshistorik")).toContainText("worker-process-2");
+    await expect(page.getByLabel("Återhämtningshistorik")).toContainText(TAKEOVER_JOB_ID);
+    await expect(page.getByText("PRIVATE_RAW_RECOVERY_EVIDENCE_SENTINEL")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Starta" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Återuppta" })).toHaveCount(0);
+  });
+
+  test("fails closed when the server denies access to linked execution details", async ({ page }) => {
+    await page.route(`**/api/mainai/jobs/${JOB_ID}`, (route) =>
+      route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ detail: "Forbidden" }) })
+    );
+
+    await page.goto(`${FRONTEND_URL}/admin/mainai-execution`, { waitUntil: "networkidle" });
+    await page.getByRole("row", { name: /Founder-owned goal/ }).click();
+    await page.locator("li").filter({ hasText: "repo_edit" }).first().click();
+
+    await expect(page.getByLabel("Körningssession och kapacitet")).toContainText("Länkat jobb kunde inte verifieras: Forbidden");
+    await expect(page.getByLabel("Körningssession och kapacitet")).toContainText("Begär avbrytning: okänd");
+    await expect(page.getByRole("button", { name: "Begär avbrytning" })).toHaveCount(0);
   });
 
   test("uses the owner-scoped job cancellation request only after Founder confirmation", async ({ page }) => {

@@ -562,6 +562,8 @@ export type MainAIJob = {
   created_at: string;
   started_at: string | null;
   last_heartbeat_at: string | null;
+  locked_by: string | null;
+  lease_expires_at: string | null;
   completed_at: string | null;
   progress_current: number;
   progress_total: number | null;
@@ -702,6 +704,23 @@ export type MainAITaskWait = {
   evidence: Record<string, unknown>;
   created_at: string;
   resolved_at: string | null;
+};
+
+export type MainAIRecoveryRecord = {
+  id: string;
+  task_id: string;
+  job_id: string;
+  detected_at: string;
+  classification: string | null;
+  evidence: Record<string, unknown>;
+  salvage_action: string | null;
+  takeover_executor: string | null;
+  takeover_job_id: string | null;
+  status: string;
+  blocker: string | null;
+  manual_review_required: boolean;
+  completed_at: string | null;
+  created_at: string;
 };
 
 // V0.3 -- founder-wide engineering lesson (app/mainai_execution/lessons.py), including
@@ -1253,6 +1272,7 @@ export const api = {
   // V0.3 additions
   mainaiExecutionGoalPlans: (goalId: string) => request<MainAIPlan[]>(`/api/mainai/execution/goals/${goalId}/plans`),
   mainaiExecutionTaskWaits: (id: string) => request<MainAITaskWait[]>(`/api/mainai/execution/tasks/${id}/waits`),
+  mainaiExecutionTaskRecovery: (id: string) => request<MainAIRecoveryRecord[]>(`/api/mainai/execution/tasks/${id}/recovery`),
   mainaiExecutionLessons: (statusFilter?: string) =>
     request<EngineeringLesson[]>(`/api/mainai/execution/lessons${statusFilter ? `?status_filter=${statusFilter}` : ""}`),
 };
