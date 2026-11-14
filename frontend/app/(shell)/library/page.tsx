@@ -158,7 +158,11 @@ function LibraryOpsStatusBar() {
           className={`inline-block h-2 w-2 rounded-full ${status.worker_reachable ? "bg-emerald-400" : "bg-red-400"}`}
           aria-hidden="true"
         />
-        {status.worker_reachable ? "Worker aktiv" : "Worker onåbar"}
+        {statusError
+          ? `Senast känd workerstatus: ${status.worker_reachable ? "aktiv" : "onåbar"}`
+          : status.worker_reachable
+            ? "Worker aktiv"
+            : "Worker onåbar"}
       </span>
       <span>Kö: {status.queue_length}</span>
       <span>Jobb registrerade som kör: {status.running_jobs}</span>

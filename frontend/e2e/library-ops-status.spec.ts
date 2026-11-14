@@ -72,4 +72,28 @@ test.describe("Life Library processing status", () => {
     await expect(status).toContainText("Worker aktiv");
     await expect(status).toContainText("Status hämtad:");
   });
+
+  test("labels the last successful observation as stale when a refresh fails", async ({ page }) => {
+    let requests = 0;
+    await page.route("**/api/library/ops/status", async (route) => {
+      requests += 1;
+      if (requests > 1) {
+        await route.fulfill({ status: 503, contentType: "application/json", body: '{"detail":"unavailable"}' });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(makeOpsStatus()),
+      });
+    });
+
+    await page.goto(`${FRONTEND_URL}/library`, { waitUntil: "networkidle" });
+
+    const status = page.getByLabel("Bearbetningsstatus");
+    await expect(status).toContainText("Worker aktiv");
+    await status.getByRole("button", { name: "Uppdatera status" }).click();
+    await expect(status).toContainText("Senast känd workerstatus: aktiv");
+    await expect(status).toContainText("visad status kan vara inaktuell");
+  });
 });
