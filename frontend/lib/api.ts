@@ -614,6 +614,7 @@ export const RETRYABLE_MAINAI_JOB_STATUSES: MainAIJobStatus[] = ["failed"];
 export type MainAIGoal = {
   id: string;
   title: string;
+  original_instruction: string;
   status: string;
   risk_level: string;
   approval_policy: string;

@@ -1,7 +1,18 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { api, EngineeringLesson, MainAIGoal, MainAIGoalDetail, MainAIGoalReport, MainAIPlan, MainAITaskDetail, MainAITaskWait } from "@/lib/api";
+import {
+  api,
+  CANCELLABLE_MAINAI_JOB_STATUSES,
+  EngineeringLesson,
+  MainAIGoal,
+  MainAIGoalDetail,
+  MainAIGoalReport,
+  MainAIJobDetail,
+  MainAIPlan,
+  MainAITaskDetail,
+  MainAITaskWait,
+} from "@/lib/api";
 
 // MainAI Execution Loop V0.1 (see backend/docs/MAINAI_EXECUTION_LOOP_V0_1.md,
 // backend/app/mainai_execution/*). Deliberately plain, function-before-design, same
@@ -47,10 +58,47 @@ const LIVENESS_COLORS: Record<string, string> = {
 
 const POLL_INTERVAL_MS = 4000;
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function safeCheckpointMetadata(checkpoint: MainAITaskDetail["checkpoints"][number]): string[] {
+  const state = checkpoint.executor_state;
+  const lines: string[] = [];
+  if (typeof state.job_id === "string") lines.push(`Jobb: ${state.job_id}`);
+
+  const workResult = asRecord(state.work_result);
+  const finalizeInfo = asRecord(state.finalize_info) ?? asRecord(workResult?.finalize_info);
+  const workMetadata = finalizeInfo ?? workResult;
+  if (workMetadata) {
+    for (const key of ["branch", "base_branch", "head_sha"] as const) {
+      const value = workMetadata[key];
+      if (typeof value === "string" && value.length <= 160) lines.push(`${key}: ${value}`);
+    }
+    if (typeof workMetadata.proposed === "boolean") lines.push(`PR-förslag: ${workMetadata.proposed ? "ja" : "nej"}`);
+  }
+
+  const verification = asRecord(state.verification);
+  if (verification && typeof verification.passed === "boolean") {
+    lines.push(`Verifiering: ${verification.passed ? "godkänd" : "misslyckad"}`);
+    if (Array.isArray(verification.steps)) {
+      for (const item of verification.steps) {
+        const step = asRecord(item);
+        if (step && typeof step.kind === "string" && typeof step.passed === "boolean") {
+          lines.push(`Kontroll ${step.kind}: ${step.passed ? "godkänd" : "misslyckad"}`);
+        }
+      }
+    }
+  }
+  return lines;
+}
+
 export default function MainAIExecutionPage() {
   const [goals, setGoals] = useState<MainAIGoal[]>([]);
   const [selectedGoal, setSelectedGoal] = useState<MainAIGoalDetail | null>(null);
   const [selectedTask, setSelectedTask] = useState<MainAITaskDetail | null>(null);
+  const [linkedJob, setLinkedJob] = useState<MainAIJobDetail | null>(null);
+  const [linkedJobError, setLinkedJobError] = useState<string | null>(null);
   const [taskWaits, setTaskWaits] = useState<MainAITaskWait[]>([]);
   const [report, setReport] = useState<MainAIGoalReport | null>(null);
   const [plans, setPlans] = useState<MainAIPlan[] | null>(null);
@@ -97,9 +145,21 @@ export default function MainAIExecutionPage() {
 
   async function openTask(id: string) {
     try {
-      const [task, waits] = await Promise.all([api.mainaiExecutionTaskDetail(id), api.mainaiExecutionTaskWaits(id)]);
+      const task = await api.mainaiExecutionTaskDetail(id);
       setSelectedTask(task);
-      setTaskWaits(waits);
+      setLinkedJob(null);
+      setLinkedJobError(null);
+      const [waitsResult, jobResult] = await Promise.allSettled([
+        api.mainaiExecutionTaskWaits(id),
+        task.mainai_job_id ? api.mainaiJobDetail(task.mainai_job_id) : Promise.resolve(null),
+      ]);
+      if (waitsResult.status === "fulfilled") setTaskWaits(waitsResult.value);
+      else {
+        setTaskWaits([]);
+        setError(waitsResult.reason instanceof Error ? waitsResult.reason.message : "Väntehistoriken kunde inte hämtas.");
+      }
+      if (jobResult.status === "fulfilled") setLinkedJob(jobResult.value);
+      else setLinkedJobError(jobResult.reason instanceof Error ? jobResult.reason.message : "Jobbdetaljer kunde inte hämtas.");
     } catch (e: any) {
       setError(e.message);
     }
@@ -190,6 +250,22 @@ export default function MainAIExecutionPage() {
       await fn(selectedTask.id);
       await openTask(selectedTask.id);
       if (selectedGoal) await openGoal(selectedGoal.id);
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function requestJobCancellation() {
+    if (!linkedJob || !selectedTask || !CANCELLABLE_MAINAI_JOB_STATUSES.includes(linkedJob.status)) return;
+    if (!window.confirm("Begär att den aktiva körningen avbryts vid nästa säkra kontrollpunkt?")) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.mainaiCancelJob(linkedJob.id);
+      await openTask(selectedTask.id);
+      await refreshGoals();
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -459,6 +535,120 @@ export default function MainAIExecutionPage() {
                 </div>
               </div>
 
+              <section className="space-y-2 rounded-lg border border-border/60 p-3" aria-label="Uppdragsbrief">
+                <h3 className="text-xs uppercase tracking-wide text-white/50">Sparad uppdragsbrief</h3>
+                <p className="text-xs text-white/40">
+                  Visar beständiga mål- och taskfält. Detta är inte en fullständig leverantörsprompt.
+                </p>
+                <dl className="space-y-2 text-xs">
+                  <div>
+                    <dt className="text-white/40">Grundarens mål</dt>
+                    <dd className="mt-0.5 whitespace-pre-wrap text-white/75">{selectedGoal?.original_instruction ?? "Mål saknas i aktuell vy."}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-white/40">Task-instruktion</dt>
+                    <dd className="mt-0.5 whitespace-pre-wrap text-white/75">{selectedTask.description}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-white/40">Källreferenser i beständigt jobb</dt>
+                    <dd className="mt-0.5 text-white/75">
+                      {linkedJob
+                        ? linkedJob.input_refs.filter((ref) => ref.type !== "mainai_task").length > 0
+                          ? linkedJob.input_refs
+                              .filter((ref) => ref.type !== "mainai_task")
+                              .map((ref) => `${String(ref.type ?? "okänd")}:${String(ref.id ?? "saknar-id")}`)
+                              .join(", ")
+                          : "Inga dokument-/källreferenser registrerade."
+                        : "Okänt: inget länkat jobb kunde verifieras."}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-white/40">Behörighetsunderlag</dt>
+                    <dd className="mt-0.5 text-white/75">
+                      Policy: {selectedGoal?.approval_policy ?? "okänd"} · risk: {selectedTask.risk_level} ·{" "}
+                      {selectedTask.approval_required
+                        ? selectedTask.approval_granted
+                          ? "grundargodkännande registrerat"
+                          : "grundargodkännande krävs men saknas"
+                        : "task kräver inte separat godkännande"}
+                    </dd>
+                    <p className="mt-0.5 text-amber-100/70">Granulär leverantörs-/agentprofil: unavailable — no authorized execution adapter.</p>
+                  </div>
+                  <div>
+                    <dt className="text-white/40">Beständiga verifieringskriterier</dt>
+                    <dd className="mt-0.5">
+                      {selectedTask.verification_plan.length > 0 ? (
+                        <ul className="list-disc space-y-0.5 pl-4 text-white/75">
+                          {selectedTask.verification_plan.map((step, index) => (
+                            <li key={`${String(step.kind ?? "check")}-${index}`}>
+                              {String(step.kind ?? "okänd kontroll")}
+                              {typeof step.target === "string" ? `: ${step.target}` : ""}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <span className="text-amber-100/70">Inga verifieringskriterier registrerade.</span>
+                      )}
+                    </dd>
+                  </div>
+                </dl>
+              </section>
+
+              <section className="space-y-2 rounded-lg border border-border/60 p-3" aria-label="Körningssession och kapacitet">
+                <h3 className="text-xs uppercase tracking-wide text-white/50">Körningssession och kontroller</h3>
+                {linkedJob ? (
+                  <>
+                    <div className="flex flex-wrap justify-between gap-2 text-xs">
+                      <span>
+                        Beständigt jobb: {linkedJob.job_type} · {linkedJob.status}
+                      </span>
+                      <span>Försök: {linkedJob.retry_count}/{linkedJob.max_retries}</span>
+                    </div>
+                    <div className="space-y-1 text-xs text-white/60">
+                      <div>Fas: {linkedJob.current_phase ?? "inte rapporterad"}</div>
+                      <div>
+                        Senaste jobb-heartbeat:{" "}
+                        {linkedJob.last_heartbeat_at ? new Date(linkedJob.last_heartbeat_at).toLocaleString("sv-SE") : "ingen registrerad"}
+                      </div>
+                      <div>
+                        Avbrytning:{" "}
+                        {linkedJob.cancel_acknowledged
+                          ? "bekräftad av worker"
+                          : linkedJob.cancel_requested
+                            ? "begärd, väntar på worker"
+                            : "inte begärd"}
+                      </div>
+                      {linkedJob.public_message && <div>{linkedJob.public_message}</div>}
+                      {linkedJob.error_category && <div className="text-red-300">Feltyp: {linkedJob.error_category}</div>}
+                      <div>Worker-ID och lease-utgång: unavailable i nuvarande jobb-API.</div>
+                    </div>
+                    {CANCELLABLE_MAINAI_JOB_STATUSES.includes(linkedJob.status) && (
+                      <button
+                        type="button"
+                        disabled={busy || linkedJob.cancel_requested}
+                        onClick={requestJobCancellation}
+                        className="rounded border border-amber-500/40 px-3 py-1.5 text-xs text-amber-200 disabled:opacity-40"
+                      >
+                        {linkedJob.cancel_requested ? "Avbrytning begärd…" : "Begär avbrytning"}
+                      </button>
+                    )}
+                  </>
+                ) : (
+                  <p className="text-xs text-amber-100/70">
+                    {linkedJobError
+                      ? `Länkat jobb kunde inte verifieras: ${linkedJobError}`
+                      : selectedTask.mainai_job_id
+                        ? "Hämtar länkat beständigt jobb…"
+                        : "Inget beständigt jobb länkat till denna task."}
+                  </p>
+                )}
+                <ul className="space-y-1 border-t border-border/60 pt-2 text-xs text-white/60">
+                  <li>Sessionstatus i extern agent-UI: unavailable — no authorized execution adapter.</li>
+                  <li>Start/paus/fortsätt: unavailable; worker styr automatisk dispatch.</li>
+                  <li>Återupptagning från checkpoint: worker återanvänder beständiga checkpoints; inget manuellt resume-API.</li>
+                </ul>
+              </section>
+
               {/* V0.3: durable external waits (t.ex. CI) -- app/mainai_execution/ci_wait.py. */}
               {taskWaits.length > 0 && (
                 <div className="space-y-2">
@@ -485,9 +675,16 @@ export default function MainAIExecutionPage() {
                   {selectedTask.checkpoints.map((c) => (
                     <li key={c.id} className="rounded-lg border border-border/60 p-3 text-xs">
                       <div className="flex justify-between text-white/50">
-                        <span>{String(c.executor_state?.step ?? "?")}</span>
-                        <span>{new Date(c.created_at).toLocaleString("sv-SE")}</span>
+                        <span>{String(c.executor_state.step ?? "okänt steg")}</span>
+                        <span>plan v{c.plan_version} · {new Date(c.created_at).toLocaleString("sv-SE")}</span>
                       </div>
+                      {c.test_status && <div className="mt-1 text-white/60">Tester: {c.test_status}</div>}
+                      {c.ci_status && <div className="text-white/60">CI: {c.ci_status}</div>}
+                      {c.blocker && <div className="mt-1 text-amber-200">Blockerare: {c.blocker}</div>}
+                      {safeCheckpointMetadata(c).map((line) => (
+                        <div key={line} className="mt-1 break-all text-white/60">{line}</div>
+                      ))}
+                      <p className="mt-1 text-white/30">Rått checkpoint-innehåll döljs; det kan innehålla arbetsresultat.</p>
                     </li>
                   ))}
                   {selectedTask.checkpoints.length === 0 && <li className="text-white/30">Inga checkpoints ännu.</li>}
