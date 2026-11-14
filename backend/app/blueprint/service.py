@@ -77,6 +77,26 @@ def latest_version(db: Session, *, owner_id: uuid.UUID, title: str) -> int:
     return max(rows) if rows else 0
 
 
+def latest_resolved_draft(db: Session, *, owner_id: uuid.UUID, title: str) -> BlueprintDraft | None:
+    """Long-term context continuity (Life MainAI Intelligence program): the most recent
+    RESOLVED (`draft` or `approved`) version of this title, if one exists — the row a
+    regeneration should read as its own prior version for continuity, never a `generating`/
+    `failed` row (a regeneration must never be handed an in-flight or abandoned attempt as
+    if it were real prior content). Returns None for a brand-new title's first generation,
+    which is the correct, honest answer: there is no prior version to continue from yet, and
+    callers must not fabricate one."""
+    return db.execute(
+        select(BlueprintDraft)
+        .where(
+            BlueprintDraft.owner_id == owner_id,
+            BlueprintDraft.title == title,
+            BlueprintDraft.status.in_(("draft", "approved")),
+        )
+        .order_by(BlueprintDraft.version.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
 def _run_privileged_blueprint_update(stmt) -> int:
     """Every write to blueprint_drafts OTHER than the initial INSERT and the Founder-approval
     path (`approve_blueprint_draft`) runs here, on the privileged admin/migration connection
