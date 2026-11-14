@@ -17,8 +17,11 @@ from __future__ import annotations
 import asyncio
 import shutil
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 
 
 @dataclass(frozen=True)
@@ -176,7 +179,15 @@ class LocalCLIAdapter:
 
     `send_instruction()`/`resume()` are deliberately `NotImplementedError` -- this is a bounded,
     single-shot, non-interactive invocation (start, wait up to the bound, capture the result),
-    not an interactive session this coordination layer would have to trust mid-flight."""
+    not an interactive session this coordination layer would have to trust mid-flight.
+
+    `db` is REQUIRED, not optional -- `start_assignment()` re-checks
+    `app.agent_coordination.activation_gate.require_system_activation_authority()` against it
+    immediately before spawning a process, regardless of how this instance was constructed or
+    which caller holds it. This is the actual, unbypassable enforcement point (see
+    `activation_gate.py`'s own module docstring for why it lives here and not only in
+    `get_real_adapter()`): there is no lower level to invoke around this class's own real
+    subprocess spawn."""
 
     def __init__(
         self,
@@ -186,6 +197,7 @@ class LocalCLIAdapter:
         args_template: tuple[str, ...],
         cwd: str,
         timeout_seconds: int,
+        db: Session,
         env: dict[str, str] | None = None,
     ):
         self._provider_key = provider_key
@@ -193,6 +205,7 @@ class LocalCLIAdapter:
         self._args_template = args_template
         self._cwd = cwd
         self._timeout_seconds = timeout_seconds
+        self._db = db
         self._env = dict(env or {})
         self._processes: dict[UUID, asyncio.subprocess.Process] = {}
 
@@ -212,6 +225,11 @@ class LocalCLIAdapter:
         return AdapterCapabilities(supports_cancel=True)
 
     async def start_assignment(self, assignment_id: UUID) -> None:
+        from app.agent_coordination.activation_gate import (
+            require_system_activation_authority,
+        )
+
+        require_system_activation_authority(self._db, action=f"LocalCLIAdapter.start_assignment:{self._provider_key}")
         argv = [self._executable, *self._args_template]
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -258,7 +276,7 @@ class LocalCLIAdapter:
         )
 
 
-def get_real_adapter(provider_key: str, *, cwd: str, env: dict[str, str] | None = None) -> "AgentAdapter":
+def get_real_adapter(provider_key: str, *, cwd: str, db: Session, env: dict[str, str] | None = None) -> AgentAdapter:
     """The founder-controlled factory: returns a real `LocalCLIAdapter` ONLY when
     `app.agent_coordination.adapter_config.real_adapter_config()` confirms every precondition
     (enabled, executable found, an explicit args_template configured) AND the founder's own
@@ -270,6 +288,11 @@ def get_real_adapter(provider_key: str, *, cwd: str, env: dict[str, str] | None 
     `_FakeAgentAdapter`). This function's own contract (never raises, always returns an
     adapter) is unchanged by the `first_cycle_go` check -- it is treated as just one more
     precondition, not a new failure mode.
+
+    `db` is REQUIRED and passed straight through to the constructed `LocalCLIAdapter`, which
+    re-checks full `require_system_activation_authority()` (env var AND durable DB evidence)
+    fresh immediately before every real subprocess spawn -- this factory's own `first_cycle_go`
+    check here is only a cheap, non-authoritative early exit, not the enforcement point.
 
     When `env` is not explicitly supplied, defaults to
     `app.agent_coordination.adapter_config.resolve_adapter_env(provider_key)` -- the founder's
@@ -289,5 +312,6 @@ def get_real_adapter(provider_key: str, *, cwd: str, env: dict[str, str] | None 
     executable, args_template, timeout_seconds = config
     resolved_env = resolve_adapter_env(provider_key) if env is None else env
     return LocalCLIAdapter(
-        provider_key=provider_key, executable=executable, args_template=args_template, cwd=cwd, timeout_seconds=timeout_seconds, env=resolved_env
+        provider_key=provider_key, executable=executable, args_template=args_template, cwd=cwd,
+        timeout_seconds=timeout_seconds, db=db, env=resolved_env,
     )

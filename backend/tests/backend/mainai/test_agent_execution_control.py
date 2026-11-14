@@ -16,7 +16,10 @@ import uuid
 
 import pytest
 
-from app.agent_coordination.adapter_config import credential_reference, resolve_adapter_env
+from app.agent_coordination.adapter_config import (
+    credential_reference,
+    resolve_adapter_env,
+)
 from app.agent_coordination.adapters import (
     AdapterCapabilities,
     AdapterProcessLostError,
@@ -48,10 +51,20 @@ from app.agent_coordination.execution_control import (
     send_execution_instruction,
     start_execution_tracking,
 )
-from app.agent_coordination.service import acquire_lease, create_work_assignment, register_agent
+from app.agent_coordination.service import (
+    acquire_lease,
+    create_work_assignment,
+    register_agent,
+)
 from app.mainai_execution.approval import grant_task_approval
 from app.mainai_execution.planner import PlannedTaskSpec, create_goal, create_plan
-from app.models.agent_coordination import AgentWorkAssignmentEvent, AgentWorkAssignmentEventType, ExecutionAdapterState, ExecutionResultIngestionStatus
+from app.models.agent_coordination import (
+    AgentWorkAssignmentEvent,
+    AgentWorkAssignmentEventType,
+    ExecutionAdapterState,
+    ExecutionResultIngestionStatus,
+    SystemActivationAuthorization,
+)
 from app.models.mainai_execution import MainAITask
 
 
@@ -63,6 +76,19 @@ def _apply_execution_privilege_policy_before_this_module():
     from app.rls import apply_mainai_execution_privileges
 
     apply_mainai_execution_privileges(migration_engine)
+
+
+@pytest.fixture(autouse=True)
+def _grant_system_activation_authority(superuser_db, monkeypatch):
+    """This file is about the interactive control CONTRACT (instruction/cancel/resume/
+    reconcile), not the activation gate itself -- grant default authorization for every test
+    so `LocalCLIAdapter.start_assignment()`'s own `require_system_activation_authority()`
+    check never blocks what each test actually means to exercise. Uses `superuser_db` to
+    bypass `system_activation_authorizations`' own SELECT-only restriction on `mainai_app`,
+    same as it already bypasses RLS elsewhere in this suite."""
+    monkeypatch.setenv("FIRST_CYCLE_GO", "true")
+    superuser_db.add(SystemActivationAuthorization(authorized_by="test-fixture", reason="default grant for execution-control tests"))
+    superuser_db.commit()
 
 
 @pytest.fixture
@@ -225,7 +251,7 @@ async def test_send_execution_instruction_succeeds_against_a_capable_adapter(sup
 async def test_send_execution_instruction_rejected_as_unsupported_against_local_cli_adapter(superuser_db, owner_id, tmp_path):
     assignment, _agent = _ready_dispatchable_assignment(superuser_db, owner_id)
     execution = start_execution_tracking(superuser_db, assignment=assignment, adapter_key="cursor-agent", attempt_id=uuid.uuid4())
-    adapter = LocalCLIAdapter(provider_key="cursor-agent", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5)
+    adapter = LocalCLIAdapter(provider_key="cursor-agent", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5, db=superuser_db)
 
     outcome = await send_execution_instruction(superuser_db, execution=execution, assignment=assignment, adapter=adapter, instruction="ignored")
     assert outcome.outcome == OUTCOME_UNSUPPORTED_CAPABILITY
@@ -265,7 +291,7 @@ async def test_cancel_execution_succeeds_and_transitions_assignment_to_cancelled
 async def test_resume_execution_rejected_as_unsupported_then_succeeds_against_capable_adapter(superuser_db, owner_id, tmp_path):
     assignment, _agent = _ready_dispatchable_assignment(superuser_db, owner_id)
     execution = start_execution_tracking(superuser_db, assignment=assignment, adapter_key="cursor-agent", attempt_id=uuid.uuid4())
-    local_adapter = LocalCLIAdapter(provider_key="cursor-agent", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5)
+    local_adapter = LocalCLIAdapter(provider_key="cursor-agent", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5, db=superuser_db)
     rejected = await resume_execution(superuser_db, execution=execution, assignment=assignment, adapter=local_adapter)
     assert rejected.outcome == OUTCOME_UNSUPPORTED_CAPABILITY
 
@@ -371,7 +397,7 @@ async def test_reconcile_execution_state_distinguishes_result_unavailable_after_
 
     assignment, _agent = _ready_dispatchable_assignment(superuser_db, owner_id)
     execution = start_execution_tracking(superuser_db, assignment=assignment, adapter_key="cursor-agent", attempt_id=uuid.uuid4())
-    fresh_adapter = LocalCLIAdapter(provider_key="cursor-agent", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5)
+    fresh_adapter = LocalCLIAdapter(provider_key="cursor-agent", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5, db=superuser_db)
     mark_execution_running(superuser_db, execution=execution)
     decision = await reconcile_execution_state(superuser_db, execution=execution, assignment=assignment, adapter=fresh_adapter)
     assert decision.outcome == RECONCILE_RESULT_UNAVAILABLE
@@ -404,8 +430,8 @@ def test_resolve_adapter_env_only_forwards_explicitly_allowlisted_names(monkeypa
 # test adapter -- capability declarations proven against both the fake and a REAL (harmless)
 # LocalCLIAdapter instance.
 
-def test_local_cli_adapter_declares_only_cancel_capability(tmp_path):
-    adapter = LocalCLIAdapter(provider_key="test-caps", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5)
+def test_local_cli_adapter_declares_only_cancel_capability(tmp_path, superuser_db):
+    adapter = LocalCLIAdapter(provider_key="test-caps", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5, db=superuser_db)
     assert adapter.control_capabilities() == AdapterCapabilities(supports_cancel=True)
 
 
@@ -476,7 +502,7 @@ async def test_full_interactive_control_loop_from_dispatch_through_result_ingest
 @pytest.mark.asyncio
 async def test_e2e_control_loop_lost_process_during_collection_never_falsely_reports_completed(superuser_db, owner_id, tmp_path):
     assignment, agent = _ready_dispatchable_assignment(superuser_db, owner_id)
-    start_adapter = LocalCLIAdapter(provider_key="cursor-agent", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5)
+    start_adapter = LocalCLIAdapter(provider_key="cursor-agent", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5, db=superuser_db)
     decision = await dispatch_assignment(superuser_db, assignment=assignment, agent=agent, adapter=start_adapter)
     assert decision.outcome == "ASSIGNABLE"
     execution = start_execution_tracking(superuser_db, assignment=assignment, adapter_key="cursor-agent", attempt_id=decision.attempt_id)
@@ -484,7 +510,7 @@ async def test_e2e_control_loop_lost_process_during_collection_never_falsely_rep
 
     # A FRESH adapter instance for collection -- its own `_processes` dict never saw this
     # assignment's process started, so collect_result() genuinely raises AdapterProcessLostError.
-    fresh_adapter = LocalCLIAdapter(provider_key="cursor-agent", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5)
+    fresh_adapter = LocalCLIAdapter(provider_key="cursor-agent", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5, db=superuser_db)
     result_decision = await collect_and_ingest_execution_result(
         superuser_db, execution=execution, assignment=assignment, agent=agent, adapter=fresh_adapter, adapter_key="cursor-agent"
     )
@@ -500,7 +526,7 @@ async def test_e2e_control_loop_lost_process_during_collection_never_falsely_rep
 @pytest.mark.asyncio
 async def test_e2e_control_loop_timeout_during_collection_never_falsely_reports_completed(superuser_db, owner_id, tmp_path):
     assignment, agent = _ready_dispatchable_assignment(superuser_db, owner_id)
-    adapter = LocalCLIAdapter(provider_key="cursor-agent", executable="/bin/sleep", args_template=("5",), cwd=str(tmp_path), timeout_seconds=1)
+    adapter = LocalCLIAdapter(provider_key="cursor-agent", executable="/bin/sleep", args_template=("5",), cwd=str(tmp_path), timeout_seconds=1, db=superuser_db)
     decision = await dispatch_assignment(superuser_db, assignment=assignment, agent=agent, adapter=adapter)
     assert decision.outcome == "ASSIGNABLE"
     execution = start_execution_tracking(superuser_db, assignment=assignment, adapter_key="cursor-agent", attempt_id=decision.attempt_id)

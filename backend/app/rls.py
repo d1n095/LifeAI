@@ -1017,6 +1017,10 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
                 errors.append(f"{table}: must never be owned by mainai_app")
 
         for table, allowed in (
+            # Migration 0069 (System Activation Authorization): SELECT only -- no application
+            # code path, however reached, may ever write a row here. See that migration's own
+            # module docstring and app.models.agent_coordination.SystemActivationAuthorization.
+            ("system_activation_authorizations", frozenset({"SELECT"})),
             ("mainai_task_events", _MAINAI_EXECUTION_TASK_EVENT_TABLE_ALLOWED_PRIVILEGES),
             ("mainai_checkpoints", _MAINAI_EXECUTION_CHECKPOINT_TABLE_ALLOWED_PRIVILEGES),
             ("mainai_recovery_events", _MAINAI_RECOVERY_EVENT_TABLE_ALLOWED_PRIVILEGES),

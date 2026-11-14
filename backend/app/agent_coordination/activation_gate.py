@@ -4,28 +4,45 @@ repo-wide grep (2026-11-14, confirmed independently twice this session) found ZE
 matches for this term anywhere in the codebase -- it was a decision this codebase was ASSUMED
 to already enforce, but never actually did.
 
-This module is the smallest possible fail-closed implementation, not a new security system:
-ONE environment flag, ONE check function, wired into the ONE place in this codebase that would
-ever invoke a REAL external AI provider adapter --
-`app.agent_coordination.adapters.get_real_adapter()`. That path has ZERO live callers anywhere
-in `app/routers/` or `app/worker.py` today (confirmed this session), so wiring this gate in
-changes NOTHING about current live behavior -- there is nothing live to block yet. It becomes
-load-bearing only once (if ever) `app.agent_coordination.dispatch.dispatch_assignment()` is
-wired to a real request/worker path in a future increment, per the migration boundary recorded
-in `docs/LIFE_EXECUTION_AUTHORITY_CANONICAL_MAPPING.md`.
+Two layers live in this module, added in two passes of the same Founder directive:
 
-Deliberately NOT a database flag, NOT a founder-facing API, NOT something any in-process code
-(including MainAI itself) can set: the directive frames `first_cycle_go` as the founder's OWN
-external release decision (the same kind of thing a human flips when they decide Founder Alpha
-has survived its first real activation cycle), so this module only ever READS a single
-environment variable the founder sets outside application code -- there is no `set_*` function
-here, on purpose, and never should be. Fail-closed by construction: unset, empty, or any value
-other than exactly `"true"` means NOT gone -- the same discipline
-`app.mainai_execution.approval.requires_approval()`'s unknown-policy fallback and
-`app.mainai_execution.recovery_approval.recovery_requires_approval()`'s unknown-classification
-fallback already apply to their own gates."""
+1. `first_cycle_go()`/`require_first_cycle_go()` -- the original, cheapest possible check: one
+   environment flag. Deliberately NOT a database flag, NOT a founder-facing API, NOT something
+   any in-process code (including MainAI itself) can set -- the directive frames
+   `first_cycle_go` as the founder's OWN external release decision, so this reads a single env
+   var the founder sets outside application code; there is no `set_*` function here, on
+   purpose, and never should be.
+
+2. `require_system_activation_authority()` -- a SECOND, later-directive follow-up ("An
+   environment variable alone must not constitute production activation authority"). Requires
+   BOTH the env var above AND a current row in `system_activation_authorizations`
+   (`app.agent_coordination.system_activation.current_system_activation()`) -- a table no
+   application code path can ever write to (migration 0069 revokes INSERT/UPDATE/DELETE from
+   `mainai_app`; see that migration and `SystemActivationAuthorization`'s own docstring).
+   Neither the env var nor the DB row is sufficient alone; both fail closed independently.
+
+Wiring: `app.agent_coordination.adapters.LocalCLIAdapter.start_assignment()` -- the actual,
+literal point a real subprocess gets spawned, regardless of how the adapter instance was
+constructed or which caller reached it. An earlier pass of this directive wired the check only
+into `get_real_adapter()` (the factory), which a security review correctly found insufficient:
+`dispatch.dispatch_assignment()` takes an `AgentAdapter` as a caller-supplied parameter and
+never calls `get_real_adapter()` itself, so a directly-constructed `LocalCLIAdapter` passed
+into it would have bypassed that earlier, shallower check entirely. Moving the check to the
+adapter's own real-effect method closes that: there is no lower level left to invoke around.
+`get_real_adapter()` still checks `first_cycle_go()` too, as a cheap early-exit that avoids
+even constructing a `LocalCLIAdapter` when the simplest precondition already fails -- but it is
+no longer the ONLY enforcement point, and was never meant to be.
+
+Fail-closed by construction throughout: unset, empty, or any value other than exactly `"true"`
+means NOT gone for the env var; missing, revoked, or expired means NOT authorized for the DB
+evidence -- the same discipline `app.mainai_execution.approval.requires_approval()`'s
+unknown-policy fallback and `app.mainai_execution.recovery_approval.
+recovery_requires_approval()`'s unknown-classification fallback already apply to their own
+gates."""
 
 import os
+
+from sqlalchemy.orm import Session
 
 _ENV_FIRST_CYCLE_GO = "FIRST_CYCLE_GO"
 
@@ -61,3 +78,38 @@ def require_first_cycle_go(*, action: str) -> None:
     `FirstCycleNotGoError` unless the founder has explicitly set `FIRST_CYCLE_GO=true`."""
     if not first_cycle_go():
         raise FirstCycleNotGoError(action)
+
+
+class SystemActivationNotAuthorizedError(Exception):
+    """Raised by `require_system_activation_authority()` when EITHER the env var or the durable
+    DB evidence is missing -- the caller must treat this as a hard stop. Distinct from
+    `FirstCycleNotGoError` (env var alone) because this is the one callers doing anything with
+    real external effect must use; `first_cycle_go()`'s bare env var is no longer, by itself,
+    sufficient authorization for that."""
+
+    def __init__(self, action: str, *, reason: str):
+        super().__init__(
+            f"system activation is not authorized (action: {action!r}): {reason}. Both "
+            f"{_ENV_FIRST_CYCLE_GO}=true AND a current row in system_activation_authorizations "
+            "are required -- no code path in this repository may create that row on its own "
+            "behalf (see migration 0069)."
+        )
+        self.action = action
+        self.reason = reason
+
+
+def require_system_activation_authority(db: Session, *, action: str) -> None:
+    """THE authoritative enforcement point: requires BOTH the env var AND current, valid,
+    non-expired, non-revoked DB evidence. Re-queries fresh on every call -- never cached --
+    so revoking authorization or letting it expire takes effect on the very next check, closing
+    the "concurrent changes and stale authorization" scenario a security review flagged.
+    Raises `SystemActivationNotAuthorizedError`, naming exactly which half is missing, rather
+    than a single undifferentiated failure."""
+    from app.agent_coordination.system_activation import current_system_activation
+
+    if not first_cycle_go():
+        raise SystemActivationNotAuthorizedError(action, reason=f"{_ENV_FIRST_CYCLE_GO} is not set to \"true\"")
+    if current_system_activation(db) is None:
+        raise SystemActivationNotAuthorizedError(
+            action, reason="no current (active, non-expired) row exists in system_activation_authorizations"
+        )
