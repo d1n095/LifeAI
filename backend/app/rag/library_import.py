@@ -4,10 +4,10 @@ extraction -> app/rag/ingest.py's existing chunk/embed/store pipeline -> a Knowl
 snapshot -> ImportJob progress/result tracking. See docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md.
 
 Life Library durable-worker package: the raw uploaded package is no longer passed around in
-memory  POST /api/library/import (app/routers/library.py) streams it straight to durable
+memory — POST /api/library/import (app/routers/library.py) streams it straight to durable
 storage (app/storage/) before this module ever runs, and records where at
 ImportJob.source_storage_key. run_import_job() opens that file itself. This module is called
-from app/worker.py's poll loop now, not a FastAPI BackgroundTask  a crash between here and a
+from app/worker.py's poll loop now, not a FastAPI BackgroundTask — a crash between here and a
 job reaching a terminal status simply leaves it `pending`/`running` with an expired lease,
 and any worker (the same one restarted, or a different replica) picks it back up exactly like
 a fresh claim (see app/worker.py's claim_next_job).
@@ -60,7 +60,7 @@ MEDIA_TYPES: dict[str, str] = {
     ".json": "application/json",
     ".html": "text/html",
     ".htm": "text/html",
-    # STEG 12: audio/video (see app/rag/media_import.py)  dispatched to a different
+    # STEG 12: audio/video (see app/rag/media_import.py) — dispatched to a different
     # pipeline in _import_one_file below, but the MIME type it gets labeled with in the
     # Document row comes from this same lookup table as everything else.
     **media_import.MEDIA_TYPES,
@@ -69,7 +69,7 @@ MEDIA_TYPES: dict[str, str] = {
 VALID_CLASSIFICATIONS = {c.value for c in KnowledgeClassification}
 VALID_TRUTH_STATUSES = {s.value for s in ActiveTruthStatus}
 
-# 2026-07-28: mirrors app/rag/context_status.py's _FAILED_STATUSES  a Document already in
+# 2026-07-28: mirrors app/rag/context_status.py's _FAILED_STATUSES — a Document already in
 # one of these when _import_one_file sees it again (e.g. a resumed `partial` job) is a real,
 # still-unresolved failure, not a duplicate. See _import_one_file's existing-document branch.
 _FAILED_INDEX_STATUSES = (
@@ -82,7 +82,7 @@ _FAILED_INDEX_STATUSES = (
 
 class JobCancelled(Exception):
     """Raised internally to unwind out of per-file processing the instant a cancellation is
-    observed  never escapes run_import_job (caught there and treated as a clean, expected
+    observed — never escapes run_import_job (caught there and treated as a clean, expected
     stop, not a failure to retry)."""
 
 
@@ -92,7 +92,7 @@ class FileOutcome:
     status: str  # "indexed" | "duplicate" | "failed" | "skipped" | "cancelled" | "blocked" | "encrypted"
     reason: str | None = None
     source_id: str | None = None
-    # P2: only set for a file that came from inside a nested ZIP archive  mirrors
+    # P2: only set for a file that came from inside a nested ZIP archive — mirrors
     # ZipEntryResult.archive_path/archive_chain (see app/rag/zip_import.py), carried through
     # unchanged so ImportJob.file_results retains the same provenance the extraction step
     # already computed. None for a top-level file, exactly like before P2.
@@ -103,7 +103,7 @@ class FileOutcome:
 def _manifest_entry_for(manifest: dict | None, filename: str) -> dict:
     """Looks up per-file metadata from a `{"documents": [{"file": ..., ...}, ...]}`-shaped
     manifest (the FKP-like package format DEL 2 asks to support) by filename or basename.
-    Returns {} if there's no manifest, or no entry for this specific file  the import still
+    Returns {} if there's no manifest, or no entry for this specific file — the import still
     proceeds with defaults, since the manifest is enrichment, not a requirement."""
     if not manifest or not isinstance(manifest.get("documents"), list):
         return {}
@@ -120,18 +120,18 @@ def _set_rls_owner(db: Session, owner_id: uuid.UUID) -> None:
     """The worker gets a fresh session that never goes through app/deps.py's
     get_current_user (see app/rag/ingest.py's identical requirement). This whole orchestrator
     makes several separate db.commit() calls as it goes (progress updates), each of which
-    ends the current transaction  app/db.py's after_begin listener re-applies SET LOCAL on
+    ends the current transaction — app/db.py's after_begin listener re-applies SET LOCAL on
     every *new* transaction, but only by reading the current_user_id contextvar, so setting
     the raw session variable alone (as app/rag/ingest.py's single-shot caller does) only
-    covers the first transaction. Setting the contextvar too  exactly what get_current_user
-    does for a real request  is what makes every later commit's next transaction correctly
+    covers the first transaction. Setting the contextvar too — exactly what get_current_user
+    does for a real request — is what makes every later commit's next transaction correctly
     re-scoped without this function needing to be called again before each one."""
     current_user_id_var.set(str(owner_id))
     db.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_id)})
 
 
 def _job_is_cancelled(db: Session, job_id: uuid.UUID) -> bool:
-    """A cheap, dedicated status-only read (not a full ORM load)  called between every
+    """A cheap, dedicated status-only read (not a full ORM load) — called between every
     per-file step and before every major pipeline transition, so a delete-triggered
     cancellation (app/routers/library.py's delete_source) is noticed promptly rather than
     only at the next natural commit boundary."""
@@ -142,7 +142,7 @@ def _job_is_cancelled(db: Session, job_id: uuid.UUID) -> bool:
 def _store_bytes(storage: StorageBackend, content: bytes, *, max_bytes: int):
     """Adapts a plain in-memory bytes value (already validated/extracted from a ZIP entry,
     or the whole single-file upload) to StorageBackend.write_stream's pull-based
-    read_chunk() interface  chunked, not because `content` isn't already fully in memory
+    read_chunk() interface — chunked, not because `content` isn't already fully in memory
     here (the worker's own documented tradeoff, see this module's top docstring), but so the
     write itself still goes through the exact same streaming-hash-and-atomic-write path a
     truly-streamed source would."""
@@ -162,7 +162,7 @@ def _store_bytes_with_reference_lock(db: Session, storage: StorageBackend, conte
     """Pass 32 (a seventh founder review round): wraps `_store_bytes()` with the SAME
     lock+verify+republish protocol `app/storage/references.py`'s
     `store_content_with_reference_lock()` already provides for Project Memory's writers (Pass
-    31)  see that function's docstring for the write-before-reference race this closes, and
+    31) — see that function's docstring for the write-before-reference race this closes, and
     this module's own module docstring / `_import_one_file`'s call site for why `_store_bytes`
     itself (a genuinely persistent writer with no lock at all) was a real, founder-flagged gap:
     the worker's per-file write here durably creates a blob BEFORE the surrounding `Document`
@@ -173,16 +173,16 @@ def _store_bytes_with_reference_lock(db: Session, storage: StorageBackend, conte
     Deliberately calls `_store_bytes()` itself (not `store_content_with_reference_lock()`
     directly) rather than duplicating its logic inline, so existing tests that monkeypatch
     `li._store_bytes` to observe the pipeline's granular status transitions (see
-    tests/backend/rag/test_library_import.py) continue to observe the real write  Python resolves
+    tests/backend/rag/test_library_import.py) continue to observe the real write — Python resolves
     the bare `_store_bytes(...)` call below against this module's current global at call time,
     so a monkeypatched replacement is still picked up correctly.
 
     Callers MUST set `Document.storage_key` and commit while STILL holding this same `db`
-    session's open transaction  the advisory lock releases at that transaction's next commit
+    session's open transaction — the advisory lock releases at that transaction's next commit
     or rollback, exactly like every other caller of `acquire_storage_key_lock`.
 
     Pass 32 (an eighth founder review round): uses `storage.verify(expected_sha256=...,
-    expected_size=...)`, not `storage.exists()`  see `store_content_with_reference_lock()`'s
+    expected_size=...)`, not `storage.exists()` — see `store_content_with_reference_lock()`'s
     (app/storage/references.py) matching docstring update for why `exists()` alone can't tell
     a genuinely-published blob apart from a same-path file whose bytes don't actually match
     this content's hash."""
@@ -198,32 +198,32 @@ def _store_bytes_with_reference_lock(db: Session, storage: StorageBackend, conte
     # Safe to republish now, WHILE holding the lock, so no concurrent deleter's reference
     # check can run again until this transaction commits or rolls back.
     logger.warning(
-        "Blob %s saknas eller �r korrupt vid referens-l�set -- �terpublicerar fr�n minnet.", blob.storage_key
+        "Blob %s saknas eller är korrupt vid referens-låset -- återpublicerar från minnet.", blob.storage_key
     )
     blob = _store_bytes(storage, content, max_bytes=max_bytes)
     if not storage.verify(blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes):
         raise StorageError(
-            f"Kunde inte publicera en verifierad blob {blob.storage_key} -- inneh�llet matchar "
-            f"fortfarande inte den f�rv�ntade sha256:n efter �terpublicering."
+            f"Kunde inte publicera en verifierad blob {blob.storage_key} -- innehållet matchar "
+            f"fortfarande inte den förväntade sha256:n efter återpublicering."
         )
     return blob
 
 
 def maybe_purge_blob(db: Session, storage: StorageBackend, storage_key: str | None) -> DeletionStatus:
     """Life Library durable-worker package (DEL 5): physically removes a blob ONLY when
-    nothing still needs it  content-addressing (see app/storage/local_fs.py) means two
+    nothing still needs it — content-addressing (see app/storage/local_fs.py) means two
     different documents (or a pending ImportJob's raw upload) with byte-identical content
     already share one physical file, so the reference check is a live DB query, not a
     maintained counter that could drift. Pass 22: the reference check itself now lives in
-    app/storage/references.py::storage_key_still_referenced()  a live Document.storage_key
+    app/storage/references.py::storage_key_still_referenced() — a live Document.storage_key
     row was always checked here, but a pending/running/resumable ImportJob.source_storage_key
     was not, which let a source purge physically delete a blob a not-yet-processed import job
     still needed (see that module's docstring for the full incident and the fix). Returns the
     DeletionStatus to persist on the caller's Document row: `purged` (removed, or nothing to
-    remove), `pending` (still referenced elsewhere  correct to leave the file in place),
+    remove), `pending` (still referenced elsewhere — correct to leave the file in place),
     `failed` (a real I/O error, surfaced distinctly rather than silently retried forever).
     Callers with a real storage_key must hold app.storage.references.acquire_storage_key_lock
-    for this call  this function itself does no locking."""
+    for this call — this function itself does no locking."""
     if storage_key is None:
         return DeletionStatus.purged
     if storage_key_still_referenced(db, storage_key):
@@ -247,30 +247,30 @@ async def _resume_incomplete_document(
     archive_chain: list[dict] | None = None,
 ) -> FileOutcome:
     """P1, widened 2026-07-28: re-attempts extraction+embedding for a Document that is NOT
-    in a terminal state  reuses the SAME row and its existing KnowledgeVersion rather than
+    in a terminal state — reuses the SAME row and its existing KnowledgeVersion rather than
     creating a duplicate. Two distinct ways to land here, both driving the exact same code:
       - `awaiting_provider`/`blocked_provider` (the original P1 case): a real pause, resumed
         once app/worker.py's _requeue_blocked_jobs sees the provider verify ok again.
       - Any status in app/models/document.py's RESUMABLE_INDEX_STATUSES (extracting,
         embedding, etc.): the worker PROCESS itself died mid-step with no exception for
-        Python to catch, leaving the row stuck there  reached either when its ImportJob's
+        Python to catch, leaving the row stuck there — reached either when its ImportJob's
         lease expires and gets reclaimed, or via app/worker.py's _reconcile_orphaned_documents
         for a job that had already (wrongly) reached a terminal status. Restarting the whole
         extraction+embedding pipeline from scratch is deliberately simple and safe here: we
         don't know which exact sub-step the crash interrupted, and re-extraction is cheap and
         local (no AI involved) regardless.
-    Reached whenever a file with a matching checksum is seen again  never needs the ORIGINAL
+    Reached whenever a file with a matching checksum is seen again — never needs the ORIGINAL
     http upload again: `content` here always comes from re-reading the job's own durably
     stored original (ImportJob.source_storage_key, see run_import_job/_run_once). The
-    original bytes are never re-stored  the document is already `original_stored` (or
+    original bytes are never re-stored — the document is already `original_stored` (or
     further along), and app/storage/'s content-addressing would just no-op a re-write
     anyway.
 
     2026-07-28, second correction: RESUMABLE_INDEX_STATUSES applies to every Document
-    regardless of type  an audio/video file (media_import.py's pipeline) can crash while
+    regardless of type — an audio/video file (media_import.py's pipeline) can crash while
     stuck at `extracting`/`embedding` exactly like a text document can, but it does NOT go
     through extract_text()/index_document() on a first import (see _import_one_file's own
-    `if media_kind is None: ... else: ...` split)  it goes through
+    `if media_kind is None: ... else: ...` split) — it goes through
     media_import.validate_media_bytes() + media_import.index_media_document() instead, which
     transcribes and builds timestamped chunks rather than extracting/embedding plain text.
     Resuming a crash-stuck MP3/MP4 through the text pipeline would misclassify it as
@@ -350,19 +350,19 @@ async def _resume_incomplete_document(
             await extract_claims_for_document(db, document, owner_id, version.id)
         except Exception:  # noqa: BLE001 - claim extraction is best-effort, indexing already succeeded
             # S1A dual-write (app/rag/claims.py) flushes MemorySourceUnit/DocumentSourceUnit
-            # rows before it commits  an exception partway through (a later chunk's provider
+            # rows before it commits — an exception partway through (a later chunk's provider
             # error surfacing unexpectedly, an identity conflict) can leave those flushed-but-
             # uncommitted writes sitting in this session. Without rollback here, a LATER
             # db.commit() elsewhere in this same worker session could commit them anyway,
-            # even though extraction was reported as failed  or, if that later commit itself
+            # even though extraction was reported as failed — or, if that later commit itself
             # hits a DB error, leave the session stuck in PendingRollback and break the rest
             # of the job. db.rollback() only undoes this function's own uncommitted work
             # (document.status/indexing were already committed above), so "indexed" below is
             # still accurate.
             db.rollback()
             logger.exception(
-                "Claim-extraktion misslyckades f�r dokument %s (owner=%s, version=%s)  "
-                "session rullades tillbaka, indexering kvarst�r som lyckad.",
+                "Claim-extraktion misslyckades för dokument %s (owner=%s, version=%s) — "
+                "session rullades tillbaka, indexering kvarstår som lyckad.",
                 document.id,
                 owner_id,
                 version.id,
@@ -394,7 +394,7 @@ async def _import_one_file(
     archive_chain: list[dict] | None = None,
 ) -> FileOutcome:
     # Idempotency at the file level: identical content (by checksum) already owned by this
-    # user is never re-imported as a second copy  DEL 2's "vara idempotent vid samma
+    # user is never re-imported as a second copy — DEL 2's "vara idempotent vid samma
     # checksumma" and DEL 4's duplicate-marking both point at this same check.
     existing = (
         db.query(Document)
@@ -402,7 +402,7 @@ async def _import_one_file(
         .first()
     )
     if existing is not None:
-        # P1: a row already paused on the provider is NOT a duplicate  resume it in place
+        # P1: a row already paused on the provider is NOT a duplicate — resume it in place
         # instead of creating a second Document/KnowledgeVersion (see
         # _resume_incomplete_document's docstring).
         if existing.status in (IndexStatus.awaiting_provider, IndexStatus.blocked_provider):
@@ -411,13 +411,13 @@ async def _import_one_file(
             )
         # 2026-07-28, second incident: a document left at any OTHER non-terminal status
         # (embedding, extracting, original_stored, ...) got there because the worker PROCESS
-        # itself died mid-step  no exception was ever raised, so nothing set a terminal
+        # itself died mid-step — no exception was ever raised, so nothing set a terminal
         # status. Falling through to "duplicate" below would leave it stuck at that status
-        # forever even though the job it belongs to can still reach `completed`  the exact
+        # forever even though the job it belongs to can still reach `completed` — the exact
         # confirmed production incident (MAINAI_CONTEXT_BUNDLE.md stuck at `embedding`, job
         # showing "Klar", queue empty, nothing left to ever revisit it). Resuming re-attempts
         # the whole extraction+embedding pipeline on the SAME row from the durably stored
-        # original  see _resume_incomplete_document's docstring for why restarting from
+        # original — see _resume_incomplete_document's docstring for why restarting from
         # scratch is safe here regardless of which exact step the crash interrupted.
         if existing.status in RESUMABLE_INDEX_STATUSES:
             return await _resume_incomplete_document(
@@ -425,14 +425,14 @@ async def _import_one_file(
             )
         # 2026-07-28 incident: a real, still-unresolved failure must keep reporting as
         # "failed" on a resumed pass (e.g. app/worker.py's _requeue_blocked_jobs reprocessing
-        # a `partial` job to unstick its blocked files)  falling through to the generic
+        # a `partial` job to unstick its blocked files) — falling through to the generic
         # "duplicate" outcome below would silently erase it from THIS pass's failed_count,
         # since _run_once's summary (see that module) recomputes every count from scratch on
         # each attempt rather than merging across attempts. A job with real failures could
         # then flip straight to `completed` once its blocked files finally succeed, with the
         # original failures never surfaced again anywhere. This never re-attempts
-        # extraction/embedding  the failure is already durably recorded on the Document row
-        #  it only reports it honestly again instead of masking it as a duplicate.
+        # extraction/embedding — the failure is already durably recorded on the Document row
+        # — it only reports it honestly again instead of masking it as a duplicate.
         if existing.status in _FAILED_INDEX_STATUSES:
             return FileOutcome(
                 filename=filename,
@@ -446,7 +446,7 @@ async def _import_one_file(
         return FileOutcome(
             filename=filename,
             status="duplicate",
-            reason="Identiskt inneh�ll finns redan.",
+            reason="Identiskt innehåll finns redan.",
             source_id=str(existing.id),
             archive_path=archive_path,
             archive_chain=archive_chain,
@@ -458,7 +458,7 @@ async def _import_one_file(
     classification_raw = manifest_entry.get("classification")
     classification = classification_raw if classification_raw in VALID_CLASSIFICATIONS else KnowledgeClassification.general.value
     # Epistemic fail-closed: an unrecognized active_truth_status must NEVER elevate to
-    # `active` (the most privileged trust class  see app/rag/trust.py). Missing status on
+    # `active` (the most privileged trust class — see app/rag/trust.py). Missing status on
     # ordinary single-file uploads (empty manifest_entry) still defaults to `active` so
     # founder-direct library uploads remain current-truth by default; only an EXPLICIT but
     # invalid value fails closed to `proposed`.
@@ -475,13 +475,13 @@ async def _import_one_file(
         return FileOutcome(
             filename=filename,
             status="failed",
-            reason="Manifestets deklarerade checksumma matchar inte filens faktiska inneh�ll.",
+            reason="Manifestets deklarerade checksumma matchar inte filens faktiska innehåll.",
             archive_path=archive_path,
             archive_chain=archive_chain,
         )
 
     # The Document row exists (status `received`) BEFORE the original is durably stored or
-    # extraction is attempted  a failure at ANY later step is recorded ON this row instead
+    # extraction is attempted — a failure at ANY later step is recorded ON this row instead
     # of losing the received upload entirely. See IndexStatus's docstring for the full
     # granular state list this function walks through.
     document = Document(
@@ -498,15 +498,15 @@ async def _import_one_file(
         import_job_id=import_job_id,
         imported_at=datetime.utcnow(),
         status=IndexStatus.received,
-        # Original bytes are durably stored at storage_key below  do NOT duplicate them in
+        # Original bytes are durably stored at storage_key below — do NOT duplicate them in
         # media_blob (legacy in-DB copy kept only for pre-migration rows; see Document.media_blob).
     )
     db.add(document)
     db.commit()
 
     raw_metadata = {"original_filename": filename, "size_bytes": len(content), "media_type": document.media_type}
-    # P2: provenance for a file that came from inside a nested ZIP  see
-    # docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md �10.6. Omitted entirely (not just None) for a
+    # P2: provenance for a file that came from inside a nested ZIP — see
+    # docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §10.6. Omitted entirely (not just None) for a
     # top-level file, unchanged from before P2.
     if archive_path is not None:
         raw_metadata["archive_path"] = archive_path
@@ -529,13 +529,13 @@ async def _import_one_file(
         return FileOutcome(
             filename=filename,
             status="cancelled",
-            reason="Importen avbr�ts.",
+            reason="Importen avbröts.",
             source_id=str(document.id),
             archive_path=archive_path,
             archive_chain=archive_chain,
         )
 
-    # DEL 1 (persistent original storage): write, fsync, verify  see
+    # DEL 1 (persistent original storage): write, fsync, verify — see
     # app/storage/local_fs.py's write_stream. Only once this succeeds does the document
     # advance past `original_storing`; a storage failure here is recorded as a normal
     # `failed` outcome, exactly like an extraction failure, never a silently-lost upload.
@@ -545,10 +545,10 @@ async def _import_one_file(
     try:
         blob = _store_bytes_with_reference_lock(db, storage, content, max_bytes=max_upload_bytes)
     except StorageError as exc:
-        # P1: reclassified from the old undifferentiated `failed`  the original never made
+        # P1: reclassified from the old undifferentiated `failed` — the original never made
         # it into durable storage at all, so unlike awaiting_provider/blocked_provider this
         # is terminal: there is nothing safely stored to resume from, a fresh upload is
-        # required (see docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md �4.7).
+        # required (see docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.7).
         document.status = IndexStatus.storage_failed
         document.error_message = f"Kunde inte lagra originalfilen: {exc}"
         db.add(document)
@@ -568,7 +568,7 @@ async def _import_one_file(
     document.status = IndexStatus.original_stored
     db.add(document)
     db.commit()
-    # After durable Document.storage_key exists  not while still under the write lock 
+    # After durable Document.storage_key exists — not while still under the write lock —
     # supersede any stale rejected_upload_cleanup rows for this key (crash-before-reference
     # must leave the blob reclaimable by cleanup, not retained_shared forever).
     retain_pending_rejected_upload_cleanup_tasks(blob.storage_key)
@@ -580,7 +580,7 @@ async def _import_one_file(
         return FileOutcome(
             filename=filename,
             status="cancelled",
-            reason="Importen avbr�ts.",
+            reason="Importen avbröts.",
             source_id=str(document.id),
             archive_path=archive_path,
             archive_chain=archive_chain,
@@ -593,9 +593,9 @@ async def _import_one_file(
         try:
             text_content = extract_text(filename, content)
         except Exception as exc:  # noqa: BLE001 - one file's extraction failure must not abort the batch
-            # P1: reclassified from the old undifferentiated `failed`  the file's CONTENT is
+            # P1: reclassified from the old undifferentiated `failed` — the file's CONTENT is
             # the problem here, not the provider or storage, so this is terminal too (see
-            # docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md �4.7).
+            # docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.7).
             document.status = IndexStatus.extraction_failed
             document.error_message = f"Kunde inte extrahera text: {exc}"
             db.add(document)
@@ -613,7 +613,7 @@ async def _import_one_file(
         db.commit()
         await index_document(db, document, text_content)
     else:
-        # STEG 12: MIME/size check  a rejected media file becomes a per-file FileOutcome,
+        # STEG 12: MIME/size check — a rejected media file becomes a per-file FileOutcome,
         # exactly like a text-extraction failure above, never a job-level failure (see
         # app/rag/media_import.py's MediaImportError docstring).
         try:
@@ -621,9 +621,9 @@ async def _import_one_file(
         except media_import.MediaImportError as exc:
             document.status = IndexStatus.failed
             # MediaImportError is raised only by our own app/rag/media_import.py validation
-            # code with a deliberate, pre-written message  never wraps an httpx/provider
+            # code with a deliberate, pre-written message — never wraps an httpx/provider
             # exception, so str(exc) here can never contain a URL, header or API key (unlike
-            # the embedding call site in app/rag/ingest.py  see
+            # the embedding call site in app/rag/ingest.py — see
             # app/providers/verification.py's classify_provider_exception docstring).
             document.error_message = str(exc)
             db.add(document)
@@ -638,7 +638,7 @@ async def _import_one_file(
             )
         await media_import.index_media_document(db, document, content, filename, media_kind)
 
-    # P1: awaiting_provider/blocked_provider is a PAUSE, not a failure  the file is safely
+    # P1: awaiting_provider/blocked_provider is a PAUSE, not a failure — the file is safely
     # stored and extracted, just waiting on the AI provider, and app/worker.py's automatic
     # requeue will retry it with no re-upload. Every other non-`indexed` status here
     # (storage_failed/extraction_failed/indexing_failed, or the legacy generic `failed`) is a
@@ -664,7 +664,7 @@ async def _import_one_file(
 
     # Claim extraction (STEG 10, app/rag/claims.py) runs after indexing succeeds, on the
     # chunks index_document just created. A failure here must never turn a successfully
-    # indexed, searchable document into a "failed" import outcome  claims are an
+    # indexed, searchable document into a "failed" import outcome — claims are an
     # enrichment layer on top of the already-complete indexing result, not a precondition
     # for it, so any exception is swallowed the same way a single chunk's extraction
     # failure already is inside extract_claims_for_document itself.
@@ -677,8 +677,8 @@ async def _import_one_file(
         # the session in PendingRollback on a DB-level failure. Roll back before continuing.
         db.rollback()
         logger.exception(
-            "Claim-extraktion misslyckades f�r dokument %s (owner=%s, version=%s)  "
-            "session rullades tillbaka, indexering kvarst�r som lyckad.",
+            "Claim-extraktion misslyckades för dokument %s (owner=%s, version=%s) — "
+            "session rullades tillbaka, indexering kvarstår som lyckad.",
             document.id,
             owner_id,
             version.id,
@@ -696,22 +696,22 @@ async def _import_one_file(
 async def run_import_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID) -> None:
     """Restart-safe worker entry point (DEL 3): one attempt at the actual import work for a
     job app/worker.py's claim_next_job() has already atomically marked `running` under a
-    Postgres lease (`FOR UPDATE SKIP LOCKED`)  that claim is what guarantees no two workers
+    Postgres lease (`FOR UPDATE SKIP LOCKED`) — that claim is what guarantees no two workers
     ever process the SAME job row concurrently. This function additionally acquires the
-    existing STEG 11 Redis JobLock, scoped by (owner, content checksum) rather than job id 
+    existing STEG 11 Redis JobLock, scoped by (owner, content checksum) rather than job id —
     a DIFFERENT, narrower race the Postgres claim alone doesn't cover: two separate ImportJob
     rows created from two near-simultaneous uploads of byte-identical content could each be
     claimed by a different worker at the same time, and without this lock both could pass
     _import_one_file's duplicate-checksum check before either commits its new Document row.
 
     If Redis is unreachable (`JobLockUnavailable`), this function FAILS CLOSED by re-raising
-     `app/jobs/retry.py` already classifies that as transient, so the worker retries with
+    — `app/jobs/retry.py` already classifies that as transient, so the worker retries with
     backoff instead of racing without coordination. Contended locks (`acquire() is False`)
     still fail the job as a permanent "identical import already in progress" outcome.
 
     Never raises for a normal per-file failure (those become FileOutcome entries); DOES
     raise for a genuine, unexpected orchestration-level error AND for JobLockUnavailable.
-    Unlike the old synchronous-BackgroundTask design, this function itself does NOT retry 
+    Unlike the old synchronous-BackgroundTask design, this function itself does NOT retry —
     app/worker.py's caller owns the retry/backoff loop (app/jobs/retry.py, reused unchanged).
     """
     _set_rls_owner(db, owner_id)
@@ -723,13 +723,13 @@ async def run_import_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID) ->
 
     lock_key = f"import:{owner_id}:{job.source_checksum or job_id}"
     lock = JobLock(lock_key, lease_seconds=60)
-    # JobLockUnavailable means Redis itself is unreachable  FAIL CLOSED, do not proceed.
+    # JobLockUnavailable means Redis itself is unreachable — FAIL CLOSED, do not proceed.
     # Proceeding without the (owner, checksum) lock was a documented fail-open that allowed
     # two ImportJob rows for byte-identical content (claimed by different workers) to both
     # pass the duplicate-checksum check and commit two Document rows. JobLockUnavailable is
     # already classified transient in app/jobs/retry.py; re-raising lets process_claimed_job
     # retry/backoff until Redis returns, instead of racing without coordination.
-    # False = another worker genuinely holds this exact (owner, content) lock right now 
+    # False = another worker genuinely holds this exact (owner, content) lock right now —
     # a real concurrency outcome, not degraded Redis.
     try:
         lock_held = lock.acquire()
@@ -738,7 +738,7 @@ async def run_import_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID) ->
 
     if lock_held is False:
         job.status = ImportJobStatus.failed
-        job.failure_reason = "En identisk import p�g�r redan i en annan process (jobbl�s upptaget)."
+        job.failure_reason = "En identisk import pågår redan i en annan process (jobblås upptaget)."
         job.completed_at = datetime.utcnow()
         db.add(job)
         db.commit()
@@ -752,7 +752,7 @@ async def run_import_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID) ->
 
 
 async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uuid.UUID) -> None:
-    """The actual import work for one attempt  opens the durably-stored original from
+    """The actual import work for one attempt — opens the durably-stored original from
     app/storage/ and runs it through the same zip/single-file pipeline as before. Raises on
     an unexpected orchestration-level error (never on a per-file failure, which becomes a
     FileOutcome instead) so app/worker.py's retry wrapper can classify and act on it."""
@@ -762,7 +762,7 @@ async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uu
             raw = f.read()
     except (FileNotFoundError, StorageError) as exc:
         job.status = ImportJobStatus.failed
-        job.failure_reason = f"Originalfilen kunde inte l�sas fr�n lagringen: {exc}"
+        job.failure_reason = f"Originalfilen kunde inte läsas från lagringen: {exc}"
         job.completed_at = datetime.utcnow()
         db.add(job)
         db.commit()
@@ -779,8 +779,8 @@ async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uu
 
     if suffix == ".zip":
         # P2: outer_filename seeds the first segment of any nested entry's archive_path (e.g.
-        # "backup.zip!/users/docs.zip!/contracts/lease.pdf")  see zip_import.py's docstring.
-        zip_result = validate_and_extract_zip(raw, outer_filename=filename)  # ZipSecurityError propagates  permanent, see app/worker.py
+        # "backup.zip!/users/docs.zip!/contracts/lease.pdf") — see zip_import.py's docstring.
+        zip_result = validate_and_extract_zip(raw, outer_filename=filename)  # ZipSecurityError propagates — permanent, see app/worker.py
         job.manifest = zip_result.manifest
         entries = zip_result.entries
         job.progress_total = len(entries)
@@ -789,14 +789,14 @@ async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uu
 
         for entry in entries:
             if _job_is_cancelled(db, job_id):
-                outcomes.append(FileOutcome(filename=entry.filename, status="cancelled", reason="Importen avbr�ts."))
+                outcomes.append(FileOutcome(filename=entry.filename, status="cancelled", reason="Importen avbröts."))
                 job.progress_current = len(outcomes)
                 job.file_results = [o.__dict__ for o in outcomes]
                 db.add(job)
                 db.commit()
                 continue
             # manifest.json describes the package (see zip_import.py's own parsing of
-            # it into zip_result.manifest, already applied above)  it is package
+            # it into zip_result.manifest, already applied above) — it is package
             # metadata, not a knowledge source in its own right, so it's never imported
             # as a Document even though it passes the same .json allow-list check every
             # other JSON file in the package does.
@@ -812,8 +812,8 @@ async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uu
                 )
             elif entry.status == "encrypted":
                 # P2: kept as its own distinct FileOutcome.status (not folded into generic
-                # "skipped") purely for diagnostic clarity in ImportJob.file_results  see
-                # docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md �10.5. Counted alongside
+                # "skipped") purely for diagnostic clarity in ImportJob.file_results — see
+                # docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §10.5. Counted alongside
                 # skipped/duplicate in the job-level summary below; never resumable/blocked in
                 # the P1 provider-pause sense.
                 outcomes.append(
@@ -858,20 +858,20 @@ async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uu
             db.add(job)
             db.commit()
             # Heartbeat: renews the Postgres lease so a large package doesn't outlive its
-            # claim while still genuinely being worked on  see app/jobs/lease.py's
-            # renew_lease docstring. A failed renewal (locked_by no longer matches  the
+            # claim while still genuinely being worked on — see app/jobs/lease.py's
+            # renew_lease docstring. A failed renewal (locked_by no longer matches — the
             # lease already expired and another worker reclaimed this job as abandoned) is
             # logged, not fatal: the import keeps going rather than aborting mid-batch over
             # a coordination signal, matching the same "per-file idempotency is the real
             # safety net, not the lock itself" philosophy STEG 11 already established.
             if job.locked_by and not renew_lease(db, job_id, job.locked_by, WORKER_LEASE_SECONDS):
-                logger.warning("Import %s: kunde inte f�rnya jobbleasen  kan ha �vertagits som �vergivet.", job_id)
+                logger.warning("Import %s: kunde inte förnya jobbleasen — kan ha övertagits som övergivet.", job_id)
     else:
         job.progress_total = 1
         db.add(job)
         db.commit()
         if _job_is_cancelled(db, job_id):
-            outcomes.append(FileOutcome(filename=filename, status="cancelled", reason="Importen avbr�ts."))
+            outcomes.append(FileOutcome(filename=filename, status="cancelled", reason="Importen avbröts."))
         else:
             checksum = sha256_bytes(raw)
             outcome = await _import_one_file(
@@ -898,12 +898,12 @@ async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uu
     failed = sum(1 for o in outcomes if o.status == "failed")
     skipped = sum(1 for o in outcomes if o.status == "skipped")
     cancelled = sum(1 for o in outcomes if o.status == "cancelled")
-    # P2: an encrypted/password-protected entry  never attempted, never resumable. Counted
+    # P2: an encrypted/password-protected entry — never attempted, never resumable. Counted
     # alongside skipped/duplicate for job-level status purposes (see docs/
-    # MAINAI_PROJECT_UNDERSTANDING_PLAN.md �10.5); kept as its own FileOutcome.status only for
+    # MAINAI_PROJECT_UNDERSTANDING_PLAN.md §10.5); kept as its own FileOutcome.status only for
     # clearer per-file diagnostics.
     encrypted = sum(1 for o in outcomes if o.status == "encrypted")
-    # P1: files paused on awaiting_provider/blocked_provider  nothing genuinely failed here,
+    # P1: files paused on awaiting_provider/blocked_provider — nothing genuinely failed here,
     # the job is just waiting for the AI provider (see IndexStatus's docstring).
     blocked = sum(1 for o in outcomes if o.status == "blocked")
 
@@ -916,10 +916,10 @@ async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uu
         job.status = ImportJobStatus.cancelled
         job.completed_at = datetime.utcnow()
     elif blocked and not (succeeded or failed):
-        # P1: every non-duplicate/non-skipped file is paused on the provider  this is NOT a
+        # P1: every non-duplicate/non-skipped file is paused on the provider — this is NOT a
         # terminal outcome. app/worker.py's _requeue_blocked_jobs flips this back to `pending`
         # automatically once the active provider verifies ok, so `completed_at` is
-        # deliberately left unset  the job isn't done, it's waiting.
+        # deliberately left unset — the job isn't done, it's waiting.
         job.status = ImportJobStatus.blocked
     elif failed and (succeeded or duplicates or skipped or blocked or encrypted):
         job.status = ImportJobStatus.partial
@@ -935,11 +935,11 @@ async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uu
     # 2026-07-28, permanent fix (production incident: MAINAI_CONTEXT_BUNDLE.md stuck at
     # `embedding` while its job showed "Klar"): a job must never report completed/partial/
     # failed while a linked, live Document is still stuck mid-pipeline. This is a safety net
-    # independent of THIS pass's own outcomes list  it re-checks the actual, current Document
+    # independent of THIS pass's own outcomes list — it re-checks the actual, current Document
     # rows rather than trusting the counts above alone, since not every stuck row is
     # necessarily represented in `outcomes` (e.g. a prior attempt's crash left it behind before
     # this pass ever reached it). Overrides back to `pending` (no completed_at/failure_reason)
-    # so the very next poll cycle reclaims and resumes it via claim_next_job  see
+    # so the very next poll cycle reclaims and resumes it via claim_next_job — see
     # _import_one_file's RESUMABLE_INDEX_STATUSES branch above, and app/worker.py's
     # _reconcile_orphaned_documents for the equivalent guard when a job is discovered to
     # already be terminal (no poll cycle left to naturally reach this function again).

@@ -10,15 +10,12 @@ from app.rag.extract_isolated import ExtractionIsolationError, extract_text_isol
 
 
 def test_plain_text_round_trips_through_real_child_process() -> None:
-    raw = "Founderbeslut: källorna ska bevaras.\n".encode()
+    raw = b"Founder decision: preserve every source.\n"
     assert extract_text_isolated("../../private/founder-note.txt", raw) == raw.decode()
 
 
 def test_invalid_docx_fails_closed_without_parser_detail() -> None:
-    with pytest.raises(
-        ExtractionIsolationError,
-        match="kunde inte parsas i den isolerade processen",
-    ):
+    with pytest.raises(ExtractionIsolationError, match="could not be parsed"):
         extract_text_isolated("broken.docx", b"not-a-docx")
 
 
@@ -49,8 +46,7 @@ def test_child_receives_no_parent_secrets_or_attacker_filename(
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
 
     assert extract_text_isolated("../../secret-name.txt", b"safe") == "safe"
-    child_env = captured["env"]
-    assert child_env == {
+    assert captured["env"] == {
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "PYTHONHASHSEED": "0",
@@ -82,7 +78,7 @@ def test_timeout_kills_the_whole_child_process_group(
     monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: process)
     monkeypatch.setattr(os, "killpg", lambda pid, sig: killed.append((pid, sig)))
 
-    with pytest.raises(ExtractionIsolationError, match="överskred tidsgränsen"):
+    with pytest.raises(ExtractionIsolationError, match="exceeded its time limit"):
         extract_text_isolated("slow.pdf", b"%PDF-", timeout_seconds=0.01)
     assert killed == [(456, 9)]
 
@@ -95,5 +91,5 @@ def test_oversized_input_is_rejected_before_starting_child(
         "Popen",
         lambda *args, **kwargs: pytest.fail("child must not start"),
     )
-    with pytest.raises(ExtractionIsolationError, match="storleksgräns"):
+    with pytest.raises(ExtractionIsolationError, match="input limit"):
         extract_text_isolated("large.txt", b"x" * (25 * 1024 * 1024 + 1))

@@ -1,8 +1,8 @@
 """Process-isolated document extraction for untrusted Founder files.
 
-The durable import worker is long-lived and security-sensitive.  PDF/DOCX/HTML parsers must
+The durable import worker is long-lived and security-sensitive. PDF/DOCX/HTML parsers must
 therefore not run in that process: malformed input, parser memory growth, or a stuck parser
-must terminate only a short-lived child.  The child receives no application secrets and is
+must terminate only a short-lived child. The child receives no application secrets and is
 bounded by both parent wall-clock timeout and child OS resource limits.
 """
 
@@ -26,9 +26,8 @@ class ExtractionIsolationError(RuntimeError):
 
 
 def _child_environment() -> dict[str, str]:
-    # Intentionally do not inherit DATABASE_URL, provider keys, Founder credentials, proxy
-    # variables, PYTHONPATH, or credential-helper configuration.  The absolute interpreter
-    # path plus a fixed backend cwd is sufficient to import the application module.
+    # Intentionally do not inherit database URLs, provider keys, Founder credentials,
+    # proxy variables, Python paths, or credential-helper configuration.
     return {
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
@@ -38,10 +37,9 @@ def _child_environment() -> dict[str, str]:
 
 
 def _safe_child_filename(filename: str) -> str:
-    # The parser needs only the extension.  Keeping attacker-controlled directory/name text
-    # out of argv also prevents it appearing in process listings and exception diagnostics.
-    suffix = Path(filename).suffix.lower()
-    return f"input{suffix}"
+    # The parser needs only the extension. Keeping attacker-controlled directory/name text
+    # out of argv also prevents it appearing in process listings and diagnostics.
+    return f"input{Path(filename).suffix.lower()}"
 
 
 def extract_text_isolated(
@@ -52,23 +50,17 @@ def extract_text_isolated(
 ) -> str:
     """Extract text in a disposable, resource-bounded subprocess.
 
-    No shell is involved.  Failure, timeout, oversized input/output, invalid UTF-8 output,
-    or abnormal termination all fail closed with a generic error.  The original bytes are
+    No shell is involved. Failure, timeout, oversized input/output, invalid UTF-8 output,
+    or abnormal termination all fail closed with a generic error. The original bytes are
     passed read-only over stdin and are never modified.
     """
     if len(raw) > _MAX_INPUT_BYTES:
-        raise ExtractionIsolationError("Dokumentet överskrider parserns hårda storleksgräns.")
+        raise ExtractionIsolationError("Document exceeds the parser input limit.")
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
 
-    command = [
-        sys.executable,
-        "-m",
-        "app.rag.extract_subprocess",
-        _safe_child_filename(filename),
-    ]
     process = subprocess.Popen(  # noqa: S603 - fixed interpreter/module, no shell or user path
-        command,
+        [sys.executable, "-m", "app.rag.extract_subprocess", _safe_child_filename(filename)],
         cwd=_BACKEND_ROOT,
         env=_child_environment(),
         stdin=subprocess.PIPE,
@@ -85,13 +77,13 @@ def extract_text_isolated(
         except ProcessLookupError:
             pass
         process.communicate()
-        raise ExtractionIsolationError("Dokumentparsningen överskred tidsgränsen.") from exc
+        raise ExtractionIsolationError("Document parser exceeded its time limit.") from exc
 
     if process.returncode != 0:
-        raise ExtractionIsolationError("Dokumentet kunde inte parsas i den isolerade processen.")
+        raise ExtractionIsolationError("Document could not be parsed in the isolated process.")
     if len(stdout) > _MAX_OUTPUT_BYTES:
-        raise ExtractionIsolationError("Parserresultatet överskrider den hårda storleksgränsen.")
+        raise ExtractionIsolationError("Parser output exceeds the hard size limit.")
     try:
         return stdout.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
-        raise ExtractionIsolationError("Parsern returnerade ogiltig textkodning.") from exc
+        raise ExtractionIsolationError("Parser returned invalid text encoding.") from exc
