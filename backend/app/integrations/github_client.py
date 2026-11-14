@@ -3,7 +3,7 @@ app/agent_orchestration.py) and, as of the MainAI Execution Loop V0.1 executor
 (app/mainai_execution/execution_job.py), real repo edits.
 
   - read, single-ref/single-PR: get_ref, get_pull_request, list_pull_requests_for_head,
-    list_check_runs
+    list_check_runs, list_reviews
   - read, repo-wide (Continuous Build Directive, Section B — "MainAI engineering
     coordinator": read verified GitHub evidence, identify open tasks, understand
     dependencies/ownership, propose a prioritized work queue): list_pull_requests,
@@ -149,6 +149,16 @@ class GitHubClient:
         if sha:
             params += f"&sha={sha}"
         return await self._request("GET", f"/repos/{repo}/commits?{params}")
+
+    async def list_reviews(self, number: int, *, per_page: int = 30, page: int = 1) -> list[dict]:
+        """Real review state for one pull request (each item has `state` --
+        APPROVED/CHANGES_REQUESTED/COMMENTED/DISMISSED -- and `user`). Coordinator checkpoint
+        reconciliation (Continuous Build Directive, Section D: "never turn a PR description
+        into verified execution evidence") reads this instead of anything a PR's own text
+        claims about its review status -- GitHub's own review records are the only source of
+        truth for whether a human actually approved something."""
+        repo = self._require_configured()
+        return await self._request("GET", f"/repos/{repo}/pulls/{number}/reviews?per_page={per_page}&page={page}")
 
     # --- Write (only called when settings.github_write_enabled is True) -----------------
 

@@ -253,6 +253,24 @@ async def test_list_commits_includes_sha_filter_when_given(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_list_reviews_hits_the_pull_request_reviews_endpoint(monkeypatch):
+    calls = _fake_github(
+        monkeypatch,
+        {
+            ("GET", "/repos/d1n095/LifeAI/pulls/403/reviews?per_page=30&page=1"): [
+                {"state": "APPROVED", "user": {"login": "founder"}}
+            ]
+        },
+    )
+    client = _configured_client(monkeypatch)
+
+    reviews = await client.list_reviews(403)
+
+    assert [r["state"] for r in reviews] == ["APPROVED"]
+    assert calls[0]["path"] == "/repos/d1n095/LifeAI/pulls/403/reviews?per_page=30&page=1"
+
+
+@pytest.mark.asyncio
 async def test_commit_multiple_files_raises_on_non_fast_forward_ref_update_race(monkeypatch):
     """The branch moved (a concurrent push/merge) since base_sha was captured -- GitHub
     rejects the fast-forward-only ref update. commit_multiple_files() must surface this as a
