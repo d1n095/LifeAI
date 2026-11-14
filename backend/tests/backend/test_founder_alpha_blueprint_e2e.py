@@ -1030,3 +1030,106 @@ def test_blueprint_superseded_decision_is_labeled_as_both_decision_and_supersede
     source_line = next(line for line in user_msg.split("\n") if f"document {doc.id}" in line)
     assert "[GRUNDARBESLUT]" in source_line
     assert "[KÄLLSTATUS: superseded]" in source_line
+
+
+# --- Long-term context continuity (Life MainAI Intelligence program): regenerate_draft() used
+# to call _generate() exactly like a brand-new create_draft() call -- identical title/query
+# re-synthesized from scratch with zero awareness of what the prior RESOLVED version actually
+# said. app.blueprint.service.latest_resolved_draft() is the new read; routers/blueprint.py's
+# _synthesis_prompt()/_synthesize_with_active_model() thread it into the prompt as its own
+# clearly-labeled, non-source continuity block. ---
+
+
+def test_blueprint_regeneration_includes_previous_version_for_continuity(client, superuser_db, _fake_model):
+    """Regenerating a Blueprint must hand the model its own prior RESOLVED version as explicit
+    continuity context, labeled with its version number, and record which version it
+    continued from in the new draft's own provenance."""
+    founder_id = _founder_id(superuser_db)
+    title = f"Continuity {uuid.uuid4().hex[:6]}"
+    _make_indexed_source(superuser_db, founder_id, title, text="Original project content.")
+    csrf = _login(client)
+
+    v1 = client.post(
+        "/api/blueprint/drafts",
+        json={"title": title, "query": "källa"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert v1.status_code == 201, v1.text
+    assert v1.json()["provenance"]["continued_from_version"] is None
+    v1_body = v1.json()["body"]
+
+    v2 = client.post(
+        f"/api/blueprint/drafts/{v1.json()['id']}/regenerate",
+        json={"query": "källa"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert v2.status_code == 201, v2.text
+    assert v2.json()["version"] == 2
+    assert v2.json()["provenance"]["continued_from_version"] == 1
+
+    sent_messages = _fake_model["messages"][-1]
+    user_msg = next(m.content for m in sent_messages if m.role == "user")
+    assert "PREVIOUS VERSION (v1" in user_msg
+    assert v1_body in user_msg
+    assert "INTE en källa" in user_msg  # _CONTINUITY_INSTRUCTION's own anti-hallucination line
+
+
+def test_blueprint_first_generation_has_no_continuity_context(client, superuser_db, _fake_model):
+    """Negative control: a brand-new title's FIRST generation has no prior resolved version,
+    so no continuity block or instruction is added, and provenance honestly records None
+    rather than silently omitting the field."""
+    founder_id = _founder_id(superuser_db)
+    title = f"FirstGen {uuid.uuid4().hex[:6]}"
+    _make_indexed_source(superuser_db, founder_id, title, text="Some content.")
+    csrf = _login(client)
+
+    res = client.post(
+        "/api/blueprint/drafts",
+        json={"title": title, "query": "källa"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert res.status_code == 201, res.text
+    assert res.json()["provenance"]["continued_from_version"] is None
+
+    sent_messages = _fake_model["messages"][-1]
+    user_msg = next(m.content for m in sent_messages if m.role == "user")
+    assert "PREVIOUS VERSION" not in user_msg
+
+
+def test_blueprint_regeneration_never_continues_from_a_failed_attempt(client, superuser_db, _fake_model):
+    """A failed generation attempt must never be handed to the NEXT regeneration as if it
+    were real prior content -- latest_resolved_draft() only ever reads 'draft'/'approved'
+    rows, never 'failed'."""
+    founder_id = _founder_id(superuser_db)
+    title = f"FailedContinuity {uuid.uuid4().hex[:6]}"
+    _make_indexed_source(superuser_db, founder_id, title, text="Content.")
+    csrf = _login(client)
+
+    v1 = client.post(
+        "/api/blueprint/drafts",
+        json={"title": title, "query": "källa"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert v1.status_code == 201, v1.text
+    v1_body = v1.json()["body"]
+
+    _fake_model["fail"] = True
+    failed = client.post(
+        f"/api/blueprint/drafts/{v1.json()['id']}/regenerate",
+        json={"query": "källa", "idempotency_key": f"{title}-retry"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert failed.status_code == 503, failed.text
+
+    _fake_model["fail"] = False
+    v2 = client.post(
+        f"/api/blueprint/drafts/{v1.json()['id']}/regenerate",
+        json={"query": "källa"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert v2.status_code == 201, v2.text
+    assert v2.json()["provenance"]["continued_from_version"] == 1  # v1, not the failed attempt
+
+    sent_messages = _fake_model["messages"][-1]
+    user_msg = next(m.content for m in sent_messages if m.role == "user")
+    assert v1_body in user_msg

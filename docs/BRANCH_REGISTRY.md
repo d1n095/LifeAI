@@ -6,6 +6,20 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Blueprint: långsiktig kontextkontinuitet över regenereringar (2026-11-14)
+
+**Ny branch: `claude/blueprint-context-continuity`** (PR #399, bas: #398
+`claude/blueprint-founder-decision-recognition` — sjunde lagret i kedjan). Mergeordning:
+#387 → #388 → #389 → #390 → #393 → #398 → #399.
+
+Fann att `regenerate_draft()` tidigare anropade `_generate()` identiskt med en helt ny
+`create_draft()`-förfrågan — noll medvetenhet om vad den föregående RESOLVED-versionen
+faktiskt sade. Ny `app.blueprint.service.latest_resolved_draft()` (hoppar över
+`generating`/`failed`-rader) + ett nytt, tydligt märkt "PREVIOUS VERSION"-block i
+synteskommandot + en `_CONTINUITY_INSTRUCTION` som kräver att varje sakuppgift från
+föregående version fortfarande kontrolleras mot de aktuella numrerade källorna — aldrig
+upprepas bara för att den stod där förut. Se PR #399 för detaljer.
+
 ## Blueprint Mission 5: Founder-decision/correction recognition (2026-11-14)
 
 **Ny branch: `claude/blueprint-founder-decision-recognition`** (PR #398, bas: #393
