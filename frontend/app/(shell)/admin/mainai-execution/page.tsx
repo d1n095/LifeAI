@@ -58,8 +58,73 @@ const LIVENESS_COLORS: Record<string, string> = {
 
 const POLL_INTERVAL_MS = 4000;
 
+type RuntimeCapabilityStatus = "supported" | "automatic" | "unavailable" | "unknown";
+type RuntimeCapability = { name: string; status: RuntimeCapabilityStatus; evidence: string };
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function runtimeCapabilities(
+  task: MainAITaskDetail,
+  job: MainAIJobDetail | null,
+  jobError: string | null,
+): RuntimeCapability[] {
+  const canCancel = job !== null && CANCELLABLE_MAINAI_JOB_STATUSES.includes(job.status);
+  return [
+    {
+      name: "Task- och jobbstatus",
+      status: "supported",
+      evidence: `Task liveness: ${task.liveness}; ${
+        job ? `jobbstatus: ${job.status}` : jobError ? "jobbstatus kunde inte verifieras" : "länkat jobb saknas"
+      }. Heartbeat är en lagrad observation, inte bevis på en levande agentprocess.`,
+    },
+    {
+      name: "Extern provider-session",
+      status: "unavailable",
+      evidence: "Session-ID och provider-observation finns inte i detta API-kontrakt.",
+    },
+    {
+      name: "Starta",
+      status: "automatic",
+      evidence: "Worker dispatchar automatiskt tasks när de blir redo; ingen manuell startoperation exponeras.",
+    },
+    {
+      name: "Begär avbrytning",
+      status: canCancel ? "supported" : jobError ? "unknown" : "unavailable",
+      evidence: canCancel
+        ? "Tillgänglig via den befintliga ägarbegränsade jobb-API:n, efter Founder-bekräftelse."
+        : "Ingen verifierad aktiv, avbrytbar körning.",
+    },
+    {
+      name: "Pausa",
+      status: "unavailable",
+      evidence: "Ingen auktoriserad pausoperation finns i detta kontrakt.",
+    },
+    {
+      name: "Återuppta checkpoint",
+      status: "automatic",
+      evidence: "Worker återanvänder beständiga checkpoints vid återhämtning; manuell resume-operation finns inte.",
+    },
+    {
+      name: "Provider UI-kontroll",
+      status: "unavailable",
+      evidence: "no authorized execution adapter.",
+    },
+  ];
+}
+
+function capabilityStatusLabel(status: RuntimeCapabilityStatus): string {
+  switch (status) {
+    case "supported":
+      return "stöds";
+    case "automatic":
+      return "automatisk";
+    case "unavailable":
+      return "unavailable";
+    case "unknown":
+      return "okänd";
+  }
 }
 
 function safeCheckpointMetadata(checkpoint: MainAITaskDetail["checkpoints"][number]): string[] {
@@ -643,9 +708,11 @@ export default function MainAIExecutionPage() {
                   </p>
                 )}
                 <ul className="space-y-1 border-t border-border/60 pt-2 text-xs text-white/60">
-                  <li>Sessionstatus i extern agent-UI: unavailable — no authorized execution adapter.</li>
-                  <li>Start/paus/fortsätt: unavailable; worker styr automatisk dispatch.</li>
-                  <li>Återupptagning från checkpoint: worker återanvänder beständiga checkpoints; inget manuellt resume-API.</li>
+                  {runtimeCapabilities(selectedTask, linkedJob, linkedJobError).map((capability) => (
+                    <li key={capability.name}>
+                      {capability.name}: {capabilityStatusLabel(capability.status)} — {capability.evidence}
+                    </li>
+                  ))}
                 </ul>
               </section>
 

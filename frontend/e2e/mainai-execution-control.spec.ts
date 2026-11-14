@@ -127,11 +127,14 @@ test.describe("MainAI execution control surface", () => {
     await expect(page.getByLabel("Uppdragsbrief")).toContainText("Granulär leverantörs-/agentprofil: unavailable");
     await expect(page.getByLabel("Körningssession och kapacitet")).toContainText("Senaste jobb-heartbeat:");
     await expect(page.getByLabel("Körningssession och kapacitet")).toContainText("Worker-ID och lease-utgång: unavailable");
+    await expect(page.getByLabel("Körningssession och kapacitet")).toContainText("Starta: automatisk");
+    await expect(page.getByLabel("Körningssession och kapacitet")).toContainText("Begär avbrytning: stöds");
+    await expect(page.getByLabel("Körningssession och kapacitet")).toContainText("Pausa: unavailable");
     await expect(page.getByText("verification", { exact: true }).last()).toBeVisible();
     await expect(page.getByText("Kontroll targeted_tests: godkänd")).toBeVisible();
     await expect(page.getByText("PRIVATE_RAW_TEST_OUTPUT_SENTINEL")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Begär avbrytning" })).toBeVisible();
-    await expect(page.getByText(/inget manuellt resume-API/)).toBeVisible();
+    await expect(page.getByText(/manuell resume-operation finns inte/)).toBeVisible();
   });
 
   test("uses the owner-scoped job cancellation request only after Founder confirmation", async ({ page }) => {
@@ -169,7 +172,7 @@ test.describe("MainAI execution control surface", () => {
     await page.locator("li").filter({ hasText: "repo_edit" }).first().click();
 
     await expect(page.getByLabel("Körningssession och kapacitet")).toContainText(
-      "Sessionstatus i extern agent-UI: unavailable — no authorized execution adapter."
+      "Provider UI-kontroll: unavailable — no authorized execution adapter."
     );
     await expect(page.getByRole("button", { name: "Begär avbrytning" })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Start/paus/fortsätt" })).toHaveCount(0);
