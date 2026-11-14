@@ -43,7 +43,8 @@ _STOP_COLUMNS = {
 }
 _STOP_CONSTRAINTS = {
     "mainai_stop_state": {
-        "mainai_stop_state_pkey", "ck_mainai_stop_scope", "ck_mainai_stop_owner_null",
+        "mainai_stop_state_pkey", "mainai_stop_state_owner_id_fkey", "ck_mainai_stop_scope",
+        "ck_mainai_stop_owner_null",
         "ck_mainai_stop_seq", "ck_mainai_stop_prov"
     },
     "mainai_stop_events": {
