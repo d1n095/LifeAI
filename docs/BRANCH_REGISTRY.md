@@ -6,6 +6,22 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Item G: säkerhetsarkitektur verifierad mot kod — 3 öppna frågor, ingen ny kod (2026-11-14)
+
+**Ny branch: `claude/safety-architecture-verification`** (PR #407, bas: `claude/det-kommer-
+mer-879lcm` — ren dokumentation, ingen kodändring, så ingen koppling till någon av de andra
+pågående kedjorna). Lägger till `docs/LIFE_SAFETY_ARCHITECTURE_VERIFICATION.md`: punkt-för-
+punkt-verifiering av direktivets Item G:s 5 invarianter mot verklig kod (filref, ingen
+gissning). 3 av 5 bekräftade (unprivileged/replaceable coordinator; komprometterade workers
+isolerade via `agent_coordination.dispatch.apply_dispatch_result()`s evidens-bara mönster;
+inga obegränsade credentials/backdoors). 2 öppna frågor, avsiktligt INTE avgjorda här:
+"Security Kernel" som namngivet begrepp finns inte i repot (RLS-lagret är den närmaste
+funktionella motsvarigheten, men ingen modul heter så); en bokstavligen SEPARAT verifierad
+miljö för recovery/"control room" finns inte (bara en strängare godkännande-grind i samma
+miljö); `first_cycle_go` (nämnd i direktivets Hard limits) har noll träffar i hela repot —
+okänt om den lever utanför detta repo eller behöver byggas, och om så, vad den ska spärra.
+Byggde INTE dessa själv — exakt den typen av beslut `CLAUDE.md` säger ska pausas på.
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en
