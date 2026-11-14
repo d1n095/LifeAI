@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
+from app.rag import library_import
 from app.rag.extract_isolated import ExtractionIsolationError, extract_text_isolated
+
+
+def test_runtime_import_path_is_bound_to_isolated_extractor() -> None:
+    assert library_import.extract_text is extract_text_isolated
 
 
 def test_plain_text_round_trips_through_real_child_process() -> None:
