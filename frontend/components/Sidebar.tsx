@@ -12,6 +12,7 @@ const NAV = [
   { href: "/workbench", label: "Workbench" },
   { href: "/knowledge", label: "Kunskapsdatabas" },
   { href: "/projects", label: "Projekt" },
+  { href: "/github-operations", label: "GitHub Operations" },
   { href: "/admin", label: "Admin" },
   { href: "/admin/memory", label: "Projektminne" },
   { href: "/admin/agents", label: "Agentuppdrag" },
@@ -20,7 +21,7 @@ const NAV = [
   { href: "/account", label: "Konto" },
 ];
 
-export default function Sidebar({ userEmail }: { userEmail: string }) {
+export default function Sidebar({ userEmail, role }: { userEmail: string; role: string }) {
   const pathname = usePathname();
   const router = useRouter();
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -37,7 +38,7 @@ export default function Sidebar({ userEmail }: { userEmail: string }) {
 
   const navLinks = (
     <nav aria-label="Huvudmeny" className="flex flex-col gap-1">
-      {NAV.map((item) => {
+      {NAV.filter((item) => item.href !== "/github-operations" || role === "founder").map((item) => {
         const active = pathname === item.href;
         return (
           <Link

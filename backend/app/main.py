@@ -32,6 +32,7 @@ from app.routers import (
     projects,
     provider_spend,
     workbench,
+    github_operations,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -81,6 +82,7 @@ app.include_router(project_entities.router)
 app.include_router(inspectable_memory.router)
 app.include_router(execution_envelopes.router)
 app.include_router(provider_spend.router)
+app.include_router(github_operations.router)
 
 
 @app.on_event("startup")

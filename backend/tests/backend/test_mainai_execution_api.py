@@ -102,6 +102,7 @@ def test_api_create_read_plan_and_report_a_goal(client, db_session):
 
     get_res = client.get(f"/api/mainai/execution/goals/{goal_id}")
     assert get_res.status_code == 200
+    assert get_res.json()["original_instruction"] == "Find and fix a tiny doc issue."
     assert get_res.json()["plan"] is None
     assert get_res.json()["tasks"] == []
 

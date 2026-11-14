@@ -183,14 +183,15 @@ class Settings(BaseSettings):
     provider_verification_cache_seconds: int = 300
     provider_verification_timeout_seconds: float = 10.0
 
-    # MainAI Core agent orchestration (app/agent_orchestration.py, app/integrations/
-    # github_client.py): a GitHub Personal Access Token or App installation token scoped to
-    # `github_repo` ("owner/repo"), used ONLY when github_write_enabled is explicitly turned
-    # on. Same optional-until-configured pattern as the provider API keys above — real values
-    # are entered directly in the Render dashboard, never committed, never pasted in chat.
-    # `github_write_enabled=False` (the default) means MainAI only ever PROPOSES an exact PR
-    # (branch name, commit message, diff, PR body) without calling GitHub at all — see
-    # prepare_github_pr(). `github_auto_merge_enabled` gates a capability that, as of this
+    # MainAI Core agent orchestration and the GitHub operations center use a token scoped to
+    # `github_repo` ("owner/repo"). The operations center sends bounded GET requests only;
+    # branch/PR/file writes remain separately gated by `github_write_enabled`. Prefer a
+    # read-only repository token unless write access is separately required. Real values are
+    # entered in the deployment secret store, never committed or pasted in chat.
+    # `github_write_enabled=False` (the default) keeps branch/PR/file writes disabled; it does
+    # not disable read-only repository discovery.
+    # `prepare_github_pr()` must check that gate before any write call. `github_auto_merge_enabled`
+    # gates a capability that, as of this
     # slice, has no implementation to gate: app/integrations/github_client.py deliberately has
     # no merge method at all, so there is no code path this flag could unsafely enable yet —
     # it exists so a future real merge implementation has an explicit off-by-default switch to

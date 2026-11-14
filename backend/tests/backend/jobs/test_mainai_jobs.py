@@ -1116,6 +1116,8 @@ async def test_run_corpus_review_job_is_restart_safe_and_skips_already_reviewed_
 def test_api_requires_authentication(client):
     res = client.post("/api/mainai/jobs", json={"job_type": "corpus_review", "input_refs": []})
     assert res.status_code in (401, 403)
+    detail_res = client.get(f"/api/mainai/jobs/{uuid.uuid4()}")
+    assert detail_res.status_code in (401, 403)
 
 
 def test_api_create_get_list_cancel_job(client, db_session, make_verified_user):
@@ -1132,9 +1134,26 @@ def test_api_create_get_list_cancel_job(client, db_session, make_verified_user):
     job_id = create_res.json()["id"]
     assert create_res.json()["status"] == "queued"
 
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db import migration_engine
+    from app.jobs.mainai_job_lease import claim_specific_mainai_job
+
+    claim_db = sessionmaker(bind=migration_engine)()
+    try:
+        generation = claim_specific_mainai_job(
+            claim_db, job_id=uuid.UUID(job_id), worker_id="api-test-worker", lease_seconds=120
+        )
+        assert generation is not None
+        claim_db.commit()
+    finally:
+        claim_db.close()
+
     get_res = client.get(f"/api/mainai/jobs/{job_id}")
     assert get_res.status_code == 200
     assert get_res.json()["id"] == job_id
+    assert get_res.json()["locked_by"] == "api-test-worker"
+    assert get_res.json()["lease_expires_at"] is not None
     assert any(e["event_type"] == "created" for e in get_res.json()["events"])
 
     list_res = client.get("/api/mainai/jobs")

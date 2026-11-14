@@ -834,6 +834,10 @@ class MainAIJobOut(BaseModel):
     created_at: datetime
     started_at: datetime | None = None
     last_heartbeat_at: datetime | None = None
+    # Founder-gated operational visibility only; `locked_by` identifies a worker process,
+    # not an external provider/agent session.
+    locked_by: str | None = None
+    lease_expires_at: datetime | None = None
     completed_at: datetime | None = None
     progress_current: int
     progress_total: int | None = None
@@ -894,6 +898,7 @@ class MainAIGoalOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     title: str
+    original_instruction: str
     status: str
     risk_level: str
     approval_policy: str
