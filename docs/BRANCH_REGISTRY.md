@@ -65,9 +65,12 @@ decision.
 `60910d56670d5bacc295b264936258beebd34810` adds Founder-gated visibility of the MainAI job's
 worker process and lease expiry, plus read-only recovery outcomes from the existing recovery
 API. Raw recovery evidence stays hidden; no new execution controls are added. Exact-SHA CI run
-`43624482616` is in progress. A coordination question on the canonical assignment/attempt/
-authorization mapping was posted to #406; external-agent controls remain blocked on that
-contract.
+`43624482616` completed: backend 2359 passed/1 skipped; full-stack Playwright 22 passed/1
+skipped plus 2 rate-limit tests; frontend lint/typecheck/build, migration, RLS/session,
+account-lifecycle, and same-origin proxy checks passed. npm-audit and aggregate required checks
+remain failed on advisories owned by #323. A coordination question on the canonical
+assignment/attempt/authorization mapping was posted to #406; external-agent controls remain
+blocked on that contract.
 
 **Verifierad överlappning:** #344 och #376 ändrar samma tre `runs-on`-rader i
 `.github/workflows/ci.yml` till `ubuntu-24.04`. Båda ändringarna behövs för att deras separata
