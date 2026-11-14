@@ -67,7 +67,7 @@ def test_historical_standalone_0069_upgrades_without_skipping_embedding_identity
     script = _script_directory()
     assert script.get_revision("0069").revision == "0069"
     assert script.get_revision("0069_embedding_space_identity").down_revision == "0069"
-    assert script.get_heads() == ["0073_provider_disclosure_local"]
+    assert script.get_heads() == ["0074_0069_lineage_bridge"]
 
     configured = urlparse(os.environ["DATABASE_URL"])
     database_name = f"lifeai_historical_0069_{uuid.uuid4().hex}"
@@ -112,7 +112,7 @@ def test_historical_standalone_0069_upgrades_without_skipping_embedding_identity
         with psycopg2.connect(disposable_url) as upgraded:
             with upgraded.cursor() as cursor:
                 cursor.execute("SELECT version_num FROM alembic_version")
-                assert cursor.fetchall() == [("0073_provider_disclosure_local",)]
+                assert cursor.fetchall() == [("0074_0069_lineage_bridge",)]
                 cursor.execute(
                     """
                     SELECT column_name
