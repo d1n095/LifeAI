@@ -867,3 +867,61 @@ def test_claim_blueprint_generation_concurrent_same_key_exactly_one_wins(superus
         sa_text("SELECT count(*) FROM blueprint_drafts WHERE idempotency_key = :key"), {"key": key}
     ).scalar()
     assert row_count == 1, "exactly one row, no duplicate created by the race"
+
+
+# --- Mission 4 (Life MainAI Intelligence program): duplicate/near-duplicate source
+# detection, reusing the existing `duplicates` SourceRelationship (app/rag/trust.py's
+# detect_duplicate_sources, parallel to its own detect_conflicts). ---
+
+
+def test_blueprint_duplicate_sources_are_labeled_and_recorded(client, superuser_db, _fake_model):
+    """Two sources the founder has explicitly linked as duplicates must be labeled in the
+    actual prompt sent to the model (not just recorded after the fact) and never silently
+    read as two independent documents agreeing with each other."""
+    from app.models.source_relationship import RelationshipType, SourceRelationship
+
+    founder_id = _founder_id(superuser_db)
+    title = f"Duplicate {uuid.uuid4().hex[:6]}"
+    doc_a = _make_indexed_source(superuser_db, founder_id, f"{title} A", text="The budget is 50000 SEK.")
+    doc_b = _make_indexed_source(superuser_db, founder_id, f"{title} B", text="The budget is 50000 SEK (copy).")
+    superuser_db.add(
+        SourceRelationship(
+            owner_id=founder_id,
+            from_source_id=doc_a.id,
+            to_source_id=doc_b.id,
+            relationship_type=RelationshipType.duplicates,
+        )
+    )
+    superuser_db.commit()
+    csrf = _login(client)
+
+    res = client.post(
+        "/api/blueprint/drafts",
+        json={"title": title, "query": "källa"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert res.status_code == 201, res.text
+    pairs = res.json()["provenance"]["duplicate_source_pairs"]
+    assert len(pairs) == 1
+    assert sorted(pairs[0]) == sorted([str(doc_a.id), str(doc_b.id)])
+
+    sent_messages = _fake_model["messages"][-1]
+    user_msg = next(m.content for m in sent_messages if m.role == "user")
+    assert "DUPLICERING AV document" in user_msg
+    assert "ONE piece of evidence" in user_msg
+
+
+def test_blueprint_no_duplicates_leaves_provenance_empty(client, superuser_db, _fake_model):
+    """Negative control: ordinary, unrelated sources record no duplicate pairs."""
+    founder_id = _founder_id(superuser_db)
+    title = f"NoDuplicate {uuid.uuid4().hex[:6]}"
+    _make_indexed_source(superuser_db, founder_id, title, text="Unrelated content.")
+    csrf = _login(client)
+
+    res = client.post(
+        "/api/blueprint/drafts",
+        json={"title": title, "query": "källa"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert res.status_code == 201, res.text
+    assert res.json()["provenance"]["duplicate_source_pairs"] == []
