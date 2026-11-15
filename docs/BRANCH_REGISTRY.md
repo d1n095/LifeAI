@@ -8989,3 +8989,45 @@ omauktorisering (en framtida reconciliation-loop skulle behöva köra
 på `AgentDispatchExecution` ännu (bara `last_heartbeat_at`).
 
 **Rör INTE** `cancel_task()`, `execution_control.py`, eller någon produktionskod.
+
+### PR #437 — `claude/repository-source-identity-foundation` — Priority 2 (grundardirektiv "CONTINUE MAINAI INTEGRATION"): repo-fil-källidentitet, S1D — den fjärde MemorySourceUnit-armen
+
+**Status: draft, CI väntas. Ej mergad.** Staplad ovanpå #435 via riktig `git merge` — #435:s
+EGNA branch orörd. **Löser** arkitekturvalet #435 namngav men medvetet INTE avgjorde.
+
+**Beslutet, med beviset bakom, inte påstått:** `SourceKind` är INTE en nativ Postgres-enum
+(migration 0019 deklarerade `varchar(32)` + en CHECK-constraint), och exakt denna
+"tredje-arm"-utökning har redan BEVISATS säker en gång tidigare i detta repo:
+`MessageSourceUnit` (migration 0037, S1C) lade till en ANDRA arm (document→+message) på
+exakt samma sätt. Denna migration lägger till den FJÄRDE armen (→+repository_file)
+identiskt — en ny CHECK-värde, en ny subtyptabell, en breddad
+`trg_msu_check_subtype_exists()`-gren — ALDRIG en parallell tabell, ALDRIG en ny databas.
+
+**Alternativ A (dirigera repo-dokument genom Library-uppladdningspipen) valdes INTE** —
+skulle kräva att faktiskt ladda upp ~114 filer och omtolka `KnowledgeVersion`
+(uppladdningstids-versionering) till att betyda "git-commit", ett koncept den aldrig byggdes
+för att hålla. Inte mindre, bara annorlunda format arbete.
+
+**Identitet:** `(repo_identity, file_path, commit_sha)`, aldrig ett `document_id`.
+`commit_sha` är DB-CHECK-TVINGAD att vara en riktig 40-hex-tecken SHA — "HEAD" eller ett
+branch-namn avvisas på databasnivå, matchar den här sessionens egna exakt-SHA-bevisdisciplin
+STRUKTURELLT, inte bara konventionellt. En ny commit av samma fil är ALLTID en ny, separat,
+oföränderlig rad — gits egen historik ÄR redan versionshistoriken ("bevara tidigare
+versioner" följer gratis).
+
+**Återanvänder, uppfinner inget nytt:** `get_or_create_repository_file_source_unit()`
+speglar `get_or_create_memory_source_unit()`:s exakta SAVEPOINT-mönster.
+`erase_owner_memory()`/`_admin()` utökad för att kaskadera in i den nya tabellen.
+`s1a_privilege_policy.py` utökad (SELECT+INSERT, samma som de andra två subtyptabellerna).
+
+**0069-kollisionen återupprepad, INTE löst:** detta är en SJÄTTE, oberoende granskningsbar
+kandidat för samma revision-slot — exakt samma lösning repot redan använde en gång för en
+identisk kollision (migration 0037:s egen docstring citerar prejudikatet). Rör INTE någon av
+de fem andra branscherna.
+
+**Bevis:** ingen lokal Postgres i sandlådan (bekräftat). `alembic heads` löser rent till
+`0069 (head)`. Alla 16 nya tester + 100 befintliga S1A/S1C/privilege-tester collect:ar utan
+importfel. `ruff check`: noll nya fynd i varenda ändrad fil.
+
+**Rör INTE** `document_source_units`, `message_source_units`, eller något bortom
+källagret (noll rader till `interpretation_proposals`/`project_entities`/`work_candidates`).
