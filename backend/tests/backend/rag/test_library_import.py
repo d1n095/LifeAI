@@ -338,7 +338,7 @@ async def test_archive_progress_is_fenced_and_restart_finishes_remaining_files(
     assert interrupted.locked_by == "archive-restart"
     assert interrupted.status == ImportJobStatus.running
     assert interrupted.progress_current == 0
-    assert interrupted.file_results == []
+    assert not interrupted.file_results
 
     monkeypatch.setattr(li, "_import_one_file", real_import_one)
     from app.worker import process_claimed_job
@@ -348,9 +348,13 @@ async def test_archive_progress_is_fenced_and_restart_finishes_remaining_files(
     db_session.expire_all()
     completed = db_session.get(ImportJob, job.id)
     assert completed.status == ImportJobStatus.completed
-    assert completed.succeeded_count == 2
+    assert completed.succeeded_count == 1
     assert completed.skipped_count == 1
     assert completed.progress_current == 2
+    assert {result["filename"]: result["status"] for result in completed.file_results} == {
+        "first.txt": "duplicate",
+        "second.txt": "indexed",
+    }
     assert {
         row.original_filename
         for row in db_session.query(Document).filter_by(import_job_id=job.id).all()
