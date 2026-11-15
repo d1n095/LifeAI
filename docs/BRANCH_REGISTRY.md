@@ -6,6 +6,91 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Section B, nästa steg: stateless GitHub-bevisrapport (2026-11-14)
+
+**Ny branch: `claude/github-work-queue-evidence-report`** (PR #396, bas: `claude/github-
+client-repo-evidence`/#395 — äkta beroende, inte bara bekvämlighet, eftersom modulen
+anropar #395:s nya `list_pull_requests()`/`list_issues()`/`list_check_runs()` direkt).
+
+**Öppen arkitekturfråga till grundaren (INTE avgjord här):** Jag utredde att återanvända
+`app.work_candidates` (det befintliga "signal producer ≠ truth writer"-mönstret — se
+migration 0054–0056) för att göra GitHub-bevis till en grundarbar granskningsbar kandidat,
+men förkastade det: `WorkCandidate.source_entity_id` är en composite-FK in i
+`project_entities`, som enbart nås via `InterpretationProposal` ← `KnowledgeClaim` —
+hela den kedjan är avsiktligt begränsad till GRUNDARENS EGEN KUNSKAP, inte levande extern
+systemstatus som en GitHub-PR. Att tvinga in GitHub-bevis i den kedjan (t.ex. en påhittad
+`KnowledgeClaim` enbart för att tillfredsställa FK:n) hade återanvänt tabellens FORM medan
+den invariant den byggdes för att upprätthålla bryts — exakt den typen av genväg CLAUDE.md:s
+isolerings-/återanvändningsprincip varnar för.
+
+**Beslut som krävs av grundaren (eller Codex för den säkerhetsrelevanta delen):** Ska
+GitHub-bevis-härledda förslag få sin EGEN grundarbara mellanlagringstabell (en syster till
+`work_candidates`, samma godkännande-grind-mönster, annan källmodell)? Det ändrar hur arbete
+kommer in i goal-skapande-pipelinen — exakt den typ av "unresolved authority decision" som
+direktivet säger ska pausas på, inte avgöras enväldigt. Tills det beslutet finns gör #396
+BARA läsning: `build_github_work_queue_report()` returnerar fakta (draft/stale/ci_red/
+ci_green/merge_conflict) om öppna PR:er/issues, skriver ingenting, skapar inget mål.
+
+## Känd, repo-bred CI-blockad: npm audit-drift, EJ fixad här (2026-11-14)
+
+Upptäckt som bieffekt av att jaga CI på PR #389/#390/#393/#394: jobbet "Frontend — npm audit"
+(`frontend/scripts/check-npm-audit.js`) misslyckas just nu på VARJE PR, oavsett diff —
+bekräftat på #390/#393/#394, inklusive #394 som enbart rör `.github/workflows/ci.yml` och den
+här filen. Skriptets allowlist täcker idag bara 3 advisory-source-ID:n för EN historisk fynd
+(brace-expansion, GHSA-mh99-v99m-4gvg, dokumenterad i `docs/SECURITY_BLOCKERS.md`) — verklig
+`npm audit` rapporterar nu 24 icke-allowlistade high/critical advisory-källor över många olika
+GHSA-ID:n, ren drift sedan allowlisten senast rördes.
+
+**Medvetet INTE fixad i någon av mina aktiva brancher.** Att göra det rätt kräver paket-för-
+paket-triage (version-bump vs. motiverad allowlist-post i `docs/SECURITY_BLOCKERS.md` per
+fynd) — verkligt säkerhetsomdöme, inte en enrads-infrastrukturpinning som Playwright/ubuntu-
+26.04-fixen (#394) ovan. Det ligger närmare Founder Alpha-säkerhetsspåret (Codex's ägarskap
+per `CLAUDE.md`s/direktivets rollfördelning) än Blueprint-intelligens-/MainAI-koordinator-
+spåret jag driver. Flaggat en gång per öppen PR (#389/#390/#393/#394) + här, i stället för att
+upprepa samma kommentar om och om igen eller gissa mig till en snabb fix. Kvarstår som ett
+OLÖST, synligt gap tills grundaren eller Codex bedömer det — ingen egen branch/PR öppnad för
+det ännu.
+
+## Grundardirektiv 2026-11-14: "Turn Life into a working engineering coordinator"
+
+Nytt, explicit direktiv efter #401: bygg en sammanhängande koordineringsväg ovanpå BEFINTLIG
+infrastruktur (Safe Planner, Work Driver, Supervisor Goal Lease, durable MainAI job/
+checkpoint, GitHub-bevis). Löste explicit den öppna arkitekturfrågan från #396/#397: en
+dedikerad, smal evidensmellanlagringsprojektion är auktoriserad eftersom work_candidates-
+kedjan inte kan representera GitHub-bevis utan att bryta grundarkunskaps-invarianten.
+
+**`claude/coordinator-evidence-staging`** (PR #403, bas: #396) — ny tabell
+`github_evidence_candidates`, samma "signal producer ≠ truth writer"-mönster som
+`work_candidates`, men identifierad via source_repo/source_kind/source_number istället för en
+grundarkunskaps-FK. Fullständig RLS/erasure-integration (app/rls.py, app/account/erasure.py).
+
+**Kvarstående delar av direktivet (ej byggda än):** next-task-selection (B), minimal-context-
+promptbyggare (C), checkpoint-reconciliation mot verifierad CI/PR-status (D, nästa steg),
+recovery/idempotent omfördelning (E). Ingen deploy/merge, `first_cycle_go=false` oförändrat.
+
+## Section B startpunkt: github_client.py repo-brett läs-API (2026-11-14)
+
+**Ny, isolerad branch: `claude/github-client-repo-evidence`** (PR #395, bas:
+`claude/det-kommer-mer-879lcm` direkt). Continuous Build Directive, Sektion B ("MainAI
+engineering coordinator") kräver att BEFINTLIG infrastruktur utökas innan något nytt byggs.
+En oberoende kartläggning (se separat registerpost om PR #394 ovan/nedan för samma datum,
+om den hunnit landas i den här grenen vid läsning) av Safe Planner (`app/safe_planner/
+service.py`), Work Driver (`app/development_driver/service.py`), Supervisor Goal Lease
+(`app/development_supervisor/lease.py`), godkännande-grinden (`app/mainai_execution/
+approval.py`), Dead Agent Recovery och den generella `mainai_jobs`-tabellen fann att nästan
+allt Sektion B/C behöver redan finns — UTOM en konkret lucka: `app/integrations/
+github_client.py` kan bara slå upp EN specifik ref/PR i taget, inte hela repot.
+
+**Tillägg (enbart läsning, inget skriv-/mergekapacitet tillagt):** `list_pull_requests()`,
+`list_issues()` (filtrerar bort PR:er som GitHubs `/issues`-endpoint annars blandar in),
+`list_commits()`. Avsiktligt litet — detta är enbart bevisinsamling, inte själva
+koordinator-/arbetskö-logiken (den hör till `app/safe_planner/service.py`s
+`plan_founder_request()`, en separat, senare ändring när den här bevisytan finns att mata
+in i). Isolerad från både Blueprint-kedjan (#387–#390/#393) och Playwright/ubuntu-26.04-
+CI-fixen (#394).
+
+---
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en
@@ -9125,10 +9210,56 @@ orelaterade driftet (`Frontend — npm audit`, `E2E — Playwright (full stack)`
 grundarens addendum explicit flaggade som overifierad ("full PostgreSQL test suite must pass
 for exact SHA"). Löser INTE 0069-kollisionen (punkt 1 ovan) — den kvarstår oförändrad.
 
+## PR #440 — `claude/migration-0069-composition-integration` (ny, draft) — löser EN av de två 0069-kollisionerna
+
+Grundardirektiv "RESUME ACTIVE DEVELOPMENT WHEN CAPACITY IS AVAILABLE" (2026-11-15), Priority
+2. Viktig precisering FÖRST: PR #417 (riktig DDL-parsing, inte antagande) hade redan bevisat
+att Codex/Copilots #412/#413-kedja löser en ANNAN, tidigare 0069-kollision (rotad i PR
+#237/#400:s provider-disclosure-lineage) — noll objektnivå-överlapp med resten. Den kedjan
+rörs INTE av #440 och är fortfarande en separat, inte oberoende-granskad kandidat för sin EGEN
+kollision.
+
+Kollisionen #440 faktiskt löser är den smalare: #408 (`system_activation_authorizations`),
+#403 (`github_evidence_candidates`), #411 (`calendar_events`), #437
+(`repository_file_source_units`) — alla fyra grenade oberoende från samma dev-topp och
+deklarerade `revision = "0069"`, `down_revision = "0068"`. #417 hade redan bevisat dessa
+fyras Postgres-objekt är helt disjunkta — lösningen är en REN omnumrering, ingen
+innehållsförsoning.
+
+**Vad #440 gör:** `git merge --no-ff` av alla fyra brancher i grundarens egen ordning (#408 →
+#403 → #411, med #437 tillagd sist) — INGEN av de fyra ursprungliga PR-branchernas egna filer
+rörs, byter namn eller rebasas. Endast KOPIORNA på integrationsbranchen omnumreras till en
+linjär kedja: `0068 → 0069 (#408) → 0070 (#403) → 0071 (#411) → 0072 (#437)`. Två
+sammanslagningskonflikter i `backend/app/models/__init__.py` löstes manuellt, rad för rad
+verifierat (varje "konflikt"-rad var antingen en genuint ny symbol eller redan existerande
+innehåll som bara dök upp dubbelt på grund av diff-algoritmens justering — INGEN riktig
+duplicering kvar, 230 `__all__`-poster, filen parsar rent). Alla docstring-/kommentar-
+referenser till de gamla `0069_*`-filnamnen uppdaterade i de tre omnumrerade filerna.
+
+**Ny, INTE duplicerad, testfil:** `test_migration_0069_composition_integration.py` — bevisar
+att alla fyra tabellers RLS (enabled+forced) och exakta `mainai_app`-privilegier stämmer sida
+vid sida, på ETT ställe, istället för att en granskare måste korsreferensera fyra separata
+testmoduler. Upprepar INTE upgrade/downgrade/rollback-reversibilitet för hela den
+sammansatta kedjan — det täcks redan, migrationsagnostiskt, av den befintliga
+`test_migration_roundtrip.py::test_full_migration_chain_downgrades_to_base_and_back_to_head`
+utan att den behövde ändras.
+
+**Verifierat (ingen Postgres i sandboxen):** `alembic heads` → enda huvud (`0072`), `alembic
+upgrade 0068:head --sql` dry-run genererar ren DDL genom hela kedjan, varje rörd fil
+compile:ar/importerar rent, `ruff check` ger noll NYA fynd (de 8 befintliga fynden återskapas
+identiskt mot varje källbranchs egen oförändrade baslinje — verifierat direkt, inte antaget).
+Riktig DB-körning (den nya kompositionstesten, plus alla fyra sammanslagna PR:ers egna sviter,
+plus den befintliga roundtrip-testen) väntar på CI.
+
+**Inte självcertifierat** — oberoende granskning krävs fortfarande (grundarens Priority 1 +
+stående "do not self-certify your own security-sensitive changes"). Ingen merge/deploy.
+
 **Vid återupptagande:** fortsätt från detta verifierade repo-tillstånd — läs detta register
 och öppna PR:er FÖRST (standardbeteendet CLAUDE.md redan kräver) — upprepa INTE redan
-slutförda utredningar (0069-kollisionsanalysen, work-candidate-fragmenteringskontrollen,
-#323/#394-fyndet är alla redan klara och ska återanvändas, inte göras om).
+slutförda utredningar (0069-kollisionsanalysen för #408/#403/#411/#437 är nu LÖST av #440,
+väntar på CI+granskning; Codex/Copilots SEPARATA #412/#413-kollision kvarstår öppen och orörd;
+work-candidate-fragmenteringskontrollen och #323/#394-fyndet är fortfarande redan klara och
+ska återanvändas, inte göras om).
 
 `first_cycle_go=false` genomgående. Inget väntande arbete begärt förrän grundaren säger
 annat.
