@@ -15,7 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 
 from app.config import get_settings
-from app.db import migration_engine
+from app.db import SessionLocal, migration_engine
 from app.jobs.lease import (
     ImportJobLeaseLostError,
     claim_next_job,
