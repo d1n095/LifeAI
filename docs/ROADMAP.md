@@ -52,6 +52,15 @@ Fasindelad plan. Varje fas ska vara körbar och testbar innan nästa påbörjas.
 - [ ] Observability: metrics, tracing, larm.
 - [ ] Lastbalansering av backend, separat drift av Qdrant/Postgres vid behov.
 
+## Uppskjutna produktområden (ej del av någon fas ovan)
+- **Life Innovation & Patent Intelligence, ElevenLabs-forskning, multi-coin Life Compute &
+  Mining / Life Mining Advisor** — långsiktig produktvision, konsoliderad men INTE
+  påbörjad. Byggspärr: väntar på att MainAI:s grund är klar (se
+  `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` §8). Se
+  `docs/LIFE_DEFERRED_PRODUCT_VISION_AND_VENDOR_PHILOSOPHY.md` för fullständig beskrivning
+  och de principer (studera externa verktyg, lås inte in teknikval, anta inte lönsamhet) som
+  styr dem.
+
 ## Icke-mål (medvetet uteslutet från MVP)
 - Ingen SaaS-mellanhand för orkestrering (LangChain/LlamaIndex undviks initialt — egen enkel
   RAG-pipeline ger full kontroll och färre beroenden, i linje med kravet att undvika dyra
