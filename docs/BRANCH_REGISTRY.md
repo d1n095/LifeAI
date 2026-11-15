@@ -9031,3 +9031,26 @@ importfel. `ruff check`: noll nya fynd i varenda ändrad fil.
 
 **Rör INTE** `document_source_units`, `message_source_units`, eller något bortom
 källagret (noll rader till `interpretation_proposals`/`project_entities`/`work_candidates`).
+
+### PR #438 — `claude/mainai-integration-fragmentation-plan` — Priority 3 (grundardirektiv "CONTINUE MAINAI INTEGRATION"): minsta vägen till EN sammanhängande arbetsflöde
+
+**Status: draft, CI väntas. Ej mergad.** Staplad ovanpå #437 via riktig `git merge` — #437:s
+EGNA branch orörd. Utökar #434:s egen beroendekedje-/CI-analys (INTE omhärledd) med de två
+kedjor som levererats sedan dess (#436/#437) och kontrollerar det ENA fokusområde #434 ännu
+inte täckte: "godkänd work-candidate-befordran."
+
+**Kontrollerat genom att LÄSA koden, inte antaget:** grep:ade varenda `WorkCandidate(...)`-
+konstruktionsplats i `app/` och hittade EXAKT EN skrivprimitiv (`record_work_candidate()`),
+anropad av tre legitima, oberoende dokumenterade uppströms-producenter (AI-extraktions-
+befordran, grundarminneskoppling, exekutiv lookaround) — var och en explicit taggar sin egen
+utdata som ej godkänd, ingen kringgår den — och EXAKT EN auktoriseringsgrind
+(`authorize_work_candidate()`, EN grundar-grindad router-endpoint). **Verifierat resultat:
+ingen fragmentering finns här.** Rapporterat som ett bekräftat icke-problem, inte hoppat över.
+
+**Slutsats:** den minsta kvarstående vägen till "en sammanhängande MainAI-arbetsflöde" kräver
+INGEN ytterligare teknik — det är helt en gransknings-och-merge-sekvens: #323 först, sedan
+Kedja A i strikt ordning (#419→423→428→431→433→436), sedan Kedja B i strikt ordning
+(#430→432→435→437), sedan #424/#429 oberoende när som helst. Respekterar Merge-regeln
+explicit — ingen branch rebasas i förväg.
+
+**Rör INTE** någon av de granskade PR:erna/brancherna.
