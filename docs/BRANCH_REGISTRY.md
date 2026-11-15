@@ -8597,6 +8597,30 @@ utfall ändras av godkännande (`OUTCOME_APPROVAL_REQUIRED` → `OUTCOME_ASSIGNA
 `workforce`s utfall gör det INTE (identiskt undantag, identiskt meddelande, före och efter
 godkännande).
 
+### PR #424 — `claude/life-deferred-product-vision-vendor-philosophy` — Priority 4 (grundardokumentationssidequest)
+
+**Status: draft, CI väntas. Ej mergad. EGEN isolerad branch, INTE commitad direkt till
+dev-branchen** — till skillnad från registerupdateringar, enligt grundarens explicita
+instruktion för den här sidequesten. Ny fil:
+`docs/LIFE_DEFERRED_PRODUCT_VISION_AND_VENDOR_PHILOSOPHY.md` + en rads korsreferens i
+`docs/ROADMAP.md` (samma mönster som `LIFE_LIBRARY_PLAN.md` redan länkas).
+
+Genomsökte `docs/ROADMAP.md`, `docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md`,
+`docs/LIFE_LIBRARY_PLAN.md` och alla `LIFE_*`/`MAINAI_*`-dokument efter "ElevenLabs",
+"patent", "mining"/"compute" INNAN skrivning — inget existerande dokument täckte det här,
+ingen duplicering skapad.
+
+**Innehåll:** (1) principen "studera externa verktyg för idéer, ackumulera inte
+leverantörer; föredra egna modulära implementationer där motiverat; håll
+tredjepartsutökningar ersättningsbara och säkerhetsgranskade"; (2) Life Innovation & Patent
+Intelligence (uppskjutet); (3) ElevenLabs-forskning (uppskjutet, forskningsspår — INTE ett
+åtagande att integrera just ElevenLabs); (4) multi-coin Life Compute & Mining + Life Mining
+Advisor (uppskjutet) — måste jämföra kompatibla mynt, algoritmer, nuvarande utrustning,
+uppgraderingar, energikostnader, temperaturer, svårighetsgrad och förväntad lönsamhet; låser
+INTE in framtida teknikval; antar INTE lönsamhet. Allt väntar på att MainAI:s grund är klar
+(samma byggspärr-mönster som `LIFE_LIBRARY_PLAN.md`). Ingen kod, inget leverantörsval, ingen
+ny exekverings- eller auktoritetsväg.
+
 **Rekommendation (dokumenterad, EJ implementerad i den här PR:n — varje steg en egen,
 separat granskningsbar framtida PR):** (1) behåll workforce:s `ActivationGateSet` — den
 skyddar ett annat invariant (infra-bred beredskap) än per-task-godkännande; (2) återanvänd
