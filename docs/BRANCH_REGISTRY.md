@@ -8699,3 +8699,34 @@ textjämförelse); import-namnen har noll överlapp bortom det de redan delade i
 `approve_blueprint_draft`-korrigeringen ovan som körbar assertion; den exakta
 rekonciliationsordningen dokumenterad (gren från #401, mergea in #379, behåll båda kwargen,
 behåll unionen av imports, kör om befintliga testsviter oförändrat) — INTE utförd här.
+
+### PR #430 — `claude/project-knowledge-inventory-pass1` — Priority 3 (grundardirektiv 2026-11-15): projektkunskaps-inventering, modell + Pass 1
+
+**Status: draft, CI väntas. Ej mergad.** Föreslår INGEN ny modell — kartlägger grundarens
+fyra posttyper (requirement/decision/dependency/open_question) DIREKT på den arkitektur som
+redan finns för exakt det här: `MemorySourceUnit → KnowledgeClaim → InterpretationProposal →
+ProjectEntity → WorkCandidate` (`docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md` §4.2/§6.4, varje
+hänvisning verifierad direkt mot riktig kod, inte memorerad). `ProjectEntity.
+supersedes_entity_id` och `WorkCandidate.dependencies` finns redan som riktiga kolumner för
+exakt grundarens "superseded"/"dependencies"-krav.
+
+**Mätbar täckning, riktig, inte illustrativ:**
+`backend/scripts/mainai/extract_project_knowledge_inventory_pass1.py` — en reproducerbar,
+rent-stdlib skanning av 111 filer (alla `docs/*.md` + `CLAUDE.md`/`README.md`, medvetet
+UTAN `docs/BRANCH_REGISTRY.md` — en kontinuerligt ändrad sessionslogg, inte stabilt
+kravunderlag) med 8 namngivna, granskningsbara regex-klassificerare. Faktiskt körd; output
+committad ordagrant i `docs/LIFE_PROJECT_KNOWLEDGE_INVENTORY_PASS1.json`: **158 poster över
+19 943 rader** (98 beslut, 52 krav, 5 öppna frågor, 3 beroenden) — inklusive riktiga, citerade
+supersession-påståenden redan i korpuset (t.ex. `AUTH_THREAT_MODEL.md`s cookie-vs-JWT-beslut,
+`CLAUDE_AUTO_RECOVERY_AUTHORITY_LANE.md`s "#165 has merged"-supersession).
+
+**Rekognoscering, INTE ingestion:** skapar INGEN databasrad — ingen Postgres/provider-åtkomst
+i den här sandlådan, och riktig ingestion kräver att varje dokument först blir en riktig
+`MemorySourceUnit` (Library-import), ett separat, substantiellt, INTE utfört steg här. Rör
+inte `ProjectEntity`s egna "SIGNAL PRODUCER != TRUTH WRITER"-styrning — enda vägen till en
+riktig `ProjectEntity` förblir `promote_interpretation_proposal()`, oförändrad. Namngivna
+(inte dolda) luckor för Pass 2+: utvecklingshistorik/PR-beskrivningar (separat, stort
+korpus), full semantisk kravextraktion via den riktiga ingestion-pipelinen.
+
+**PR #424:s tre uppskjutna produktområden promotas INTE till någon `ProjectEntity`-rad** —
+förblir exakt lika uppskjutna som #424 redan deklarerade.
