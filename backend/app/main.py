@@ -31,6 +31,7 @@ from app.routers import (
     project_entities,
     projects,
     provider_spend,
+    session_context,
     workbench,
 )
 from app.scheduler import start_scheduler, stop_scheduler
@@ -79,6 +80,7 @@ app.include_router(mainai_jobs.router)
 app.include_router(mainai_execution.router)
 app.include_router(project_entities.router)
 app.include_router(inspectable_memory.router)
+app.include_router(session_context.router)
 app.include_router(execution_envelopes.router)
 app.include_router(provider_spend.router)
 
