@@ -90,6 +90,7 @@ jobs:
           ref: ${{ github.sha }}
           path: candidate
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Bind acceptance to exact SHA and immutable source ancestry
         id: sha
