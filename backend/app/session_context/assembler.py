@@ -302,6 +302,31 @@ def assemble_session_context(
     sections.append(SessionContextSection("active_assignments", "agent_coordination",
                                           "agent_coordination active AgentWorkAssignment(owner)", items[:max_items_per_section], err))
 
+    # --- 7b. Upcoming calendar events (best-effort; the proactive-assistance read path app.
+    # calendar.upcoming_summaries() was built for -- see app/calendar/service.py's own
+    # docstring, which explicitly named "a future session-context assembler" as its intended
+    # consumer before this wiring existed). A plain read-only projection, never the ORM row.
+    def _calendar_items() -> list[dict]:
+        from datetime import timedelta
+
+        from app.calendar import upcoming_summaries
+
+        return [
+            {
+                "source_module": "calendar",
+                "source_ref": str(s.id),
+                "title": s.title,
+                "starts_at": s.starts_at.isoformat(),
+                "ends_at": s.ends_at.isoformat() if s.ends_at else None,
+                "location": s.location,
+            }
+            for s in upcoming_summaries(db, owner_id=owner_id, within=timedelta(days=7))
+        ]
+
+    items, err = _safe_items(_calendar_items)
+    sections.append(SessionContextSection("upcoming_calendar_events", "calendar",
+                                          "calendar.upcoming_summaries(owner, within=7 days)", items[:max_items_per_section], err))
+
     # --- 8. Canonical project-status reference (pointer, not a copy) --------------------------
     sections.append(SessionContextSection(
         "project_status", "docs",
