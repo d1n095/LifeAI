@@ -307,7 +307,15 @@ jobs:
   # ---------------------------------------------------------------------------------------
   e2e-tests:
     name: E2E — Playwright (full stack)
-    runs-on: ubuntu-latest
+    # Pinned to 24.04, not ubuntu-latest: GitHub's ubuntu-latest label now resolves to 26.04,
+    # and the Playwright version pinned in frontend/package.json ("@playwright/test": "1.56.1")
+    # does not support chromium on ubuntu26.04-x64 yet (confirmed directly in CI logs: "Error:
+    # ERROR: Playwright does not support chromium on ubuntu26.04-x64" on every run since the
+    # runner image rollout — a runner/environment regression, not caused by any application
+    # change). Revert to ubuntu-latest once Playwright ships ubuntu-26.04 support (or the
+    # pinned Playwright version is bumped to one that does) rather than leaving this pinned
+    # indefinitely.
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -473,7 +481,9 @@ jobs:
   # ---------------------------------------------------------------------------------------
   same-origin-proxy-test:
     name: E2E — same-origin proxy
-    runs-on: ubuntu-latest
+    # Same rationale as the e2e-tests job above: ubuntu-latest now resolves to 26.04, which the
+    # pinned Playwright version (1.56.1) does not support for chromium yet.
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: pgvector/pgvector:pg16

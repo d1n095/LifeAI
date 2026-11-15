@@ -6,6 +6,57 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## CI-infrastruktur: Playwright/ubuntu-26.04-pin + Blueprint-kedjans status (2026-11-14)
+
+**Känd lucka i det här registret, sagt öppet snarare än gissat:** ingenting mellan
+2026-08-31 och denna post är infogat ovanför — PR #237 och allt därefter (inklusive hela
+Founder Alpha-säkerhetsgranskningen, #340/#352/#360–#386, #392) saknas som egna poster i
+registrets huvuddel. Den fullständiga ikapphämtningen är ett eget, avgränsat arbete (bör göras
+innan nästa gång en branch/PR-konflikt måste bedömas mot historiken) — INTE gjord nu, eftersom
+dagens arbete (nedan) är en akut, repo-bred CI-blockad, inte en historikstädning.
+
+**Ny, isolerad branch: `claude/ci-playwright-ubuntu2604-pin`** (bas: `claude/det-kommer-
+mer-879lcm` direkt, INTE någon Blueprint-branch — orelaterad fix per `CLAUDE.md`s
+isoleringsprincip). Upptäckt som en bieffekt av att jaga CI på PR #389: GitHub Actions'
+`ubuntu-latest`-etikett pekar nu på 26.04, och den pinnade Playwright-versionen i
+`frontend/package.json` (`"@playwright/test": "1.56.1"`) saknar chromium-stöd för den —
+`Error: ERROR: Playwright does not support chromium on ubuntu26.04-x64` på BÅDA
+Playwright-jobben (`E2E — Playwright (full stack)`, `E2E — same-origin proxy`), bekräftat
+repo-brett (samma fel syns på `codex/founder-alpha-parser-isolation` (#392), en helt orelaterad
+gren). Fix: pinnar bara dessa två jobb till `runs-on: ubuntu-24.04` i stället för att bumpa
+Playwright-versionen (mindre risk, ingen beroendeändring) — reverteras när `ubuntu-latest`
+eller Playwright själv stöder 26.04. Ingen överlapp med `claude/ci-apt-install-retry` (en
+annan, redan existerande CI-flake-fix för apt-mirror-DNS, orörd här).
+
+**Blueprint-intelligenskedjan (Continuous Build Directive, "Life MainAI Intelligence, Blueprint
+Engine & Context Reliability"):** `claude/founder-alpha-blueprint-draft` (#340, bas) →
+`claude/blueprint-source-content-isolation` (#387, Mission 1: injektionsisolering) →
+`claude/blueprint-trust-engine-integration` (#388, Mission 2: TrustEngine-koppling) →
+`claude/blueprint-generation-idempotency` (#389, Mission 3: idempotens/crash-safe-generering)
+→ `claude/blueprint-duplicate-source-detection` (#390, Mission 4: dubblettdetektion) →
+`claude/blueprint-evaluation-harness` (#393, Mission 6: utvärderingssvit). Strikt linjär stack,
+samma `_generate()`-funktion vidareutvecklad genom varje lager i stället för konkurrerande
+omskrivningar — rekommenderad mergeordning är exakt denna kedjeordning, #387 → #388 → #389 →
+#390 → #393, ingen kan mergas före sitt eget beroende.
+
+**Verklig regression hittad och fixad i kedjan (inte hypotetisk):** #389:s commit `4d33272`
+introducerade migration `0074_blueprint_generation_lifecycle_guard` med ett 41 tecken långt
+`revision`-ID — alembics egen `alembic_version.version_num`-kolumn är `VARCHAR(32)`, så
+`alembic upgrade head` kraschade (`StringDataRightTruncation`) och slog ut ALLA backend-
+CI-jobb (2328 fel), inte bara Blueprint-testerna. Fixat (`29d9d08` på #389, förkortat till
+`0074_blueprint_lifecycle_guard`, 30 tecken) och propagerat med `git merge` (INTE rebase/force-
+push — blockerat av verktygets destruktiva-åtgärd-klassificerare i den här miljön) genom #390
+(`d07cfc9`) och #393 (`40af2f9`). Färsk CI begärd på alla tre; väntar på resultat inklusive
+denna Playwright-pinning.
+
+**Status:** Ingen merge/deploy ännu (`first_cycle_go=false` gäller fortfarande hela kedjan).
+Sektion B (MainAI engineering coordinator) under utredning parallellt — se separat kommande
+registerpost när den konkreta leveransen (sannolikt en utökning av `app/integrations/
+github_client.py`s smala läs-ytan, kopplad till `app/safe_planner/service.py`s
+`plan_founder_request()`) är redo för en egen branch.
+
+---
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en
