@@ -1,0 +1,81 @@
+name: Import security regression tests (frozen SHA)
+
+on:
+  push:
+    branches:
+      - copilot/import-security-validation-31dd0cf
+
+permissions:
+  contents: read
+
+concurrency:
+  group: import-security-exact-sha
+  cancel-in-progress: false
+
+jobs:
+  import-regressions:
+    name: PostgreSQL, Redis, worker and parser regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+      APP_DATABASE_URL: postgresql://mainai_app:mainai_app_pw@localhost:5432/lifeos_test
+      REDIS_URL: redis://localhost:6379/1
+      SECRET_KEY: ci-test-secret-key
+      FOUNDER_EMAIL: founder@lifeos.local
+      FOUNDER_PASSWORD: TestFounderPassword123!
+      FRONTEND_ORIGINS: http://127.0.0.1:3020
+      PUBLIC_APP_URL: http://127.0.0.1:3020
+      ENABLE_SCHEDULED_CLEANUP: "false"
+    steps:
+      - name: Check out the frozen candidate only
+        uses: actions/checkout@v4
+        with:
+          ref: 31dd0cfe0a6127e21ea6bb9720f845da6cde155d
+          path: candidate
+          persist-credentials: false
+
+      - name: Verify the tested source SHA
+        working-directory: candidate
+        run: test "$(git rev-parse HEAD)" = "31dd0cfe0a6127e21ea6bb9720f845da6cde155d"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        working-directory: candidate/backend
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run import lease, recovery, Redis lock, and parser-isolation regressions
+        working-directory: candidate/backend
+        run: |
+          python -m pytest -q \
+            tests/backend/jobs/test_worker.py \
+            tests/backend/jobs/test_job_lock.py \
+            tests/backend/rag/test_library_import.py \
+            tests/backend/rag/test_library_import_job_lock_fail_closed.py \
+            tests/backend/rag/test_extract_isolation.py
