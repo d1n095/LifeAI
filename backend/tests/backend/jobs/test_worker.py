@@ -6,6 +6,7 @@ reclaimed, two workers never process the same job simultaneously, and the worker
 step works despite knowledge_import_jobs' per-owner RLS policy."""
 
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta
 
@@ -270,6 +271,104 @@ def test_stale_worker_cannot_commit_document_after_takeover(
     superuser_db.expire_all()
     assert superuser_db.query(Document).filter_by(import_job_id=job.id).count() == 0
     assert superuser_db.get(ImportJob, job.id).locked_by == "replacement-worker"
+
+
+def test_commit_fence_checks_expiry_after_waiting_for_job_row_lock(
+    superuser_db, make_verified_user
+):
+    user, _ = make_verified_user()
+    job = _make_pending_job(superuser_db, user.id)
+    claim_db = _ClaimSession()
+    assert claim_next_job(claim_db, "fenced-worker", 1) == (job.id, user.id)
+    claim_db.execute(
+        text("""
+            UPDATE knowledge_import_jobs
+            SET lease_expires_at = clock_timestamp() + interval '1 second'
+            WHERE id = :job_id
+        """),
+        {"job_id": str(job.id)},
+    )
+    claim_db.commit()
+    claim_db.close()
+
+    row_locked = threading.Event()
+    release_lock = threading.Event()
+    commit_started = threading.Event()
+    outcome: list[str] = []
+    backend_pid: list[int] = []
+
+    def _hold_job_row() -> None:
+        db = _ClaimSession()
+        try:
+            db.execute(
+                text("""
+                    SELECT id FROM knowledge_import_jobs
+                    WHERE id = :job_id
+                    FOR UPDATE
+                """),
+                {"job_id": str(job.id)},
+            )
+            row_locked.set()
+            release_lock.wait(timeout=10)
+        finally:
+            db.rollback()
+            db.close()
+
+    def _commit_with_fence() -> None:
+        from app.request_context import current_user_id
+
+        db = SessionLocal()
+        try:
+            current_user_id.set(str(user.id))
+            db.execute(
+                text("SET LOCAL app.current_user_id = :owner_id"),
+                {"owner_id": str(user.id)},
+            )
+            backend_pid.append(db.execute(text("SELECT pg_backend_pid()")).scalar_one())
+            configure_import_lease_fence(db, job.id, user.id, "fenced-worker", 1)
+            imported_job = db.get(ImportJob, job.id)
+            imported_job.progress_current = 1
+            commit_started.set()
+            db.commit()
+            outcome.append("committed")
+        except ImportJobLeaseLostError:
+            db.rollback()
+            outcome.append("lease-lost")
+        finally:
+            db.close()
+
+    blocker = threading.Thread(target=_hold_job_row)
+    writer = threading.Thread(target=_commit_with_fence)
+    blocker.start()
+    assert row_locked.wait(timeout=5)
+    writer.start()
+    assert commit_started.wait(timeout=5)
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            waiting = superuser_db.execute(
+                text("""
+                    SELECT wait_event_type = 'Lock'
+                    FROM pg_stat_activity
+                    WHERE pid = :pid
+                """),
+                {"pid": backend_pid[0]},
+            ).scalar_one_or_none()
+            if waiting:
+                break
+            time.sleep(0.02)
+        assert waiting is True
+        time.sleep(1.1)
+    finally:
+        release_lock.set()
+        blocker.join(timeout=10)
+        writer.join(timeout=10)
+
+    assert not blocker.is_alive()
+    assert not writer.is_alive()
+    assert outcome == ["lease-lost"]
+    superuser_db.expire_all()
+    assert superuser_db.get(ImportJob, job.id).progress_current == 0
 
 
 def test_cancelled_import_rejects_pending_worker_writes(
