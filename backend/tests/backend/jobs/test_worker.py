@@ -346,8 +346,8 @@ def test_commit_fence_checks_expiry_after_waiting_for_job_row_lock(
     blocker.start()
     assert row_locked.wait(timeout=5)
     writer.start()
-    assert commit_started.wait(timeout=5)
     try:
+        assert commit_started.wait(timeout=5), errors
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             waiting = superuser_db.execute(
