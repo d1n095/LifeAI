@@ -4,7 +4,6 @@ import uuid
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile
-from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, field_validator
 from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
@@ -119,7 +118,7 @@ def _visible_document_query(db: Session, owner_id: uuid.UUID):
 
 @router.post("/import", response_model=ImportJobOut)
 @limiter.limit(f"{settings.rate_limit_library_import_per_minute}/minute")
-async def import_package(
+def import_package(
     request: Request,
     file: UploadFile,
     project_id: uuid.UUID | None = None,
@@ -160,10 +159,10 @@ async def import_package(
         return file.file.read(1 << 20)
 
     try:
-        # The whole streaming write (chunk reads from the incoming multipart body AND writes
-        # to the destination temp file) runs in a worker thread — run_in_threadpool, not a
-        # bare call — so this sync I/O never blocks the event loop other requests share.
-        blob = await run_in_threadpool(storage.write_stream, _read_chunk, max_bytes=MAX_UPLOAD_BYTES)
+        # This route deliberately stays synchronous: FastAPI runs it in its thread pool, so
+        # its synchronous ORM calls cannot block the event loop while waiting on the
+        # owner-scoped advisory lock held by another upload.
+        blob = storage.write_stream(_read_chunk, max_bytes=MAX_UPLOAD_BYTES)
     except StorageSizeLimitExceeded:
         raise HTTPException(status_code=413, detail=f"Filen är för stor (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB).")
     except StorageError as exc:

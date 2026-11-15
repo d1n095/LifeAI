@@ -17,7 +17,8 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./backend/db-init:/docker-entrypoint-initdb.d:ro
     ports:
-      - "5432:5432"
+      # Host access is for local development tools only; application containers use postgres:5432.
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U lifeos"]
       interval: 5s

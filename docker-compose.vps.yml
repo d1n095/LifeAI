@@ -27,9 +27,9 @@
 # starting points sized for a small VPS, not a hard architectural ceiling — tune them to the
 # real server's specs during the first deployment (docs/STRATO_VPS_DEPLOY.md).
 #
-# Two private Docker networks, not one: `lifeai_internal` (Caddy/frontend/backend) and
-# `lifeai_data` (backend/redis only, `internal: true` — no route out to the internet even
-# for the containers on it). Redis holds nothing frontend or Caddy ever need, and a
+# Two private Docker networks, not one: `lifeai_internal` (Caddy/frontend/backend/worker)
+# and `lifeai_data` (backend/worker/redis/Ollama, `internal: true` — no route out to the
+# internet even for the containers on it). Redis holds nothing frontend or Caddy ever need, and a
 # vulnerability in either of those two is a much more likely first foothold than one in
 # backend — putting Redis on a network they can't even resolve, let alone connect to, is a
 # free extra containment layer beyond "Redis requires a password".
@@ -558,7 +558,7 @@ networks:
     driver: bridge
   # internal: true — Docker never gives this network a route out (no NAT to the internet,
   # not even for the containers on it) on top of it already having no host port publication
-  # for redis. Backend is the only service on both networks; frontend/caddy are on neither.
+  # for data services. Backend and worker are the only services on both networks.
   lifeai_data:
     driver: bridge
     internal: true

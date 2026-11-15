@@ -133,6 +133,17 @@ def test_all_library_routes_require_founder(client, make_verified_user):
     assert client.request("DELETE", f"/api/library/{fake_id}", json={"confirm": True}).status_code == 403
 
 
+def test_import_route_keeps_blocking_database_work_off_the_event_loop():
+    """Same-owner imports serialize on a PostgreSQL advisory lock. The route must remain
+    synchronous so FastAPI runs that blocking lock wait in its thread pool rather than
+    freezing the event loop needed by the lock holder to finish and commit."""
+    import inspect
+
+    from app.routers.library import import_package
+
+    assert not inspect.iscoroutinefunction(import_package)
+
+
 def test_import_single_text_file_via_api(client):
     csrf = _login(client)
     job = _import_and_wait(client, csrf, "hello.txt", b"Detta ar ett testdokument.")
