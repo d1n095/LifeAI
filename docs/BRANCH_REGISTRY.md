@@ -8908,3 +8908,21 @@ denna PR:s agent_coordination-fix (fullständig end-to-end för auktoriseringsdi
 två tydligt åtskilda resultat.
 
 **Rör INTE** `app.workforce` eller #431:s egen branch alls.
+
+### PR #434 — `claude/integration-readiness-assessment` — Priority 2 (grundardirektiv "CONTINUE ACTIVE ENGINEERING"): sammanfattande integrationsberedskapsbedömning
+
+**Status: draft, CI väntas. Ej mergad.** Fristående från dev-tippen (ingen av de granskade
+PR:erna mergas eller rebasas av det här dokumentet). `docs/LIFE_INTEGRATION_READINESS_
+ASSESSMENT.md` konsoliderar till EN läsarvänlig rapport det som redan fanns utspritt i detta
+register: beroendekedjor (A: #419→#423→#428→#431→#433, B: #430→#432, fristående: #424/#429),
+en tabell per PR som tydligt SKILJER "backend-grönt" (de 4 riktiga backend-jobben) från
+"aggregat-grönt" (which förblir rött på nästan alla p.g.a. den redan kända npm-audit/E2E-
+driften), samt en rekommenderad gransknings-/mergeordning som respekterar CLAUDE.md:s
+"Merge-regel" explicit (ingen branch rebasas i förväg).
+
+**Återanvänder, upprepar INTE:** #323/#394-fyndet (redan dokumenterat ovan i detta register,
+"Uppdatering 2026-11-15") omformuleras och omverifieras mot GitHub för rapporten, men
+härleddes INTE på nytt från grunden — grundardirektivets egen instruktion att inte upprepa
+redan slutförd analys.
+
+**Rör INTE** någon av de granskade brancherna/PR:erna.
