@@ -24,7 +24,13 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.mainai_execution import MainAITask, MainAITaskEvent, MainAITaskEventType
+from app.models.mainai_execution import (
+    MainAIGoal,
+    MainAITask,
+    MainAITaskEvent,
+    MainAITaskEventType,
+    MainAITaskStatus,
+)
 
 
 class ApprovalError(Exception):
@@ -104,6 +110,65 @@ def require_task_approval(db: Session, *, task: MainAITask, goal_approval_policy
     ).first()
     if granted is None:
         raise ApprovalRequiredError(task.id)
+
+
+# A task whose underlying status has already moved past "live" -- cancelled, completed,
+# failed, blocked, or retryable_failed -- is not a safe real-invoke target even if an earlier,
+# unlocked readiness check (e.g. evaluate_dispatch_readiness()) saw it as approved: the founder
+# may have cancelled it, or it may have already finished, in the gap between that check and
+# the actual dispatch. Deliberately the SAME five values
+# app.workforce.provider_worker._WORKFORCE_DISPATCHABLE_TASK_STATUSES independently uses for
+# the workforce execution boundary -- not imported from there (that module's constant is
+# private, and this module must not take a dependency on app.workforce) but kept in sync by
+# inspection: both express "this MainAITask's own lifecycle has not reached a terminal or
+# paused-pending-human-decision state."
+LIVE_DISPATCHABLE_TASK_STATUSES = frozenset(
+    {
+        MainAITaskStatus.pending,
+        MainAITaskStatus.ready,
+        MainAITaskStatus.running,
+        MainAITaskStatus.waiting_external,
+        MainAITaskStatus.waiting_ci,
+    }
+)
+
+
+def require_live_task_approval_for_dispatch(db: Session, *, owner_id: uuid.UUID, task_id: uuid.UUID) -> MainAITask:
+    """ATOMIC, transactional authorization check for an execution boundary about to invoke a
+    real external agent/adapter/provider on a MainAITask's behalf.
+
+    `require_task_approval()` above is a plain, unlocked read -- correct as an early filter
+    (e.g. inside a readiness/status check a caller may run long before actually dispatching,
+    or re-run many times without any intention to dispatch), but NOT sufficient immediately
+    before the real invoke: a concurrent founder revocation, task cancellation, or any other
+    MainAITask mutation could land in the gap between that earlier check and the real dispatch.
+
+    This function closes that gap the same way app.mainai_execution.executor._lock_task()
+    already closes the identical class of race for cancel_task()/dispatch_ready_task()/
+    retry_task(), and the same way
+    app.workforce.provider_worker.require_live_task_authorization_for_workforce_dispatch()
+    independently closes it for the workforce execution boundary: it takes a real
+    `SELECT ... FOR UPDATE` row lock on the MainAITask, HELD FOR THE REMAINDER OF THE CALLER'S
+    TRANSACTION, and re-checks liveness and approval against that locked, current row -- never
+    a decision computed by an earlier, now-stale read. A caller MUST call this immediately
+    before the actual dispatch/invoke step, inside the same transaction that then performs it;
+    calling it earlier and proceeding later reopens exactly the gap it exists to close.
+
+    Fails closed (raises ApprovalRequiredError) if: the task does not resolve for this owner,
+    the task's own status has left LIVE_DISPATCHABLE_TASK_STATUSES, its goal does not resolve,
+    or require_task_approval() itself still raises against the now-locked row. Returns the
+    locked task on success so a caller keeps working with the authoritative current row rather
+    than whatever it already had in hand."""
+    task = db.execute(select(MainAITask).where(MainAITask.id == task_id, MainAITask.owner_id == owner_id).with_for_update()).scalar_one_or_none()
+    if task is None:
+        raise ApprovalRequiredError(task_id)
+    if task.status not in LIVE_DISPATCHABLE_TASK_STATUSES:
+        raise ApprovalRequiredError(task.id)
+    goal = db.execute(select(MainAIGoal).where(MainAIGoal.id == task.goal_id, MainAIGoal.owner_id == owner_id)).scalar_one_or_none()
+    if goal is None:
+        raise ApprovalRequiredError(task.id)
+    require_task_approval(db, task=task, goal_approval_policy=goal.approval_policy)
+    return task
 
 
 def grant_task_approval(db: Session, *, task: MainAITask, approved_by: str) -> MainAITaskEvent:

@@ -29,6 +29,24 @@ something this PR introduces, and not something this PR fixes.
 > one) for the full guarantee to hold end-to-end. This document's §4/§5 are updated to
 > reflect what is now implemented vs. what remains a future integration responsibility.
 
+> **Second update (`claude/agent-coordination-dispatch-authorization-boundary`, same
+> founder-directive cycle, Priority 1 of "CONTINUE ACTIVE ENGINEERING"): the end-to-end gap
+> §1 named for `app.agent_coordination.dispatch_assignment()` is now closed** — this is the
+> one path, of the two named in §1, where a real external call (`await
+> adapter.start_assignment()`) already exists today, so "closed" here means something
+> stronger than workforce's still-primitive-only fix above: the atomic re-check genuinely
+> protects a real invoke, proven by a genuine two-connection test that observes the lock held
+> DURING that call
+> (`test_lock_is_held_through_the_real_adapter_invoke_not_only_the_earlier_check`,
+> `backend/tests/backend/mainai/test_agent_dispatch_authorization_boundary.py`). This is
+> deliberately NOT a lease/fencing redesign — the lock is held across the adapter call on
+> purpose, justified by reading the one real adapter implementation
+> (`LocalCLIAdapter.start_assignment()`): it only calls
+> `asyncio.create_subprocess_exec` and returns, never awaiting the agent's own work, so the
+> hold is bounded by "time to start a process." §1/§4/§5 below are updated; the "what this
+> document does not do" section is corrected to drop the now-false claim that this path is
+> unfixed.
+
 ## 1. The precise race window
 
 **As originally written, neither** `app.workforce.provider_worker.
@@ -46,17 +64,22 @@ kept as the original finding, with the fix noted inline, so the before/after is 
   separate connection in `test_workforce_task_authorization_concurrency.py`. Still true today,
   unchanged: nothing meaningful happens between that locked read and the function's own
   return/raise, because there is still no real invoke step to protect — see §2.
-- **Agent coordination (pre-existing, same class of gap):** `dispatch_assignment()`
-  (`dispatch.py:187-256`) calls `evaluate_dispatch_readiness()` (a plain, unlocked read),
-  then `transition_status(db, assignment=assignment, new_status="waiting_agent", ...)`
-  (`service.py:465-488` — compares against the in-memory Python object's current `.status`
-  attribute, not a fresh locked re-read, then writes), then `await adapter.start_assignment()`
-  — a REAL external call (subprocess/provider) that can take meaningful wall-clock time. If a
-  concurrent transaction changes the task's approval-relevant state (the closest existing
-  equivalent being `cancel_task()`, which DOES lock the task row via `_lock_task()`) and
-  commits strictly between `evaluate_dispatch_readiness()`'s read and `start_assignment()`'s
-  actual invocation, that change is not seen — the already-computed `OUTCOME_ASSIGNABLE`
-  decision is used as-is.
+- **Agent coordination (now fixed end-to-end for the authorization dimension):**
+  `dispatch_assignment()` (`dispatch.py`) still calls `evaluate_dispatch_readiness()` first
+  (a plain, unlocked read — kept, since it is also called standalone for pure readiness
+  display/testing, where taking a lock would be wrong), but now ALSO calls
+  `app.mainai_execution.approval.require_live_task_approval_for_dispatch()` immediately
+  before `transition_status(..., "waiting_agent", ...)` and `await
+  adapter.start_assignment()` — taking a real `SELECT ... FOR UPDATE` lock on the linked
+  `MainAITask`, held through both of those calls (not committed in between). A concurrent
+  `cancel_task()`-style write attempting to lock the same row blocks until this function's
+  caller commits or rolls back; proven in
+  `test_for_update_lock_blocks_a_concurrent_cancel_task_style_write` and, for the real invoke
+  window specifically, in
+  `test_lock_is_held_through_the_real_adapter_invoke_not_only_the_earlier_check`
+  (`test_agent_dispatch_authorization_boundary.py`). `assignment.approval_required` with no
+  `task_id` is unaffected (unchanged, unconditional fail-closed — there is no task row to
+  lock).
 
 **This is not a new gap introduced by this PR.** It already existed in the only currently-live
 dispatch path's design; this PR's own gate shares the same unlocked-read pattern because it
@@ -75,11 +98,13 @@ gate's read and the function returning/raising — so the race window is real in
 has no real consequence to race against today, because nothing real is ever dispatched
 regardless of the gate's answer.
 
-**`app.agent_coordination` is different: it is live, and the window is real there already,**
-independent of this PR. `dispatch_assignment()` genuinely awaits a real adapter call after its
-own `transition_status()` write. This is pre-existing and out of scope for this PR to fix, but
-it means the race this document describes is not purely theoretical in this codebase overall
-— it already exists on the one path that is actually reachable in production today.
+**`app.agent_coordination` was different, and is why it was fixed first (not just at the
+primitive level): it is live, and the window was real there already**, independent of
+workforce's own status. `dispatch_assignment()` genuinely awaits a real adapter call
+(`start_assignment()`) after its own `transition_status()` write — the race this §2 describes
+was not purely theoretical in this codebase overall, it already existed on the one path that
+is actually reachable in production today. That is now closed: see the second update note at
+the top of this document and §1's updated bullet.
 
 ## 3. When does this become relevant for workforce specifically?
 
@@ -120,6 +145,16 @@ new mechanism:
    implemented; a partial mitigation, not selected because approach 1 already provides the
    full guarantee for whatever the lock is actually held across.
 
+**For `dispatch_assignment()`, approach 1 is now wired end-to-end, not just at the
+primitive level** — see the second update note above §1. The open caveat above (slow
+external call inside the lock) was resolved by evidence, not by assumption: the one real
+`AgentAdapter` implementation's `start_assignment()` only spawns a subprocess and returns, so
+"held across the real invoke" means "held for a process-spawn syscall," not "held for however
+long the agent's actual work takes." If a future adapter implementation makes
+`start_assignment()` itself slow or network-bound, this approach should be revisited in favor
+of approach 2 or 4 for that specific call — flagged here as a condition to watch, not a
+present defect.
+
 ## 5. Required adversarial PostgreSQL concurrency tests
 
 **Written and passing** (genuine two-connection concurrency, not sequential simulation) in
@@ -136,28 +171,60 @@ rollback to show the lock's exact lifetime:
    `require_live_task_authorization_for_workforce_dispatch()` itself and proving via a
    genuinely separate connection that its lock is still held after the call returns.
 
-**Still not written, and out of scope for this fix:**
-- A test with a "real" provider invocation actually taking non-trivial time (needs the
-  activation commit's real invoke step to exist first, per §4 approach 1's open caveat).
-- A liveness test proving the chosen mechanism does not needlessly serialize unrelated,
-  non-conflicting dispatch attempts on DIFFERENT tasks (plausible by construction, since the
-  lock is per-row, but not separately proven here).
-- The equivalent fix and tests for `app.agent_coordination.dispatch_assignment()` — §1
-  established this is not workforce-specific, but this PR's scope is workforce only; fixing
-  `dispatch_assignment()` the same way is a separate, out-of-scope change to the one path
-  that is actually live today.
+**For `app.agent_coordination.dispatch_assignment()`, written and passing**
+(`backend/tests/backend/mainai/test_agent_dispatch_authorization_boundary.py`), closing every
+item the previous revision of this section listed as not yet written for that path:
 
-## What this document (and the fix it now describes) explicitly does not do
+5. **Real-invoke timing, through the actual call this time** —
+   `test_lock_is_held_through_the_real_adapter_invoke_not_only_the_earlier_check`: a
+   deliberately slow fake adapter makes the lock-hold window during `await
+   adapter.start_assignment()` observable from a genuinely separate connection, which cannot
+   acquire the same row's lock until `dispatch_assignment()`'s caller commits.
+6. **Liveness** — `test_locks_on_different_tasks_never_contend_unrelated_dispatch_is_never_blocked`:
+   two different tasks' locks, taken from two separate connections, never contend — proving
+   row-level, not table-level, exclusion.
+7. **Revocation vs. dispatch, through the real production path** —
+   `test_dispatch_assignment_rejects_a_task_cancelled_after_an_earlier_readiness_check_passed`:
+   a real, earlier `evaluate_dispatch_readiness()` call passes, the task is then genuinely
+   cancelled via `cancel_task()`, and the real `dispatch_assignment()` call still rejects —
+   the adapter is never invoked.
+8. **Competing workers / rollback+retry** —
+   `test_for_update_lock_blocks_a_concurrent_cancel_task_style_write`,
+   `test_two_concurrent_authorization_attempts_on_the_same_task_serialize_not_interleave`,
+   `test_rollback_releases_the_lock_and_an_immediate_retry_sees_unchanged_state` — the same
+   three proofs §5 items 1-3 give for workforce, given again for the `mainai_tasks` lock as
+   `dispatch_assignment()` actually uses it.
+9. **The real production function** —
+   `test_the_real_gate_function_for_dispatch_holds_the_lock_until_callers_transaction_ends`.
 
-- **Does not claim the race is fully resolved end-to-end.** The primitive-level lock is
-  implemented and proven; nothing yet exists downstream for it to protect, because
-  `ProviderActivationBlocked` still blocks every real invocation unconditionally. "Atomic
-  authorization and dispatch" as a complete guarantee is only true once a future real-invoke
-  step is wired to stay inside the same transaction — that wiring is explicitly NOT done here.
-- Does not add a version column or any new schema (approach 1 needed neither).
+**Still not written, and out of scope:**
+- A duplicate-dispatch race on the SAME `AgentWorkAssignment` row itself (two concurrent
+  `dispatch_assignment()` calls for the identical assignment, neither linked lock protects
+  this — only the linked MainAITask's row is locked). This is a different class of gap
+  (dispatch idempotency, not authorization bypass) that predates this fix and is not what the
+  founder's directive scoped as "the authorization race" — named here so it is not mistaken
+  for closed.
+- A lease/fencing-token redesign for `start_assignment()` — not needed today per §4's
+  evidence-based finding, only flagged as a future condition to watch.
+
+## What this document (and the fixes it now describes) explicitly does not do
+
+- **Does not claim workforce's race is fully resolved end-to-end.** Its primitive-level lock
+  is implemented and proven; nothing yet exists downstream for it to protect, because
+  `ProviderActivationBlocked` still blocks every real invocation unconditionally there.
+  "Atomic authorization and dispatch" as a complete guarantee for workforce is only true once
+  a future real-invoke step is wired to stay inside the same transaction — that wiring is
+  explicitly NOT done here for workforce.
+- **Does claim `app.agent_coordination.dispatch_assignment()`'s race is now closed
+  end-to-end** for the authorization dimension specifically (a revoked/cancelled task cannot
+  have its dispatch proceed once this check has run) — backed by the real-path tests in §5
+  items 5-9, not merely the primitive. It does NOT claim the separate duplicate-dispatch
+  race on the assignment row itself is closed (§5's "still not written" note).
+- Does not add a version column or any new schema (approach 1 needed neither, for either
+  path).
 - Does not activate `app.workforce`'s dormant real-provider path, and does not touch the
   `ProviderActivationBlocked` staged-raise.
-- Does not fix or touch `app.agent_coordination.dispatch_assignment()` — §1 traces the
-  identical pre-existing pattern there, but it is out of scope for this workforce-only fix.
-- Does not introduce a second approval engine or dispatcher — reuses `require_task_approval()`
-  and `_lock_task()`'s own locking idiom exactly as they already exist.
+- Does not introduce a second approval engine or dispatcher — both fixes reuse
+  `require_task_approval()` and `_lock_task()`'s own locking idiom exactly as they already
+  exist; `app.mainai_execution.approval.require_live_task_approval_for_dispatch()` is new code
+  but a thin, direct application of that same existing idiom, not a new mechanism.
