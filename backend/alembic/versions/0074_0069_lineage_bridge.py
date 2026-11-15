@@ -1,16 +1,9 @@
 """Bridge the two published exact-0069 database histories without relabelling either.
 
-Founder Alpha's historical 0069 changes provider-disclosure constraints. PR #237 published a
-different exact 0069 that creates MainAI STOP tables. Alembic cannot distinguish those
-semantics from the version string alone. This terminal bridge fingerprints the actual schema:
-
-* canonical Founder Alpha history: locality constraints exist, STOP tables do not;
-* exact PR #237 history: both STOP tables match their published shape, locality is absent.
-
-The latter is preserved as inert historical data, stripped of runtime-role access, and given
-the missing locality transition. Ambiguous, partial, or already-combined states fail closed.
-A PR #237-origin database cannot downgrade through this bridge because that would require
-pretending the shared 0069 identifier has one reversible meaning.
+The shared revision string is not authority.  This migration compares the live PostgreSQL
+catalog with temporary tables built from the two published schemas.  Column types, nullability,
+defaults, complete CHECK/FK definitions, validation state, indexes, predicates, uniqueness and
+validity must all match.  Unknown, partial, combined or merely same-named objects fail closed.
 """
 
 from __future__ import annotations
@@ -36,34 +29,6 @@ _DISCLOSURE_CONSTRAINTS = {
     "ck_provider_disclosure_events_decision",
     "ck_provider_disclosure_events_sent_hash_matches_decision",
 }
-_STOP_COLUMNS = {
-    "mainai_stop_state": {
-        "id", "scope", "owner_id", "active", "reason", "sequence", "updated_at", "provenance"
-    },
-    "mainai_stop_events": {
-        "id", "scope", "owner_id", "event_kind", "sequence", "reason", "founder_ack",
-        "clear_request_id", "actor_kind", "provenance", "created_at"
-    },
-}
-_STOP_CONSTRAINTS = {
-    "mainai_stop_state": {
-        "mainai_stop_state_pkey", "mainai_stop_state_owner_id_fkey", "ck_mainai_stop_scope",
-        "ck_mainai_stop_owner_null",
-        "ck_mainai_stop_seq", "ck_mainai_stop_prov"
-    },
-    "mainai_stop_events": {
-        "mainai_stop_events_pkey", "ck_mainai_stop_ev_scope", "ck_mainai_stop_ev_kind",
-        "ck_mainai_stop_ev_actor", "ck_mainai_stop_ev_prov"
-    },
-}
-_STOP_INDEXES = {
-    "mainai_stop_state": {
-        "mainai_stop_state_pkey", "uq_mainai_stop_global", "uq_mainai_stop_owner"
-    },
-    "mainai_stop_events": {
-        "mainai_stop_events_pkey", "uq_mainai_stop_clear_request", "ix_mainai_stop_events_owner"
-    },
-}
 
 
 def _table_exists(bind: sa.Connection, table: str) -> bool:
@@ -75,64 +40,225 @@ def _table_exists(bind: sa.Connection, table: str) -> bool:
     )
 
 
-def _provider_constraints(bind: sa.Connection) -> dict[str, str]:
+def _column_fingerprint(bind: sa.Connection, relation: str) -> tuple[tuple[object, ...], ...]:
+    return tuple(
+        tuple(row)
+        for row in bind.execute(
+            sa.text(
+                """
+                SELECT a.attname,
+                       format_type(a.atttypid, a.atttypmod),
+                       a.attnotnull,
+                       pg_get_expr(d.adbin, d.adrelid, true)
+                  FROM pg_attribute a
+                  LEFT JOIN pg_attrdef d
+                    ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+                 WHERE a.attrelid = to_regclass(:relation)
+                   AND a.attnum > 0
+                   AND NOT a.attisdropped
+                 ORDER BY a.attnum
+                """
+            ),
+            {"relation": relation},
+        ).all()
+    )
+
+
+def _constraint_fingerprint(
+    bind: sa.Connection,
+    relation: str,
+    *,
+    names: set[str] | None = None,
+) -> dict[str, tuple[str, bool, str]]:
     rows = bind.execute(
         sa.text(
             """
-            SELECT conname, pg_get_constraintdef(oid)
+            SELECT conname, contype, convalidated, pg_get_constraintdef(oid, true)
               FROM pg_constraint
-             WHERE conrelid = 'public.provider_disclosure_events'::regclass
-               AND conname = ANY(:names)
+             WHERE conrelid = to_regclass(:relation)
+               AND (:all_names OR conname = ANY(:names))
+             ORDER BY conname
             """
         ),
-        {"names": list(_DISCLOSURE_CONSTRAINTS)},
+        {
+            "relation": relation,
+            "all_names": names is None,
+            "names": sorted(names or {"__all__"}),
+        },
     ).all()
-    return {str(name): str(definition) for name, definition in rows}
+    return {
+        str(name): (str(kind), bool(validated), str(definition))
+        for name, kind, validated, definition in rows
+    }
+
+
+def _index_fingerprint(bind: sa.Connection, relation: str) -> dict[str, tuple[object, ...]]:
+    rows = bind.execute(
+        sa.text(
+            """
+            SELECT index_class.relname,
+                   idx.indisunique,
+                   idx.indisprimary,
+                   idx.indisvalid,
+                   idx.indisready,
+                   access_method.amname,
+                   regexp_replace(
+                       pg_get_indexdef(idx.indexrelid),
+                       ' ON (ONLY )?[^ ]+ ',
+                       ' ON \\1<table> '
+                   ) AS normalized_definition
+              FROM pg_index idx
+              JOIN pg_class index_class ON index_class.oid = idx.indexrelid
+              JOIN pg_class table_class ON table_class.oid = idx.indrelid
+              JOIN pg_am access_method ON access_method.oid = index_class.relam
+             WHERE table_class.oid = to_regclass(:relation)
+             ORDER BY index_class.relname
+            """
+        ),
+        {"relation": relation},
+    ).all()
+    return {
+        str(name): (
+            bool(unique),
+            bool(primary),
+            bool(valid),
+            bool(ready),
+            str(method),
+            str(definition),
+        )
+        for name, unique, primary, valid, ready, method, definition in rows
+    }
+
+
+def _create_expected_disclosure_tables(bind: sa.Connection) -> None:
+    bind.execute(
+        sa.text(
+            """
+            CREATE TEMP TABLE _expected_disclosure_pre_0074 (
+                decision varchar(16) NOT NULL,
+                sent_content_hash varchar(64),
+                CONSTRAINT ck_provider_disclosure_events_decision
+                    CHECK (decision IN ('allowed', 'denied')),
+                CONSTRAINT ck_provider_disclosure_events_sent_hash_matches_decision CHECK (
+                    (decision = 'denied' AND sent_content_hash IS NULL)
+                    OR (decision = 'allowed' AND sent_content_hash IS NOT NULL)
+                )
+            ) ON COMMIT DROP;
+            CREATE TEMP TABLE _expected_disclosure_local_0074 (
+                decision varchar(16) NOT NULL,
+                sent_content_hash varchar(64),
+                CONSTRAINT ck_provider_disclosure_events_decision
+                    CHECK (decision IN ('allowed', 'denied', 'local')),
+                CONSTRAINT ck_provider_disclosure_events_sent_hash_matches_decision CHECK (
+                    (decision = 'denied' AND sent_content_hash IS NULL)
+                    OR (decision IN ('allowed', 'local') AND sent_content_hash IS NOT NULL)
+                )
+            ) ON COMMIT DROP;
+            """
+        )
+    )
+
+
+def _provider_constraint_state(bind: sa.Connection) -> str:
+    _create_expected_disclosure_tables(bind)
+    actual = _constraint_fingerprint(
+        bind,
+        "public.provider_disclosure_events",
+        names=_DISCLOSURE_CONSTRAINTS,
+    )
+    if set(actual) != _DISCLOSURE_CONSTRAINTS:
+        raise RuntimeError("provider-disclosure constraint fingerprint is incomplete")
+    pre = _constraint_fingerprint(
+        bind,
+        "pg_temp._expected_disclosure_pre_0074",
+        names=_DISCLOSURE_CONSTRAINTS,
+    )
+    local = _constraint_fingerprint(
+        bind,
+        "pg_temp._expected_disclosure_local_0074",
+        names=_DISCLOSURE_CONSTRAINTS,
+    )
+    if actual == pre:
+        return "pre_locality"
+    if actual == local:
+        return "locality"
+    raise RuntimeError("provider-disclosure constraints do not match a published exact-0069 state")
+
+
+def _create_expected_pr237_tables(bind: sa.Connection) -> None:
+    bind.execute(
+        sa.text(
+            """
+            CREATE TEMP TABLE _expected_mainai_stop_state_0074 (
+                id uuid CONSTRAINT mainai_stop_state_pkey PRIMARY KEY DEFAULT gen_random_uuid(),
+                scope varchar(16) NOT NULL,
+                owner_id uuid,
+                active boolean NOT NULL DEFAULT false,
+                reason text NOT NULL DEFAULT '',
+                sequence bigint NOT NULL DEFAULT 0,
+                updated_at timestamp NOT NULL DEFAULT now(),
+                provenance jsonb NOT NULL DEFAULT '{}'::jsonb,
+                CONSTRAINT mainai_stop_state_owner_id_fkey
+                    FOREIGN KEY (owner_id) REFERENCES public.users(id) ON DELETE CASCADE,
+                CONSTRAINT ck_mainai_stop_scope CHECK (scope IN ('owner', 'global')),
+                CONSTRAINT ck_mainai_stop_owner_null CHECK (
+                    (scope = 'global' AND owner_id IS NULL)
+                    OR (scope = 'owner' AND owner_id IS NOT NULL)
+                ),
+                CONSTRAINT ck_mainai_stop_seq CHECK (sequence >= 0),
+                CONSTRAINT ck_mainai_stop_prov_object
+                    CHECK (jsonb_typeof(provenance) = 'object')
+            ) ON COMMIT DROP;
+            CREATE UNIQUE INDEX uq_mainai_stop_global
+                ON _expected_mainai_stop_state_0074 ((scope)) WHERE scope = 'global';
+            CREATE UNIQUE INDEX uq_mainai_stop_owner
+                ON _expected_mainai_stop_state_0074 (owner_id) WHERE scope = 'owner';
+
+            CREATE TEMP TABLE _expected_mainai_stop_events_0074 (
+                id uuid CONSTRAINT mainai_stop_events_pkey PRIMARY KEY DEFAULT gen_random_uuid(),
+                scope varchar(16) NOT NULL,
+                owner_id uuid,
+                event_kind varchar(32) NOT NULL,
+                sequence bigint NOT NULL,
+                reason text NOT NULL,
+                founder_ack text,
+                clear_request_id uuid,
+                actor_kind varchar(32) NOT NULL,
+                provenance jsonb NOT NULL DEFAULT '{}'::jsonb,
+                created_at timestamp NOT NULL DEFAULT now(),
+                CONSTRAINT ck_mainai_stop_ev_scope CHECK (scope IN ('owner', 'global')),
+                CONSTRAINT ck_mainai_stop_ev_kind CHECK (
+                    event_kind IN ('activate', 'clear', 'reject_clear', 'boot_blocked')
+                ),
+                CONSTRAINT ck_mainai_stop_ev_actor CHECK (
+                    actor_kind IN ('founder', 'operator', 'system')
+                ),
+                CONSTRAINT ck_mainai_stop_ev_prov
+                    CHECK (jsonb_typeof(provenance) = 'object')
+            ) ON COMMIT DROP;
+            CREATE UNIQUE INDEX uq_mainai_stop_clear_request
+                ON _expected_mainai_stop_events_0074 (clear_request_id)
+                WHERE clear_request_id IS NOT NULL;
+            CREATE INDEX ix_mainai_stop_events_owner
+                ON _expected_mainai_stop_events_0074 (owner_id, created_at DESC);
+            """
+        )
+    )
 
 
 def _validate_exact_pr237_shape(bind: sa.Connection) -> None:
-    for table in _STOP_TABLES:
-        columns = {
-            str(row[0])
-            for row in bind.execute(
-                sa.text(
-                    """
-                    SELECT column_name FROM information_schema.columns
-                     WHERE table_schema = 'public' AND table_name = :table
-                    """
-                ),
-                {"table": table},
-            )
-        }
-        if columns != _STOP_COLUMNS[table]:
+    _create_expected_pr237_tables(bind)
+    expected_relations = {
+        "mainai_stop_state": "pg_temp._expected_mainai_stop_state_0074",
+        "mainai_stop_events": "pg_temp._expected_mainai_stop_events_0074",
+    }
+    for table, expected in expected_relations.items():
+        actual_relation = f"public.{table}"
+        if _column_fingerprint(bind, actual_relation) != _column_fingerprint(bind, expected):
             raise RuntimeError(f"{table} does not match the published PR #237 column fingerprint")
-        constraints = {
-            str(row[0])
-            for row in bind.execute(
-                sa.text(
-                    """
-                    SELECT conname FROM pg_constraint
-                     WHERE conrelid = CAST(:table AS regclass)
-                    """
-                ),
-                {"table": f"public.{table}"},
-            )
-        }
-        if constraints != _STOP_CONSTRAINTS[table]:
+        if _constraint_fingerprint(bind, actual_relation) != _constraint_fingerprint(bind, expected):
             raise RuntimeError(f"{table} does not match the published PR #237 constraint fingerprint")
-        indexes = {
-            str(row[0])
-            for row in bind.execute(
-                sa.text(
-                    """
-                    SELECT indexname FROM pg_indexes
-                     WHERE schemaname = 'public' AND tablename = :table
-                    """
-                ),
-                {"table": table},
-            )
-        }
-        if indexes != _STOP_INDEXES[table]:
+        if _index_fingerprint(bind, actual_relation) != _index_fingerprint(bind, expected):
             raise RuntimeError(f"{table} does not match the published PR #237 index fingerprint")
 
 
@@ -143,29 +269,16 @@ def _classify(bind: sa.Connection) -> str:
     if any(stop_presence) and not all(stop_presence):
         raise RuntimeError("partial PR #237 STOP schema is unsafe to bridge")
 
-    constraints = _provider_constraints(bind)
-    if set(constraints) != _DISCLOSURE_CONSTRAINTS:
-        raise RuntimeError("provider-disclosure constraint fingerprint is incomplete")
-    local_flags = {"local" in definition for definition in constraints.values()}
-    if len(local_flags) != 1:
-        raise RuntimeError("provider-disclosure constraints disagree about locality")
-    has_local = local_flags.pop()
-
-    if not any(stop_presence) and has_local:
+    disclosure_state = _provider_constraint_state(bind)
+    if not any(stop_presence) and disclosure_state == "locality":
         return "founder_alpha_provider_disclosure"
-    if all(stop_presence) and not has_local:
+    if all(stop_presence) and disclosure_state == "pre_locality":
         _validate_exact_pr237_shape(bind)
         return "pr237_mainai_stop_controls"
     raise RuntimeError("ambiguous exact-0069 schema effects; refusing silent combination")
 
 
 def _marker_source_lineage(bind: sa.Connection) -> str:
-    """Read immutable schema provenance, cross-checking mutable detail when present.
-
-    Test and maintenance cleanup legitimately truncates application-adjacent tables.  The
-    source lineage therefore lives in a migration-owned CHECK-constraint name, not solely in
-    a row which can disappear.  A surviving row must agree with that schema anchor.
-    """
     names = {
         str(row[0])
         for row in bind.execute(
@@ -198,7 +311,6 @@ def _apply_provider_locality() -> None:
             DROP CONSTRAINT ck_provider_disclosure_events_decision,
             ADD CONSTRAINT ck_provider_disclosure_events_decision
                 CHECK (decision IN ('allowed', 'denied', 'local'));
-
         ALTER TABLE provider_disclosure_events
             DROP CONSTRAINT ck_provider_disclosure_events_sent_hash_matches_decision,
             ADD CONSTRAINT ck_provider_disclosure_events_sent_hash_matches_decision CHECK (
@@ -249,7 +361,7 @@ def upgrade() -> None:
     )
     detail = json.dumps(
         {
-            "bridge": "explicit_exact_0069_schema_fingerprint",
+            "bridge": "exact_catalog_fingerprint",
             "source_lineage": source_lineage,
             "stop_tables_preserved_inert": source_lineage == "pr237_mainai_stop_controls",
         },
