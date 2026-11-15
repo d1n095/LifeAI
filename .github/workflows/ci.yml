@@ -8,7 +8,10 @@ on:
   pull_request:
     # Include agent integration bases so stacked PRs (e.g. cursor/* → claude/*) receive
     # the same required Actions checks as PRs into main. Does not weaken or skip any job.
-    branches: [main, "claude/**", "cursor/**", "codex/**"]
+    branches: [main, "claude/**", "cursor/**", "codex/**", "copilot/import-lease-parser-hardening"]
+
+permissions:
+  contents: read
 
 # Cancel superseded runs on the same branch/PR to keep the queue short.
 concurrency:
@@ -28,6 +31,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -45,6 +50,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -66,6 +73,8 @@ jobs:
         mode: [docker, vercel]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -130,6 +139,8 @@ jobs:
       ENABLE_SCHEDULED_CLEANUP: "false"
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -181,6 +192,8 @@ jobs:
       ENABLE_SCHEDULED_CLEANUP: "false"
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -223,6 +236,8 @@ jobs:
       ENABLE_SCHEDULED_CLEANUP: "false"
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -255,6 +270,8 @@ jobs:
       SECRET_KEY: ci-test-secret-key
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -346,6 +363,8 @@ jobs:
       E2E_EMAIL_LOG_PATH: ${{ github.workspace }}/backend/e2e_test_emails.jsonl
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -526,6 +545,8 @@ jobs:
       INTERNAL_API_URL: http://127.0.0.1:8010
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -655,6 +676,8 @@ jobs:
       CONTAINER_REDIS_URL: redis://host.docker.internal:6379/0
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -1244,6 +1267,8 @@ jobs:
     if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/vps-worker-privilege-race-hotfix'
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
@@ -1494,6 +1519,8 @@ jobs:
       LIFEAI_ENV_FILE: ${{ github.workspace }}/ci-secrets.env
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Create database for the VPS-compose run
         env:
@@ -2314,6 +2341,8 @@ jobs:
       TEST_ENV_FILE: ${{ github.workspace }}/deploy-test/etc-lifeai.env
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Create database for this test
         env:
@@ -2469,6 +2498,8 @@ jobs:
       TEST_RESTORE_DIR: ${{ github.workspace }}/backup-test/restored
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up a fake /opt/lifeai and known-content Docker volumes
         run: |
