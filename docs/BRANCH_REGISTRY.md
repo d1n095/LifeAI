@@ -9115,6 +9115,16 @@ något av ovanstående:**
    omgångar — "draft, CI väntas, ej mergad" gäller genomgående; ingen av dessa förmågor ska
    beskrivas som operationell före slutförd end-to-end-verifiering.
 
+**CI-bekräftelse, #437 (tillagd efter handoff, ingen ny kod):** den fullständiga
+PostgreSQL-testsviten vid exakt head `a9949740787f103f70f4d9582f0d478725f34db8` är nu grön —
+`Backend — Alembic migration check`, `Backend — unit/integration tests` (kör de 16 nya
+S1D-testerna), `Backend — RLS & session-security tests` och `Backend — account lifecycle &
+rate-limit tests` passerade alla. Enda röda checkarna är det redan dokumenterade,
+orelaterade driftet (`Frontend — npm audit`, `E2E — Playwright (full stack)`,
+`E2E — same-origin proxy`) — samma mönster som #323/#394. Detta stänger den enda punkten
+grundarens addendum explicit flaggade som overifierad ("full PostgreSQL test suite must pass
+for exact SHA"). Löser INTE 0069-kollisionen (punkt 1 ovan) — den kvarstår oförändrad.
+
 **Vid återupptagande:** fortsätt från detta verifierade repo-tillstånd — läs detta register
 och öppna PR:er FÖRST (standardbeteendet CLAUDE.md redan kräver) — upprepa INTE redan
 slutförda utredningar (0069-kollisionsanalysen, work-candidate-fragmenteringskontrollen,
