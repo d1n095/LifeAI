@@ -49,7 +49,7 @@ ci_green/merge_conflict) om öppna PR:er/issues, skriver ingenting, skapar inget
 
 | Branch | PR | Status | Bas / beroende | Scope |
 |---|---|---|---|---|
-| `copilot/life-development-monitor-architecture` | — | **Active, documentation-only; implementation deferred; draft PR not yet opened** | #396 at `371af5c3886c14237c50795c68d464e759c73713`; merge order #395 → #396 → this documentation | Requirements for a read-only, provenance-preserving GitHub monitor integrated with MainAI's existing authority path. Leaves #396's proposal-staging decision unresolved; no new queue, supervisor, schema, API permission, or runtime. Do not rebase/update before #396 merges. Independent of parser sidecar #425. |
+| `copilot/life-development-monitor-architecture` | [#426](https://github.com/d1n095/LifeAI/pull/426) | **Open, draft; documentation SHA `dbc855fc560ae0f5e1c9d7c69a430b93cc05aa05`; registry follow-up only** | #396 at `371af5c3886c14237c50795c68d464e759c73713`; merge order #395 → #396 → #426 | Requirements for a read-only, provenance-preserving GitHub monitor integrated with MainAI's existing authority path. Leaves #396's proposal-staging decision unresolved; no new queue, supervisor, schema, API permission, or runtime. Do not rebase/update before #396 merges. Independent of parser sidecar #425. |
 
 ## Känd, repo-bred CI-blockad: npm audit-drift, EJ fixad här (2026-11-14)
 
