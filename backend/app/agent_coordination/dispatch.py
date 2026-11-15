@@ -53,7 +53,7 @@ from app.agent_coordination.service import (
     record_assignment_outcome,
     transition_status,
 )
-from app.mainai_execution.approval import ApprovalRequiredError, require_task_approval
+from app.mainai_execution.approval import ApprovalRequiredError, require_live_task_approval_for_dispatch, require_task_approval
 from app.models.agent_coordination import AgentWorkAssignment, CoordinationAgent, WorkAssignmentReadWriteMode, WorkAssignmentStatus
 from app.models.mainai_execution import MainAIGoal, MainAITask
 
@@ -232,7 +232,31 @@ async def dispatch_assignment(
     `waiting_agent` maps to `RuntimeStatus.IDLE` in `app.agent_coordination.runtime_view`, and a
     crashed dispatch left there would silently read as "idle," never as "broken." NEVER
     silently reports success, never fabricates a running state for a dispatch that never
-    actually reached a real external agent."""
+    actually reached a real external agent.
+
+    ATOMIC RE-AUTHORIZATION (closing the TOCTOU gap `evaluate_dispatch_readiness()` alone
+    leaves open): when `assignment.task_id` is set, this function re-checks founder approval
+    via `app.mainai_execution.approval.require_live_task_approval_for_dispatch()` -- which
+    takes a real `SELECT ... FOR UPDATE` lock on that MainAITask -- immediately before
+    transitioning the assignment and invoking the adapter, never relying on
+    `evaluate_dispatch_readiness()`'s own earlier, unlocked approval check as if it were still
+    valid at invoke time. A concurrent founder revocation or task cancellation landing between
+    that earlier check and this one is therefore still caught: the locked re-read sees the
+    CURRENT row, not a stale one.
+
+    This function does not commit, so that lock IS held across the `await
+    adapter.start_assignment()` call below, for as long as the CALLER's own transaction stays
+    open -- a deliberate choice, not an oversight: the one real adapter implementation
+    (`LocalCLIAdapter.start_assignment()`, `app.agent_coordination.adapters`) only calls
+    `asyncio.create_subprocess_exec` and returns; it never awaits the agent's actual work (that
+    happens later, via `collect_dispatch_result()`, entirely outside this transaction). So the
+    lock-hold window this adds is bounded by "time to start a process," never "time to do the
+    work" -- not the "unnecessary long-lived lock across an external provider call" pattern to
+    avoid. See `test_lock_is_held_through_the_real_adapter_invoke_not_only_the_earlier_check`
+    (tests/backend/mainai/test_agent_dispatch_authorization_boundary.py) for the proof, and
+    that same test's docstring for why this would need revisiting (a lease/fencing-token
+    redesign, not holding the lock) if a future `AgentAdapter` implementation's
+    `start_assignment()` ever becomes slow or blocking."""
 
     from app.agent_coordination.adapters import AdapterProcessLostError, AdapterTimeoutError, ProviderNotConfiguredError
 
@@ -249,6 +273,17 @@ async def dispatch_assignment(
             return DispatchDecision(
                 OUTCOME_SCOPE_NOT_EXPLICIT, f"authority_envelope requests paths outside the assignment's own allowed_paths: {escaping}"
             )
+
+    # Atomic re-authorization, immediately before the real invoke -- see this function's own
+    # docstring ("ATOMIC RE-AUTHORIZATION") for why evaluate_dispatch_readiness()'s own earlier,
+    # unlocked approval check is not relied on here. `assignment.approval_required` with no
+    # task_id is unaffected -- evaluate_dispatch_readiness() already failed that case closed,
+    # unconditionally, above, so there is no stale decision to re-check there.
+    if assignment.task_id is not None:
+        try:
+            require_live_task_approval_for_dispatch(db, owner_id=assignment.owner_id, task_id=assignment.task_id)
+        except ApprovalRequiredError as exc:
+            return DispatchDecision(OUTCOME_APPROVAL_REQUIRED, str(exc))
 
     attempt_id = uuid.uuid4()
     transition_status(db, assignment=assignment, new_status="waiting_agent", detail={"reason": "dispatching", "attempt_id": str(attempt_id)})
