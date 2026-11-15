@@ -9217,12 +9217,47 @@ baslinje — inget nytt introducerat av själva kombinationen.
 **Ingen riktig merge/rebase/omnumrering utfördes. Inget fel hittades, så inget att reparera.**
 `first_cycle_go=false`.
 
+## PR #443 — `claude/first-cycle-harness` (ny, draft) — Priority 4, exekverbar testharness för #439
+
+Samma grundardirektiv, Priority 4: "Use #439 as the existing specification. Prepare the
+minimum executable test harness necessary to verify the first supervised cycle... Do not
+activate autonomous provider dispatch. Do not turn project-knowledge extraction into automatic
+task authorization."
+
+Grenad på kedja A:s topp (#436) + #440 (0069-komposition) + kedja B:s topp (#439) — exakt
+samma kombination #442 redan bevisade konfliktfri. Endast EN ny testfil är detta PR:s egna
+tillägg: `test_first_supervised_development_cycle.py`.
+
+**Vad den bevisar, som riktiga DB-rader, ingenting mockat på tjänstelagret:** kör #439:s egna
+sjustegstabell end-to-end med ENDAST befintliga, redan granskade primitiv —
+`record_github_evidence_candidates()` → `authorize_github_evidence_candidate()` →
+`create_plan()` → `grant_task_approval()`/`require_task_approval()` (bevisar gringen GENUINT
+blockerar FÖRE godkännande och öppnar EFTER) → `require_live_task_approval_for_dispatch()`
+(samma atomiska pre-invoke-grind #428/#431/#433 härdade — bevisar grinden öppnas, GÅR INTE
+igenom den) → en `MainAITaskEvent`-bevisrad. Steg 2 (kunskapsigenkänning) är MEDVETET INTE
+övat — #439:s egen tabell märker det bara "delvis byggt". Steg 3 (identifiera problemet) görs
+EXPLICIT av testet självt, som människans ställföreträdare — aldrig härlett från en
+klassificerare.
+
+**Aktiverar INGEN adapter-/provider-dispatch** — inget `AgentAdapter`, `dispatch_assignment()`
+eller `app.workforce`/`app.agent_coordination`-anrop förekommer i filen. Läser/sätter/kräver
+ALDRIG `first_cycle_go`.
+
+**Verifierat:** `ruff check` rent, `py_compile`/`ast.parse` rent. Varje funktionssignatur
+verifierad genom att läsa den faktiska källkoden och korsverifierad mot denna sessions egen
+redan CI-grönaste testfil (`test_agent_dispatch_authorization_boundary.py`) för exakt
+fixture-mönster (`superuser_db` + `make_verified_user`). Ingen Postgres i sandboxen; riktig
+DB-körning väntar på CI.
+
+**Inte självcertifierat.** Ingen merge/deploy/aktivering. `first_cycle_go=false`.
+
 **Vid återupptagande:** fortsätt från detta verifierade repo-tillstånd — läs detta register
 och öppna PR:er FÖRST (standardbeteendet CLAUDE.md redan kräver) — upprepa INTE redan
 slutförda utredningar (0069-kollisionsanalysen för #408/#403/#411/#437 är nu LÖST av #440,
 väntar på CI+granskning; Codex/Copilots SEPARATA #412/#413-kollision kvarstår öppen och orörd;
 work-candidate-fragmenteringskontrollen och #323/#394-fyndet är fortfarande redan klara och
-ska återanvändas, inte göras om).
+ska återanvändas, inte göras om). Grundarens fyra prioriteter från "RESUME ACTIVE DEVELOPMENT
+WHEN CAPACITY IS AVAILABLE" är nu alla levererade: #440 (P2), #441 (P1), #442 (P3), #443 (P4).
 
 `first_cycle_go=false` genomgående. Inget väntande arbete begärt förrän grundaren säger
 annat.
