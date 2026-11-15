@@ -63,7 +63,7 @@ def _prepare(db, owner_id, **overrides):
         repo="d1n095/LifeAI",
         branch="claude/mainai-integration-context-lessons",
         base_sha=_SHA,
-        trust_zone="INTERNAL",
+        trust_zone="LOCAL_INTERNAL",
         lesson_components=["workforce"],
     )
     params.update(overrides)
