@@ -8254,3 +8254,46 @@ granskas först eftersom #409/#410 båda bygger vidare på resonemang #408 intro
 (aktiveringsgrinden respektive dess egna testers mönster), men ingen av dem är tekniskt
 blockerad av att vänta på en annan. Ingen branch väntar på ett beroende — inget att notera
 under "Merge-regeln" för den här omgången.
+
+## PR #411 — `claude/calendar-foundation` — Priority 3 (kalender/task management, grundarens 2026-11-15-direktiv)
+
+**Status: draft, CI väntas. Ej mergad.** Grenad direkt från `claude/det-kommer-mer-879lcm`
+(bas `64c07d5b`), inga kodberoenden mot #408/#409/#410.
+
+Svar på grundarens löpande direktiv ("Continue implementing MainAI's core functionality"),
+Priority 3: "Context-aware calendar, task management and proactive assistance." Verifierat
+INGEN sådan domän fanns någonstans i kodbasen innan den här branchen (grep efter
+`scheduled_at`/`due_at`/`start_time` gav noll träffar; `app.life_intents` är mål-/
+beroendenivå, aldrig tidsschemalagt) — det här är det FÖRSTA, medvetet smala inkrementet,
+inte hela kalenderfunktionen.
+
+- Migration 0069 (`calendar_events`): ägarskopad, enkel RLS-nivå (samma som `documents`/
+  `conversations` — INTE den tyngre append-only-nivån `life_intents`/
+  `_MAINAI_EXECUTION_TABLES` använder, eftersom grundaren måste kunna redigera/radera sina
+  egna kalenderhändelser rakt av).
+- `app/calendar/service.py`: create/cancel/complete/get, list_in_range, och den proaktiva
+  läsvägen `list_upcoming()`/`upcoming_summaries()` (en ren läs-projektion, inte ORM-raden
+  själv — för framtida tvärmodul-konsumtion, t.ex. en session-context-assembler, utan att
+  den konsumenten äger en låsbar databasrad).
+- `app/routers/calendar.py`: grundar-grindad CRUD-API, exakt samma `require_founder`/
+  `owner_id`-aldrig-från-request-body-mönster som `app/routers/project_entities.py`.
+- Regressionstester: service-lager (validering, cancel/complete-övergångar, upcoming/range)
+  + en riktig RLS cross-owner-isoleringstest, matchar
+  `tests/security/test_rls_isolation_work_candidates.py`s etablerade mönster exakt.
+
+**Medvetet UTANFÖR scope:** ingen extern leverantörs-synk (Google Calendar/Outlook) — det är
+ett riktigt externt integrationsbeslut (leverantörsval, credential-/OAuth-modell,
+synk-konflikt-semantik) utanför den här uppgiftens mandat att besluta ensidigt om; lämnas som
+en senare, egen uppgift.
+
+**Verifierat:** `alembic heads` visar ett enda huvud (`0069`), `alembic upgrade 0068:0069
+--sql` dry-run genererar ren DDL, `ruff check` rent på varje ny/rörd fil (enda fynden:
+redan-existerande I001 på `app/main.py`/`app/models/__init__.py`, orört per scope-disciplin,
+samt den redan 47 gånger etablerade `Depends()`-i-default-konventionen). Ingen Postgres
+tillgänglig i den här sandboxen för att köra DB-baserade tester lokalt — verifieras i CI, som
+alla andra PR:er i projektet.
+
+**Koordinering:** kontrollerade ~100 öppna PR:er för en "calendar"-branch/titel innan arbetet
+påbörjades — hittade ingen. Ingen överlappning med Codex (migration remediation), Copilot
+(import-worker lease/parser) eller Cursor (frontend/Operations Center) — helt ny,
+fristående backend-domän utan delade filer.
