@@ -15,7 +15,7 @@ equivalent fault injection.
 | #420 test corrections | `31dd0cfe0a6127e21ea6bb9720f845da6cde155d` | #413 exact head; #415 is a separate sibling PR | 58 worker/import/parser tests and 9 Redis lock/fail-closed tests passed against disposable PostgreSQL/Redis | No significant test-correction issue found; not security acceptance | No backend Actions run; only Vercel checks | Not verified |
 | #421 exact-SHA validation workflow | `f1de4ad417d1ac4c1252a36030c9d9ee0184cf3f` | #420 exact head | Workflow definition recognized; target test code already passed locally as above | Not independently reviewed | Run `43713479509` is `action_required`, zero jobs | Not applicable |
 | #422 parser procfs boundary reproducer | Test SHA `d2f79d3132f9a9003557f2fb3199550c26987b50` | #420 exact head | The test is an expected failure; `--runxfail` reproduced `visible` instead of `denied` using only a synthetic canary | Not yet reviewed | No backend Actions run; only Vercel checks | Demonstrates same-UID procfs access locally; production deployment replication not run |
-| #425 parser isolated-sidecar follow-up | Current tested implementation SHA `2e3cdbce4823f00027467ec2a82da283a9ede71f` (draft); UID/socket hardening remains at `c3f143a55767d7ebe1357548afc6899f375effad` | #422 at `a4f6819fff04d6919d4b46b1c018ba38aad1ab88` | Parser API/isolation: 12 passed, 1 inherited strict xfail. Opt-in Docker boundary: 1 passed, including 413 for oversized input and automatic restart after parser-process crash. Focused transient-outage/archive tests: 4 passed. Duplicate-import idempotency and archive-recovery tests: 2 passed through the rebuilt VPS Compose sidecar socket. | Independent code review of the UID/socket diff through `c3f143a55767d7ebe1357548afc6899f375effad` found no actionable issue; review did not execute containers and did not cover the later retry fix. Not security acceptance. | No backend Actions run; current remote checks are Vercel only | Started the actual parser service from both local and VPS Compose manifests, using a local candidate image and synthetic, non-secret VPS interpolation values; did not start the full application stack. Verified effective parser UID/GID, secretless env, separate PID namespace, no egress, read-only root, single socket mount, shared-socket owner/group/modes, configured CPU/memory/PID limits, real extraction, fail-closed behavior during a real service stop, restart/rebind and post-restart extraction. The parser returned 413 for an oversized request and remained usable. No deliberate OOM/CPU exhaustion or full host/deployment fault injection was performed. |
+| #425 parser isolated-sidecar follow-up | Tested implementation SHA `f2cede7c8dfaff21fb24e99cbe2addf96f298a2e`; earlier UID/socket hardening `c3f143a55767d7ebe1357548afc6899f375effad` | #422 at `a4f6819fff04d6919d4b46b1c018ba38aad1ab88` | Parser/import/worker/lease regressions: 64 passed, 1 inherited strict xfail. Opt-in Docker boundary: 1 passed, including bounded concurrency/503, 413 input limit, 256 MiB OOM containment, CPU-bound child timeout, active extraction interrupted by parser-process crash, typed retryable transport failure, restart/rebind, and successful post-restart extraction. Earlier VPS Compose socket idempotency/archive-recovery checks: 2 passed. | Independent code review of the current retry/resource diff found no remaining actionable issue after 503 overload responses were made retryable. Review did not execute containers and is not security acceptance. | No backend Actions run; current remote checks are Vercel only | Started the actual parser service from both local and VPS Compose manifests, using a local candidate image and synthetic, non-secret VPS interpolation values; did not start the full application stack. Verified effective parser UID/GID, secretless env, separate PID namespace, no egress, read-only root, single socket mount, shared-socket owner/group/modes, configured CPU/memory/PID limits, real extraction, fail-closed behavior during a real service stop, restart/rebind and post-restart extraction. The opt-in Docker test now exercises an active socket extraction interrupted by parser process death, confirms the caller sees a retryable transport failure, then verifies service recovery. Resource tests confirm the 256 MiB cgroup OOM boundary and CPU-bound child timeout/cleanup; these do not constitute sustained full-stack CPU stress or full host/deployment fault injection. |
 
 Dependency order is #392 → #402 → #413. PRs #415 and #420 are separate children of
 #413; #421 and #422 are evidence-only children of #420. In particular, #420 does not
@@ -48,17 +48,20 @@ full-backend CI remains blocked independently by GitHub's authorization gate bel
 ## Parser outage retry gap and remediation
 
 Compose-level tests showed the sidecar fails closed when stopped and recovers after restart,
-but source inspection found that `httpx` transport failures were wrapped as generic
-`ExtractionIsolationError`. The import layer treated that as a terminal per-file extraction
-failure, so a parser restart during import could leave a file failed instead of reaching the
-worker's bounded retry/backoff path. Follow-up SHA
-`2e3cdbce4823f00027467ec2a82da283a9ede71f` adds `ParserServiceUnavailableError`
-(an extraction error and transient `ConnectionError`) and propagates only that exception
-through both first-import and incomplete-document resume paths. Content/format failures
-remain terminal, and production does not fall back to local parsing. Regression evidence:
-the configured missing-socket test and archive retry/recovery/idempotency tests pass; the
-archive test verifies two files are indexed once when the second-file parse fails once and
-then recovers. This is local test evidence, not proof of lease fencing.
+but source inspection found that parser transport failures were wrapped as generic
+`ExtractionIsolationError`. The import layer treated them as terminal per-file failures, while
+Uvicorn's bounded-concurrency 503 overload response was also non-retryable. Implementation
+SHA `f2cede7c8dfaff21fb24e99cbe2addf96f298a2e` classifies only transport failures and 503
+overload responses as `ParserServiceUnavailableError` (an extraction error and transient
+`ConnectionError`). Content/format failures remain terminal, and production does not fall
+back to local parsing. Retries remain bounded by `ImportJob.max_attempts`; when parser outage
+retries are exhausted, linked documents left in `extracting` are terminalized as
+`extraction_failed`, preventing orphan reconciliation from retrying them forever. Regression
+tests cover the 503 classification, transient archive recovery without duplicate documents,
+exhaustion followed by orphan reconciliation, and permanent content failures. The opt-in
+Docker test separately kills the parser during an active socket extraction, verifies a typed
+transport failure, observes restart/socket recovery, and confirms extraction works afterward.
+This is local test evidence, not proof of lease fencing.
 
 ## CI authorization blocker
 
@@ -108,12 +111,15 @@ read-only root, no application mounts, configured resource limits, real extracti
 413 rejection of oversized input. Unexpected parser-process death incremented the Compose
 restart count and extraction recovered after socket rebind. A real Compose stop caused the
 production caller to fail closed without local parsing; starting the service restored
-extraction. The opt-in Docker test repeats these boundary and restart assertions. These
-results do not include deliberate OOM/CPU exhaustion or full host/deployment fault injection.
+extraction. The opt-in Docker test additionally verified bounded request concurrency,
+memory-limit OOM containment, CPU-bound child timeout/cleanup, and service restart while a
+socket extraction was active. It confirmed the interrupted caller received a retryable
+transport failure and a subsequent extraction succeeded. These checks do not include
+sustained full-application CPU stress or full host/deployment fault injection.
 
-The independent review of the UID/socket diff found no actionable code-level issue, but
-did not run the containers; the later retry-path change has not had a separate independent
-review. The updated parser/import/recovery tests pass 12 cases with one inherited strict
-xfail. Remote backend CI and formal security acceptance remain pending. Render's combined
-container has no sidecar and document parsing/imports remain unavailable there until an
-equivalent isolated service exists. This is not security acceptance.
+The independent review of the current retry/resource diff found no remaining actionable
+issue after the overload-response correction; the review did not execute containers.
+Parser/import/worker/lease regressions pass 64 cases with one inherited strict xfail. Remote
+backend CI and formal security acceptance remain pending. Render's combined container has
+no sidecar and document parsing/imports remain unavailable there until an equivalent
+isolated service exists. This is not security acceptance.
