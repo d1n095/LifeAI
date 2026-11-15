@@ -8366,6 +8366,40 @@ tidigare kollisioner i samma nummerserie — Codex äger migration-remediation (
 2026-11-15) och är redan mitt i exakt den här klassen av problem. Flaggas här för synlighet
 tills det löses vid faktisk mergeordning, rörs inte proaktivt av mig.
 
+#### Uppdatering 2026-11-15 (grundarens egna GitHub-kommentarer på PR #408 och #403) — kollisionen är STÖRRE än tidigare dokumenterat, och #412 är nu den framväxande kanoniska huvudet
+
+Grundaren (riktigt GitHub-konto `d1n095`, inte en bot) postade koordineringskommentarer
+direkt på PR #408 och PR #403 som kompletterar och korrigerar bilden ovan. Verifierat
+direkt mot #412:s faktiska diff (inte bara tagit kommentaren på förtroende): **PR #412 har
+nu en riktig, sofistikerad `0074_0069_lineage_bridge.py`** som bryggar de TVÅ publicerade
+exakta `0069`-historierna utan att omnumrera någon av dem — Founder Alphas
+provider-disclosure-låsning OCH PR #237:s `mainai_stop_*`-tabeller — genom att jämföra den
+RIKTIGA Postgres-katalogen (kolumn-/constraint-/index-fingeravtryck, inte bara
+versionssträngen) mot temporära tabeller byggda från båda publicerade scheman; tvetydiga,
+partiella eller redan kombinerade tillstånd failar closed utan mutation. Det här är redan
+mer avancerat än jag tidigare hade dokumenterat.
+
+**Kollisionen omfattar FEM parter, inte tre:** #412/#413 (Codex, redan bryggade/komponerade),
+#408 (min egen, activation authority), **#403 (min EGEN PR, `claude/coordinator-evidence-
+staging`, "GitHub evidence staging table" — upptäckt glömd efter en tidigare
+kontext-komprimering i den här sessionen; den har sin EGEN `0069_github_evidence_staging.py`
+och var INTE tidigare flaggad i det här avsnittet)**, och #411 (min egen, calendar). Fem
+`0069`-anspråk totalt, inte tre.
+
+**Grundarens föreslagna beroendeordning** (citerad ordagrant): "#412/#413 composition, then
+#408 activation authority, then #403 GitHub evidence, then #411 calendar." Explicit: "Do not
+merge or renumber this branch in isolation" (sagt om BÅDA #408 och #403). En efterträdare
+måste rebasa på den oberoende certifierade kanoniska huvudet, ta nästa DÅ-fria revision, och
+lägga till disposable-Postgres fresh-install/upgrade/downgrade/atomic-failure/privilege-tester
+(#408) respektive fresh-install/upgrade/downgrade/atomic-rollback/RLS/account-erasure-tester
+(#403). En databas gjord från dessa omergade standalone-`0069`:or måste exakt
+fingeravtrycksidentifieras och antingen säkert återställas eller nekas UTAN stämpling/
+datamutation — samma disciplin `recover_0069_dual_version.py` (#412) redan implementerar.
+
+**Ingen åtgärd vidtagen av mig** — inget mergat, inget omnumrerat, i linje med grundarens
+explicita instruktion. Det här avsnittet uppdateras för att hålla registret sanningsenligt;
+inget kod-/branch-tillstånd har ändrats.
+
 ### Uppföljning 2026-11-15 (samma dag, grundarens andra direktiv) — #414 fryst, PR #417, #406 bekräftad
 
 **PR #414:** egen-granskning postad (auktorisering, tenant-isolering, provenance,
