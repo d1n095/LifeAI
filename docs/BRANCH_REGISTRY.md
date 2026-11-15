@@ -8365,3 +8365,35 @@ ett redan AKTIVT, pågående Codex-ansvar: `codex/founder-alpha-0069-security-re
 tidigare kollisioner i samma nummerserie — Codex äger migration-remediation (grundardirektivet
 2026-11-15) och är redan mitt i exakt den här klassen av problem. Flaggas här för synlighet
 tills det löses vid faktisk mergeordning, rörs inte proaktivt av mig.
+
+### Uppföljning 2026-11-15 (samma dag, grundarens andra direktiv) — #414 fryst, PR #417, #406 bekräftad
+
+**PR #414:** egen-granskning postad (auktorisering, tenant-isolering, provenance,
+felhantering, ingen oauktoriserad dispatch/minnesläckage/execution-authority-kringgång — se
+PR-kommentar). **Fryst** — inga fler pushar förrän oberoende granskning sker. CI bekräftat
+grönt på Alembic-check/RLS/account-lifecycle; unit/integration-svit väntas fortfarande vid
+skrivande stund.
+
+**PR #417 — `claude/migration-0069-compatibility-evidence`** (ny, draft): isolerat
+kompatibilitetsbevis för #408-vs-#411-kollisionen ovan — riktig parsing av båda migrationernas
+faktiska DDL (fångad vid exakta SHA:n, inte hand-skriven tautologi) visar att kollisionen är
+RENT revisions-ID-strängen; de faktiska Postgres-objekten (tabeller/index/policyer/
+constraints) är helt disjunkta. Rekommenderar INGEN ordning, omnumrerar INGEN av filerna —
+det beslutet tillhör den som faktiskt vet mergeordningen. Ska raderas när kollisionen faktiskt
+löses.
+
+**PR #406 — `claude/copilot-adapter-registration`** (redan existerande sedan tidigare i
+sessionen, INTE nybyggd nu): bekräftad CI-grön (Alembic/unit-integration/RLS/account-lifecycle
+alla success), egen-granskad och fryst med samma checklista som #414. Registrerar `"copilot"`
+i `SUPPORTED_LOCAL_CLI_PROVIDERS` — en enda dict-rad, `enabled=False` som standard precis som
+varje annan post, ingen ny kod-yta. Kompatibilitetskontrollerad mot #408 (som senare gjorde
+`db: Session` obligatorisk på `get_real_adapter()`/`LocalCLIAdapter.__init__()`): #406 anropar
+ingen av dessa funktioner alls, så ingen call-site-konflikt finns mellan de två.
+
+**KVARSTÅENDE, EJ LÖST ARKITEKTURFRÅGA (flaggas för grundaren, avgörs INTE enväldigt här):**
+#406:s egen forskning hittade att TRE parallella worker-/exekveringssystem saknar ett
+dokumenterat konvergensbeslut: `app.agent_coordination` (adaptermekanismen #406/#414 bygger
+på), `app.workforce` (redan uttryckligen tänkt återanvända `agent_coordination`, se Stage T),
+och MainAI:s egen `MainAITask`-dispatch (`app.mainai_execution.executor`), som idag har NOLL
+provider-abstraktion — kör sig själv, kopplad till ingen av de andra två. Det här är precis
+den typ av beslut `CLAUDE.md` säger ska pausas på, inte avgöras av en enskild branch.
