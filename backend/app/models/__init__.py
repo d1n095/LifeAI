@@ -31,6 +31,7 @@ from app.models.agent_task import (
     AgentTaskStatus,
 )
 from app.models.audit import AuditLog
+from app.models.calendar import CalendarEvent
 from app.models.candidate_learning_signal import (
     CANDIDATE_SIGNAL_CONFIDENCES,
     CANDIDATE_SIGNAL_KINDS,
@@ -293,6 +294,7 @@ __all__ = [
     "ACTIVE_MAINAI_GOAL_STATUSES",
     "AUTO_SALVAGEABLE_CLASSIFICATIONS",
     "CANCELLABLE_MAINAI_JOB_STATUSES",
+    "CalendarEvent",
     "CANDIDATE_SIGNAL_CONFIDENCES",
     "CANDIDATE_SIGNAL_KINDS",
     "CANDIDATE_SIGNAL_SOURCE_TYPES",
