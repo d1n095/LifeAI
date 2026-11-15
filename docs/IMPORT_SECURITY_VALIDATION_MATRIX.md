@@ -15,11 +15,33 @@ equivalent fault injection.
 | #420 test corrections | `31dd0cfe0a6127e21ea6bb9720f845da6cde155d` | #413 exact head; #415 is a separate sibling PR | 58 worker/import/parser tests and 9 Redis lock/fail-closed tests passed against disposable PostgreSQL/Redis | No significant test-correction issue found; not security acceptance | No backend Actions run; only Vercel checks | Not verified |
 | #421 exact-SHA validation workflow | `f1de4ad417d1ac4c1252a36030c9d9ee0184cf3f` | #420 exact head | Workflow definition recognized; target test code already passed locally as above | Not independently reviewed | Run `43713479509` is `action_required`, zero jobs | Not applicable |
 | #422 parser procfs boundary reproducer | Test SHA `d2f79d3132f9a9003557f2fb3199550c26987b50` | #420 exact head | The test is an expected failure; `--runxfail` reproduced `visible` instead of `denied` using only a synthetic canary | Not yet reviewed | No backend Actions run; only Vercel checks | Demonstrates same-UID procfs access locally; production deployment replication not run |
-| #425 parser isolated-sidecar follow-up | Validated implementation SHA `2fc520fa7c6e0f1c6550379b23ac852a936d2220` (draft; subsequent commits are evidence documentation only) | #422 at `a4f6819fff04d6919d4b46b1c018ba38aad1ab88` | 50 passed, 1 expected failure across parser/import/recovery tests; real Docker containment test included | Independent code review found no actionable issue; no security acceptance | No remote CI yet | Local Docker test verifies secretless env, distinct PID namespace, network `none`, UID 10001, read-only root, no capabilities, `no-new-privileges`, resource limits, UID-only socket, and real extraction; deployed Compose topology not exercised |
+| #425 parser isolated-sidecar follow-up | Tested implementation SHA `c3f143a55767d7ebe1357548afc6899f375effad` (draft) | #422 at `a4f6819fff04d6919d4b46b1c018ba38aad1ab88` | Earlier parser/import/recovery suite: 50 passed, 1 inherited strict xfail. At this SHA, opt-in Docker boundary test: 1 passed. The two corrected #416 tests also pass on the #420 descendant. | Prior review of `2fc520fa7c6e0f1c6550379b23ac852a936d2220` found no actionable issue; the UID/socket-permission increment has not had a new independent review | No backend Actions run; only Vercel checks | Direct Docker runtime test passed with Compose-equivalent parser restrictions, including distinct UIDs, private PID namespace, no egress, socket owner/group/modes, restricted mounts, fail-closed behavior, extraction, and stop/start recovery. Compose CLI/VPS topology, automatic restart behavior, full import recovery/idempotency through the sidecar, and deployment fault injection remain unverified |
 
 Dependency order is #392 → #402 → #413. PRs #415 and #420 are separate children of
 #413; #421 and #422 are evidence-only children of #420. In particular, #420 does not
 contain #415.
+
+## #416 integration failures and #413 coordination
+
+PR #416's full backend job failed twice on exact head
+`fb3f3abd3553ce636a37a817e4bcf205b79eb347` (run `43704034822`), each with 2 failed,
+2,422 passed, and 1 skipped. Both failures are test defects in #413's lineage, not
+production-code failures:
+
+- `test_commit_fence_checks_expiry_after_waiting_for_job_row_lock` calls `SessionLocal()`
+  from its thread without importing it. The resulting `NameError` occurs before
+  `commit_started` is set, so the parent test times out waiting for the event.
+- `test_archive_progress_is_fenced_and_restart_finishes_remaining_files` requires
+  `file_results == []`, but the nullable column remains SQL `NULL` when no file progress
+  has been committed.
+
+Both corrections already exist in downstream #420 at
+`31dd0cfe0a6127e21ea6bb9720f845da6cde155d`: import `SessionLocal` and assert the
+empty/falsy state. The two targeted tests passed locally (2 passed) on that descendant.
+The diagnosis and recommendation to carry only those test corrections into #413's next
+authorized update were posted to #413:
+https://github.com/d1n095/LifeAI/pull/413#issuecomment-6897386451. The #413 exact-SHA
+full-backend CI remains blocked independently by GitHub's authorization gate below.
 
 ## CI authorization blocker
 
@@ -56,11 +78,19 @@ no capabilities, `no-new-privileges`, bounded tmpfs, CPU/memory/PID limits, and 
 size/time-limited byte-in/text-out protocol. The caller fails closed on timeout, malformed
 output, or service absence; production without `PARSER_SOCKET_PATH` fails closed.
 
-The local opt-in Docker test checks those properties and verifies real text extraction.
-The parser/import/recovery suite passed 50 tests with one inherited strict expected failure
-that still demonstrates the old same-UID process boundary. Both Compose manifests pass a
-YAML parse, but the Compose CLI is unavailable, so the actual Compose deployment topology
-has not been started or validated. Render's combined container has no sidecar and therefore
-document parsing/imports remain unavailable there in production until an equivalent isolated
-service is provided. Exact branch SHA, remote CI, and deployment-equivalent fault injection
-remain pending; this is not security acceptance.
+The earlier parser/import/recovery suite passed 50 tests with one inherited strict expected
+failure that still demonstrates the old same-UID process boundary. Follow-up implementation
+SHA `c3f143a55767d7ebe1357548afc6899f375effad` gives the parser UID 10002 and retains
+group 10001 solely for the caller's Unix-socket access. The socket directory is mode 0710
+and the socket 0660, owned by the parser UID and shared group. Its opt-in Docker test passed
+and checks the actual mounted socket, distinct UIDs, private PID namespace, absence of the
+synthetic caller environment, no egress, configured resource limits, no application mounts,
+production fail-closed behavior, real text extraction, and recovery after a forced stop and
+explicit start. This is a Docker runtime test using the Compose security settings, not a
+`docker compose` invocation. Compose/VPS start-up, automatic restart-policy behavior,
+full import recovery/idempotency through the socket, and deployment-equivalent fault
+injection remain unverified. Both Compose manifests parse as YAML, but the Compose CLI is
+unavailable. Render's combined container has no sidecar and therefore document
+parsing/imports remain unavailable there in production until an equivalent isolated service
+is provided. Remote CI and independent review of the UID/socket-permission increment remain
+pending; this is not security acceptance.
