@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
 import psycopg2
+import pytest
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -74,7 +75,7 @@ def _install_exact_pr237_0069(database_url: str) -> tuple[uuid.UUID, uuid.UUID]:
                         OR (scope = 'owner' AND owner_id IS NOT NULL)
                     ),
                     CONSTRAINT ck_mainai_stop_seq CHECK (sequence >= 0),
-                    CONSTRAINT ck_mainai_stop_prov CHECK (jsonb_typeof(provenance) = 'object')
+                    CONSTRAINT ck_mainai_stop_prov_object CHECK (jsonb_typeof(provenance) = 'object')
                 );
                 CREATE UNIQUE INDEX uq_mainai_stop_global
                     ON mainai_stop_state ((scope)) WHERE scope = 'global';
@@ -234,7 +235,7 @@ def test_ambiguous_combined_0069_effects_fail_closed():
                             OR (scope = 'owner' AND owner_id IS NOT NULL)
                         ),
                         CONSTRAINT ck_mainai_stop_seq CHECK (sequence >= 0),
-                        CONSTRAINT ck_mainai_stop_prov CHECK (jsonb_typeof(provenance) = 'object')
+                        CONSTRAINT ck_mainai_stop_prov_object CHECK (jsonb_typeof(provenance) = 'object')
                     );
                     CREATE UNIQUE INDEX uq_mainai_stop_global
                         ON mainai_stop_state ((scope)) WHERE scope = 'global';
@@ -296,3 +297,141 @@ def test_canonical_lineage_anchor_survives_data_cleanup_for_safe_downgrade():
                 assert cursor.fetchone() == ("0073_provider_disclosure_local",)
                 cursor.execute("SELECT to_regclass('_alembic_0074_0069_lineage')")
                 assert cursor.fetchone() == (None,)
+
+
+@pytest.mark.parametrize(
+    ("mutation_sql", "expected_error"),
+    [
+        (
+            """
+            ALTER TABLE mainai_stop_state DROP CONSTRAINT ck_mainai_stop_seq;
+            ALTER TABLE mainai_stop_state ADD CONSTRAINT ck_mainai_stop_seq CHECK (true);
+            """,
+            "constraint fingerprint",
+        ),
+        (
+            """
+            DROP INDEX uq_mainai_stop_owner;
+            CREATE INDEX uq_mainai_stop_owner ON mainai_stop_state (owner_id);
+            """,
+            "index fingerprint",
+        ),
+        (
+            "ALTER TABLE mainai_stop_state ALTER COLUMN reason DROP NOT NULL",
+            "column fingerprint",
+        ),
+        (
+            """
+            ALTER TABLE mainai_stop_state DROP CONSTRAINT ck_mainai_stop_prov_object;
+            ALTER TABLE mainai_stop_state ADD CONSTRAINT ck_mainai_stop_prov_object
+                CHECK (jsonb_typeof(provenance) = 'object') NOT VALID;
+            """,
+            "constraint fingerprint",
+        ),
+    ],
+)
+def test_same_named_or_incomplete_pr237_objects_fail_atomically(mutation_sql, expected_error):
+    with _disposable_database("lifeai_pr237_malicious_shape") as database_url:
+        owner_id, _ = _install_exact_pr237_0069(database_url)
+        with psycopg2.connect(database_url) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(mutation_sql)
+
+        result = _run_alembic(database_url, "upgrade", "head", check=False)
+        assert result.returncode != 0
+        assert expected_error in (result.stderr + result.stdout)
+        with psycopg2.connect(database_url) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT version_num FROM alembic_version")
+                assert cursor.fetchall() == [("0069",)]
+                cursor.execute("SELECT to_regclass('_alembic_0074_0069_lineage')")
+                assert cursor.fetchone() == (None,)
+                cursor.execute(
+                    "SELECT active, reason, sequence FROM mainai_stop_state WHERE owner_id = %s",
+                    (str(owner_id),),
+                )
+                assert cursor.fetchone() == (True, "preserve-me", 7)
+                cursor.execute(
+                    "SELECT count(*) FROM audit_log WHERE action = 'migration_bridge_0069_pr237'"
+                )
+                assert cursor.fetchone() == (0,)
+
+
+def test_unknown_same_named_disclosure_constraint_is_not_classified_by_substring():
+    with _disposable_database("lifeai_unknown_disclosure_shape") as database_url:
+        _run_alembic(database_url, "upgrade", "0069")
+        with psycopg2.connect(database_url) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    ALTER TABLE provider_disclosure_events
+                        DROP CONSTRAINT ck_provider_disclosure_events_decision,
+                        ADD CONSTRAINT ck_provider_disclosure_events_decision
+                            CHECK (decision IN ('allowed', 'denied', 'local', 'forged'));
+                    """
+                )
+
+        result = _run_alembic(database_url, "upgrade", "head", check=False)
+        assert result.returncode != 0
+        assert "do not match a published exact-0069 state" in (result.stderr + result.stdout)
+        with psycopg2.connect(database_url) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT version_num FROM alembic_version")
+                assert cursor.fetchall() == [("0069",)]
+                cursor.execute("SELECT to_regclass('_alembic_0074_0069_lineage')")
+                assert cursor.fetchone() == (None,)
+
+
+def test_startup_privilege_replay_cannot_reopen_lineage_or_stop_tables():
+    with _disposable_database("lifeai_pr237_privilege_replay") as database_url:
+        owner_id, _ = _install_exact_pr237_0069(database_url)
+        _run_alembic(database_url, "upgrade", "head")
+
+        # Reproduce the broad startup GRANT before the shared policy narrows it in the same
+        # boot. Running the production policy script proves this is restart-persistent.
+        with psycopg2.connect(database_url) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO mainai_app"
+                )
+        policy = subprocess.run(
+            [sys.executable, str(BACKEND_ROOT / "scripts" / "security" / "apply_runtime_privileges.py")],
+            cwd=BACKEND_ROOT,
+            env={**os.environ, "DATABASE_URL": database_url},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert policy.returncode == 0, policy.stderr or policy.stdout
+
+        protected = (
+            "_alembic_0074_0069_lineage",
+            "mainai_stop_state",
+            "mainai_stop_events",
+        )
+        with psycopg2.connect(database_url) as conn:
+            with conn.cursor() as cursor:
+                for table in protected:
+                    for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+                        cursor.execute(
+                            "SELECT has_table_privilege('mainai_app', %s, %s)",
+                            (f"public.{table}", privilege),
+                        )
+                        assert cursor.fetchone() == (False,), f"{table}.{privilege} was regranted"
+
+        with psycopg2.connect(database_url) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SET ROLE mainai_app")
+                with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                    cursor.execute(
+                        "UPDATE mainai_stop_state SET active = false WHERE owner_id = %s",
+                        (str(owner_id),),
+                    )
+
+        with psycopg2.connect(database_url) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT active, reason, sequence FROM mainai_stop_state WHERE owner_id = %s",
+                    (str(owner_id),),
+                )
+                assert cursor.fetchone() == (True, "preserve-me", 7)
