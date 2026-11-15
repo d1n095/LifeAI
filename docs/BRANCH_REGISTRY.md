@@ -8498,3 +8498,73 @@ jobb, inte "minsta säkra mängd."
 ögonblicksbilden — mönstret #377/#380/#381 representerade verkar vara uttömt i Claude-lane
 för tillfället. Nästa genomsökning bör ske EFTER att #414/#417/#418/#419 faktiskt mergats,
 inte tvinga fram en ny kandidat nu.
+
+### Uppdatering 2026-11-15 — grundardirektiv "Architectural Convergence": Blueprint-kollisionen är TRIVIAL, inte djup
+
+**Korrigerar och preciserar avsnittet ovan.** Grundaren bad specifikt om en jämförelse av
+#378→#379 vs #387→...→#401 (Priority 2). Verifierat med en RIKTIG lokal testmerge (inte
+GitHubs renderade diff, i en disponibel scratch-klon, ingenting pushat, inga PR-branches
+rörda): `git merge-base` bekräftar #340 (`add0da83`) som exakt gemensam förfader till båda
+topparna. Endast DIKTIG filkollision: `app/blueprint/service.py` och
+`app/routers/blueprint.py` — allt annat (migrationerna 0073/0074, `models/blueprint_draft.py`,
+`rag/trust.py`, `rag/vector_store.py`, samtliga testfiler) mergar med NOLL konflikter.
+
+En riktig testmerge (`git merge --no-ff` #401 mot #379) ger EXAKT två triviala konflikter:
+1. `generate_blueprint_draft()`s signatur (service.py:314) — #379 lägger till
+   `open_questions: list[str] | None = None`, #401 lägger till
+   `extra_provenance: dict[str, Any] | None = None`. Två oberoende, additiva keyword-
+   argument, inte en verklig kollision — löses genom att behålla båda. Funktionskroppen
+   (~80 rader) mergar med NOLL konflikt och använder redan båda säkert och oberoende av
+   varandra (#401:s egen `extra_provenance`-hantering är redan skriven defensivt: `if k not
+   in provenance`, så den kan aldrig skriva över #379:s nycklar).
+2. Samma import-block i `routers/blueprint.py` (rad ~41) — #379 lägger till
+   `evaluate_blueprint_readiness`, #401 lägger till tre andra namn. Löses genom att behålla
+   alla fyra.
+
+**Korrigering av tidigare, oprecisa påstående:** föregående anteckning ("båda staplarna
+skriver TUNGT om samma... `approve_blueprint_draft()`") var FEL i detalj — endast #379
+ändrar faktiskt den funktionens kropp (2 hunks, den namngivande fail-closed readiness-
+omkontrollen). #401 NÄMNER bara `approve_blueprint_draft` i docstrings/kommentarer; rör
+aldrig kroppen. Ingen verklig överlappning där alls.
+
+Efter att båda konflikterna löstes: `py_compile` rent på båda filerna plus
+`models/blueprint_draft.py`/`rag/trust.py`/`rag/vector_store.py`; den enda riktiga
+anropsplatsen för `generate_blueprint_draft()` (i #401:s version av routern, den som
+överlever mergen eftersom #379 aldrig kopplar in `open_questions` i sin egen router) skickar
+allt som keyword-argument, så den mergade tvånyckel-signaturen bryter ingenting.
+
+**Rekommenderad integrationsväg (dokumenterad, INTE utförd av mig — grundaren instruerade
+explicit "do not... merge conflicting branches"):** en mekanisk reconciliation-branch/PR,
+samma form som #417:s migrationskompatibilitetsbevis, som grenas från #401 (den längre,
+nyare stacken), mergar in #379, löser exakt de två hunkarna ovan genom att behålla båda
+sidors tillägg, och kör om båda staplarnas befintliga testsviter oförändrade. **Ingen
+funktionalitet från någon stack behöver kasseras. Det finns inget "välj vinnare"-beslut här**
+— till skillnad från exekveringsarkitektur-konvergensfrågan (tre system) nedan, som FAKTISKT
+kräver ett grundarbeslut. Kvarstående, inte löst av den här analysen: oberoende
+säkerhetsgranskning är fortfarande efterfrågad på #379 OCH #401 var för sig (deras egna
+PR-beskrivningar begär det); den här reconciliationen ersätter inte det.
+
+### Uppdatering 2026-11-15 — #394 är en delmängdsduplikat av #323 (npm-audit/E2E-driften)
+
+Grundardirektiv Priority 3 bad om en bedömning av om #323/#394 löser den redan kända,
+återkommande `Frontend — npm audit`/`E2E`-driften. Verifierat direkt mot GitHub (inte
+memorerat): **PR #323** (`claude/frontend-npm-audit-baseline-consolidation`, open, INTE
+draft, `mergeable_state=clean`) höjer `next`/`eslint-config-next` till 16.4.3 plus riktade
+overrides (sharp, zod, source-map-js, js-yaml, browserslist) OCH pinnar Playwright E2E-jobben
+till `ubuntu-24.04` i en andra commit — dess senaste riktiga CI-körning (2026-11-01) var helt
+grön över npm-audit, båda E2E-jobben och aggregatgrinden. De GHSA-id:n den patchar matchar
+EXAKT dagens levande npm-audit-fel (verifierat genom att läsa jobbloggen från PR #419:s egen
+körning idag, inte gissat). Inget har rört `frontend/package.json` på dev-tippen sedan #323
+grenades, så fixen bör fortfarande gå att applicera rent. En tidigare sessions egen kommentar
+på #323 (2026-11-12) utropar den redan som den ovedersagda ägaren av den här
+beroende-saneringen.
+
+**PR #394** (`claude/ci-playwright-ubuntu2604-pin`, draft) visar sig vara en tidigare
+oflaggad DELMÄNGDSDUPLIKAT av HALVA #323 — dess egen CI bekräftar att ubuntu-24.04-pinningen
+löser E2E, men den lämnar npm-audit (och aggregatgrinden) röd by design, eftersom det ligger
+utanför dess scope.
+
+**Rekommendation (ingen ny branch öppnad, ingen merge utförd av mig — det kräver
+grundarens/behörig granskares godkännande, utanför vad någon session här kan göra ensam):**
+#323 är komplett och väntar bara på oberoende granskning/merge. #394 bör stängas som
+subsumerad av #323 DEN DAGEN #323 mergas — flaggat här, inte löst nu.
