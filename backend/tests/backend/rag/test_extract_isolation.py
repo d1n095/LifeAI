@@ -187,3 +187,16 @@ def test_oversized_input_is_rejected_before_starting_child(
     )
     with pytest.raises(ExtractionIsolationError, match="input limit"):
         extract_text_isolated("large.txt", b"x" * (25 * 1024 * 1024 + 1))
+
+
+def test_production_fails_closed_when_isolated_parser_is_unconfigured(monkeypatch) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.delenv("PARSER_SOCKET_PATH", raising=False)
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("production must not run a same-container parser"),
+    )
+
+    with pytest.raises(ExtractionIsolationError, match="not configured"):
+        extract_text_isolated("input.txt", b"secret document")

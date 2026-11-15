@@ -15,6 +15,7 @@ equivalent fault injection.
 | #420 test corrections | `31dd0cfe0a6127e21ea6bb9720f845da6cde155d` | #413 exact head; #415 is a separate sibling PR | 58 worker/import/parser tests and 9 Redis lock/fail-closed tests passed against disposable PostgreSQL/Redis | No significant test-correction issue found; not security acceptance | No backend Actions run; only Vercel checks | Not verified |
 | #421 exact-SHA validation workflow | `f1de4ad417d1ac4c1252a36030c9d9ee0184cf3f` | #420 exact head | Workflow definition recognized; target test code already passed locally as above | Not independently reviewed | Run `43713479509` is `action_required`, zero jobs | Not applicable |
 | #422 parser procfs boundary reproducer | Test SHA `d2f79d3132f9a9003557f2fb3199550c26987b50` | #420 exact head | The test is an expected failure; `--runxfail` reproduced `visible` instead of `denied` using only a synthetic canary | Not yet reviewed | No backend Actions run; only Vercel checks | Demonstrates same-UID procfs access locally; production deployment replication not run |
+| Parser isolated-sidecar follow-up | Active branch; exact SHA pending commit | #422 at `a4f6819fff04d6919d4b46b1c018ba38aad1ab88` | 50 passed, 1 expected failure across parser/import/recovery tests; real Docker containment test included | Independent code review found no actionable issue; no security acceptance | No PR/remote CI yet | Local Docker test verifies secretless env, distinct PID namespace, network `none`, UID 10001, read-only root, no capabilities, `no-new-privileges`, resource limits, UID-only socket, and real extraction; deployed Compose topology not exercised |
 
 Dependency order is #392 → #402 → #413. PRs #415 and #420 are separate children of
 #413; #421 and #422 are evidence-only children of #420. In particular, #420 does not
@@ -36,7 +37,7 @@ the repository's workflow approval policy and use the supported administrative e
 path. Do not reroute the workflow through a more privileged event or bypass branch/review
 protections. No further API approval attempts are planned.
 
-## Parser containment finding and recommended boundary
+## Parser containment finding and current boundary
 
 The current parser subprocess drops inherited environment variables and applies input,
 output, CPU, address-space, file-descriptor, file-size, and wall-clock bounds. However, it
@@ -46,16 +47,20 @@ arbitrary code execution can read a same-UID parent's `/proc/<pid>/environ`; tes
 only `PARSER_PARENT_CANARY=synthetic-value`. This is a demonstrated containment gap, not
 evidence that a supported document currently achieves code execution.
 
-The deployment-compatible strong boundary is a dedicated parser service/container, not
-granting `CAP_SETUID` or `CAP_SYS_ADMIN` to the backend/worker. The service should use the
-existing backend image and parser libraries but have no application env file, database or
-Redis credentials, upload-volume mount, or public ingress; a dedicated internal-only
-network should connect it only to the backend/worker. Apply read-only root, no capabilities,
-`no-new-privileges`, bounded tmpfs, CPU/memory/PID limits, and a strict size/time-limited
-byte-in/text-out protocol. The request sender must fail closed on timeout, malformed output,
-or service absence. This fits the existing Docker Compose production model but requires a
-separate implementation and real-compose tests before it can be treated as a control.
+The active follow-up branch implements a dedicated parser container rather than granting
+`CAP_SETUID` or `CAP_SYS_ADMIN` to the backend/worker. It uses the backend image and parser
+libraries, but receives no app env file, database/Redis credentials, upload-volume mount, or
+network access (`network_mode: none`). A bounded, UID-restricted Unix socket is the only
+shared resource. The parser has separate container PID/mount namespaces, read-only root,
+no capabilities, `no-new-privileges`, bounded tmpfs, CPU/memory/PID limits, and a strict
+size/time-limited byte-in/text-out protocol. The caller fails closed on timeout, malformed
+output, or service absence; production without `PARSER_SOCKET_PATH` fails closed.
 
-Until that boundary exists and is verified, parser-compromise containment, network
-non-egress, and protection of application secrets remain **NOT VERIFIED**. The current
-worker-level container resource limits are not per-parser limits.
+The local opt-in Docker test checks those properties and verifies real text extraction.
+The parser/import/recovery suite passed 50 tests with one inherited strict expected failure
+that still demonstrates the old same-UID process boundary. Both Compose manifests pass a
+YAML parse, but the Compose CLI is unavailable, so the actual Compose deployment topology
+has not been started or validated. Render's combined container has no sidecar and therefore
+document parsing/imports remain unavailable there in production until an equivalent isolated
+service is provided. Exact branch SHA, remote CI, and deployment-equivalent fault injection
+remain pending; this is not security acceptance.
