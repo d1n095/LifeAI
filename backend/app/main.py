@@ -1,10 +1,12 @@
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from sqlalchemy.exc import OperationalError
 
 from app.bootstrap import bootstrap_founder_user
 from app.config import get_settings
@@ -44,6 +46,22 @@ app = FastAPI(title="LifeOS / MainAI API", version="0.1.0")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
+
+
+@app.exception_handler(OperationalError)
+async def _database_unavailable(request: Request, exc: OperationalError):
+    logger.warning(
+        "Database operation unavailable for %s %s (%s).",
+        request.method,
+        request.url.path,
+        type(exc.orig).__name__,
+    )
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Tjänsten är tillfälligt otillgänglig. Försök igen med samma begäran."},
+        headers={"Retry-After": "3"},
+    )
+
 
 # CSRF verification is folded into app/deps.py's get_current_user (every mutating route
 # requires it) plus an explicit check in /refresh and /logout, which authenticate via the

@@ -63,8 +63,15 @@ checksummor verifieras. 22 säkerhetstester i
 (`extract-v1`), manifest-styrd klassificering/status, ett fils fel avbryter aldrig hela
 batchen (`FileOutcome` per fil), `manifest.json` självt importeras aldrig som dokument.
 `app/routers/library.py`s `ImportJob`-idempotens på hela uppladdningens checksumma
-förhindrar dubbla jobb för identiskt innehåll. Deterministiska mock-embeddings i alla tester
-— aldrig riktiga AI-nycklar.
+förhindrar dubbla jobb för identiskt innehåll. En identisk uppladdning återanvänder också ett
+befintligt resumable jobb (`pending`, `running`, `blocked` eller `partial` med blockerade
+filer), så en klient kan säkert skicka om samma innehåll efter ett tvetydigt databas-commit;
+terminalt `failed` jobb kan fortfarande startas om. Vid SQLAlchemy `OperationalError` lämnar
+API:t en sanerad `503` med `Retry-After`; efter att originalet skrivits försöker routen
+referenskontrollerad blob-städning under samma ägar-/storage-låsprotokoll. Om databasen
+fortfarande är otillgänglig under städningen kan en orrefererad, hållbar blob bli kvar tills
+klienten skickar om samma innehåll; någon generell automatisk orphan-sweep är inte garanterad.
+Deterministiska mock-embeddings i alla tester — aldrig riktiga AI-nycklar.
 
 ## Founder Library-API och UI (DEL 4)
 

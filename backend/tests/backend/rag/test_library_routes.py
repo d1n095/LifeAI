@@ -6,6 +6,7 @@ exercised together, the same way a real client would hit them."""
 import asyncio
 import importlib.util
 import io
+import os
 import time
 import uuid
 import zipfile
@@ -142,6 +143,259 @@ def test_import_route_keeps_blocking_database_work_off_the_event_loop():
     from app.routers.library import import_package
 
     assert not inspect.iscoroutinefunction(import_package)
+
+
+def test_import_database_failure_before_blob_write_returns_retryable_unavailable(client, monkeypatch):
+    import hashlib
+
+    from sqlalchemy.exc import OperationalError
+
+    import app.routers.library as library_router
+    from app.storage import get_storage
+
+    csrf = _login(client)
+    original_lock = library_router.acquire_owner_erasure_lock
+    fail_once = True
+
+    def _fail_before_storage(db, owner_id):
+        nonlocal fail_once
+        if fail_once:
+            fail_once = False
+            raise OperationalError("SELECT advisory lock", {}, RuntimeError("synthetic private detail"))
+        return original_lock(db, owner_id)
+
+    monkeypatch.setattr(library_router, "acquire_owner_erasure_lock", _fail_before_storage)
+    content = b"retry after database outage before storage"
+    checksum = hashlib.sha256(content).hexdigest()
+    response = client.post(
+        "/api/library/import",
+        files={"file": ("db-before-storage.txt", content, "text/plain")},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "3"
+    assert "synthetic private detail" not in response.text
+    assert "password" not in response.text.lower()
+    assert get_storage().exists(f"{checksum[:2]}/{checksum}") is False
+    assert list((Path(os.environ["STORAGE_ROOT"]) / "tmp").iterdir()) == []
+
+
+def test_database_failure_during_upload_authentication_returns_retryable_unavailable(client, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+
+    import app.deps as dependencies
+
+    csrf = _login(client)
+
+    def _fail_auth_database_query(*_args, **_kwargs):
+        raise OperationalError("SELECT revoked token", {}, RuntimeError("synthetic private detail"))
+
+    monkeypatch.setattr(dependencies, "is_access_token_revoked", _fail_auth_database_query)
+    response = client.post(
+        "/api/library/import",
+        files={"file": ("db-during-auth.txt", b"no storage before auth completes", "text/plain")},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "3"
+    assert "synthetic private detail" not in response.text
+
+
+def test_import_database_failure_after_blob_write_reconciles_then_allows_retry(client, monkeypatch, superuser_db):
+    import hashlib
+
+    from sqlalchemy.exc import OperationalError
+
+    import app.routers.library as library_router
+    from app.models.import_job import ImportJob
+    from app.storage import get_storage
+
+    csrf = _login(client)
+    original_lock = library_router.acquire_storage_key_lock
+    fail_once = True
+
+    def _fail_after_storage(db, storage_key):
+        nonlocal fail_once
+        if fail_once:
+            fail_once = False
+            raise OperationalError("SELECT advisory lock", {}, RuntimeError("synthetic connection failure"))
+        return original_lock(db, storage_key)
+
+    monkeypatch.setattr(library_router, "acquire_storage_key_lock", _fail_after_storage)
+    content = b"retry after database outage after durable blob write"
+    checksum = hashlib.sha256(content).hexdigest()
+    response = client.post(
+        "/api/library/import",
+        files={"file": ("db-after-storage.txt", content, "text/plain")},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "3"
+    assert "synthetic connection failure" not in response.text
+    assert superuser_db.query(ImportJob).filter_by(source_checksum=checksum).count() == 0
+    assert get_storage().exists(f"{checksum[:2]}/{checksum}") is False
+    assert list((Path(os.environ["STORAGE_ROOT"]) / "tmp").iterdir()) == []
+
+    retried = client.post(
+        "/api/library/import",
+        files={"file": ("db-after-storage.txt", content, "text/plain")},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert retried.status_code == 200, retried.text
+    completed = _wait_for_job(client, retried.json()["id"])
+    assert completed["status"] == "completed"
+    assert superuser_db.query(ImportJob).filter_by(source_checksum=checksum).count() == 1
+
+
+def test_postgres_disconnect_during_job_commit_rolls_back_row_and_reconciles_blob(client, monkeypatch, superuser_db):
+    import hashlib
+
+    import psycopg2
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session as ORMSession
+
+    from app.models.import_job import ImportJob
+    from app.storage import get_storage
+
+    csrf = _login(client)
+    content = b"database backend termination during import commit"
+    checksum = hashlib.sha256(content).hexdigest()
+    original_commit = ORMSession.commit
+    terminate_once = True
+
+    def _terminate_connection_before_commit(session):
+        nonlocal terminate_once
+        if not terminate_once:
+            return original_commit(session)
+
+        terminate_once = False
+        session.flush()
+        backend_pid = session.execute(text("SELECT pg_backend_pid()")).scalar_one()
+        control = psycopg2.connect(os.environ["DATABASE_URL"])
+        try:
+            control.autocommit = True
+            with control.cursor() as cursor:
+                cursor.execute("SELECT pg_terminate_backend(%s, 5000)", (backend_pid,))
+                assert cursor.fetchone()[0] is True
+        finally:
+            control.close()
+        return original_commit(session)
+
+    monkeypatch.setattr(ORMSession, "commit", _terminate_connection_before_commit)
+    failed = client.post(
+        "/api/library/import",
+        files={"file": ("db-commit-interruption.txt", content, "text/plain")},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert failed.status_code == 503
+    assert failed.headers["retry-after"] == "3"
+    assert superuser_db.query(ImportJob).filter_by(source_checksum=checksum).count() == 0
+    assert get_storage().exists(f"{checksum[:2]}/{checksum}") is False
+    assert list((Path(os.environ["STORAGE_ROOT"]) / "tmp").iterdir()) == []
+    owner_id = client.get("/api/auth/me").json()["id"]
+    assert superuser_db.execute(
+        text("SELECT pg_try_advisory_xact_lock(pg_catalog.hashtextextended(:key, 1))"),
+        {"key": owner_id},
+    ).scalar_one() is True
+    assert superuser_db.execute(
+        text("SELECT pg_try_advisory_xact_lock(pg_catalog.hashtextextended(:key, 0))"),
+        {"key": f"{checksum[:2]}/{checksum}"},
+    ).scalar_one() is True
+    superuser_db.commit()
+
+    retried = client.post(
+        "/api/library/import",
+        files={"file": ("db-commit-interruption.txt", content, "text/plain")},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert retried.status_code == 200, retried.text
+    assert _wait_for_job(client, retried.json()["id"])["status"] == "completed"
+    assert superuser_db.query(ImportJob).filter_by(source_checksum=checksum).count() == 1
+
+
+def test_import_retry_reuses_job_when_commit_succeeds_but_acknowledgment_is_lost(
+    client, monkeypatch, superuser_db
+):
+    import hashlib
+
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.orm import Session as ORMSession
+
+    from app.models.document import Document
+    from app.models.import_job import ImportJob
+
+    csrf = _login(client)
+    content = b"ambiguous commit must not create duplicate jobs"
+    checksum = hashlib.sha256(content).hexdigest()
+    original_commit = ORMSession.commit
+    lose_acknowledgment = True
+
+    def _commit_then_lose_acknowledgment(session):
+        nonlocal lose_acknowledgment
+        original_commit(session)
+        if lose_acknowledgment:
+            lose_acknowledgment = False
+            raise OperationalError("COMMIT", {}, RuntimeError("synthetic lost acknowledgment"))
+
+    monkeypatch.setattr(ORMSession, "commit", _commit_then_lose_acknowledgment)
+    first = client.post(
+        "/api/library/import",
+        files={"file": ("ambiguous-commit.txt", content, "text/plain")},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert first.status_code == 503
+    assert first.headers["retry-after"] == "3"
+    assert "synthetic lost acknowledgment" not in first.text
+
+    committed = superuser_db.query(ImportJob).filter_by(source_checksum=checksum).one()
+    assert committed.status.value == "pending"
+
+    retry = client.post(
+        "/api/library/import",
+        files={"file": ("ambiguous-commit.txt", content, "text/plain")},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["id"] == str(committed.id)
+    completed = _wait_for_job(client, retry.json()["id"])
+    assert completed["status"] == "completed"
+    assert superuser_db.query(ImportJob).filter_by(source_checksum=checksum).count() == 1
+    assert superuser_db.query(Document).filter_by(import_job_id=committed.id, deleted_at=None).count() == 1
+
+
+def test_concurrent_identical_uploads_reuse_one_pending_job(client, superuser_db):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.models.import_job import ImportJob
+
+    csrf = _login(client)
+    content = b"parallel identical submissions must share one durable job"
+    headers = {"X-CSRF-Token": csrf}
+
+    def _submit(index):
+        return client.post(
+            "/api/library/import",
+            files={"file": (f"parallel-{index}.txt", content, "text/plain")},
+            headers=headers,
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        responses = list(executor.map(_submit, range(4)))
+
+    assert all(response.status_code == 200 for response in responses), [response.text for response in responses]
+    job_ids = {response.json()["id"] for response in responses}
+    assert len(job_ids) == 1
+    job_id = uuid.UUID(job_ids.pop())
+    assert superuser_db.query(ImportJob).filter_by(id=job_id).count() == 1
+
+    completed = _wait_for_job(client, str(job_id))
+    assert completed["status"] == "completed"
+    assert completed["succeeded_count"] == 1
+    assert superuser_db.query(ImportJob).filter_by(id=job_id).count() == 1
 
 
 def test_import_single_text_file_via_api(client):

@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import uuid
@@ -5,7 +6,8 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, field_validator
-from sqlalchemy import or_, text
+from sqlalchemy import or_
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -13,7 +15,7 @@ from app.db import get_db
 from app.deps import require_founder
 from app.jobs.heartbeat import worker_process_alive
 from app.limiter import limiter
-from app.models.document import ActiveTruthStatus, Document, IndexStatus, KnowledgeClassification
+from app.models.document import ActiveTruthStatus, Document, KnowledgeClassification
 from app.models.document_chunk import DocumentChunk
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_claim import KnowledgeClaim
@@ -32,7 +34,6 @@ from app.library.originals import (
 from app.providers.registry import embed_with_policy, resolve_active
 from app.providers.verification import classify_provider_exception
 from app.rag.embedding_space import native_dim_of
-from app.rag.library_import import maybe_purge_blob
 from app.rag.trust import assess_claim_confidence
 from app.rag.vector_store import hybrid_search
 from app.storage import get_storage
@@ -61,6 +62,7 @@ from app.schemas import (
 
 router = APIRouter(prefix="/api/library", tags=["library"], dependencies=[Depends(require_founder)])
 settings = get_settings()
+logger = logging.getLogger("mainai.library")
 
 # Raw upload byte cap — deliberately distinct from zip_import.py's MAX_TOTAL_UNCOMPRESSED_BYTES
 # (200 MB): that limit bounds what a ZIP is allowed to expand to; this one bounds the
@@ -125,6 +127,46 @@ def import_package(
     db: Session = Depends(get_db),
     user: User = Depends(require_founder),
 ):
+    try:
+        return _import_package_impl(request, file, project_id, db, user)
+    except OperationalError as exc:
+        try:
+            db.rollback()
+        except OperationalError:
+            logger.warning("Could not roll back the failed library-import transaction.")
+        storage_key = getattr(request.state, "library_import_storage_key", None)
+        if storage_key is not None:
+            try:
+                acquire_owner_erasure_lock(db, user.id)
+                delete_if_unreferenced(db, get_storage(), storage_key)
+                db.commit()
+            except OperationalError:
+                try:
+                    db.rollback()
+                except OperationalError:
+                    logger.warning("Could not roll back library-import blob reconciliation.")
+                logger.warning(
+                    "Could not reconcile a library-import blob while the database was unavailable; "
+                    "an unreferenced durable blob may remain, but retrying the same upload is safe."
+                )
+        logger.warning(
+            "Database unavailable during library import (%s); returning a retryable response.",
+            type(exc.orig).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Tjänsten är tillfälligt otillgänglig. Försök igen med samma fil.",
+            headers={"Retry-After": "3"},
+        ) from exc
+
+
+def _import_package_impl(
+    request: Request,
+    file: UploadFile,
+    project_id: uuid.UUID | None,
+    db: Session,
+    user: User,
+):
     """Life Library durable-worker package: streams the upload straight to durable storage
     (app/storage/), computing size and sha256 as it goes — never buffers the whole file in
     memory (no `await file.read()` on the full body). Responds with the job id as soon as the
@@ -168,6 +210,8 @@ def import_package(
     except StorageError as exc:
         raise HTTPException(status_code=500, detail=f"Kunde inte lagra filen: {exc}")
 
+    request.state.library_import_storage_key = blob.storage_key
+
     if blob.size_bytes == 0:
         # Pass 30 (a fourth founder review round): a bare `storage.delete()` here used to
         # bypass the canonical check-then-act protocol entirely -- see
@@ -188,12 +232,30 @@ def import_package(
 
     checksum = blob.sha256
 
-    # Whole-upload idempotency: re-uploading byte-identical content (the same ZIP or the
-    # same single file) returns the original completed job instead of a new one — see
-    # docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md. A job that's still pending/running/failed for
-    # this checksum is NOT treated as a duplicate: pending/running could be a legitimate
-    # concurrent retry, and failed should be retriable, not permanently stuck as "the"
-    # result for this checksum.
+    # An upload whose commit acknowledgment was lost can already have a durable job even
+    # though its client received an error. Reuse resumable jobs for the same owner/content
+    # so retrying the same request cannot enqueue duplicate work. Failed jobs remain
+    # retriable; blocked jobs and partial jobs with blocked files are worker-resumable.
+    active = (
+        db.query(ImportJob)
+        .filter(
+            ImportJob.owner_id == user.id,
+            ImportJob.source_checksum == checksum,
+            (
+                ImportJob.status.in_(
+                    (ImportJobStatus.pending, ImportJobStatus.running, ImportJobStatus.blocked)
+                )
+                | ((ImportJob.status == ImportJobStatus.partial) & (ImportJob.blocked_count > 0))
+            ),
+        )
+        .order_by(ImportJob.created_at.desc())
+        .first()
+    )
+    if active is not None and active.source_storage_key == blob.storage_key and storage.exists(blob.storage_key):
+        return active
+
+    # Whole-upload idempotency: re-uploading byte-identical content returns the original
+    # completed job when that job still has a live result.
     existing = (
         db.query(ImportJob)
         .filter_by(owner_id=user.id, source_checksum=checksum, status=ImportJobStatus.completed)
