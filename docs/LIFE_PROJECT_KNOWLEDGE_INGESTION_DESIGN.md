@@ -87,6 +87,21 @@ survives independent edits" property `record_id` was already built for in Pass 2
 None of the above required inventing a new mechanism; every one is Pass 2's own output field
 mapped onto a parameter an existing, already-reviewed function already accepts.
 
+> **Update (`claude/repository-source-identity-foundation`, founder directive "CONTINUE
+> MAINAI INTEGRATION", Priority 2): the fork below is now resolved, not merely named.**
+> Option A vs. B is decided in favor of **Option B** — a new, narrowly-scoped `SourceKind.
+> repository_file` plus its own `repository_file_source_units` subtype table (migration
+> 0069), identified by `(repo_identity, file_path, commit_sha)`. The deciding evidence:
+> `SourceKind` is NOT a native Postgres enum (migration 0019 used `varchar(32)` + a CHECK
+> constraint), and this exact "third-arm" extension was already proven safe once before —
+> `MessageSourceUnit` (migration 0037) added a SECOND arm the same way. Option A would have
+> meant actually running the Library upload pipeline for ~114 files and reinterpreting
+> `KnowledgeVersion` (upload-time versioning) to mean "git commit," a concept it was never
+> built to hold — not smaller, just differently-shaped work. See the migration's own docstring
+> for the full evidence trail and the now-sixth entry in the already-tracked 0069 revision
+> collision (restated, not resolved, there). This update does NOT retract §4 below, which
+> remains the accurate record of the fork as it stood before this decision.
+
 ## 4. The real blocker: `MemorySourceUnit` has no slot for a git-tracked repo file
 
 This is the finding that keeps this design a design, not a script. Every path from raw text to
@@ -154,13 +169,18 @@ first and asking forgiveness after.
   anything, "do not create executable tasks from extracted ideas" is true by construction, not
   by instruction.
 
-## 6. What this document explicitly does not do
+## 6. What this document explicitly does not do (as originally written — see the update note above §4 for what changed since)
 
-- Does not add a migration, a new `SourceKind` value, or any new table.
-- Does not run the Library upload pipeline against the docs corpus.
-- Does not write a single row to `memory_source_units`, `knowledge_claims`,
-  `interpretation_proposals`, `project_entities`, or `work_candidates`.
-- Does not pick between Option A and Option B in §4 — names both, recommends one, decides
-  neither.
+- As originally written, did not add a migration, a new `SourceKind` value, or any new table,
+  and did not pick between Option A and Option B in §4. **The update note above §4 records
+  that `claude/repository-source-identity-foundation` (migration 0069) has since done exactly
+  that** — a new `SourceKind.repository_file` value, a new `repository_file_source_units`
+  table, and the code implementing it. That branch is itself still an isolated, unmerged,
+  independently-reviewable draft — nothing here claims it is authoritative until reviewed.
+- Still does not run the Library upload pipeline against the docs corpus (the migration
+  implements Option B, which specifically does not need this).
+- Still does not write a single row to `interpretation_proposals`, `project_entities`, or
+  `work_candidates` — migration 0069 only reaches as far as `memory_source_units`/
+  `repository_file_source_units` (the source layer), never past it.
 - Does not treat Pass 1/2's 158 records as anything more authoritative than they already were
   (`promoted: false`, reconnaissance only) — this document changes nothing about their status.

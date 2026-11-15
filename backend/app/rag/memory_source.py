@@ -25,6 +25,7 @@ from app.models.memory_source_unit import (
     DocumentSourceUnit,
     MemorySourceUnit,
     OccurredAtBasis,
+    RepositoryFileSourceUnit,
     SnapshotStatus,
     SourceKind,
     SourceRole,
@@ -189,6 +190,125 @@ def get_or_create_memory_source_unit(db: Session, locator: DocumentSourceLocator
     # source is eligible for reuse; anything else is a real conflict the caller must decide
     # how to handle (e.g. create a fresh source instead), not something this function papers
     # over.
+    if existing_msu.lifecycle_status.value != "active":
+        raise MemorySourceIdentityConflict(
+            f"memory_source_units {existing_msu.id}: source_identity_key={locator.identity_key!r} "
+            f"matched an existing source, but its lifecycle_status is "
+            f"{existing_msu.lifecycle_status.value!r}, not 'active' — refusing to silently reuse a "
+            f"revoked or purged source"
+        )
+    if existing_msu.snapshot_status != locator.snapshot_status or existing_msu.content_hash != content_hash:
+        raise MemorySourceIdentityConflict(
+            f"memory_source_units {existing_msu.id}: snapshot_status/content_hash mismatch on lookup "
+            f"(expected snapshot_status={locator.snapshot_status}, content_hash={content_hash!r}; "
+            f"found snapshot_status={existing_msu.snapshot_status}, content_hash={existing_msu.content_hash!r})"
+        )
+
+    return existing_msu.id
+
+
+@dataclass
+class RepositoryFileSourceLocator:
+    """S1D (migration 0069) — identifies a git-tracked repository file at ONE exact commit.
+    `commit_sha` MUST already be a resolved, real 40-hex-character git SHA (never "HEAD" or a
+    branch name) — `ck_rfsu_commit_sha_format` rejects anything else at the database level, so
+    a caller resolving a branch/ref to its real SHA is the caller's own responsibility, never
+    silently done here. No chunk_id/version_id-style degradation concept exists for this
+    source kind: the source unit IS the whole file's content at that commit; a future pass
+    extracting specific claims from specific lines records the line number in ITS OWN
+    provenance, not by narrowing this locator."""
+
+    owner_id: uuid.UUID
+    repo_identity: str
+    file_path: str
+    commit_sha: str
+    observed_at: datetime
+    content_text: str | None
+    snapshot_status: SnapshotStatus
+
+    @property
+    def identity_key(self) -> str:
+        return f"repository_file:{self.repo_identity}:{self.file_path}:{self.commit_sha}"
+
+
+def get_or_create_repository_file_source_unit(db: Session, locator: RepositoryFileSourceLocator) -> uuid.UUID:
+    """The S1D counterpart of `get_or_create_memory_source_unit()` above — identical
+    SAVEPOINT-scoped race-safe find-or-create, identical `uq_msu_owner_identity`-collision
+    recovery path, deliberately not sharing a single generic implementation with the
+    document-kind function: the two locator shapes differ enough (document_id/version_id/
+    chunk_id vs. repo_identity/file_path/commit_sha) that a shared generic would need its own
+    branching, which is exactly the kind of abstraction this codebase's own conventions treat
+    as premature until a THIRD call site needs it — see this module's own docstring praising
+    the SAVEPOINT pattern over a CTE for the same "write the real thing, not a clever
+    generalization of it" reasoning. `source_role` is always `unknown`, same justification as
+    the document path: nothing at ingest time can vouch for a repository file's authorship."""
+    content_hash, content_hash_version = compute_content_hash(locator.content_text)
+    savepoint = db.begin_nested()
+    try:
+        msu = MemorySourceUnit(
+            owner_id=locator.owner_id,
+            source_kind=SourceKind.repository_file,
+            source_identity_key=locator.identity_key,
+            source_role=SourceRole.unknown,
+            observed_at=locator.observed_at,
+            occurred_at=None,
+            occurred_at_basis=OccurredAtBasis.unknown,
+            content_text=locator.content_text,
+            content_hash=content_hash,
+            content_hash_version=content_hash_version,
+            snapshot_status=locator.snapshot_status,
+        )
+        db.add(msu)
+        db.flush()
+        db.add(
+            RepositoryFileSourceUnit(
+                memory_source_id=msu.id,
+                owner_id=locator.owner_id,
+                source_kind=SourceKind.repository_file,
+                repo_identity=locator.repo_identity,
+                file_path=locator.file_path,
+                commit_sha=locator.commit_sha,
+            )
+        )
+        db.flush()
+        savepoint.commit()
+        return msu.id
+    except IntegrityError as exc:
+        constraint_name = getattr(getattr(getattr(exc, "orig", None), "diag", None), "constraint_name", None)
+        savepoint.rollback()
+        if constraint_name != "uq_msu_owner_identity":
+            raise
+
+    existing = (
+        db.query(MemorySourceUnit, RepositoryFileSourceUnit)
+        .join(RepositoryFileSourceUnit, RepositoryFileSourceUnit.memory_source_id == MemorySourceUnit.id)
+        .filter(
+            MemorySourceUnit.owner_id == locator.owner_id,
+            MemorySourceUnit.source_identity_key == locator.identity_key,
+        )
+        .one_or_none()
+    )
+    if existing is None:
+        raise MemorySourceIdentityConflict(
+            f"uq_msu_owner_identity fired for identity_key={locator.identity_key!r} but no matching "
+            f"memory_source_units row is visible — likely a concurrent, not-yet-committed writer; retry"
+        )
+
+    existing_msu, existing_rfsu = existing
+    if (
+        existing_msu.source_kind != SourceKind.repository_file
+        or existing_rfsu.repo_identity != locator.repo_identity
+        or existing_rfsu.file_path != locator.file_path
+        or existing_rfsu.commit_sha != locator.commit_sha
+    ):
+        raise MemorySourceIdentityConflict(
+            f"memory_source_units {existing_msu.id}: source_identity_key={locator.identity_key!r} "
+            f"matched but locator differs (existing repo_identity={existing_rfsu.repo_identity!r}, "
+            f"file_path={existing_rfsu.file_path!r}, commit_sha={existing_rfsu.commit_sha!r} vs. "
+            f"requested repo_identity={locator.repo_identity!r}, file_path={locator.file_path!r}, "
+            f"commit_sha={locator.commit_sha!r})"
+        )
+
     if existing_msu.lifecycle_status.value != "active":
         raise MemorySourceIdentityConflict(
             f"memory_source_units {existing_msu.id}: source_identity_key={locator.identity_key!r} "
