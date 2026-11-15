@@ -60,6 +60,8 @@ def _extract_via_socket(filename: str, raw: bytes, socket_path: str, timeout_sec
                 headers={"x-document-suffix": suffix},
                 content=raw,
             ) as response:
+                if response.status_code == 503:
+                    raise ParserServiceUnavailableError("Isolated parser service is temporarily overloaded.")
                 if response.status_code != 200:
                     raise ExtractionIsolationError("Document could not be parsed in the isolated service.")
                 output = bytearray()
@@ -67,7 +69,7 @@ def _extract_via_socket(filename: str, raw: bytes, socket_path: str, timeout_sec
                     if len(output) + len(chunk) > _MAX_OUTPUT_BYTES:
                         raise ExtractionIsolationError("Parser output exceeds the hard size limit.")
                     output.extend(chunk)
-    except httpx.HTTPError as exc:
+    except httpx.TransportError as exc:
         raise ParserServiceUnavailableError("Isolated parser service is unavailable.") from exc
     try:
         return output.decode("utf-8", errors="strict")

@@ -625,6 +625,43 @@ async def test_parser_service_outage_retries_archive_without_duplicate_documents
 
 
 @pytest.mark.asyncio
+async def test_exhausted_parser_outage_is_terminal_and_not_reconciled_forever(
+    db_session, make_verified_user, monkeypatch
+):
+    from app.rag import library_import as li
+    from app.worker import Worker, process_claimed_job
+
+    user, _ = make_verified_user()
+    job = _make_job(db_session, user.id, b"Persistent parser outage", "parser-outage.txt")
+    job.max_attempts = 2
+    db_session.add(job)
+    db_session.commit()
+    calls = 0
+
+    def parser_stays_unavailable(*_args):
+        nonlocal calls
+        calls += 1
+        raise ParserServiceUnavailableError("synthetic persistent outage")
+
+    monkeypatch.setattr(li, "extract_text", parser_stays_unavailable)
+
+    await process_claimed_job(db_session, job.id, user.id)
+
+    db_session.refresh(job)
+    documents = db_session.query(Document).filter_by(import_job_id=job.id).all()
+    assert calls == job.max_attempts
+    assert job.status == ImportJobStatus.failed
+    assert job.attempt_count == job.max_attempts - 1
+    assert job.last_failure_transient is True
+    assert len(documents) == 1
+    assert documents[0].status == IndexStatus.extraction_failed
+
+    Worker()._reconcile_orphaned_documents(db_session)
+    db_session.refresh(job)
+    assert job.status == ImportJobStatus.failed
+
+
+@pytest.mark.asyncio
 async def test_permanent_failure_is_not_retried(db_session, make_verified_user):
     """A malformed ZIP (ZipSecurityError, classified permanent — see app/jobs/retry.py)
     must fail immediately, not burn through retry attempts on something retrying can never

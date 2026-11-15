@@ -13,6 +13,7 @@ from app.rag.extract_isolated import (
     ParserServiceUnavailableError,
     extract_text_isolated,
 )
+from app.jobs.retry import is_transient_error
 
 
 def test_runtime_import_path_is_bound_to_isolated_extractor() -> None:
@@ -220,3 +221,42 @@ def test_configured_parser_outage_is_fail_closed_and_retryable(monkeypatch) -> N
 
     assert isinstance(exc_info.value, ExtractionIsolationError)
     assert isinstance(exc_info.value, ConnectionError)
+
+
+def test_parser_overload_response_is_retryable(monkeypatch) -> None:
+    from contextlib import nullcontext
+
+    import httpx
+
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("PARSER_SOCKET_PATH", "/run/lifeai-parser/overloaded.sock")
+
+    class FakeResponse:
+        status_code = 503
+
+    class FakeClient:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def stream(self, *_args, **_kwargs):
+            return nullcontext(FakeResponse())
+
+    monkeypatch.setattr(httpx, "Client", FakeClient)
+
+    with pytest.raises(ParserServiceUnavailableError) as exc_info:
+        extract_text_isolated("input.txt", b"source bytes")
+
+    assert is_transient_error(exc_info.value)
+
+
+def test_only_parser_transport_errors_are_retryable() -> None:
+    import httpx
+
+    assert is_transient_error(ParserServiceUnavailableError("connection refused"))
+    assert not is_transient_error(httpx.DecodingError("invalid response encoding"))

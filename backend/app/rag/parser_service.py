@@ -15,6 +15,7 @@ from app.rag.extract_isolated import ExtractionIsolationError, extract_text_in_s
 
 _SOCKET_PATH = Path(os.environ.get("PARSER_SOCKET_PATH", "/run/lifeai-parser/parser.sock"))
 _MAX_INPUT_BYTES = 25 * 1024 * 1024
+_MAX_CONCURRENT_REQUESTS = 2
 _SAFE_SUFFIX = re.compile(r"\.[a-z0-9]{1,10}\Z")
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
@@ -34,16 +35,16 @@ async def extract_document(request: Request) -> Response:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="Invalid content length.") from exc
 
-    chunks: list[bytes] = []
+    content = bytearray()
     total = 0
     async for chunk in request.stream():
         total += len(chunk)
         if total > _MAX_INPUT_BYTES:
             raise HTTPException(status_code=413, detail="Document exceeds the parser input limit.")
-        chunks.append(chunk)
+        content.extend(chunk)
 
     try:
-        text = extract_text_in_subprocess(f"input{suffix}", b"".join(chunks))
+        text = extract_text_in_subprocess(f"input{suffix}", bytes(content))
     except ExtractionIsolationError as exc:
         raise HTTPException(status_code=422, detail="Document could not be parsed.") from exc
 
@@ -58,7 +59,13 @@ def main() -> None:
     except FileNotFoundError:
         pass
     os.umask(0o177)
-    config = uvicorn.Config(app, uds=str(_SOCKET_PATH), access_log=False, log_level="warning")
+    config = uvicorn.Config(
+        app,
+        uds=str(_SOCKET_PATH),
+        access_log=False,
+        log_level="warning",
+        limit_concurrency=_MAX_CONCURRENT_REQUESTS,
+    )
     server = uvicorn.Server(config)
     uds_socket = config.bind_socket()
     try:
