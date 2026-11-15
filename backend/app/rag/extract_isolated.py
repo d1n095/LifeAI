@@ -42,6 +42,21 @@ def _safe_child_filename(filename: str) -> str:
     return f"input{Path(filename).suffix.lower()}"
 
 
+def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    for pipe in (process.stdin, process.stdout):
+        if pipe is not None:
+            pipe.close()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
 def extract_text_isolated(
     filename: str,
     raw: bytes,
@@ -65,19 +80,18 @@ def extract_text_isolated(
         env=_child_environment(),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
         close_fds=True,
         start_new_session=True,
     )
     try:
-        stdout, _stderr = process.communicate(input=raw, timeout=timeout_seconds)
+        stdout, _ = process.communicate(input=raw, timeout=timeout_seconds)
     except subprocess.TimeoutExpired as exc:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.communicate()
+        _kill_process_group(process)
         raise ExtractionIsolationError("Document parser exceeded its time limit.") from exc
+    finally:
+        if process.poll() is None:
+            _kill_process_group(process)
 
     if process.returncode != 0:
         raise ExtractionIsolationError("Document could not be parsed in the isolated process.")

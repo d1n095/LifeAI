@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,14 @@ def test_child_receives_no_parent_secrets_or_attacker_filename(
     class FakeProcess:
         pid = 123
         returncode = 0
+        stdin = None
+        stdout = None
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, *, timeout: float | None = None):
+            return self.returncode
 
         def communicate(self, *, input: bytes | None = None, timeout: float | None = None):
             captured["input"] = input
@@ -43,6 +52,7 @@ def test_child_receives_no_parent_secrets_or_attacker_filename(
         captured["env"] = kwargs["env"]
         captured["shell"] = kwargs.get("shell")
         captured["cwd"] = kwargs["cwd"]
+        captured["stderr"] = kwargs["stderr"]
         return FakeProcess()
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://secret")
@@ -59,7 +69,30 @@ def test_child_receives_no_parent_secrets_or_attacker_filename(
     }
     assert captured["command"][-1] == "input.txt"
     assert captured["shell"] is None
+    assert captured["stderr"] is subprocess.DEVNULL
     assert Path(captured["cwd"]).name == "backend"
+
+
+def test_stderr_warning_flood_is_discarded_instead_of_buffered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_popen = subprocess.Popen
+
+    def noisy_popen(_command, **kwargs):
+        return real_popen(
+            [
+                sys.executable,
+                "-c",
+                "import os; "
+                "[os.write(2, b'x' * 4096) for _ in range(2048)]; "
+                "os.write(1, b'parsed')",
+            ],
+            **kwargs,
+        )
+
+    monkeypatch.setattr(subprocess, "Popen", noisy_popen)
+
+    assert extract_text_isolated("warning-flood.pdf", b"%PDF-", timeout_seconds=10) == "parsed"
 
 
 def test_timeout_kills_the_whole_child_process_group(
@@ -70,7 +103,12 @@ def test_timeout_kills_the_whole_child_process_group(
     class HungProcess:
         pid = 456
         returncode = None
+        stdin = None
+        stdout = None
         calls = 0
+
+        def poll(self):
+            return self.returncode
 
         def communicate(self, *, input: bytes | None = None, timeout: float | None = None):
             self.calls += 1
@@ -78,6 +116,13 @@ def test_timeout_kills_the_whole_child_process_group(
                 raise subprocess.TimeoutExpired(["python"], timeout)
             self.returncode = -9
             return b"", b""
+
+        def wait(self, *, timeout: float | None = None):
+            self.returncode = -9
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
 
     process = HungProcess()
     monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: process)

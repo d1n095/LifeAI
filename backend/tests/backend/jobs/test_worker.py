@@ -10,11 +10,18 @@ import uuid
 from datetime import datetime, timedelta
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 
 from app.config import get_settings
 from app.db import migration_engine
-from app.jobs.lease import claim_next_job, renew_lease
+from app.jobs.lease import (
+    ImportJobLeaseLostError,
+    claim_next_job,
+    configure_import_lease_fence,
+    renew_lease,
+)
+from app.models.document import Document, DocumentSource
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.storage_deletion_task import StorageDeletionStatus, StorageDeletionTask
 from app.storage import get_storage
@@ -140,6 +147,170 @@ def test_renew_lease_cannot_resurrect_an_expired_claim(superuser_db, make_verifi
     refreshed = superuser_db.get(ImportJob, job.id)
     assert refreshed.locked_by == "stale-worker"
     assert refreshed.lease_expires_at == expired_at
+
+
+def test_renew_lease_uses_wall_clock_after_transaction_has_been_open(
+    superuser_db, make_verified_user
+):
+    """Reproduces transaction-time `now()` accepting a renewal after its real deadline."""
+    user, _ = make_verified_user()
+    job = _make_pending_job(superuser_db, user.id)
+    claim_db = _ClaimSession()
+    try:
+        transaction_started = claim_db.execute(text("SELECT now()")).scalar_one()
+        superuser_db.execute(
+            text("""
+                UPDATE knowledge_import_jobs
+                SET status = 'running',
+                    locked_by = 'slow-transaction-worker',
+                    lease_expires_at = clock_timestamp() + interval '150 milliseconds'
+                WHERE id = :job_id
+            """),
+            {"job_id": str(job.id)},
+        )
+        superuser_db.commit()
+        claim_db.execute(text("SELECT pg_sleep(0.3)"))
+
+        assert renew_lease(claim_db, job.id, "slow-transaction-worker", 120) is False
+        assert claim_db.execute(
+            text("""
+                SELECT lease_expires_at > :transaction_started
+                   AND lease_expires_at < clock_timestamp()
+                FROM knowledge_import_jobs WHERE id = :job_id
+            """),
+            {"job_id": str(job.id), "transaction_started": transaction_started},
+        ).scalar_one()
+    finally:
+        claim_db.rollback()
+        claim_db.close()
+
+
+def test_concurrent_workers_reclaim_an_expired_job_once(superuser_db, make_verified_user):
+    user, _ = make_verified_user()
+    job = _make_pending_job(superuser_db, user.id)
+    superuser_db.execute(
+        text("""
+            UPDATE knowledge_import_jobs
+            SET status = 'running',
+                locked_by = 'expired-worker',
+                lease_expires_at = clock_timestamp() - interval '1 second'
+            WHERE id = :job_id
+        """),
+        {"job_id": str(job.id)},
+    )
+    superuser_db.commit()
+
+    start = threading.Barrier(2)
+    claimed: list[tuple[uuid.UUID, uuid.UUID] | None] = []
+
+    def _claim(worker_id: str) -> None:
+        claim_db = _ClaimSession()
+        try:
+            start.wait(timeout=5)
+            claimed.append(claim_next_job(claim_db, worker_id, 120))
+        finally:
+            claim_db.close()
+
+    threads = [
+        threading.Thread(target=_claim, args=("reclaimer-a",)),
+        threading.Thread(target=_claim, args=("reclaimer-b",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert sorted(result is not None for result in claimed) == [False, True]
+    superuser_db.expire_all()
+    assert superuser_db.get(ImportJob, job.id).locked_by in {"reclaimer-a", "reclaimer-b"}
+
+
+def test_stale_worker_cannot_commit_document_after_takeover(
+    db_session, superuser_db, make_verified_user
+):
+    user, _ = make_verified_user()
+    job = _make_pending_job(superuser_db, user.id)
+    claim_db = _ClaimSession()
+    try:
+        assert claim_next_job(claim_db, "stale-worker", 120) == (job.id, user.id)
+        claim_db.execute(
+            text("""
+                UPDATE knowledge_import_jobs
+                SET lease_expires_at = clock_timestamp() - interval '1 second'
+                WHERE id = :job_id
+            """),
+            {"job_id": str(job.id)},
+        )
+        claim_db.commit()
+        assert claim_next_job(claim_db, "replacement-worker", 120) == (job.id, user.id)
+    finally:
+        claim_db.close()
+
+    from app.request_context import current_user_id
+
+    current_user_id.set(str(user.id))
+    db_session.execute(text("SET LOCAL app.current_user_id = :owner_id"), {"owner_id": str(user.id)})
+    configure_import_lease_fence(db_session, job.id, user.id, "stale-worker", 120)
+    db_session.add(
+        Document(
+            uploaded_by=user.id,
+            title="stale-write.txt",
+            source=DocumentSource.upload,
+            checksum=uuid.uuid4().hex,
+            media_type="text/plain",
+            original_filename="stale-write.txt",
+            import_job_id=job.id,
+        )
+    )
+    with pytest.raises(ImportJobLeaseLostError):
+        db_session.commit()
+    db_session.rollback()
+
+    superuser_db.expire_all()
+    assert superuser_db.query(Document).filter_by(import_job_id=job.id).count() == 0
+    assert superuser_db.get(ImportJob, job.id).locked_by == "replacement-worker"
+
+
+def test_cancelled_import_rejects_pending_worker_writes(
+    db_session, superuser_db, make_verified_user
+):
+    user, _ = make_verified_user()
+    job = _make_pending_job(superuser_db, user.id)
+    claim_db = _ClaimSession()
+    try:
+        assert claim_next_job(claim_db, "cancelled-worker", 120) == (job.id, user.id)
+        claim_db.execute(
+            text("UPDATE knowledge_import_jobs SET status = 'cancelled' WHERE id = :job_id"),
+            {"job_id": str(job.id)},
+        )
+        claim_db.commit()
+    finally:
+        claim_db.close()
+
+    from app.request_context import current_user_id
+
+    current_user_id.set(str(user.id))
+    db_session.execute(text("SET LOCAL app.current_user_id = :owner_id"), {"owner_id": str(user.id)})
+    configure_import_lease_fence(db_session, job.id, user.id, "cancelled-worker", 120)
+    db_session.add(
+        Document(
+            uploaded_by=user.id,
+            title="cancelled-write.txt",
+            source=DocumentSource.upload,
+            checksum=uuid.uuid4().hex,
+            media_type="text/plain",
+            original_filename="cancelled-write.txt",
+            import_job_id=job.id,
+        )
+    )
+    with pytest.raises(ImportJobLeaseLostError):
+        db_session.commit()
+    db_session.rollback()
+
+    superuser_db.expire_all()
+    assert superuser_db.query(Document).filter_by(import_job_id=job.id).count() == 0
+    assert superuser_db.get(ImportJob, job.id).status == ImportJobStatus.cancelled
 
 
 def test_import_claim_id_is_unique_even_for_same_process_and_worker_slot():
