@@ -8568,3 +8568,43 @@ utanför dess scope.
 grundarens/behörig granskares godkännande, utanför vad någon session här kan göra ensam):**
 #323 är komplett och väntar bara på oberoende granskning/merge. #394 bör stängas som
 subsumerad av #323 DEN DAGEN #323 mergas — flaggat här, inte löst nu.
+
+### PR #423 — `claude/execution-authority-convergence-recommendation` — Priority 1 (exekveringsarkitektur-konvergens)
+
+**Status: draft, CI väntas. Ej mergad.** Staplad ovanpå #419 (tre-exekveringssystem-kartan)
+via riktig `git merge` — #419:s egen branch orörd. Innehåller docs/
+`LIFE_EXECUTION_ARCHITECTURE_CONVERGENCE_RECOMMENDATION.md` + 2 nya regressionstester
+(`backend/tests/backend/mainai/test_execution_authority_convergence_gap.py`, riktig
+Postgres, inga mockar). Ingen produktionskod ändrad.
+
+**Huvudfynd (direkt läst i koden, inte gissat):** det tidigare säkerhetsgranskningsförslaget
+("nullable `mainai_job_id` FK", #410, "design only, not implemented") finns redan FAKTISKT
+implementerat för `app.agent_coordination` — `evaluate_dispatch_readiness()`
+(`dispatch.py:160-178`) delegerar redan HELT till
+`app.mainai_execution.approval.require_task_approval()` via `AgentWorkAssignment.task_id`s
+riktiga FK till `mainai_tasks`. Det FAKTISKA, tidigare odokumenterade gapet finns på andra
+sidan: `WorkforceAssignment` har INGEN `task_id`-kolumn alls (bara
+`WorkforceDelegationRequest` har en, och `resolve_delegation()` ytar aldrig den på
+assignment-objektet den skapar), och `execute_workforce_assignment()`s
+`activate_provider`-väg anropar ALDRIG `require_task_approval()` någonstans — bara en
+global aktiveringsgrind, följt av en ovillkorlig "staged"-raise som redan blockerar riktig
+invokation idag oavsett godkännandestatus. Inte exploaterbart idag (raisen blockerar allt)
+men latent: om den raisen någonsin medvetet tas bort krävs det här steget för att
+auktorisationen faktiskt ska finnas.
+
+De två nya testerna bevisar asymmetrin körbart med SAMMA `MainAITask`: `agent_coordination`s
+utfall ändras av godkännande (`OUTCOME_APPROVAL_REQUIRED` → `OUTCOME_ASSIGNABLE`);
+`workforce`s utfall gör det INTE (identiskt undantag, identiskt meddelande, före och efter
+godkännande).
+
+**Rekommendation (dokumenterad, EJ implementerad i den här PR:n — varje steg en egen,
+separat granskningsbar framtida PR):** (1) behåll workforce:s `ActivationGateSet` — den
+skyddar ett annat invariant (infra-bred beredskap) än per-task-godkännande; (2) återanvänd
+`require_task_approval()` som den enda kanoniska auktoriteten, ingen ny logik; (3) fixa
+`resolve_delegation()` att yta `task_id` på assignmentet (framtida PR); (4) lägg till
+`require_task_approval()`-anropet i `execute_workforce_assignment()`s `activate_provider`-
+gren, FÖRE den befintliga staged-raisen (framtida, säkerhetsgranskad PR — detta är den
+riktiga auktoritetsändringen och förtjänar egen granskning). `coordination_assignment_id`s
+öde och om workforce:s riktiga provider-väg någonsin ska aktiveras: grundarbeslut, utanför
+scope här. `ProviderActivationBlocked`s ovillkorliga raise, `coordination_assignment_id` och
+`first_cycle_go` rörs INTE av den här PR:n.
