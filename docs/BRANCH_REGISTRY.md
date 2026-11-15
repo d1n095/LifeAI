@@ -6,6 +6,27 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Item F, liten bit: Copilot registrerad; en öppen arkitekturfråga kvarstår (2026-11-14)
+
+**Ny branch: `claude/copilot-adapter-registration`** (PR #406, bas: `claude/det-kommer-mer-
+879lcm` — INTE koordinatorkedjan #403–#405, eftersom `app.agent_coordination` är orelaterad,
+redan existerande infrastruktur). Lägger till `"copilot"` i `SUPPORTED_LOCAL_CLI_PROVIDERS`
+(`adapter_config.py`) — en ren registrering, samma mönster som `codex`/`cursor-agent`, ingen
+ny adapterklass. Adaptern är fortsatt helt avstängd tills grundaren själv sätter
+`LIFE_AGENT_ADAPTER_ENABLED__COPILOT=true`.
+
+**Öppen arkitekturfråga (INTE avgjord här):** en research-pass inför #406 hittade att TRE
+parallella worker-/exekveringssystem existerar utan dokumenterat beslut om hur/om de ska
+konvergera: `app.agent_coordination` (adapter-mekanismen #406 bygger på), `app.workforce`
+(se Stage T nedan — redan uttryckligen tänkt återanvända `agent_coordination` snarare än
+skapa en parallell broker), och MainAI:s egen `MainAITask`-dispatch
+(`app.mainai_execution.executor`), som idag saknar ALL provider-abstraktion — den kör sig
+själv, utan koppling till `agent_coordination` eller `app.workforce` överhuvudtaget. Stage
+T:s "Skapar inte parallell broker/memory"-princip täcker `workforce` vs `agent_coordination`,
+men ingen tidigare branch/PR verkar ha tagit ställning till var `MainAITask`-dispatch passar
+in i det. Det här är exakt den typen av beslut som enligt `CLAUDE.md` ska pausas på, inte
+avgöras enväldigt av en enskild branch — flaggat här för grundaren/Codex, inte löst i #406.
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en

@@ -38,7 +38,7 @@ from dataclasses import dataclass
 # The provider-neutral real-adapter boundary this module governs. Adding a new provider means
 # adding one entry here -- never a new adapter class per provider (see
 # app.agent_coordination.adapters.LocalCLIAdapter's own docstring for why one bounded
-# subprocess mechanism serves all three). `default_executable` is only ever used to constitute
+# subprocess mechanism serves every provider below). `default_executable` is only ever used to constitute
 # argv -- never invoked without the caller ALSO supplying a real, founder-configured
 # `args_template` (see `get_real_adapter()` below); an executable existing on PATH with no
 # configured invocation shape is still fully disabled.
@@ -46,6 +46,16 @@ SUPPORTED_LOCAL_CLI_PROVIDERS: dict[str, dict] = {
     "claude-code": {"default_executable": "claude"},
     "cursor-agent": {"default_executable": "cursor-agent"},
     "codex": {"default_executable": "codex"},
+    # Founder directive 2026-11-14 ("Turn Life into a working engineering coordinator"), Item F
+    # ("Coordinate with Codex and Copilot on real worker adapters"). GitHub's standalone
+    # Copilot CLI (the `@github/copilot` package) installs a `copilot` binary on PATH -- same
+    # shape as every other entry here, so it needs no new adapter class, only this registration
+    # (see LocalCLIAdapter's own docstring for why one bounded mechanism serves every provider).
+    # Still fully disabled until the founder explicitly sets
+    # LIFE_AGENT_ADAPTER_ENABLED__COPILOT=true and supplies a real args_template -- registering
+    # it here only makes "supported" become True; it changes no other fact in
+    # AdapterAvailability and authorizes nothing by itself.
+    "copilot": {"default_executable": "copilot"},
 }
 
 _ENV_ENABLED = "LIFE_AGENT_ADAPTER_ENABLED__{key}"
