@@ -9169,6 +9169,28 @@ plus den befintliga roundtrip-testen) väntar på CI.
 **Inte självcertifierat** — oberoende granskning krävs fortfarande (grundarens Priority 1 +
 stående "do not self-certify your own security-sensitive changes"). Ingen merge/deploy.
 
+## PR #441 — `claude/independent-review-handoff` (ny, draft) — Priority 1, verifierad CI-ögonblicksbild + granskarpaket
+
+Samma grundardirektiv, Priority 1. Bygger på PR #438:s egen beroendekedje-/fragmenteringsanalys
+— duplicerar den INTE. Det nya: en **verifierad-just-nu** CI-ögonblicksbild, hämtad LIVE via
+`get_check_runs` för varje PR i exekveringsauktoritets-kedjan (#423/#428/#431/#433/#436) och
+projektkunskaps-kedjan (#430/#432/#435/#437), plus #323/#424/#429/#438/#439 — bekräftar varje
+PR:s egna påstådda status istället för att återge den från brödtext, som kan bli inaktuell.
+
+**Självupptäckt och korrigerat innan något skrevs:** blandade först ihop två API-resultat vid
+kontroll av #323 (fick #423:s check-runs, trodde det var #323:s) — upptäckte detta genom att
+läsa jobbloggens faktiska checkout-rad (`pull/423/merge`), hämtade om #323:s RIKTIGA check-runs,
+och bekräftade: #323 är genuint helt grön (inklusive npm audit och båda E2E-jobben) — INTE
+bara "känt drift" som alla andra PR:er i omgången.
+
+Fyra konkreta granskarpaket (ett per kedja + ett för de fristående dokument-PR:erna): vad som
+ändrades end-to-end, vilka filer är högst risk, vilka tester BEVISAR
+concurrency/atomicitet-påståendena (inte bara "testerna passerar"), och vad som explicit INTE
+ännu är byggt så en granskare inte antar mer är kopplat än det faktiskt är.
+
+**Utför INGEN oberoende granskning själv, mergar/rebasar/omnumrerar INGET, auktoriserar INGEN
+produktionsaktivering.** `first_cycle_go=false`.
+
 **Vid återupptagande:** fortsätt från detta verifierade repo-tillstånd — läs detta register
 och öppna PR:er FÖRST (standardbeteendet CLAUDE.md redan kräver) — upprepa INTE redan
 slutförda utredningar (0069-kollisionsanalysen för #408/#403/#411/#437 är nu LÖST av #440,
