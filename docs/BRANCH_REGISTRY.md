@@ -8926,3 +8926,38 @@ härleddes INTE på nytt från grunden — grundardirektivets egen instruktion a
 redan slutförd analys.
 
 **Rör INTE** någon av de granskade brancherna/PR:erna.
+
+### PR #435 — `claude/project-knowledge-ingestion-design` — Priority 3 (grundardirektiv "CONTINUE ACTIVE ENGINEERING"): Pass-3-ingestionsdesign + genuin inkrementell omskanning
+
+**Status: draft, CI väntas. Ej mergad.** Staplad ovanpå #432 via riktig `git merge` — #432:s
+EGNA branch orörd. `docs/LIFE_PROJECT_KNOWLEDGE_INGESTION_DESIGN.md` mappar Pass-2:s
+utdatafält rakt på BEFINTLIGA `app.project_entities`-primitiv (`record_id`→
+`idempotency_key`, `confidence`→`classifier_confidence`, `source_file`/`line_no`/
+`source_last_commit`→`provenance`) — ingen ny mekanism uppfunnen.
+
+**Den riktiga blockeraren, funnen genom att LÄSA koden, inte antagen:**
+`app.rag.memory_source.get_or_create_memory_source_unit()` — den enda granskade vägen till
+en `MemorySourceUnit` — kräver ett riktigt `document_id`. Repots egna `docs/*.md`-filer som
+Pass 1/2 skannar har ALDRIG laddats upp via Library och har inget `document_id`. Två legitima
+alternativ namngivna (ingestera dokumentkorpusen som riktiga Library-dokument FÖRST, kontra
+en ny, smalt avgränsad `SourceKind` för git-spårad text) — **dokumentet väljer INGET av
+dem**, flaggat som ett arkitekturbeslut för oberoende granskning, inte något detta dokument
+avgör ensidigt.
+
+**Strukturellt garanterat, inte bara utlovat:** ingen `InterpretationProposal`/
+`ProjectEntity`/`WorkCandidate` skapas av denna design — den anropar aldrig
+`record_interpretation_proposal()` alls (inget att anropa den med förrän blockeraren ovan är
+löst).
+
+**Exekverbart bevis** (`extract_project_knowledge_inventory_pass3_incremental.py`): en riktig
+bugg fångades och fixades FÖRE commit genom att faktiskt KÖRA skriptet tre gånger — första
+versionen spårade bara commit per fil för filer med minst en matchande post, så 66
+noll-matchnings-filer omskannades (gratis, men meningslöst) VARJE körning. Fixat genom att
+spara varenda fils commit, inte bara de med matchningar. Omverifierat: körning 1 (mot Pass
+2:s baslinje) omskannar 69 ändrade filer, återanvänder 45; körningar 2 och 3 (mot skriptets
+EGEN kedjade utdata, inget ändrat mellan dem) återanvänder alla 114 filer, omskannar NOLL.
+
+**Fortfarande rekognoscering, INTE ingestion:** noll databasrader skrivna, `promoted` förblir
+`false` på varenda post — identisk hållning som Pass 1/Pass 2.
+
+**Rör INTE** `app.rag`, `app.project_entities`, eller någon databastabell.
