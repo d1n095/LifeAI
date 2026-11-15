@@ -122,6 +122,89 @@ crash recovery — already exists, built and (for the execution/checkpoint half)
 real tests this session. No new memory, scheduler, task, or execution system is needed to
 satisfy any of those; the two items above are additive integration, not architecture.
 
+## Acceptance tests and dependencies, if this is ever authorized
+
+Per the follow-up founder directive ("CONTINUE ENGINEERING + ECOSYSTEM VISION AUDIT",
+2026-11-15): *"Evaluate the smallest additive architecture that closes these gaps... Implement
+only a narrowly scoped foundation if justified by verified gaps. Otherwise document the
+precise acceptance tests and dependencies."* Having evaluated it, neither gap is justified as
+an implementation today — no concrete workspace-consuming feature exists yet to drive the
+design, and building the grouping unit or the source-change wiring ahead of such a feature
+would be exactly the kind of speculative abstraction this repo's own engineering discipline
+rejects. What follows is the second option: precise acceptance tests and dependencies, so a
+future authorization does not have to re-derive this analysis.
+
+### Gap 1 — the workspace grouping unit
+
+**Dependencies (must exist/be decided before implementation starts):**
+- A concrete, named consumer (a UI surface, an endpoint, or a MainAI-internal caller) that
+  actually needs to pause/resume a *group* of goals/tasks together — today nothing calls for
+  this; `ActiveContextSet` already serves every caller that exists. Building the grouping unit
+  without one is building ahead of demand.
+- A founder decision on identity: is a Life Workspace exactly one `ActiveContextSet` plus zero
+  or more `MainAIGoal`s (the thin-reference design this document recommends), or does it need
+  its own table with its own lifecycle independent of any single `ActiveContextSet`? The
+  former requires no new table; the latter does and should not be assumed.
+- Confirmation that the existing `ActiveContextSet.label`/`anchor_type`/`anchor_ref` fields are
+  sufficient for "list my open workspaces" (likely yes — `anchor_type='life_workspace'` with
+  `anchor_ref` as a stable slug would work today) rather than needing a new listing endpoint.
+
+**Acceptance tests (would gate any implementation PR, not required to exist today):**
+1. `test_two_workspaces_for_the_same_owner_are_independently_resumable` — create two
+   `ActiveContextSet`s each anchored to a different `MainAIGoal`, confirm resuming one (reading
+   its members + its goal's latest `MainAICheckpoint`) never reads or mutates the other's rows.
+2. `test_pausing_a_workspace_persists_annotations_and_references_across_a_simulated_restart` —
+   add `ActiveContextMember` rows with `source_provenance` data representing a reference/
+   highlight, confirm they are unchanged after a simulated process restart (fresh DB session).
+3. `test_switching_the_active_workspace_does_not_leak_into_the_previously_active_one` —
+   confirm no shared mutable "current workspace" global/session field exists that a second
+   workspace could silently overwrite (this is a structural assertion, not a behavioral one,
+   given no such field exists in the codebase today).
+4. `test_a_second_owner_cannot_list_discover_or_resume_the_first_owners_workspace` — the
+   existing owner-scoped RLS pattern (already proven for `ActiveContextSet` and
+   `MainAIGoal`/`MainAITask`) applied to whatever the grouping unit turns out to be.
+5. `test_resuming_a_workspace_after_a_crash_never_re-dispatches_an_already-completed_task` —
+   this is not new: it is the existing `recovery_takeover.py` guarantee, re-asserted at the
+   grouping level to confirm the thin-reference design doesn't accidentally bypass it.
+6. `test_a_workspaces_active_context_members_stay_within_a_bounded_count` — guards against
+   unbounded growth of `ActiveContextMember` rows per set becoming an unbounded context/token
+   cost at resume time (the founder's "bounded model context/resource usage" requirement);
+   the exact bound is a product decision, not a technical one, and is not set here.
+
+### Gap 2 — workspace-level source-change detection
+
+**Dependencies:**
+- A decision on where the check runs: polled on workspace resume (cheapest, matches "safe
+  pause/resume" framing) vs. a standing watch (would need a new scheduled mechanism — the
+  founder directive's "do not introduce another scheduler" makes polling-on-resume the only
+  compliant default unless a future directive says otherwise).
+- A defined scope of "referenced source": every object type `ActiveContextMember` can anchor
+  to (30+) does not have a `commit_sha` or equivalent version marker today — only
+  `repository_file_source_units` (#437) and Pass 3's `file_commits` map do. The dependency is
+  deciding whether source-change detection covers only those two existing commit-identity
+  mechanisms at first, or is deferred until a general per-object-type "current version" concept
+  exists (the latter would itself be new architecture, not integration, and should not be
+  built speculatively).
+
+**Acceptance tests:**
+1. `test_resuming_a_workspace_flags_a_referenced_repository_file_whose_commit_sha_changed` —
+   seed an `ActiveContextMember` anchored to a `repository_file_source_units` row pinned to
+   commit SHA A, simulate the underlying file now being at commit SHA B, confirm resume
+   surfaces this as a flagged, non-blocking notice (never a silent auto-update of the pinned
+   SHA, which would defeat the exact-SHA evidence discipline this whole session relies on).
+2. `test_an_unchanged_referenced_source_produces_no_flag` — same seed, no commit change,
+   confirm no false positive.
+3. `test_source_change_detection_never_mutates_the_original_pinned_commit_sha` — the check is
+   read-only by construction; any "update the reference" action must be a separate, explicit,
+   owner-initiated step, never automatic.
+4. `test_source_change_detection_degrades_to_no-op_for_object_types_with_no_version_marker` —
+   confirms the check is additive (skips cleanly) rather than erroring for the 28+ anchor
+   types that have no commit-identity concept yet, so partial coverage never breaks resume.
+
+Neither gap's acceptance tests are implemented by this document. Recording them now means a
+future authorized implementation PR can be verified against a pre-agreed bar instead of an
+ad hoc one invented at build time.
+
 ## What this document explicitly does not do
 
 - Does not create any new table, model, service, or router.
