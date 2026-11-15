@@ -4,7 +4,7 @@
   "candidate_sha_source": "git rev-parse HEAD",
   "first_cycle_go": false,
   "release_candidate": false,
-  "expected_migration_head": "0073_provider_disclosure_local",
+  "expected_migration_head": "0074_0069_lineage_bridge",
   "components": [
     {
       "name": "frontend_security_ci_baseline",

@@ -40,6 +40,7 @@ POLICY_PATH = BACKEND_ROOT / "scripts" / "security" / "s1a_privilege_policy.py"
 # schema, but these are the ones whose user data made the finding worth acting on, so they get
 # their own named, non-parameterised-away coverage.
 USER_DATA_TABLES = ["messages", "conversations", "documents", "document_chunks"]
+PROTECTED_AUTHORITY_TABLES = ["_alembic_0074_0069_lineage"]
 
 
 def _load_policy():
@@ -74,11 +75,23 @@ def restore_privileges():
     happens to run after it executes in."""
     yield
     settings = get_settings()
+    policy = _load_policy()
     admin = psycopg2.connect(settings.database_url)
-    admin.autocommit = True
-    with admin.cursor() as cur:
-        cur.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO mainai_app")
-    admin.close()
+    admin.autocommit = False
+    try:
+        with admin.cursor() as cur:
+            cur.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO mainai_app")
+            policy.acquire_privilege_boot_lock(cur)
+            cur.execute("SELECT current_user")
+            (expected_owner,) = cur.fetchone()
+            errors = policy.apply_privilege_policy(
+                cur, expected_owner=expected_owner, require_complete=True
+            )
+            assert errors == [], f"restore policy reported errors: {errors}"
+        admin.commit()
+    finally:
+        admin.rollback()
+        admin.close()
 
 
 # --------------------------------------------------------------------------------------
@@ -154,6 +167,32 @@ def test_truncate_is_actually_rejected_when_attempted_as_the_real_runtime_role(t
         with conn.cursor() as cur:
             with pytest.raises(psycopg2.errors.InsufficientPrivilege):
                 cur.execute(f"TRUNCATE TABLE {table}")
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def test_runtime_role_has_no_direct_access_to_migration_authority_tables():
+    with migration_engine.connect() as conn:
+        for table in PROTECTED_AUTHORITY_TABLES:
+            for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"):
+                held = conn.execute(
+                    text("SELECT has_table_privilege('mainai_app', :t, :p)"),
+                    {"t": f"public.{table}", "p": privilege},
+                ).scalar()
+                assert held is False, f"{table}.{privilege} must not be runtime-authorized"
+
+
+def test_runtime_role_cannot_mutate_the_lineage_marker():
+    settings = get_settings()
+    conn = psycopg2.connect(settings.app_database_url)
+    try:
+        with conn.cursor() as cur:
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                cur.execute(
+                    "UPDATE _alembic_0074_0069_lineage "
+                    "SET source_lineage = 'pr237_mainai_stop_controls'"
+                )
     finally:
         conn.rollback()
         conn.close()

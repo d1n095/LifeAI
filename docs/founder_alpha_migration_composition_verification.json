@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "first_cycle_go": false,
+  "purpose": "Executable migration-only composition rehearsal; not release authorization",
+  "composition_order": [413, 412],
+  "sources": [
+    {
+      "pr": 413,
+      "sha": "23022662a78abb141792ea7439b715d670cdc640",
+      "role": "import_parser_and_lease_lineage",
+      "migration_files": []
+    },
+    {
+      "pr": 412,
+      "sha": "bff25dbc398094f453be00479db8027e33b8c3bd",
+      "role": "exact_0069_authority_and_lineage",
+      "migration_files": [
+        "backend/alembic/versions/0074_0069_lineage_bridge.py"
+      ]
+    }
+  ],
+  "expected_alembic_head": "0074_0069_lineage_bridge",
+  "expected_exact_0069_owner": "backend/alembic/versions/0069_provider_disclosure_local_decision.py",
+  "excluded_exact_0069_collisions": [
+    {
+      "pr": 403,
+      "sha": "565523b61668947808e9a36a58de8a306a8f48f5",
+      "migration": "0069_github_evidence_staging",
+      "requirement": "renumber and rebase before any composition"
+    },
+    {
+      "pr": 408,
+      "sha": "0c88e228c9d183a4d811c29aa5cfb19e0eabc993",
+      "migration": "0069_system_activation_authorization",
+      "requirement": "renumber and rebase before any composition"
+    },
+    {
+      "pr": 411,
+      "sha": "86115310718d03e67d1f9bcb9315cc5a856d35ee",
+      "migration": "0069_calendar_foundation",
+      "requirement": "renumber and rebase before any composition"
+    }
+  ]
+}
