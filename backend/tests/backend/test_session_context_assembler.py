@@ -161,7 +161,8 @@ def test_c8_section_order_is_fixed(db_session, make_verified_user):
     names = [s.name for s in _assemble(db_session, user.id).sections]
     assert names == [
         "startup_readiness", "continuity", "active_context", "founder_memory",
-        "truth_claim_violations", "capability_gaps", "active_assignments", "project_status",
+        "truth_claim_violations", "capability_gaps", "active_assignments",
+        "upcoming_calendar_events", "project_status",
     ]
 
 
