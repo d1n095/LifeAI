@@ -8827,3 +8827,35 @@ här. `app.agent_coordination.dispatch_assignment()`s identiska, redan existeran
 spårat men medvetet INTE fixat här (utanför scope för en workforce-bara PR).
 `docs/LIFE_WORKFORCE_AUTHORIZATION_RACE_WINDOW.md` uppdaterad (på #431:s egen gren, #428:s
 EGEN branch orörd) för att visa exakt vad som nu är fixat vs. vad som kvarstår.
+
+### PR #432 — `claude/project-knowledge-inventory-pass2` — Priority 2 (grundardirektiv "STOP IDLING, CONTINUE ENGINEERING"): Pass 2, mätt FP/FN, dedup, provenance
+
+**Status: draft, CI väntas. Ej mergad.** Staplad ovanpå #430 via riktig `git merge` — #430:s
+EGNA branch orörd. Adresserar varenda punkt grundaren namngav i Pass-2-direktivet, med
+MÄTT bevis, inte påstående.
+
+**Huvudfynd (manuellt granskat sampel, n=25, inte gissat):** de 7 icke-`superseded_marker`-
+klassificerarna gav 5/5 sanna positiva. `superseded_marker` (91 av 158 poster, STÖRSTA
+kategorin) gav 6/20 strikt / 12/20 inklusive gränsfall (30–60%) — "superseded"/"ersätter"
+används ofta för att beskriva VOKABULÄR (enum-värden, relationstyp-listor), inte en specifik
+händelse. **Testade och FÖRKASTADE ett strängare auto-filter** innan någon kod skrevs: det
+tappade korrekt 80/91 brusposter, men tappade ÄVEN `docs/AUTH_THREAT_MODEL.md:1` — det här
+repots EGET toppnivå-sessionsautentiseringsbeslut. Byte av recall mot precision här förlorar
+riktig signal. Löst med en MÄTT `confidence`-nivå istället, för mänsklig triage — inte
+auto-filtrering.
+
+**Nytt** (`extract_project_knowledge_inventory_pass2.py`): stabil SHA-256-innehållshash
+`record_id` (INTE radnummerbaserad — överlever oberoende redigeringar som flyttar
+radnummer; 158 unika ID:n, 0 kollisioner, mätt); `source_last_commit` per fil (för att
+upptäcka korpusdrift vid omkörning); extraherade `#PR`/datum-referenser (10 av 158);
+medvetet grov, explicit SVAG `candidate_module`-ledtråd för de 52 `requirement`-posterna
+(10/52 = 19,2% träff, ärligt lågt tal, inte uppblåst). `promoted` hårdkodad `false` på
+VARJE post — fortfarande rekognoscering, ingenting ingesterat i
+`KnowledgeClaim`/`InterpretationProposal`/`ProjectEntity`/`WorkCandidate`, ingen exekverbar
+uppgift skapad.
+
+**Utökad täckning:** samma mönster körda mot `docs/BRANCH_REGISTRY.md` (34 poster / 8 829
+rader), rapporterat SEPARAT, INTE sammanslaget med den stabila 158-post-baslinjen (samma
+stabilitetsskäl Pass 1 redan uteslöt den för). Namngivet explicit som fortfarande ej
+skannat: PR-beskrivningar/commit-historik, källkod, externt grundarmaterial,
+åtkomstgränser för framtida privata dokument.
