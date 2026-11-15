@@ -8397,3 +8397,25 @@ på), `app.workforce` (redan uttryckligen tänkt återanvända `agent_coordinati
 och MainAI:s egen `MainAITask`-dispatch (`app.mainai_execution.executor`), som idag har NOLL
 provider-abstraktion — kör sig själv, kopplad till ingen av de andra två. Det här är precis
 den typ av beslut `CLAUDE.md` säger ska pausas på, inte avgöras av en enskild branch.
+
+### PR #418 — `claude/calendar-session-context-integration` — koppling #411 ↔ #381/#414
+
+**Status: draft, CI väntas. Ej mergad.** Grundardirektiv "Continue Active Development",
+Priority 3: "Prioritize missing connections between already-implemented modules." Staplad
+ovanpå #411 (`claude/calendar-foundation`) OCH #414 (`claude/mainai-integration-context-
+lessons`) via riktig `git merge` — ingen av de två frysta kandidaternas EGNA branches/commits
+rörs, exakt samma mönster #380 redan använde ovanpå #377.
+
+`app.calendar.service`s egen docstring (#411) namngav "a future session-context assembler"
+som `upcoming_summaries()`s tänkta konsument innan den här kopplingen fanns —
+`assemble_session_context()` (#381/#414) hade ingen kalender-sektion alls. Lägger till en,
+exakt samma `_safe_items()`-mönster som varje annan best-effort-sektion: en kalenderkälla som
+fallerar ytas på sin egen sektion, blockerar aldrig resten av sessionkontexten.
+
+5 nya regressionstester (real Postgres): kommande händelse ytas; händelse utanför
+7-dagarsfönstret ytas inte; avbokad händelse ytas inte; tenant-isolering genom HELA kedjan
+(RLS + `app.calendar`s egen owner_id-filtrering, inte bara enhetstest i isolering); en
+kalenderkälla som fallerar blockerar inte resten av bundlen.
+
+**Rör INTE:** #411:s eller #414:s egna branches/commits; ingen ny migration (`alembic heads`
+oförändrat `0069`); ingen ny dispatcher, inget säkerhetsauktoritetsbeslut.
