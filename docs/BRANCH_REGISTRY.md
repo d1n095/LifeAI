@@ -6,6 +6,16 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Import lease-fencing / parser-isolation remediation (2026-11-15)
+
+| Branch | PR | Status | Bas / beroende | Scope |
+|---|---|---|---|---|
+| `codex/founder-alpha-parser-isolation` | [#392](https://github.com/d1n095/LifeAI/pull/392) | **Open, frozen at `92d4ad3d76634473d1dc4a7a85913ff676090947`; ready for review** | `codex/founder-alpha-approved-precomposition` | Parser isolation candidate; do not modify. |
+| `codex/founder-alpha-import-lease-fencing` | [#402](https://github.com/d1n095/LifeAI/pull/402) | **Open, frozen at `5b66814b35a4889c68acab9ed9e0ed3edd9dfbf5`; ready for review** | #392 | Lease-loss stop behavior; do not modify. |
+| `copilot/import-lease-parser-hardening` | [#413](https://github.com/d1n095/LifeAI/pull/413) | **Open, draft; code SHA `5ab939602107506c06f1caa42981713d52ab2fd3`; follow-up exact-head CI approval pending** | #402 at `5b66814b35a4889c68acab9ed9e0ed3edd9dfbf5` | Copilot: database-wall-clock lease validation, transaction-coupled owner/claim fencing for all import-session commits, and bounded parser stderr/process cleanup. No migration or changes to #392/#402. |
+
+**Validation boundary:** #413 adds PostgreSQL regressions for a lease expiring during an open transaction, competing reclaim, stale writes after takeover/cancellation, delayed single-file completion, interrupted two-file archive recovery, and a lock wait that outlives the lease; parser coverage includes a real child-process stderr flood. The first independent review identified a stale timestamp-before-lock race in `27e0a57`; follow-up `5ab9396` moved validation after acquiring the job lock and added the lock-wait regression. A second read-only adversarial review found no further concrete issues, but did not certify security acceptance. No tests have run remotely: run `43700283244` for prior SHA `27e0a57` is `action_required` with zero jobs, and the corrected exact head requires workflow approval. Do not treat this as a test pass. Request maintainer approval for the latest exact-head run; then record PostgreSQL/backend, parser, and aggregate results. No merge, deployment, or activation is implied (`first_cycle_go=false`).
+
 ## Frontend npm-audit baseline-konsolidering (2026-10-31)
 
 Konsoliderar de spridda frontend-beroende-remedieringarna (#248/#275/#282/#305) till EN

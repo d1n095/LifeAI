@@ -54,11 +54,13 @@ forever if candidates keep churning unrealistically fast.
 
 import uuid
 
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.orm import Session
 
-from app.models.import_job import CLAIMABLE_IMPORT_JOB_STATUSES
+from app.models.import_job import CLAIMABLE_IMPORT_JOB_STATUSES, ImportJobStatus
 from app.storage.references import acquire_owner_erasure_lock
+
+_IMPORT_FENCE_INFO_KEY = "import_job_lease_fence"
 
 
 class ImportJobLeaseLostError(Exception):
@@ -75,22 +77,34 @@ class ImportJobLeaseLostError(Exception):
 _CANDIDATE_SQL = text("""
     SELECT id, owner_id FROM knowledge_import_jobs
     WHERE status = ANY(:claimable_statuses)
-       OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < now())
+       OR (
+            status = 'running'
+            AND lease_expires_at IS NOT NULL
+            AND lease_expires_at < clock_timestamp()
+          )
     ORDER BY created_at ASC
     LIMIT 1
 """)
 
 _CLAIM_SQL = text("""
+    WITH lease_clock AS MATERIALIZED (
+        SELECT clock_timestamp() AS checked_at
+    )
     UPDATE knowledge_import_jobs
     SET status = 'running',
         locked_by = :worker_id,
-        lease_expires_at = now() + make_interval(secs => :lease_seconds),
-        last_heartbeat_at = now(),
-        started_at = COALESCE(started_at, now())
+        lease_expires_at = lease_clock.checked_at + make_interval(secs => :lease_seconds),
+        last_heartbeat_at = lease_clock.checked_at,
+        started_at = COALESCE(started_at, lease_clock.checked_at)
+    FROM lease_clock
     WHERE id = :candidate_id
       AND (
             status = ANY(:claimable_statuses)
-            OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < now())
+            OR (
+                status = 'running'
+                AND lease_expires_at IS NOT NULL
+                AND lease_expires_at < lease_clock.checked_at
+            )
           )
     RETURNING id, owner_id
 """)
@@ -135,6 +149,100 @@ def claim_next_job(
     return None
 
 
+def configure_import_lease_fence(
+    db: Session,
+    job_id: uuid.UUID,
+    owner_id: uuid.UUID,
+    worker_id: str,
+    lease_seconds: int,
+) -> None:
+    """Require every commit in this session to renew the exact live import claim."""
+    db.info[_IMPORT_FENCE_INFO_KEY] = {
+        "job_id": str(job_id),
+        "owner_id": str(owner_id),
+        "worker_id": worker_id,
+        "lease_seconds": lease_seconds,
+    }
+
+
+def clear_import_lease_fence(db: Session, job_id: uuid.UUID, worker_id: str) -> None:
+    fence = db.info.get(_IMPORT_FENCE_INFO_KEY)
+    if fence and fence["job_id"] == str(job_id) and fence["worker_id"] == worker_id:
+        db.info.pop(_IMPORT_FENCE_INFO_KEY, None)
+
+
+@event.listens_for(Session, "before_commit")
+def _fence_import_commit(session: Session) -> None:
+    """Fence all import-session commits, including commits inside indexing helpers.
+
+    Lock the authoritative job row before reading the deadline, then keep the lock through
+    the caller's flush and a final live-deadline check. A concurrent reclaim therefore either
+    wins first (and this check fails) or waits until the authorized writes commit.
+    PostgreSQL's transaction-start `now()` and a timestamp computed before a row-lock wait
+    are both unsuitable for this deadline.
+    """
+    fence = session.info.get(_IMPORT_FENCE_INFO_KEY)
+    if not fence:
+        return
+
+    connection = session.connection()
+    row = connection.execute(
+        text("""
+            SELECT owner_id, locked_by, status, lease_expires_at
+            FROM knowledge_import_jobs
+            WHERE id = :job_id
+            FOR UPDATE
+        """),
+        {"job_id": fence["job_id"]},
+    ).first()
+    if (
+        row is None
+        or str(row.owner_id) != fence["owner_id"]
+        or row.locked_by != fence["worker_id"]
+        or row.status != ImportJobStatus.running.value
+        or row.lease_expires_at is None
+    ):
+        raise ImportJobLeaseLostError(uuid.UUID(fence["job_id"]), fence["worker_id"])
+
+    checked_at = connection.execute(text("SELECT clock_timestamp()")).scalar_one()
+    params = {**fence, "checked_at": checked_at}
+    renewed = connection.execute(
+        text("""
+            UPDATE knowledge_import_jobs
+            SET lease_expires_at = :checked_at + make_interval(secs => :lease_seconds),
+                last_heartbeat_at = :checked_at
+            WHERE id = :job_id
+              AND owner_id = :owner_id
+              AND locked_by = :worker_id
+              AND status = 'running'
+              AND lease_expires_at >= :checked_at
+            RETURNING id
+        """),
+        params,
+    ).first()
+    if renewed is None:
+        raise ImportJobLeaseLostError(uuid.UUID(fence["job_id"]), fence["worker_id"])
+
+    session.flush()
+
+    committed_at = connection.execute(text("SELECT clock_timestamp()")).scalar_one()
+    renewed = connection.execute(
+        text("""
+            UPDATE knowledge_import_jobs
+            SET lease_expires_at = :checked_at + make_interval(secs => :lease_seconds),
+                last_heartbeat_at = :checked_at
+            WHERE id = :job_id
+              AND owner_id = :owner_id
+              AND locked_by = :worker_id
+              AND lease_expires_at >= :checked_at
+            RETURNING id
+        """),
+        {**fence, "checked_at": committed_at},
+    ).first()
+    if renewed is None:
+        raise ImportJobLeaseLostError(uuid.UUID(fence["job_id"]), fence["worker_id"])
+
+
 def renew_lease(
     db: Session,
     job_id: uuid.UUID,
@@ -151,14 +259,18 @@ def renew_lease(
     and leave recovery to the next authoritative claim."""
     result = db.execute(
         text("""
+            WITH lease_clock AS MATERIALIZED (
+                SELECT clock_timestamp() AS checked_at
+            )
             UPDATE knowledge_import_jobs
-            SET lease_expires_at = now() + make_interval(secs => :lease_seconds),
-                last_heartbeat_at = now()
+            SET lease_expires_at = lease_clock.checked_at + make_interval(secs => :lease_seconds),
+                last_heartbeat_at = lease_clock.checked_at
+            FROM lease_clock
             WHERE id = :job_id
               AND locked_by = :worker_id
               AND status = 'running'
               AND lease_expires_at IS NOT NULL
-              AND lease_expires_at >= now()
+              AND lease_expires_at >= lease_clock.checked_at
         """),
         {"job_id": str(job_id), "worker_id": worker_id, "lease_seconds": lease_seconds},
     )
