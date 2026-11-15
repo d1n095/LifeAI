@@ -120,6 +120,48 @@ database/Redis restart while a worker is actively committing, sustained resource
 remote backend Actions, or formal independent security acceptance. No production
 credentials/documents were used; `first_cycle_go=false`.
 
+## #425 database-interruption consistency follow-up
+
+Recovery implementation commit: `2740d37940afe6762987fd2b66307b923ba4aab0`. The route now
+returns a sanitized HTTP 503 with `Retry-After: 3` for SQLAlchemy `OperationalError`s,
+including failures during authentication. The upload handler rolls back the failed request
+transaction and, when a blob has already been written, reacquires the owner lock and invokes
+the canonical storage-key lock/reference-check cleanup before responding. Matching
+`pending`, `running`, `blocked`, and resumable `partial` jobs are reused when their recorded
+source key still matches the content-addressed upload; terminal `failed` jobs remain
+retriable.
+
+The complete `test_library_routes.py` module passed: **52 passed** on the recovery code
+commit. Cases included sanitized 503 responses before storage and during authentication;
+post-write database failure with no job, durable blob, or temporary upload file after
+successful reconciliation; and four concurrent identical same-owner uploads reusing one
+job and producing one indexed document. A PostgreSQL-backed test terminated the actual
+database backend after flushing the `ImportJob` row but before commit. The request returned
+503, the row rolled back, the blob and temporary file were absent, both owner and storage
+advisory locks could be reacquired, and retrying the same bytes completed with exactly one
+job. A separate ambiguous-commit test committed successfully and then injected a lost
+acknowledgment; retry returned the existing job and produced no duplicate indexing.
+
+Eleven selected lease/import tests also passed against this source: **11 passed**. They
+covered expired-lease takeover, valid-lease non-reclaim, renewal after expiration,
+competing reclaim, stale-worker rejection, commit fencing after a lock wait, stale import
+claim rejection, archive progress recovery, transient/parser retry, and retry exhaustion.
+The host could not reach Docker-published database ports in this environment, so test
+execution used a disposable runner container on the isolated PostgreSQL/Redis Compose
+network with the checked-out source mounted; this is local integration evidence, not remote
+Actions CI or deployment certification.
+
+Residual consistency limit: if PostgreSQL remains unavailable during post-error blob
+reconciliation, the cleanup query cannot safely determine whether a commit persisted. The
+route fails closed and logs that a durable unreferenced blob may remain; resubmitting the
+same content after recovery safely reuses that blob, but no general orphan-blob sweeper is
+currently guaranteed. The real termination test kept PostgreSQL available for the cleanup
+retry; full database-service outage after blob write and restart during an active worker
+commit remain unverified. Cross-owner upload concurrency was not tested because the endpoint
+is pinned to the single Founder identity. Four-way same-owner duplicate concurrency passed;
+this is not a sustained throughput or multi-owner stress result. No production data or
+credentials were used; `first_cycle_go=false`.
+
 ## #416 integration failures and #413 coordination
 
 PR #416's full backend job failed twice on exact head

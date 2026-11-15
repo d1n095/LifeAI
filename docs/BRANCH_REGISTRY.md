@@ -16,7 +16,7 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 | `copilot/import-fence-test-corrections` | [#420](https://github.com/d1n095/LifeAI/pull/420) | **Open, draft; frozen at `31dd0cfe0a6127e21ea6bb9720f845da6cde155d`; locally verified, remote backend CI absent** | #413 at `23022662a78abb141792ea7439b715d670cdc640` | Test-only corrections; no production code changes. |
 | `copilot/import-security-validation-31dd0cf` | [#421](https://github.com/d1n095/LifeAI/pull/421) | **Open, draft; workflow SHA `f1de4ad417d1ac4c1252a36030c9d9ee0184cf3f`; run `43713479509` is `action_required`** | #420 at `31dd0cfe0a6127e21ea6bb9720f845da6cde155d` | Push-only, contents-read workflow checks out and verifies #420's fixed SHA; no secrets, deploy, or checkout credentials. |
 | `copilot/parser-proc-boundary-regression` | [#422](https://github.com/d1n095/LifeAI/pull/422) | **Open, draft; test SHA `d2f79d3132f9a9003557f2fb3199550c26987b50`; expected-failure containment reproducer** | #420 at `31dd0cfe0a6127e21ea6bb9720f845da6cde155d` | Test-only synthetic-canary proof that a same-UID parser child can read its parent environment through procfs; no production code changes. |
-| `copilot/parser-isolated-sidecar` | [#425](https://github.com/d1n095/LifeAI/pull/425) | **Open, draft; tested implementation commit `ce4d7de1dfe470cec8b8c965009393fd0b84de1d`; no merge/deploy** | #422 at `a4f6819fff04d6919d4b46b1c018ba38aad1ab88` | Parser UID/socket hardening, full-stack parser recovery, 52 lease/import tests, same-owner concurrency and service-restart recovery are documented below. PostgreSQL loss during advisory-lock wait returned HTTP 500 without a job/blob; the identical-payload retry completed and checksum-verified original retrieval. Remote backend Actions, external host ingress, sustained full-stack stress, and independent security acceptance remain unverified. |
+| `copilot/parser-isolated-sidecar` | [#425](https://github.com/d1n095/LifeAI/pull/425) | **Open, draft; tested import-recovery implementation commit `2740d37940afe6762987fd2b66307b923ba4aab0`; no merge/deploy** | #422 at `a4f6819fff04d6919d4b46b1c018ba38aad1ab88` | Parser UID/socket hardening, full-stack parser recovery, database-interruption handling and lease/import evidence are documented below. PostgreSQL backend termination during import commit returned sanitized 503, rolled back the row, reconciled the blob, released advisory locks, and allowed one-job retry. Prolonged total database outage can still leave an unreferenced durable blob; remote backend Actions, external ingress, active-worker database restart and independent security acceptance remain unverified. |
 
 **#425 latest verification update (implementation commit
 `ce4d7de1dfe470cec8b8c965009393fd0b84de1d`):** Disposable network probes confirmed that only Caddy
@@ -35,6 +35,26 @@ during active worker commit, sustained full-stack resource stress, remote backen
 and independent security acceptance remain open. See
 `docs/IMPORT_SECURITY_VALIDATION_MATRIX.md`; these results do not change
 `first_cycle_go=false`.
+
+**#425 latest database-interruption verification (implementation
+`2740d37940afe6762987fd2b66307b923ba4aab0`):** The complete library route module passed
+52 PostgreSQL-backed tests; an additional 11 selected worker/import tests passed, including
+lease takeover, stale-worker fencing, archive recovery, parser retry and bounded exhaustion.
+An actual PostgreSQL backend was terminated after the job row had been flushed but before
+commit. The client received a sanitized 503 with `Retry-After`, no job row/blob/temp file
+remained after reconciliation, owner/storage advisory locks were reacquirable, and retrying
+the same content completed as one job with one indexed document. A commit-success/lost-ack
+injection and four concurrent identical same-owner uploads also reused one job. Tests used a
+disposable isolated PostgreSQL/Redis service; host port-forwarding was unavailable, so the
+runner shared the isolated Compose network.
+
+The route now reuses existing resumable jobs and attempts reference-checked blob cleanup
+under the canonical locks. If PostgreSQL remains unavailable during that cleanup, an
+unreferenced durable blob may remain until the client retries the same content; a general
+orphan sweep is not guaranteed. Full service outage after blob write, DB/Redis restart while
+a worker is actively committing, multi-owner upload stress (the endpoint is Founder-only),
+sustained throughput, remote backend Actions, external host ingress and formal independent
+security acceptance remain unverified. This does not change `first_cycle_go=false`.
 
 **Validation boundary:** #413's tests cover lease expiry during transactions, competing reclaim, stale writes, delayed completion, interrupted archive recovery, and a lock wait past expiry; parser coverage includes stderr flooding and process cleanup. Its run `43700873775` is `action_required` with zero jobs. To test that exact frozen code, #421 adds a dedicated push-only workflow with `contents: read`, no repository secrets, disabled checkout credentials, and a checkout SHA pinned to #420; GitHub also stopped this push event before scheduling jobs (`43713479509`, zero jobs). The Settings/Actions API returns 403, so the exact approval policy is unavailable to this installation. The one authorized maintainer action remains: inspect **Settings → Actions → General** and, if GitHub offers it, use **Actions → Import security regression tests (frozen SHA) → run 43713479509 → Approve and run**; do not change events or bypass protections. #420's local disposable PostgreSQL/Redis runs passed 58 worker/import/parser tests plus 9 Redis lock/fail-closed tests; its remote check list contains only Vercel. #416's exact integration run `43704034822` failed twice with two #413-lineage test defects: a missing `SessionLocal` import in a lock-thread test and an assertion that SQL NULL equals `[]`. Both test-only corrections are present in #420's fixed SHA and targeted tests pass there; #413 has been notified to carry those corrections and rerun. These corrections do not validate or certify lease-fencing correctness. #422's synthetic-canary test reproduces same-UID procfs exposure locally, not document-parser code execution in production. #425 now has disposable full-stack upload/index/search, parser-outage recovery, idempotency and archive partial-failure evidence, plus a separate PostgreSQL/Redis lease/import regression run. These remain local validation, not production security acceptance; remote backend Actions, external host ingress, sustained full-stack resource fault injection and independent acceptance remain unverified. See `docs/IMPORT_SECURITY_VALIDATION_MATRIX.md` for per-PR evidence. No merge, deployment, or activation is implied (`first_cycle_go=false`).
 
