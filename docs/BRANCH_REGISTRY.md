@@ -8794,3 +8794,36 @@ mekanism att testa mot först.
 **TOCTOU-testet (`test_gate_always_rechecks_fresh_state_not_an_earlier_decision`) bevisar
 INTE atomicitet** — bara sekventiell omkontroll-säkerhet. Det här skiljs nu explicit åt i
 dokumentationen, per grundarens direktiv.
+
+### PR #431 — `claude/workforce-authorization-dispatch-atomicity` — Priority 1 (grundardirektiv "STOP IDLING, CONTINUE ENGINEERING"): riktig atomicitetsåtgärd
+
+**Status: draft, CI väntas. Ej mergad.** Staplad ovanpå #428 via riktig `git merge` — #428:s
+EGNA branch helt orörd, fryst som innan. Det här är den FAKTISKA, produktionskompatibla
+åtgärden grundaren beordrade för gapet `docs/LIFE_WORKFORCE_AUTHORIZATION_RACE_WINDOW.md`
+dokumenterade som olöst.
+
+**Vald lösning (minsta korrekta, av fyra namngivna kandidater):** `require_live_task_
+authorization_for_workforce_dispatch()`s task-uppslag tar nu ett riktigt `SELECT ... FOR
+UPDATE`-radlås, hållet för resten av anroparens transaktion — EXAKT samma lås
+`app.mainai_execution.executor._lock_task()` redan tar på samma `mainai_tasks`-rad för
+`cancel_task()`/`dispatch_ready_task()`/`retry_task()`. Återanvänder den befintliga
+låsidiomen, uppfinner ingen ny. `require_task_approval()` förblir den enda
+auktoritetskällan; `ProviderActivationBlocked`s ovillkorliga raise helt orörd. Ingen ny
+dispatcher, ingen ny exekveringsauktoritet.
+
+**4 nya genuina concurrency-tester** (`test_workforce_task_authorization_concurrency.py`,
+TVÅ RIKTIGA separata databasanslutningar var — `migration_engine.connect()`, explicita
+transaktioner, `SET LOCAL lock_timeout` — INTE sekventiell simulering, samma mönster PR #379
+redan etablerade för Blueprint:s egen TOCTOU-säkra approval): revocation-vs-dispatch;
+konkurrerande workers på samma task serialiseras istället för att interleava;
+rollback-sedan-retry; och ett direkt bevis att den RIKTIGA produktionsfunktionen (inte bara
+en spegel-primitiv) håller låset tills anroparens transaktion avslutas.
+
+**Explicit INTE påstått löst end-to-end:** inget nedströms existerar ännu för låset att
+skydda — `ProviderActivationBlocked` blockerar fortfarande allt ovillkorligt. "Atomär
+auktorisation OCH dispatch" som FULLSTÄNDIG garanti kräver att ett framtida, separat
+granskat aktiveringssteg håller sig INOM samma låsta transaktion — det är INTE kopplat in
+här. `app.agent_coordination.dispatch_assignment()`s identiska, redan existerande gap är
+spårat men medvetet INTE fixat här (utanför scope för en workforce-bara PR).
+`docs/LIFE_WORKFORCE_AUTHORIZATION_RACE_WINDOW.md` uppdaterad (på #431:s egen gren, #428:s
+EGEN branch orörd) för att visa exakt vad som nu är fixat vs. vad som kvarstår.
