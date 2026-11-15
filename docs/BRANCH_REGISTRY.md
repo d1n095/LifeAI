@@ -8961,3 +8961,31 @@ EGEN kedjade utdata, inget ändrat mellan dem) återanvänder alla 114 filer, om
 `false` på varenda post — identisk hållning som Pass 1/Pass 2.
 
 **Rör INTE** `app.rag`, `app.project_entities`, eller någon databastabell.
+
+### PR #436 — `claude/post-dispatch-authorization-lifecycle` — Priority 1, punkt 4-5 (grundardirektiv "CONTINUE MAINAI INTEGRATION"): vad #433 skyddar och vad den INTE skyddar
+
+**Status: draft, CI väntas. Ej mergad.** Staplad direkt ovanpå #433 (dess KORRIGERADE head
+`c12373cb`) — endast `docs/LIFE_POST_DISPATCH_AUTHORIZATION_LIFECYCLE.md` är denna PR:s egen
+tillägg.
+
+**Direkt svar, grep-verifierat, inte antaget:** en dispatchad agentprocess KAN fortsätta köra
+efter att dess MainAITask avbryts eller dess godkännande återkallas — INGET kontrollerar
+eller propagerar det idag. `execution_control.py` importerar aldrig från
+`app.mainai_execution.approval`. `executor.cancel_task()` har NOLL referenser till
+`AgentWorkAssignment`/`agent_coordination`.
+
+**Den förmildrande omständigheten, också grep-verifierad:** `reconcile_execution_state()`/
+`collect_and_ingest_execution_result()`/`cancel_execution()` har NOLL anropare utanför sin
+egen moduls re-export och sina egna tester — och noll router-exponering. Hela delsystemet är
+onåbart från varje riktig väg i produktion idag, så luckan har ingen exploaterbar konsekvens
+ÄNNU — den blir levande i samma ögonblick en framtida commit kopplar in en router eller
+bakgrundsworker, utan ytterligare kodändring.
+
+**Tre konkreta, OIMPLEMENTERADE behov namngivna, inte byggda:** (1) avbrotts-propagering
+(`cancel_task()` → leta upp och avbryta en länkad, körande `AgentWorkAssignment` —
+`cancel_execution()` finns redan, anropas bara aldrig därifrån); (2) periodisk
+omauktorisering (en framtida reconciliation-loop skulle behöva köra
+`require_live_task_approval_for_dispatch()` varje tick); (3) inget lease/fencing-fält finns
+på `AgentDispatchExecution` ännu (bara `last_heartbeat_at`).
+
+**Rör INTE** `cancel_task()`, `execution_control.py`, eller någon produktionskod.
