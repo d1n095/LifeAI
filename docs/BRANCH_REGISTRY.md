@@ -9125,10 +9125,56 @@ orelaterade driftet (`Frontend — npm audit`, `E2E — Playwright (full stack)`
 grundarens addendum explicit flaggade som overifierad ("full PostgreSQL test suite must pass
 for exact SHA"). Löser INTE 0069-kollisionen (punkt 1 ovan) — den kvarstår oförändrad.
 
+## PR #440 — `claude/migration-0069-composition-integration` (ny, draft) — löser EN av de två 0069-kollisionerna
+
+Grundardirektiv "RESUME ACTIVE DEVELOPMENT WHEN CAPACITY IS AVAILABLE" (2026-11-15), Priority
+2. Viktig precisering FÖRST: PR #417 (riktig DDL-parsing, inte antagande) hade redan bevisat
+att Codex/Copilots #412/#413-kedja löser en ANNAN, tidigare 0069-kollision (rotad i PR
+#237/#400:s provider-disclosure-lineage) — noll objektnivå-överlapp med resten. Den kedjan
+rörs INTE av #440 och är fortfarande en separat, inte oberoende-granskad kandidat för sin EGEN
+kollision.
+
+Kollisionen #440 faktiskt löser är den smalare: #408 (`system_activation_authorizations`),
+#403 (`github_evidence_candidates`), #411 (`calendar_events`), #437
+(`repository_file_source_units`) — alla fyra grenade oberoende från samma dev-topp och
+deklarerade `revision = "0069"`, `down_revision = "0068"`. #417 hade redan bevisat dessa
+fyras Postgres-objekt är helt disjunkta — lösningen är en REN omnumrering, ingen
+innehållsförsoning.
+
+**Vad #440 gör:** `git merge --no-ff` av alla fyra brancher i grundarens egen ordning (#408 →
+#403 → #411, med #437 tillagd sist) — INGEN av de fyra ursprungliga PR-branchernas egna filer
+rörs, byter namn eller rebasas. Endast KOPIORNA på integrationsbranchen omnumreras till en
+linjär kedja: `0068 → 0069 (#408) → 0070 (#403) → 0071 (#411) → 0072 (#437)`. Två
+sammanslagningskonflikter i `backend/app/models/__init__.py` löstes manuellt, rad för rad
+verifierat (varje "konflikt"-rad var antingen en genuint ny symbol eller redan existerande
+innehåll som bara dök upp dubbelt på grund av diff-algoritmens justering — INGEN riktig
+duplicering kvar, 230 `__all__`-poster, filen parsar rent). Alla docstring-/kommentar-
+referenser till de gamla `0069_*`-filnamnen uppdaterade i de tre omnumrerade filerna.
+
+**Ny, INTE duplicerad, testfil:** `test_migration_0069_composition_integration.py` — bevisar
+att alla fyra tabellers RLS (enabled+forced) och exakta `mainai_app`-privilegier stämmer sida
+vid sida, på ETT ställe, istället för att en granskare måste korsreferensera fyra separata
+testmoduler. Upprepar INTE upgrade/downgrade/rollback-reversibilitet för hela den
+sammansatta kedjan — det täcks redan, migrationsagnostiskt, av den befintliga
+`test_migration_roundtrip.py::test_full_migration_chain_downgrades_to_base_and_back_to_head`
+utan att den behövde ändras.
+
+**Verifierat (ingen Postgres i sandboxen):** `alembic heads` → enda huvud (`0072`), `alembic
+upgrade 0068:head --sql` dry-run genererar ren DDL genom hela kedjan, varje rörd fil
+compile:ar/importerar rent, `ruff check` ger noll NYA fynd (de 8 befintliga fynden återskapas
+identiskt mot varje källbranchs egen oförändrade baslinje — verifierat direkt, inte antaget).
+Riktig DB-körning (den nya kompositionstesten, plus alla fyra sammanslagna PR:ers egna sviter,
+plus den befintliga roundtrip-testen) väntar på CI.
+
+**Inte självcertifierat** — oberoende granskning krävs fortfarande (grundarens Priority 1 +
+stående "do not self-certify your own security-sensitive changes"). Ingen merge/deploy.
+
 **Vid återupptagande:** fortsätt från detta verifierade repo-tillstånd — läs detta register
 och öppna PR:er FÖRST (standardbeteendet CLAUDE.md redan kräver) — upprepa INTE redan
-slutförda utredningar (0069-kollisionsanalysen, work-candidate-fragmenteringskontrollen,
-#323/#394-fyndet är alla redan klara och ska återanvändas, inte göras om).
+slutförda utredningar (0069-kollisionsanalysen för #408/#403/#411/#437 är nu LÖST av #440,
+väntar på CI+granskning; Codex/Copilots SEPARATA #412/#413-kollision kvarstår öppen och orörd;
+work-candidate-fragmenteringskontrollen och #323/#394-fyndet är fortfarande redan klara och
+ska återanvändas, inte göras om).
 
 `first_cycle_go=false` genomgående. Inget väntande arbete begärt förrän grundaren säger
 annat.
