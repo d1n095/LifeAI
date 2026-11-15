@@ -8419,3 +8419,36 @@ kalenderkälla som fallerar blockerar inte resten av bundlen.
 
 **Rör INTE:** #411:s eller #414:s egna branches/commits; ingen ny migration (`alembic heads`
 oförändrat `0069`); ingen ny dispatcher, inget säkerhetsauktoritetsbeslut.
+
+### PR #419 — `claude/three-execution-systems-boundary-map` — Priority 4 (de tre exekveringssystemen, enbart dokumentation)
+
+**Status: draft, CI väntas. Ej mergad.** `docs/LIFE_THREE_EXECUTION_SYSTEMS_BOUNDARY_MAP.md`.
+Ingen kod ändrad, ingen dispatcher skapad, inget auktoritetsbeslut. Varje påstående citerat
+till exakt fil:rad, oberoende verifierat (jag stickprovskontrollerade själv de mest
+avgörande påståendena mot riktig kod innan commit).
+
+**Huvudfynd:** av de tre systemen är ENDAST `app.mainai_execution` faktiskt levande i
+produktion (HTTP-routes under `require_founder` OCH ett direkt schemalagt anrop från
+`app/worker.py`s auto-advance-loop). `app.agent_coordination` och `app.workforce` är BÅDA
+helt vilande — noll HTTP-routes, noll worker-loop-anrop. Även deras enda indirekta kopplare
+(`app.mainai_executive.loop`/`dashboard`/`staff_manager`) har noll levande anropare
+någonstans.
+
+**Nytt fynd (fanns i inget tidigare dokument):** `WorkforceAssignment.
+coordination_assignment_id` (migration 0067) är en bar, icke-FK:ad, aldrig läst-eller-
+skriven UUID-kolumn vars namn antyder att den var tänkt att länka `workforce` till
+`agent_coordination` — en död platshållare ingen kopplat upp.
+
+**Dokumenterar även:** tre oberoende auktoritets-/godkännande-primitiver utan delad kod; TVÅ
+separat namngivna "activation gate"-implementationer (`agent_coordination.activation_gate`
+vs. `workforce.activation_gates`) som aldrig refererar varandra; att #414:s egen nya
+`prepare_agent_task_context()` själv fortfarande är oanropad av något — samma "byggd och
+testad, men inert"-mönster.
+
+**5 öppna frågor för grundarbeslut, medvetet INTE besvarade här:** (1) ska MainAITask bli
+den enda exekveringsauktoriteten med de andra två som backing-mekanismer, eller ska
+workforce förbli permanent separat? (2) vad ska hända med de två activation-gate-
+implementationerna? (3) är `coordination_assignment_id` en död kolumn att ta bort, eller den
+tänkta kopplingspunkten? (4) är workforce:s `ProviderActivationBlocked` permanent by design?
+(5) är `app.mainai_executive` tänkt att bli levande, eller vilande scaffolding som bör
+märkas som sådan?
