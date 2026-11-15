@@ -6,6 +6,25 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Section C klar: durable task-kontrakt — redan byggt, dokumenterat (2026-11-14)
+
+**Ny branch: `claude/section-c-durable-contract-mapping`** (bas: `claude/det-kommer-
+mer-879lcm` direkt — rent dokumentationsarbete, inget beroende på #395/#396).
+
+Direktivets Sektion C efterfrågade ett "durable, resumable task contract" (task ID, outcome,
+owner, repo scope, source commit, dependencies, current state, acceptance criteria, test
+evidence, retry counters/failure classification, cancellation state) plus "execution
+continuity" (queue polling, leases, heartbeats, retries, concurrency limits, budgets,
+kill-switch) — med explicit instruktion att ÅTERANVÄNDA befintlig lagring, inte uppfinna ny.
+
+**Fynd: allt detta finns redan, byggt och granskat genom migrationerna 0025–0028, 0032–0036,
+0057–0060.** Se `docs/SECTION_C_DURABLE_TASK_CONTRACT_MAPPING.md` för den fullständiga,
+fält-för-fält-kartläggningen mot `MainAIGoal`/`MainAIPlan`/`MainAITask`/
+`MainAITaskDependency`/`MainAITaskEvent`/`MainAICheckpoint`/`ExecutionAuthorizationEnvelope`/
+`mainai_jobs`/`app.workforce.kill_switch`/`app.models.provider_spend`. Ingen ny migration,
+ingen ny tabell — dokumentet ÄR leveransen, så att en framtida byggare (människa eller
+MainAI) inte återuppfinner ett parallellt kontrakt av okunskap om att det redan finns här.
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en
