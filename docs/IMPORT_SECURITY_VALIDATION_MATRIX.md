@@ -50,6 +50,40 @@ Dependency order is #392 → #402 → #413. PRs #415 and #420 are separate child
 #413; #421 and #422 are evidence-only children of #420. In particular, #420 does not
 contain #415.
 
+## #425 network, concurrency, and restart follow-up
+
+Exact implementation commit: `ce4d7de1dfe470cec8b8c965009393fd0b84de1d`. The import-route
+source exercised by the concurrency run had SHA-256
+`eee0c2fcbb5d0cce9ee741f2076ff8aae95976e703930d7fa0de43dc7118c717`.
+
+The disposable Compose stack published only Caddy on TCP 80/443; the separate test
+PostgreSQL container was bound to `127.0.0.1:5432`. Frontend, backend, worker, parser, and
+Redis had no host bindings. From frontend, `backend-internal` resolved to the backend's
+`lifeai_internal` address, while Redis, Ollama, and `lifeai-db` did not resolve; direct TCP
+probes to the Redis and PostgreSQL `lifeai_data` IPs were unreachable. The parser remained
+on `network_mode: none`. Caddy shares `lifeai_internal` with backend and can reach its
+listener directly, although the Caddyfile routes only to frontend; this residual lateral
+reachability is documented, not represented as isolation.
+
+Three simultaneous 512 KiB uploads completed through Caddy, were indexed with matching
+checksums, and identical replay returned the existing job. Before the route correction,
+same-owner concurrent uploads timed out: a blocking PostgreSQL advisory-lock wait inside
+the async route froze the event loop needed by the lock holder to finish. The route now
+runs synchronously in FastAPI's thread pool; the regression guard and the running route
+were verified. The route source used for this stress run had SHA-256
+`eee0c2fcbb5d0cce9ee741f2076ff8aae95976e703930d7fa0de43dc7118c717`.
+
+After restarting Redis, it became healthy and returned `PONG`. After restarting PostgreSQL,
+`SELECT 1` succeeded using both the migration role and the derived `mainai_app` runtime role
+through the `lifeai-db` data-network alias. A post-restart HTTP import was not verified:
+the disposable founder credentials available in this reused test database returned 401, so
+no further login attempts were made. This does not establish a product authentication defect;
+it leaves post-restart end-to-end import recovery unverified. External host ingress,
+full-stack resource saturation beyond the measured 512 KiB concurrency case, database or
+Redis restart during active worker processing, remote backend Actions, and formal
+independent security acceptance also remain unverified. No production host, secrets, or
+user documents were used; `first_cycle_go=false`.
+
 ## #416 integration failures and #413 coordination
 
 PR #416's full backend job failed twice on exact head
