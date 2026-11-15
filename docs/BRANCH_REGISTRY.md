@@ -8632,3 +8632,42 @@ riktiga auktoritetsändringen och förtjänar egen granskning). `coordination_as
 öde och om workforce:s riktiga provider-väg någonsin ska aktiveras: grundarbeslut, utanför
 scope här. `ProviderActivationBlocked`s ovillkorliga raise, `coordination_assignment_id` och
 `first_cycle_go` rörs INTE av den här PR:n.
+
+### PR #428 — `claude/workforce-task-approval-enforcement` — Priority 1 (grundardirektiv 2026-11-15 "Execution Authority, Integration and Complete Project Knowledge"): FAKTISK åtgärd av workforce-gapet
+
+**Status: draft, CI väntas. Ej mergad.** Staplad ovanpå #423 via riktig `git merge` — #423:s
+EGNA branch helt orörd, fryst som innan. Det här är det STEG 3 PR #423:s egen
+rekommendationsdokument medvetet lämnade oimplementerat ("security-reviewed, egen PR") —
+grundaren beordrade det här direktivet att faktiskt genomföra det, med exakt de krav
+direktivet listade.
+
+**Ingen migration.** Dev:s nuvarande migrationshuvud är `0068`; tre öppna PR:er
+(#408/#411/#412) gör redan anspråk på `0069` (se kollisionsavsnittet ovan) — en ny kolumn
+här hade gjort mig till en FJÄRDE part i exakt den kollisionen. `resolve_delegation()`
+(`app/workforce/broker.py`) ytar i stället `request.task_id` (fanns redan, tappades
+tidigare helt) på assignmentets befintliga `provenance`-JSON-fält.
+
+**Ny funktion** `require_live_task_authorization_for_workforce_dispatch()`
+(`app/workforce/provider_worker.py`), anropad i `execute_workforce_assignment()`s
+`activate_provider`-gren FÖRE den befintliga, OFÖRÄNDRADE `ProviderActivationBlocked`-
+staged-raisen: löser upp uppgiften med ett explicit `owner_id`-filter I SJÄLVA QUERYN (inte
+bara jämfört efter hämtning — tenant-gräns, djupförsvar utöver RLS), avvisar en
+icke-levande task-status (cancelled/failed/completed/blocked/retryable_failed — närmaste
+befintliga motsvarighet till "revoked/rejected", eftersom `MainAITaskEventType` är
+append-only utan egen auktorisations-återkallelse-händelse), anropar sedan
+`require_task_approval()` — EXAKT samma riktiga grind `app.agent_coordination.dispatch`
+redan delegerar till. Ingen ny godkännandemotor.
+
+**6 nya regressionstester** (riktig Postgres, inga mockar,
+`tests/backend/mainai/test_workforce_task_approval_enforcement.py`): saknad task-koppling;
+icke-godkänd uppgift; godkänd uppgift (träffar FORTFARANDE den orörda staged-raisen —
+vilande väg bevarad); tenant-gränsöverskridande uppgift; avbruten uppgift EFTER godkännande
+(närmaste "revoked"-motsvarighet); och ett TOCTOU-omkontrollsbevis — samma assignment
+klarar grinden en gång (godkänd uppgift), uppgiften avbryts, och EXAKT samma anrop
+misslyckas vid nästa invokation — bevisar att grinden alltid läser om färskt tillstånd
+istället för att lita på ett tidigare beräknat beslut (samma doktrin
+`dispatch_assignment()`s egen docstring själv deklarerar).
+
+**Rör INTE:** `ProviderActivationBlocked`s ovillkorliga raise (sista raden, oförändrad),
+`coordination_assignment_id`, `first_cycle_go` (förblir `false`), någon migration, någon
+annan PR:s egna branch/commits.
