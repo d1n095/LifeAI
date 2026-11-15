@@ -75,6 +75,18 @@ def _apply_both_privilege_policies() -> None:
     module.apply_and_verify(get_settings().database_url)
 
 
+# system_activation_authorizations (PR #408) is the one table of the four that is deliberately
+# NOT owner-scoped and has NO RLS policy at all -- its own migration's docstring states this
+# explicitly: whether the whole system is authorized to activate is founder-wide state, not
+# per-owner, and the security property that matters there is narrower and stricter than RLS
+# (mainai_app is REVOKEd everything except SELECT -- see _EXPECTED_MAINAI_APP_PRIVILEGES
+# below). A first version of this test wrongly assumed all four tables need RLS and failed for
+# real in CI against this table -- caught there, not assumed here; fixed by reading the actual
+# migration instead of guessing. coordination_agents (migration 0046) is the existing precedent
+# for this exact pattern.
+_TABLES_WITH_OWNER_SCOPED_RLS = frozenset(_EXPECTED_MAINAI_APP_PRIVILEGES) - {"system_activation_authorizations"}
+
+
 def test_all_four_0069_candidate_tables_exist_with_rls_enabled_and_forced():
     migration_engine.dispose()  # drop pooled connections so the inspector sees the current schema
     with migration_engine.connect() as conn:
@@ -91,8 +103,16 @@ def test_all_four_0069_candidate_tables_exist_with_rls_enabled_and_forced():
         "expected all four composed 0069-candidate tables to exist after `alembic upgrade head` "
         f"on this branch; found instead: {sorted(found)}"
     )
-    for table, (enabled, forced) in found.items():
+    for table in _TABLES_WITH_OWNER_SCOPED_RLS:
+        enabled, forced = found[table]
         assert enabled and forced, f"{table}: RLS must be ENABLED and FORCED, found enabled={enabled} forced={forced}"
+    # The one deliberate exception, confirmed rather than silently skipped: no RLS at all.
+    enabled, forced = found["system_activation_authorizations"]
+    assert not enabled and not forced, (
+        f"system_activation_authorizations: expected NO row-level security at all (deliberately "
+        f"founder-wide, not owner-scoped -- see its migration's own docstring), found "
+        f"enabled={enabled} forced={forced}"
+    )
 
 
 def test_mainai_app_privileges_match_each_source_prs_own_intent_simultaneously():
