@@ -688,6 +688,15 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         # also remove these rows once erase_own_project_entities_children() runs above.
         db.execute(sa_text("SELECT erase_own_work_candidates_children()"))
 
+        # --- Life MainAI Intelligence program: GitHub evidence staging (migration
+        # 0069_github_evidence_staging, see app/models/github_evidence.py): github_evidence_
+        # candidates has DELETE revoked from mainai_app the same way, deletion only through
+        # this one narrow SECURITY DEFINER function. Unlike work_candidates above, this table
+        # has no FK into project_entities (deliberately -- GitHub evidence is not founder
+        # knowledge) and its only FK (authorized_goal_id) is ON DELETE SET NULL, not CASCADE,
+        # so nothing else erases these rows automatically; this call is the only cleanup path.
+        db.execute(sa_text("SELECT erase_own_github_evidence_children()"))
+
         # --- Provider Spend Authorization (migration 0060): usage events are append-only.
         # Must run BEFORE erase_own_execution_authorization_children() / mainai_execution
         # cleanup: those CASCADE-delete envelopes and goals, which CASCADE into
