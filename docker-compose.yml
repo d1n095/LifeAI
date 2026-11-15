@@ -55,6 +55,7 @@ services:
     build: ./backend
     image: lifeai-parser:local
     restart: unless-stopped
+    init: true
     user: "10002:10001"
     entrypoint: ["python", "-m", "app.rag.parser_service"]
     environment:

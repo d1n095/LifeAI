@@ -180,14 +180,42 @@ def test_parser_container_is_secretless_networkless_and_pid_isolated() -> None:
             "assert r.content == b'isolated parser works', r.content"
         )
         docker("exec", caller_name, "python", "-c", client)
+        oversized_request = (
+            "import httpx; "
+            "c=httpx.Client(transport=httpx.HTTPTransport(uds='/run/lifeai-parser/parser.sock'), timeout=10); "
+            "r=c.post('http://parser/v1/extract', content=b'x'*(25*1024*1024+1), "
+            "headers={'x-document-suffix':'.txt'}); "
+            "assert r.status_code==413, (r.status_code, r.text)"
+        )
+        docker("exec", caller_name, "python", "-c", oversized_request)
+        docker("exec", caller_name, "python", "-c", client)
 
-        docker("kill", parser_name)
-        docker("start", parser_name)
+        time.sleep(10.5)
+        restart_count = int(docker("inspect", "-f", "{{.RestartCount}}", parser_name))
+        docker(
+            "exec",
+            "-d",
+            parser_name,
+            "python",
+            "-c",
+            "import os,signal; targets=[]; "
+            "exec('for name in os.listdir(\"/proc\"):\\n "
+            "if name.isdigit() and int(name)>1:\\n "
+            " try: argv=open(f\"/proc/{name}/cmdline\",\"rb\").read().split(bytes([0]))\\n "
+            " except OSError: continue\\n "
+            " if argv[:3]==[b\"python\",b\"-m\",b\"app.rag.parser_service\"]: targets.append(int(name))'); "
+            "assert len(targets)==1, targets; os.kill(targets[0],signal.SIGKILL)",
+        )
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
-            if docker("inspect", "-f", "{{.State.Running}}", parser_name) == "true":
+            current_restarts = int(docker("inspect", "-f", "{{.RestartCount}}", parser_name))
+            if (
+                current_restarts > restart_count
+                and docker("inspect", "-f", "{{.State.Running}}", parser_name) == "true"
+            ):
                 break
             time.sleep(0.1)
+        assert int(docker("inspect", "-f", "{{.RestartCount}}", parser_name)) > restart_count
         assert docker("inspect", "-f", "{{.State.Running}}", parser_name) == "true"
         docker(
             "exec",
