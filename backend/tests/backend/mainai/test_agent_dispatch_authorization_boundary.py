@@ -354,7 +354,11 @@ def test_rollback_releases_the_lock_and_an_immediate_retry_sees_unchanged_state(
     try:
         retry_tx = retry.begin()
         row = _lock_task_row(retry, task_id).first()
-        assert row is not None and row[0] == "pending"
+        # A freshly-planned task with no unmet dependencies becomes "ready" immediately (see
+        # app.mainai_execution.graph.recompute_task_readiness(), run as part of create_plan())
+        # -- it does not stay "pending". Matches PR #431's identical assertion in its own
+        # mirrored test (test_workforce_task_authorization_concurrency.py).
+        assert row is not None and row[0] == "ready"
         retry_tx.rollback()
     finally:
         retry.close()
