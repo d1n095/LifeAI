@@ -130,6 +130,16 @@ _PROTECTED_TABLES = [
     # as defense-in-depth (and is what the test suite's app-role sessions — which still hold the
     # uniform DML floor — actually trip on).
     ("blueprint_drafts", ["SELECT", "INSERT"]),
+    # Migration 0074's lineage marker is immutable authority data. It must remain inaccessible
+    # after the broad startup GRANT is replayed, just like every other protected table here.
+    ("_alembic_0074_0069_lineage", []),
+]
+
+# Present only on the preserved PR #237 lineage. Absence is valid on canonical Founder Alpha
+# databases, but when either table exists the runtime role receives no direct privilege.
+_OPTIONAL_PROTECTED_TABLES = [
+    ("mainai_stop_state", []),
+    ("mainai_stop_events", []),
 ]
 
 _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]
@@ -411,7 +421,10 @@ def apply_privilege_policy(
     difference is whether a missing object also counts as a reported error."""
     errors: list[str] = []
 
-    tables_present = {table for table, _ in _PROTECTED_TABLES if _table_exists(cur, table)}
+    managed_tables = [*_PROTECTED_TABLES, *_OPTIONAL_PROTECTED_TABLES]
+    tables_present = {table for table, _ in managed_tables if _table_exists(cur, table)}
+    # Required head objects must exist after migrations. The PR #237 STOP tables are optional
+    # because they truthfully exist on only one of the two preserved source lineages.
     for table, _ in _PROTECTED_TABLES:
         if table not in tables_present and require_complete:
             errors.append(f"{table}: table does not exist (required)")
@@ -446,7 +459,7 @@ def apply_privilege_policy(
             f"REVOKE {never_granted_sql} ON TABLES FROM {APP_ROLE}"
         )
 
-        for table, allowed_privs in _PROTECTED_TABLES:
+        for table, allowed_privs in managed_tables:
             if table not in tables_present:
                 continue
             cur.execute(f'REVOKE ALL ON TABLE public."{table}" FROM {APP_ROLE}')
@@ -500,7 +513,7 @@ def apply_privilege_policy(
             f"schema-wide floor would be silently undone by the next migration that adds a table"
         )
 
-    for table, allowed_privs in _PROTECTED_TABLES:
+    for table, allowed_privs in managed_tables:
         if table not in tables_present:
             continue  # already reported above when require_complete
         cur.execute(

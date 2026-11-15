@@ -1,17 +1,9 @@
 """Fail-closed repair for the known Founder Alpha dual-0069 Alembic state.
 
-A historical database can contain both ``0069`` and
-``0069_embedding_space_identity`` in ``alembic_version``.  In the corrected
-serial graph the former is the direct ancestor of the latter, so retaining
-both rows is invalid.  This utility removes only the redundant ancestor row,
-and only after proving that both schema effects and embedding provenance are
-internally consistent.
-
-Analysis is the default.  Mutation requires ``--apply`` and runs under a
-serializable transaction with an exclusive lock on ``alembic_version``.  An
-append-only ``audit_log`` receipt is committed atomically with the repair.
-Unknown, partial, conflicting (including PR #237's different exact ``0069``),
-or otherwise ambiguous states are refused without mutation.
+Mutation removes only the redundant ancestor row, under a serializable transaction, after
+proving the exact published canonical schema. PR #237 STOP objects, altered column shapes,
+same-named but different constraints, unvalidated constraints and partial provenance are all
+refused. No schema is stamped or relabelled by this utility.
 """
 
 from __future__ import annotations
@@ -29,11 +21,16 @@ from psycopg2.extensions import connection as Connection
 ANCESTOR = "0069"
 DESCENDANT = "0069_embedding_space_identity"
 BACKUP_TABLE = "_alembic_0069_embedding_space_identity_backup"
+STOP_TABLES = ("mainai_stop_state", "mainai_stop_events")
 REQUIRED_DISCLOSURE_CONSTRAINTS = frozenset(
     {
         "ck_provider_disclosure_events_decision",
         "ck_provider_disclosure_events_sent_hash_matches_decision",
     }
+)
+EXPECTED_PROVENANCE_SHAPE = (
+    ("embedding_model", "text", False, None),
+    ("embedding_native_dim", "integer", False, None),
 )
 
 
@@ -45,7 +42,10 @@ class UnsafeRecoveryState(RuntimeError):
 class RecoveryState:
     versions: tuple[str, ...]
     provenance_columns: tuple[str, ...]
-    disclosure_constraints: tuple[tuple[str, str], ...]
+    provenance_shape: tuple[tuple[object, ...], ...]
+    disclosure_constraints: tuple[tuple[str, str, bool, str], ...]
+    disclosure_constraints_exact: bool
+    stop_tables_present: tuple[str, ...]
     backup_table_present: bool
     partial_provenance_rows: int
 
@@ -58,34 +58,78 @@ class RecoveryState:
         return self.versions == (DESCENDANT,)
 
 
+def _constraint_rows(cursor, relation: str) -> tuple[tuple[str, str, bool, str], ...]:
+    cursor.execute(
+        """
+        SELECT conname, contype, convalidated, pg_get_constraintdef(oid, true)
+          FROM pg_constraint
+         WHERE conrelid = to_regclass(%s)
+           AND conname = ANY(%s)
+         ORDER BY conname
+        """,
+        (relation, list(REQUIRED_DISCLOSURE_CONSTRAINTS)),
+    )
+    return tuple((str(a), str(b), bool(c), str(d)) for a, b, c, d in cursor.fetchall())
+
+
+def _expected_disclosure_constraints(cursor) -> tuple[tuple[str, str, bool, str], ...]:
+    cursor.execute("DROP TABLE IF EXISTS pg_temp._expected_recovery_disclosure_0069")
+    cursor.execute(
+        """
+        CREATE TEMP TABLE _expected_recovery_disclosure_0069 (
+            decision varchar(16) NOT NULL,
+            sent_content_hash varchar(64),
+            CONSTRAINT ck_provider_disclosure_events_decision
+                CHECK (decision IN ('allowed', 'denied', 'local')),
+            CONSTRAINT ck_provider_disclosure_events_sent_hash_matches_decision CHECK (
+                (decision = 'denied' AND sent_content_hash IS NULL)
+                OR (decision IN ('allowed', 'local') AND sent_content_hash IS NOT NULL)
+            )
+        ) ON COMMIT DROP
+        """
+    )
+    return _constraint_rows(cursor, "pg_temp._expected_recovery_disclosure_0069")
+
+
 def inspect_state(conn: Connection) -> RecoveryState:
     with conn.cursor() as cursor:
         cursor.execute("SELECT version_num FROM alembic_version ORDER BY version_num")
         versions = tuple(row[0] for row in cursor.fetchall())
         cursor.execute(
             """
-            SELECT column_name
-              FROM information_schema.columns
-             WHERE table_schema = 'public'
-               AND table_name = 'document_chunks'
-               AND column_name IN ('embedding_model', 'embedding_native_dim')
-             ORDER BY column_name
+            SELECT a.attname,
+                   format_type(a.atttypid, a.atttypmod),
+                   a.attnotnull,
+                   pg_get_expr(d.adbin, d.adrelid, true)
+              FROM pg_attribute a
+              LEFT JOIN pg_attrdef d
+                ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+             WHERE a.attrelid = 'public.document_chunks'::regclass
+               AND a.attname IN ('embedding_model', 'embedding_native_dim')
+               AND a.attnum > 0
+               AND NOT a.attisdropped
+             ORDER BY a.attnum
             """
         )
-        provenance_columns = tuple(row[0] for row in cursor.fetchall())
+        provenance_shape = tuple(tuple(row) for row in cursor.fetchall())
+        provenance_columns = tuple(str(row[0]) for row in provenance_shape)
+
+        disclosure_constraints = _constraint_rows(cursor, "public.provider_disclosure_events")
+        expected_constraints = _expected_disclosure_constraints(cursor)
+
         cursor.execute(
             """
-            SELECT conname, pg_get_constraintdef(oid)
-              FROM pg_constraint
-             WHERE conrelid = 'public.provider_disclosure_events'::regclass
-               AND conname = ANY(%s)
-             ORDER BY conname
+            SELECT name
+              FROM unnest(%s::text[]) AS candidate(name)
+             WHERE to_regclass('public.' || name) IS NOT NULL
+             ORDER BY name
             """,
-            (list(REQUIRED_DISCLOSURE_CONSTRAINTS),),
+            (list(STOP_TABLES),),
         )
-        disclosure_constraints = tuple((row[0], row[1]) for row in cursor.fetchall())
+        stop_tables_present = tuple(str(row[0]) for row in cursor.fetchall())
         cursor.execute("SELECT to_regclass(%s) IS NOT NULL", (f"public.{BACKUP_TABLE}",))
         backup_table_present = bool(cursor.fetchone()[0])
+
         partial_provenance_rows = 0
         if provenance_columns == ("embedding_model", "embedding_native_dim"):
             cursor.execute(
@@ -96,10 +140,14 @@ def inspect_state(conn: Connection) -> RecoveryState:
                 """
             )
             partial_provenance_rows = int(cursor.fetchone()[0])
+
     return RecoveryState(
         versions=versions,
         provenance_columns=provenance_columns,
+        provenance_shape=provenance_shape,
         disclosure_constraints=disclosure_constraints,
+        disclosure_constraints_exact=disclosure_constraints == expected_constraints,
+        stop_tables_present=stop_tables_present,
         backup_table_present=backup_table_present,
         partial_provenance_rows=partial_provenance_rows,
     )
@@ -110,17 +158,22 @@ def validate_state(state: RecoveryState) -> str:
         raise UnsafeRecoveryState(
             "unsupported Alembic state; expected the known dual-version state or its repaired descendant-only state"
         )
-    if state.provenance_columns != ("embedding_model", "embedding_native_dim"):
-        raise UnsafeRecoveryState("embedding provenance columns are missing or incomplete")
+    if state.stop_tables_present:
+        raise UnsafeRecoveryState(
+            "conflicting PR #237 STOP history is present; refusing to collapse exact-0069 revisions"
+        )
+    if state.provenance_shape != EXPECTED_PROVENANCE_SHAPE:
+        raise UnsafeRecoveryState(
+            "embedding provenance columns do not match the published type/nullability/default fingerprint"
+        )
     if state.backup_table_present:
         raise UnsafeRecoveryState("migration-owned provenance backup exists; downgrade/recovery state is ambiguous")
     if state.partial_provenance_rows:
         raise UnsafeRecoveryState("partial embedding provenance rows exist; model and native dimension must be paired")
-    constraints = {name: definition for name, definition in state.disclosure_constraints}
-    if set(constraints) != REQUIRED_DISCLOSURE_CONSTRAINTS:
-        raise UnsafeRecoveryState("provider-disclosure constraint set is incomplete")
-    if any("local" not in definition for definition in constraints.values()):
-        raise UnsafeRecoveryState("exact revision 0069 does not have the expected provider-disclosure semantics")
+    if not state.disclosure_constraints_exact:
+        raise UnsafeRecoveryState(
+            "provider-disclosure constraints do not match the complete validated canonical 0069 definitions"
+        )
     return "already_recovered" if state.is_recovered else "repairable"
 
 
@@ -129,15 +182,12 @@ def recover(conn: Connection, *, apply: bool) -> dict[str, object]:
     try:
         with conn.cursor() as cursor:
             cursor.execute("LOCK TABLE alembic_version IN ACCESS EXCLUSIVE MODE")
+            cursor.execute("LOCK TABLE document_chunks, provider_disclosure_events IN SHARE MODE")
         before = inspect_state(conn)
         classification = validate_state(before)
         if not apply or classification == "already_recovered":
             conn.rollback()
-            return {
-                "status": classification,
-                "applied": False,
-                "state": asdict(before),
-            }
+            return {"status": classification, "applied": False, "state": asdict(before)}
 
         receipt_id = uuid.uuid4()
         after_versions = (DESCENDANT,)
@@ -146,9 +196,10 @@ def recover(conn: Connection, *, apply: bool) -> dict[str, object]:
                 "recovery": "collapse_redundant_0069_ancestor",
                 "before_versions": before.versions,
                 "after_versions": after_versions,
-                "provenance_columns": before.provenance_columns,
+                "provenance_shape": before.provenance_shape,
                 "partial_provenance_rows": before.partial_provenance_rows,
                 "backup_table_present": before.backup_table_present,
+                "stop_tables_present": before.stop_tables_present,
             },
             sort_keys=True,
             separators=(",", ":"),
