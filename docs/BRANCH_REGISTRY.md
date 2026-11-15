@@ -9083,6 +9083,42 @@ egen hand.
 
 ---
 
-**Sammanfattning av denna omgång ("CONTINUE MAINAI INTEGRATION"):** fyra prioriteter, fyra
-PR:er (#433 slutverifierad grön, #436, #437, #438, #439 — fem PR:er egentligen, #433 var
-redan öppen). Ingen merge utförd. `first_cycle_go=false` genomgående.
+## Konsoliderad handoff ("CONTINUE MAINAI INTEGRATION", grundarens slutliga kvitto)
+
+Fyra prioriteter levererade: #436 (post-dispatch-auktoriseringslivscykel), #437
+(repo-fil-källidentitet, S1D), #438 (fragmenteringsreduktionsplan), #439 (första övervakade
+utvecklingscykel-specifikation). #433 (grundad i en tidigare omgång) slutverifierad
+backend-grön vid korrigerad head `c12373cb`. **Ingen merge utförd av någon session. Ingen ny
+planeringsstruktur, ingen duplicerad leverans.**
+
+**Explicita, kvarstående begränsningar — gäller tills separat verifierade, inte löst av
+något av ovanstående:**
+
+1. **#437:s migration (`0069_repository_file_source_units.py`) är en SJÄTTE kandidat för den
+   redan spårade `0069`-kollisionen** (#412/#413, #408, #403, #411 — grundarens egna
+   komposition­sordning redan dokumenterad ovan). Den måste införlivas i den auktoriserade
+   migrationskompositionssekvensen av den som löser kollisionen — INTE omnumrerad eller
+   mergad isolerat av någon session.
+2. **#439 specificerar en ÖVERVAKAD första cykel, inte autonom exekveringsauktorisering.**
+   Steg 6 ("exekvera") uppfylls av en människo-styrd session under ett registrerat
+   godkännande — aldrig av `app.workforce`:s eller `app.agent_coordination`:s vilande
+   adapter-dispatch. `first_cycle_go` förblir `false`.
+3. **Källbaserad extraktion (Pass 1–3, #430/#432/#435) och faktisk MainAI-ingestion
+   (#437:s källidentitetsgrund) förblir separata.** #437 bygger ENDAST fjärde
+   `MemorySourceUnit`-armen — noll rader når `knowledge_claims`/`interpretation_proposals`/
+   `project_entities`/`work_candidates` från detta arbete. Den faktiska kopplingen
+   (extraktion → `get_or_create_repository_file_source_unit()` → riktiga `KnowledgeClaim`-
+   rader) är namngiven som separat, ogjord framtida arbete i #437:s egen dokumentation —
+   INTE beskriven som operationell.
+4. **Oberoende granskning, integrationsgrindar och produktionsberedskapsverifiering
+   kvarstår som separata krav** för varenda PR i denna omgång (#436–#439) och föregående
+   omgångar — "draft, CI väntas, ej mergad" gäller genomgående; ingen av dessa förmågor ska
+   beskrivas som operationell före slutförd end-to-end-verifiering.
+
+**Vid återupptagande:** fortsätt från detta verifierade repo-tillstånd — läs detta register
+och öppna PR:er FÖRST (standardbeteendet CLAUDE.md redan kräver) — upprepa INTE redan
+slutförda utredningar (0069-kollisionsanalysen, work-candidate-fragmenteringskontrollen,
+#323/#394-fyndet är alla redan klara och ska återanvändas, inte göras om).
+
+`first_cycle_go=false` genomgående. Inget väntande arbete begärt förrän grundaren säger
+annat.
