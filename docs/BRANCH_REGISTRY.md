@@ -8297,3 +8297,56 @@ alla andra PR:er i projektet.
 påbörjades — hittade ingen. Ingen överlappning med Codex (migration remediation), Copilot
 (import-worker lease/parser) eller Cursor (frontend/Operations Center) — helt ny,
 fristående backend-domän utan delade filer.
+
+## Grundardirektiv 2026-11-15 — "PR-konsolidering och körbar integration" + PR #414
+
+**Problemet grundaren bad om en inventering av:** 192 öppna PR:er totalt vid den här
+granskningen (#60–#413), fördelat: Cursor 81, Claude/d1n095 75, Codex 27, Copilot 5,
+adversarial-review-bottar 4. Ett dedikerat research-pass (bakgrundsfork) byggde en fullständig
+inventering, sparad i agentens scratchpad (ej i repot — se #414:s PR-beskrivning för den
+distillerade sammanfattningen) eftersom en full 192-PR-genomgång inte ska leva i det här
+dokumentet rad för rad.
+
+**Två tematiskt frestande kandidater avfärdades explicit som OSÄKRA att bygga vidare på just
+nu** (båda goda mål för en SENARE, egen ombasering-och-omcertifiering-uppgift, inte del av
+"minsta säkra mängd"):
+- **Track B (#265→#267)**, "MainAI direct agent communication" — 5 veckor gammal, grenad från
+  en nu förlegen Codex-kandidatbranch, granskad en gång och returnerad till byggaren
+  (RETURN_TO_BUILDER), aldrig omcertifierad sedan.
+- **#338/#339**, den riktiga dispatch-cykeln — 5-6 dagar äldre bas än kandidatkedjan nedan,
+  explicit självflaggad "independent review required — the author cannot certify own
+  changes", med egen evidens som bara är en fail-closed `WAITING_FOR_PROVIDER`-platshållare
+  (ingen agent-CLI tillgänglig någonstans för att bevisa en riktig rundtur).
+
+### PR #414 — `claude/mainai-integration-context-lessons` — vald "minsta säkra mängd"
+
+**Status: draft, CI väntas. Ej mergad.** Grenad från `claude/det-kommer-mer-879lcm`, integrerar
+(via riktiga `git merge`, ingen cherry-pick — full historik bevarad) tre redan oberoende
+testade PR:er, alla grenade från exakt samma bas (`64c07d5b`):
+
+| PR | Branch | Head SHA | Byggde | Egen-deklarerad lucka |
+|---|---|---|---|---|
+| #377 | `claude/agent-context-handoff` | `a96f3907` | `build_agent_task_context()` | "zero callers anywhere" (egen PR-text) |
+| #380 | `claude/integration-intelligence-lessons` | `f7e10d0b` | `integration_lessons_for_task_context()` | docstring namnger #377:s funktion som "the attach point" — men ingen anropade båda i följd |
+| #381 | `claude/session-context-assembler` | `9c61bbcc` | `assemble_session_context()` | oberoende av båda ovan, aldrig kopplad till någon |
+
+**Den faktiska integrationsluckan som täcktes:** ny `app/workforce/task_dispatch_preparation.
+py`s `prepare_agent_task_context()` — den riktiga saknade anroparen. Ren komposition, ingen ny
+logik: session-läge (#381) → relevanta tidigare integrationsmisslyckanden efter taggar (#380)
+→ den kompakta, säkerhetskontrollerade paketet med lektionerna bifogade (#377). Bevarar
+#381:s egen "advisory_observation"-semantik exakt (en blockerad session ytas i `missing_info`,
+aldrig tyst bortfallen, men blockerar ALDRIG paketbygget — glue-koden uppfinner ingen hårdare
+grind än modulen den läser från själv deklarerar).
+
+4 nya regressionstester mot riktig Postgres
+(`tests/backend/test_task_dispatch_preparation.py`), ingen mock av de tre källmodulernas egna
+beslut. Rök-testad direkt (mockar bara de DB-beroende internals, ingen Postgres i sandboxen) —
+bekräftar att kopplingen fungerar både vid en relevant lektion och vid en blockerad session.
+
+**Medvetet UTANFÖR scope:** ingen riktig extern agent-dispatch
+(`app.agent_coordination.dispatch.dispatch_assignment()` är redan byggd och grindad, se
+#408–410 — men #338/#339, stacken som skulle koppla DET HÄR paketet till det anropet, är
+förlegen och ocertifierad, se ovan).
+
+**Koordinering:** Cursors 81 PR:er och Codex 27 triagerade endast på titel (utanför mitt
+mandat per grundardirektivet); inga filer delas med Codex/Copilot/Cursors ägda lanes.
