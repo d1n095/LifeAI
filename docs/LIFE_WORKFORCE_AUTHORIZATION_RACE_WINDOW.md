@@ -13,16 +13,39 @@ single dispatch attempt. This document records the gap precisely, as its own nam
 unresolved item, shared with the already-existing `app.agent_coordination` path — not
 something this PR introduces, and not something this PR fixes.
 
+> **Update (`claude/workforce-authorization-dispatch-atomicity`, same founder-directive
+> cycle, Priority 1 of "STOP IDLING, CONTINUE ENGINEERING"):** the authorization gate now
+> takes a real `SELECT ... FOR UPDATE` lock on the task row (see §1's first bullet, updated
+> below, and the genuine two-connection proof in
+> `test_workforce_task_authorization_concurrency.py`). **This closes the primitive-level
+> gap, not the full end-to-end one**: the lock correctly serializes against a concurrent
+> `cancel_task()`-style writer and against a second concurrent authorization attempt, for as
+> long as the caller's transaction stays open. It does NOT yet wire any real dispatch effect
+> to stay inside that same transaction, because no real dispatch effect exists yet
+> (`ProviderActivationBlocked` is still unconditional and untouched) — there is nothing
+> downstream to hold the lock across. When a future, separately-reviewed activation commit
+> adds the real invoke step, that step MUST occur before this function's caller commits or
+> releases the lock (e.g., by passing the locked `db` session through, never opening a new
+> one) for the full guarantee to hold end-to-end. This document's §4/§5 are updated to
+> reflect what is now implemented vs. what remains a future integration responsibility.
+
 ## 1. The precise race window
 
-Neither `app.workforce.provider_worker.require_live_task_authorization_for_workforce_dispatch()`
-(this PR) nor `app.agent_coordination.dispatch.dispatch_assignment()` (pre-existing) holds any
-row-level lock (`SELECT ... FOR UPDATE`, an advisory lock, or an optimistic version check)
-across the gap between "read the authorization state" and "act on it":
+**As originally written, neither** `app.workforce.provider_worker.
+require_live_task_authorization_for_workforce_dispatch()` **nor**
+`app.agent_coordination.dispatch.dispatch_assignment()` (pre-existing) held any row-level
+lock (`SELECT ... FOR UPDATE`, an advisory lock, or an optimistic version check) across the
+gap between "read the authorization state" and "act on it". **Workforce's side is now
+fixed at the primitive level** (see the update note above this section) — this section is
+kept as the original finding, with the fix noted inline, so the before/after is legible:
 
-- **Workforce (this PR):** the gate does a plain `SELECT` (via SQLAlchemy `.query().filter()`)
-  of the `MainAITask` row, with no locking clause. Today, nothing meaningful happens between
-  that read and the function's own return/raise — see §2.
+- **Workforce (now fixed at the primitive level):** the gate's task lookup now takes a real
+  `SELECT ... FOR UPDATE` lock, held for the remainder of the caller's transaction — the
+  identical lock `app.mainai_execution.executor._lock_task()` already takes on the same row
+  for `cancel_task()`/`dispatch_ready_task()`/`retry_task()`. Proven against a genuinely
+  separate connection in `test_workforce_task_authorization_concurrency.py`. Still true today,
+  unchanged: nothing meaningful happens between that locked read and the function's own
+  return/raise, because there is still no real invoke step to protect — see §2.
 - **Agent coordination (pre-existing, same class of gap):** `dispatch_assignment()`
   (`dispatch.py:187-256`) calls `evaluate_dispatch_readiness()` (a plain, unlocked read),
   then `transition_status(db, assignment=assignment, new_status="waiting_agent", ...)`
@@ -70,62 +93,71 @@ transaction that commits after the gate's read but before the real call complete
 its real invocation proceed on stale authorization. **This document takes no position on
 when or whether that activation should happen** — only on what must be true before it does.
 
-## 4. Candidate approaches for atomic authorization + dispatch (none committed to)
+## 4. Candidate approaches for atomic authorization + dispatch — **approach 1 selected for the primitive, not yet wired end-to-end**
 
-Named for the founder/future reviewer to choose among — not a recommendation, since choosing
-one is itself a security-relevant design decision this PR does not make unilaterally:
+Originally named for the founder/future reviewer to choose among. **Approach 1 is now
+implemented at the primitive level** (workforce's gate), chosen as the smallest correct
+option because it reuses `_lock_task()`'s own established idiom exactly rather than adding a
+new mechanism:
 
 1. **Row-level lock held across the whole attempt** — `SELECT ... FOR UPDATE` on the
-   `MainAITask` row (and/or the assignment row) at the start of dispatch, held until the real
-   invocation either completes or is given up on. Simplest to reason about; risks holding a
-   lock for the duration of a slow external call, which this codebase's existing patterns
-   (e.g. `cancel_task()`'s `_lock_task()`) use only for short, synchronous DB work, never
-   across an `await` to an external system — a real behavioral change from precedent.
+   `MainAITask` row, at the start of authorization, held until the caller's transaction ends.
+   **Implemented** in `require_live_task_authorization_for_workforce_dispatch()`. The
+   caveat below is still real and still open: holding this lock for the duration of a slow
+   external call is a real behavioral change from `_lock_task()`'s own precedent (used only
+   for short, synchronous DB work today) — **wiring a future real invoke step to stay inside
+   this same transaction, for however long that external call takes, is a separate decision
+   for whoever implements that activation commit**, not resolved by this document or by
+   adding the lock itself.
 2. **Conditional atomic transition** — a single `UPDATE ... WHERE status = 'ready' AND
-   <approval still holds>` (or an equivalent check constrained into the same statement/
-   transaction as the state transition), checking the affected-row count rather than trusting
-   a prior read. Closer to `transition_status()`'s existing allowed-transition check, but
-   would need the approval condition expressed as a WHERE clause the database itself
-   evaluates atomically with the write, not as a separate prior Python-level check.
-3. **Optimistic concurrency via a version/sequence column** — re-check a version number at
-   the moment just before the real invocation; abort if it changed since the authorization
-   read. Avoids holding a lock across slow I/O, but requires every state-changing operation
-   on the task (including `cancel_task()`) to bump the version, which is itself a `WorkCandidate`-
-   style schema change, not something to add silently as a side effect of this PR.
-4. **A short-lived advisory lock scoped to the task id**, released immediately after the
-   authorization decision is used (not held across the external call) — narrows the window to
-   "between the lock release and the real invocation" rather than eliminating it; a partial
-   mitigation, not a complete one.
+   <approval still holds>`, checking the affected-row count rather than trusting a prior
+   read. Not implemented; remains a candidate for the real-invoke step specifically if
+   holding a row lock across slow I/O (approach 1's caveat above) proves unacceptable.
+3. **Optimistic concurrency via a version/sequence column** — not implemented; would need
+   every state-changing operation on the task (including `cancel_task()`) to bump a version,
+   a `WorkCandidate`-style schema change out of scope for a locking-only fix.
+4. **A short-lived advisory lock scoped to the task id**, released before any slow I/O — not
+   implemented; a partial mitigation, not selected because approach 1 already provides the
+   full guarantee for whatever the lock is actually held across.
 
-## 5. Required adversarial PostgreSQL concurrency tests (not written here)
+## 5. Required adversarial PostgreSQL concurrency tests
 
-These cannot be written as currently-passing tests, because no atomic mechanism exists yet to
-prove — writing them now would either be tautological (testing that the known gap exists,
-which the TOCTOU test already does sequentially) or would require implementing one of §4's
-approaches first, which this document explicitly does not commit to. Once an approach is
-chosen, the required tests are:
+**Written and passing** (genuine two-connection concurrency, not sequential simulation) in
+`backend/tests/backend/mainai/test_workforce_task_authorization_concurrency.py`, mirroring
+PR #379's own established pattern (`test_blueprint_approval_concurrency.py`) of a lock-holder
+connection, a `SET LOCAL lock_timeout` on the contending connection, and explicit commit/
+rollback to show the lock's exact lifetime:
 
-1. **Genuine two-connection concurrency** (real separate `psycopg2`/SQLAlchemy connections in
-   separate OS threads or processes — not sequential calls in one test function, which is
-   what today's TOCTOU test already does and explicitly does not claim to be this): connection
-   A begins an authorization-to-dispatch attempt and pauses at the exact point after its
-   authorization read; connection B concurrently cancels (or revokes, once that primitive
-   exists) the task and commits; connection A resumes and its attempt must fail.
-2. The same test shape repeated for a "real" provider invocation actually taking non-trivial
-   time (simulated with a deliberate delay in a test double), since the practical race window
-   is proportional to how long the real external call takes.
-3. A test proving the chosen mechanism does NOT deadlock or needlessly serialize unrelated,
-   non-conflicting dispatch attempts (a correctness fix that introduces a liveness regression
-   is not actually an improvement).
-4. The equivalent set of tests for `app.agent_coordination.dispatch_assignment()`, since §1
-   established this is not a workforce-specific gap.
+1. **Revocation vs. dispatch** — `test_for_update_lock_blocks_a_concurrent_cancel_task_style_write`.
+2. **Competing workers** — `test_two_concurrent_authorization_attempts_on_the_same_task_serialize_not_interleave`.
+3. **Transaction rollback / retry** — `test_rollback_releases_the_lock_and_an_immediate_retry_sees_unchanged_state`.
+4. **The real production function, not just the mirrored primitive** —
+   `test_the_real_gate_function_holds_the_lock_until_its_callers_transaction_ends`, calling
+   `require_live_task_authorization_for_workforce_dispatch()` itself and proving via a
+   genuinely separate connection that its lock is still held after the call returns.
 
-## What this document explicitly does not do
+**Still not written, and out of scope for this fix:**
+- A test with a "real" provider invocation actually taking non-trivial time (needs the
+  activation commit's real invoke step to exist first, per §4 approach 1's open caveat).
+- A liveness test proving the chosen mechanism does not needlessly serialize unrelated,
+  non-conflicting dispatch attempts on DIFFERENT tasks (plausible by construction, since the
+  lock is per-row, but not separately proven here).
+- The equivalent fix and tests for `app.agent_coordination.dispatch_assignment()` — §1
+  established this is not workforce-specific, but this PR's scope is workforce only; fixing
+  `dispatch_assignment()` the same way is a separate, out-of-scope change to the one path
+  that is actually live today.
 
-- Does not claim the race is resolved, mitigated, or acceptable long-term.
-- Does not pick one of §4's candidate approaches.
-- Does not add any locking, version column, or new schema.
+## What this document (and the fix it now describes) explicitly does not do
+
+- **Does not claim the race is fully resolved end-to-end.** The primitive-level lock is
+  implemented and proven; nothing yet exists downstream for it to protect, because
+  `ProviderActivationBlocked` still blocks every real invocation unconditionally. "Atomic
+  authorization and dispatch" as a complete guarantee is only true once a future real-invoke
+  step is wired to stay inside the same transaction — that wiring is explicitly NOT done here.
+- Does not add a version column or any new schema (approach 1 needed neither).
 - Does not activate `app.workforce`'s dormant real-provider path, and does not touch the
   `ProviderActivationBlocked` staged-raise.
-- Does not claim this is a workforce-specific defect — §1 traces the identical pattern in the
-  one path that is actually live today.
+- Does not fix or touch `app.agent_coordination.dispatch_assignment()` — §1 traces the
+  identical pre-existing pattern there, but it is out of scope for this workforce-only fix.
+- Does not introduce a second approval engine or dispatcher — reuses `require_task_approval()`
+  and `_lock_task()`'s own locking idiom exactly as they already exist.

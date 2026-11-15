@@ -184,7 +184,26 @@ def require_live_task_authorization_for_workforce_dispatch(db: Session, *, owner
     Raises ProviderActivationBlocked -- the existing vocabulary for "this workforce dispatch
     cannot proceed" -- for every refusal reason: missing task link, cross-tenant task,
     non-dispatchable task status, or no recorded approval. Never silently treats "nothing to
-    check" as "approved"."""
+    check" as "approved".
+
+    TRANSACTIONAL AUTHORIZATION (closes the gap docs/LIFE_WORKFORCE_AUTHORIZATION_RACE_WINDOW.md
+    names as unresolved -- see that file for the full threat model and why a sequential
+    re-check alone does not establish atomicity): the task lookup below takes a real
+    `SELECT ... FOR UPDATE` row lock, held for the remainder of the CALLER's transaction (this
+    function never commits or rolls back `db` itself). This is the exact same lock
+    `app.mainai_execution.executor._lock_task()` already takes on the identical row for
+    `cancel_task()`/`dispatch_ready_task()`/`retry_task()` -- deliberately reusing the lock
+    idiom that module's own hardening pass already established, not inventing a second one.
+    A concurrent `cancel_task()` attempting to lock the SAME task row blocks until this
+    function's caller's transaction ends (commit or rollback); whichever side acquires the
+    lock first determines the outcome the other side sees once it proceeds. This is the
+    smallest correct primitive for "prevent a revoked authorization from being accepted at
+    the execution boundary": as long as whatever eventually performs the real effect stays
+    inside the SAME transaction as this check (never committing in between), no concurrent
+    revocation can land between the check and the effect. See
+    tests/backend/mainai/test_workforce_task_authorization_concurrency.py for the genuine
+    two-connection proof, mirroring the pattern PR #379 already established for Blueprint's
+    own TOCTOU-safe approval (`test_blueprint_approval_concurrency.py`)."""
     task_id_raw = (assignment.provenance or {}).get("mainai_task_id")
     if not task_id_raw:
         raise ProviderActivationBlocked("assignment has no linked MainAI task -- fails closed, never treated as pre-approved")
@@ -195,7 +214,13 @@ def require_live_task_authorization_for_workforce_dispatch(db: Session, *, owner
 
     # Filtered by owner_id in the query itself (not compared only after fetching) -- an
     # explicit tenant boundary at the application layer, defense-in-depth alongside RLS.
-    task = db.query(MainAITask).filter(MainAITask.id == task_id, MainAITask.owner_id == owner_id).first()
+    # with_for_update(): see the transactional-authorization note above.
+    task = (
+        db.query(MainAITask)
+        .filter(MainAITask.id == task_id, MainAITask.owner_id == owner_id)
+        .with_for_update()
+        .first()
+    )
     if task is None:
         raise ProviderActivationBlocked(f"linked task {task_id} does not resolve to a real task owned by this tenant -- fails closed")
 
