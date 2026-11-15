@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 
 from app.rag import library_import
-from app.rag.extract_isolated import ExtractionIsolationError, extract_text_isolated
+from app.rag.extract_isolated import (
+    ExtractionIsolationError,
+    ParserServiceUnavailableError,
+    extract_text_isolated,
+)
 
 
 def test_runtime_import_path_is_bound_to_isolated_extractor() -> None:
@@ -200,3 +204,19 @@ def test_production_fails_closed_when_isolated_parser_is_unconfigured(monkeypatc
 
     with pytest.raises(ExtractionIsolationError, match="not configured"):
         extract_text_isolated("input.txt", b"secret document")
+
+
+def test_configured_parser_outage_is_fail_closed_and_retryable(monkeypatch) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("PARSER_SOCKET_PATH", "/run/lifeai-parser/not-running.sock")
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("production must not fall back to local parsing"),
+    )
+
+    with pytest.raises(ParserServiceUnavailableError, match="unavailable") as exc_info:
+        extract_text_isolated("input.txt", b"source bytes")
+
+    assert isinstance(exc_info.value, ExtractionIsolationError)
+    assert isinstance(exc_info.value, ConnectionError)

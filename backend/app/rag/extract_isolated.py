@@ -28,6 +28,10 @@ class ExtractionIsolationError(RuntimeError):
     """The isolated parser failed without exposing parser internals or host paths."""
 
 
+class ParserServiceUnavailableError(ExtractionIsolationError, ConnectionError):
+    """The configured parser transport is unavailable and may recover on retry."""
+
+
 def _child_environment() -> dict[str, str]:
     # Intentionally do not inherit database URLs, provider keys, Founder credentials,
     # proxy variables, Python paths, or credential-helper configuration.
@@ -64,7 +68,7 @@ def _extract_via_socket(filename: str, raw: bytes, socket_path: str, timeout_sec
                         raise ExtractionIsolationError("Parser output exceeds the hard size limit.")
                     output.extend(chunk)
     except httpx.HTTPError as exc:
-        raise ExtractionIsolationError("Isolated parser service is unavailable.") from exc
+        raise ParserServiceUnavailableError("Isolated parser service is unavailable.") from exc
     try:
         return output.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
