@@ -9259,5 +9259,48 @@ work-candidate-fragmenteringskontrollen och #323/#394-fyndet är fortfarande red
 ska återanvändas, inte göras om). Grundarens fyra prioriteter från "RESUME ACTIVE DEVELOPMENT
 WHEN CAPACITY IS AVAILABLE" är nu alla levererade: #440 (P2), #441 (P1), #442 (P3), #443 (P4).
 
+## Grundardirektiv "CONTINUE ACTIVE ENGINEERING" (2026-11-15) — fyra nya uppföljningar levererade
+
+**Priority 1 (på #440, commits `1e38c400`):** djupare säkerhetsverifiering av
+`system_activation_authorizations`-kompositionen. Ny testfil
+`test_system_activation_authorizations_composition_security.py`: UPDATE/DELETE-nekande för
+`mainai_app` (endast INSERT var tidigare bevisat), strukturell frånvaro av BÅDE `owner_id`-
+kolumn och RLS-policy (verifierat mot den riktiga Postgres-katalogen), funktionellt bevis att
+`current_system_activation()` är genuint global oavsett vilken ägare sessionen är satt till,
+riktad enstaka-migrations-upp/ner-rundtur, privilegie-replay-idempotens, och att
+komposition av alla fyra kandidaterna INTE breddar privilegier på orelaterade tabeller
+(`work_candidates`, `document_source_units`, `message_source_units`). **Kompatibilitet med
+Codex:s lineage (#412/#413) verifierad direkt** — deras `0070`–`0074`-filer använder fulla
+beskrivande revisionssträngar (`"0070_blueprint_drafts"` etc.), ALDRIG bara `"0070"`/`"0071"`/
+`"0072"` — enda faktiska strängkollisionen mellan kedjorna är den redan dokumenterade `"0069"`
+själv. Ingen ny kollision upptäckt.
+
+**Priority 2 (på #443, commit `46ea907a`):** utökad edge-case-täckning,
+`test_first_supervised_development_cycle_edge_cases.py` — alla sju namngivna scenarier
+(oauktoriserade kandidater kan inte exekvera; avvisade/återkallade godkännanden stängs;
+checkpoint-återhämtning vid omstart; dubbletter dedupliceras; bevis länkar till exakt källa +
+godkännande-händelse; ägarisolering; misslyckanden skapar aldrig falska completed-händelser).
+"Expired approval" MEDVETET utelämnad, dokumenterad ärligt — inget utgångsfält finns på
+uppgiftsnivå-godkännande (bara på `SystemActivationAuthorization`, redan täckt).
+
+**Priority 3 (ny PR #444, draft):** `docs/LIFE_DURABLE_WORKSPACES_GAP_ANALYSIS.md` —
+begränsad dokumentations-/gap-analys (INGEN byggbehörighet) för framtida "Durable Life
+Workspaces". Flaggar en namnkollision FÖRST (`app/routers/workbench.py` finns redan som en
+orelaterad engångs-AI-analysendpoint) — använder "Life Workspace" genomgående istället.
+Jämför grundarens åtta krav mot Active Context, MainAI-checkpoints, Memory Threads och
+exekveringsarkitekturen — sex av åtta redan fullt täckta genom återanvändning av befintliga
+primitiv; två genuina luckor registrerade (ingen enda adresserbar enhet grupperar en
+ActiveContextSet + dess mål/uppgift + en arbetsyta-nivå checkpoint; ingen källändrings-
+detektering på arbetsyta-nivå) — INGET byggt, båda namngivna som framtida, separat granskat
+arbete.
+
+**Priority 4 (addendum på #442, commit `d0c669ad`):** delta-ominverifiering av hela
+kombinationen med denna omgångs nya commits + #444 — samma två redan-förstådda
+dokument-tilläggskonflikter, NOLL riktiga kod-/schemakonflikter, `alembic heads` oförändrat
+enda huvud (`0072`), ren compile/import/ruff. Uppdaterar BEFINTLIGT dokument, skapar INGET
+nytt planeringsdokument (per direktivets egen instruktion).
+
+**Ingen merge/deploy/aktivering någonstans. `first_cycle_go=false` genomgående.**
+
 `first_cycle_go=false` genomgående. Inget väntande arbete begärt förrän grundaren säger
 annat.
