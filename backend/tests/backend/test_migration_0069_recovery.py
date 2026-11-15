@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
 import psycopg2
+import pytest
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 RECOVERY_SCRIPT = BACKEND_ROOT / "scripts" / "migrations" / "recover_0069_dual_version.py"
@@ -258,3 +259,63 @@ def test_recovery_refuses_pr237_exact_0069_semantics_as_unsupported():
                 assert cursor.fetchall() == [(ANCESTOR,)]
                 cursor.execute("SELECT to_regclass('mainai_stop_state')")
                 assert cursor.fetchone()[0] == "mainai_stop_state"
+
+
+@pytest.mark.parametrize(
+    ("corruption_sql", "reason_fragment"),
+    [
+        (
+            "ALTER TABLE document_chunks ALTER COLUMN embedding_native_dim TYPE text "
+            "USING embedding_native_dim::text",
+            "type/nullability/default fingerprint",
+        ),
+        (
+            "ALTER TABLE document_chunks ALTER COLUMN embedding_model SET NOT NULL",
+            "type/nullability/default fingerprint",
+        ),
+        (
+            """
+            ALTER TABLE provider_disclosure_events
+                DROP CONSTRAINT ck_provider_disclosure_events_decision,
+                ADD CONSTRAINT ck_provider_disclosure_events_decision
+                    CHECK (decision IN ('allowed', 'denied', 'local', 'forged'));
+            """,
+            "complete validated canonical 0069 definitions",
+        ),
+        (
+            """
+            ALTER TABLE provider_disclosure_events
+                DROP CONSTRAINT ck_provider_disclosure_events_decision,
+                ADD CONSTRAINT ck_provider_disclosure_events_decision
+                    CHECK (decision IN ('allowed', 'denied', 'local')) NOT VALID;
+            """,
+            "complete validated canonical 0069 definitions",
+        ),
+        (
+            "CREATE TABLE mainai_stop_state (id uuid PRIMARY KEY)",
+            "conflicting PR #237 STOP history",
+        ),
+    ],
+)
+def test_recovery_rejects_structural_or_conflicting_history_without_mutation(
+    corruption_sql, reason_fragment
+):
+    with _disposable_database("lifeai_dual_0069_structural_refusal") as database_url:
+        _run_alembic(database_url, "upgrade", DESCENDANT)
+        _make_dual_version(database_url)
+        with psycopg2.connect(database_url) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(corruption_sql)
+
+        refused = _run_recovery(database_url, "--apply", expected_returncode=2)
+        assert refused["status"] == "refused"
+        assert reason_fragment in refused["reason"]
+        with psycopg2.connect(database_url) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT version_num FROM alembic_version ORDER BY version_num")
+                assert cursor.fetchall() == [(ANCESTOR,), (DESCENDANT,)]
+                cursor.execute(
+                    "SELECT count(*) FROM audit_log "
+                    "WHERE action = 'migration_recovery_0069_dual_version'"
+                )
+                assert cursor.fetchone() == (0,)
