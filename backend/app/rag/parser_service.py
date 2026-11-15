@@ -51,8 +51,8 @@ async def extract_document(request: Request) -> Response:
 
 
 def main() -> None:
-    _SOCKET_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(_SOCKET_PATH.parent, 0o700)
+    _SOCKET_PATH.parent.mkdir(mode=0o710, parents=True, exist_ok=True)
+    os.chmod(_SOCKET_PATH.parent, 0o710)
     try:
         _SOCKET_PATH.unlink()
     except FileNotFoundError:
@@ -62,7 +62,7 @@ def main() -> None:
     server = uvicorn.Server(config)
     uds_socket = config.bind_socket()
     try:
-        os.chmod(_SOCKET_PATH, 0o600)
+        os.chmod(_SOCKET_PATH, 0o660)
         server.run(sockets=[uds_socket])
     finally:
         uds_socket.close()

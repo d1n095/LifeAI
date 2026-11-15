@@ -55,6 +55,7 @@ services:
     build: ./backend
     image: lifeai-parser:local
     restart: unless-stopped
+    user: "10002:10001"
     entrypoint: ["python", "-m", "app.rag.parser_service"]
     environment:
       LANG: C.UTF-8
@@ -137,4 +138,4 @@ volumes:
     driver_opts:
       type: tmpfs
       device: tmpfs
-      o: size=1m,uid=10001,gid=10001,mode=0700
+      o: size=1m,uid=10002,gid=10001,mode=0710

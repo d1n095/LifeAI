@@ -131,9 +131,10 @@ services:
   parser:
     # Secretless parser boundary. The Unix socket is the only shared resource with the
     # application; network_mode none gives the parser neither Internet nor service-network
-    # access. Separate container PID/mount namespaces prevent same-UID /proc inspection of
-    # backend/worker processes. No env_file, database/Redis credentials, or upload volume.
+    # access. A distinct UID plus separate container PID/mount namespaces prevent /proc
+    # inspection of backend/worker processes. No env_file, credentials, or upload volume.
     image: ${BACKEND_IMAGE:?sätt BACKEND_IMAGE i /etc/lifeai/lifeai.env, t.ex. ghcr.io/d1n095/lifeai-backend@sha256:...}
+    user: "10002:10001"
     entrypoint: ["python", "-m", "app.rag.parser_service"]
     restart: unless-stopped
     init: true
@@ -573,7 +574,7 @@ volumes:
     driver_opts:
       type: tmpfs
       device: tmpfs
-      o: size=1m,uid=10001,gid=10001,mode=0700
+      o: size=1m,uid=10002,gid=10001,mode=0710
   # Founder Alpha local models (ollama). Persistent so pulled/provisioned models survive
   # restarts without re-pulling (and so the no-egress runtime never needs to). MUST be added to
   # scripts/vps/backup.sh/restore.sh alongside the other named volumes.
