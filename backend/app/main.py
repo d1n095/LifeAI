@@ -17,6 +17,7 @@ from app.routers import (
     admin,
     agents,
     auth,
+    calendar,
     chat,
     conversations,
     documents,
@@ -31,6 +32,7 @@ from app.routers import (
     project_entities,
     projects,
     provider_spend,
+    session_context,
     workbench,
 )
 from app.scheduler import start_scheduler, stop_scheduler
@@ -65,6 +67,7 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(account.router)
+app.include_router(calendar.router)
 app.include_router(chat.router)
 app.include_router(conversations.router)
 app.include_router(documents.router)
@@ -79,6 +82,7 @@ app.include_router(mainai_jobs.router)
 app.include_router(mainai_execution.router)
 app.include_router(project_entities.router)
 app.include_router(inspectable_memory.router)
+app.include_router(session_context.router)
 app.include_router(execution_envelopes.router)
 app.include_router(provider_spend.router)
 
