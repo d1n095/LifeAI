@@ -8671,3 +8671,31 @@ istället för att lita på ett tidigare beräknat beslut (samma doktrin
 **Rör INTE:** `ProviderActivationBlocked`s ovillkorliga raise (sista raden, oförändrad),
 `coordination_assignment_id`, `first_cycle_go` (förblir `false`), någon migration, någon
 annan PR:s egna branch/commits.
+
+### PR #429 — `claude/blueprint-379-401-reconciliation-evidence` — Priority 2 (grundardirektiv 2026-11-15): körbara kompatibilitetsbevis för Blueprint-kollisionen
+
+**Status: draft, CI väntas. Ej mergad. RÖR INTE #379:s eller #401:s egna branches** —
+grundaren instruerade explicit "do not merge the branches without independent review and
+authorization." Samma `test_migration_0069_candidate_compatibility.py`-mönster (PR #417)
+återanvänt: fixture-ögonblicksbild (exakta SHA:n), inte en levande cross-branch-kontroll
+(CI:s shallow checkout skulle göra den skör och självinvaliderande).
+
+**Omverifierat direkt mot båda riktiga branches** (inte återanvänt oförändrat från den
+tidigare forskningsomgången): `git merge-base` bekräftar #340 (`add0da83`) som exakt
+gemensam förfader till #379 (`5685926d`) och #401 (`7a83cf72`). Den riktiga konflikten är
+exakt två hunkar: `generate_blueprint_draft()`s signatur får ETT oberoende, optionellt
+keyword-argument på varje sida (`open_questions` vs `extra_provenance`); det delade
+import-blocket i `routers/blueprint.py` får icke-överlappande namn på varje sida.
+
+**Korrigering av den tidigare, mindre precisa registeranteckningen** ("båda staplarna
+skriver TUNGT om `approve_blueprint_draft()`"): omdiffat båda PR:erna direkt mot
+#340 — endast #379 rör den funktionens kropp; #401 gör det aldrig.
+
+**5 nya tester** (`backend/tests/backend/test_blueprint_379_401_reconciliation_evidence.py`,
+behöver ingen DB-fixture — körda direkt som vanlig Python i den här sandlådan, alla gröna):
+de två kwargen är verkligt oberoende; en RIKTIGT konstruerad sammanslagen signatur accepterar
+BÅDA PR:ernas egna, infångade anropsplatser (riktig Python-argumentbindning, inte en
+textjämförelse); import-namnen har noll överlapp bortom det de redan delade innan;
+`approve_blueprint_draft`-korrigeringen ovan som körbar assertion; den exakta
+rekonciliationsordningen dokumenterad (gren från #401, mergea in #379, behåll båda kwargen,
+behåll unionen av imports, kör om befintliga testsviter oförändrat) — INTE utförd här.
