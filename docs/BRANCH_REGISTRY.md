@@ -9191,6 +9191,32 @@ concurrency/atomicitet-påståendena (inte bara "testerna passerar"), och vad so
 **Utför INGEN oberoende granskning själv, mergar/rebasar/omnumrerar INGET, auktoriserar INGEN
 produktionsaktivering.** `first_cycle_go=false`.
 
+## PR #442 — `claude/p3-integration-verification-evidence` (ny, draft) — Priority 3, verifierad kombinationstestning
+
+Samma grundardirektiv, Priority 3: "Move beyond documentation into executable integration
+verification... Use disposable branches... Identify conflicts, missing dependencies and
+genuine failures."
+
+**Faktiskt genomfört, inte bara dokumenterat:** byggde en engångsbranch (ALDRIG pushad —
+dess 8-vägs merge-diff hade varit 68 filer/~14 300 rader och hade felaktigt sett ut som ett
+riktigt ändringsförslag) som mergade, i #441:s rekommenderade ordning: #323 → kedja A:s topp
+(#423+428+431+433+436) → #440 (0069-komposition) → kedja B:s topp
+(#430+432+435+437+438+439) → #424 → #429.
+
+**Resultat: EN trivial konflikt (dubbel tillägg i `docs/BRANCH_REGISTRY.md`, ren textdivergens,
+inte semantisk), NOLL riktiga kod-/schemakonflikter.** Testade specifikt den risk som faktiskt
+fanns att hitta: om #440:s omnumrering (0069→0072) komponerar säkert med kedja B:s egen
+historia (som fortfarande har #437:s ORIGINAL-namngivna 0069-fil) — löstes rent via gits egen
+modified/unchanged-trevägslogik, inget manuellt ingrepp behövdes.
+
+**Efterverifiering på den sammanslagna trädet:** `alembic heads` → enda huvud (`0072`), hela
+backend-trädets `compileall` rent, app-import rent, `ruff check` på alla 49 ändrade
+Python-filer ger fynd som matchar exakt summan av varje käll-PR:s egna redan accepterade
+baslinje — inget nytt introducerat av själva kombinationen.
+
+**Ingen riktig merge/rebase/omnumrering utfördes. Inget fel hittades, så inget att reparera.**
+`first_cycle_go=false`.
+
 **Vid återupptagande:** fortsätt från detta verifierade repo-tillstånd — läs detta register
 och öppna PR:er FÖRST (standardbeteendet CLAUDE.md redan kräver) — upprepa INTE redan
 slutförda utredningar (0069-kollisionsanalysen för #408/#403/#411/#437 är nu LÖST av #440,
