@@ -8859,3 +8859,52 @@ rader), rapporterat SEPARAT, INTE sammanslaget med den stabila 158-post-baslinje
 stabilitetsskäl Pass 1 redan uteslöt den för). Namngivet explicit som fortfarande ej
 skannat: PR-beskrivningar/commit-historik, källkod, externt grundarmaterial,
 åtkomstgränser för framtida privata dokument.
+
+### PR #433 — `claude/agent-coordination-dispatch-authorization-boundary` — Priority 1 (grundardirektiv "CONTINUE ACTIVE ENGINEERING"): atomisk auktorisering genom den RIKTIGA dispatch-anropet
+
+**Status: draft, CI väntas. Ej mergad.** Staplad ovanpå #431 via riktig `git merge` — #431:s
+EGNA branch orörd. Stänger den del av `docs/LIFE_WORKFORCE_AUTHORIZATION_RACE_WINDOW.md` §1
+som #431 medvetet INTE stängde: `app.agent_coordination.dispatch_assignment()` — den enda av
+de två namngivna vägarna som redan gör ett RIKTIGT externt anrop idag
+(`await adapter.start_assignment()`), till skillnad från workforce-vägen där ingenting
+riktigt dispatchas ännu.
+
+**Ny funktion** `app.mainai_execution.approval.require_live_task_approval_for_dispatch()` —
+tar ett riktigt `SELECT ... FOR UPDATE`-lås på den länkade `MainAITask`-raden (samma idiom som
+`_lock_task()`/#431:s workforce-grind), omkontrollerar task-liveness + godkännande mot den
+LÅSTA, aktuella raden. `dispatch_assignment()` anropar den omedelbart före
+`waiting_agent`-övergången och adapter-anropet.
+
+**Medveten designbeslut, inte ett förbiseende:** låset hålls RUNT `await
+adapter.start_assignment()`. Jag läste den enda riktiga `AgentAdapter`-implementationen
+(`LocalCLIAdapter.start_assignment()`) och bekräftade att den bara anropar
+`asyncio.create_subprocess_exec` och returnerar — väntar ALDRIG på agentens faktiska arbete
+(det sker senare, via `collect_result()`, helt utanför denna transaktion). Så fönstret är
+begränsat till "tid att starta en process", inte "tid att göra arbetet" — INTE det
+"onödigt långlivat lås över ett externt leverantörsanrop"-mönster grundardirektivet varnade
+för. Om en framtida adapter-implementation blir långsam/blockerande måste detta omprövas
+(lease/fencing-token) — namngivet explicit som ett framtida villkor att bevaka, inte ett
+nuvarande fel.
+
+**Bevis** (`test_agent_dispatch_authorization_boundary.py`, 10 tester, riktig Postgres,
+uppskjutet till CI — ingen lokal Postgres i sandlådan, bekräftat via `pg_isready`): riktig
+end-to-end-TOCTOU-reproduktion genom det FAKTISKA `dispatch_assignment()`-anropet (tidigare
+`evaluate_dispatch_readiness()`-kontroll passerar, task avbryts äkta via `cancel_task()`,
+`dispatch_assignment()` avvisar fortfarande, adaptern anropas aldrig); timing-test som gör
+lås-fönstret under det riktiga adapter-anropet observerbart från en genuint separat
+Postgres-anslutning; liveness-test som visar att två olika tasks' lås ALDRIG konkurrerar
+(rad-nivå, inte tabell-nivå); samma tre genuina två-anslutnings-bevis #431 redan etablerade
+(konkurrerande workers, rollback/retry, revocation vs. dispatch) givna igen för denna väg;
+ett anrop av den RIKTIGA produktionsfunktionen (inte bara en speglad rå-SQL-primitiv).
+`ruff check`: noll nya fynd i båda ändrade produktionsfilerna jämfört med varje fils
+pre-edit-baslinje.
+
+**Explicit INTE stängt, namngivet för att inte misstas för löst:** den SEPARATA
+dubbel-dispatch-racen på samma `AgentWorkAssignment`-rad (två konkurrerande
+`dispatch_assignment()`-anrop för SAMMA assignment — en dispatch-idempotens-lucka, inte en
+auktoriseringsbypass; förexisterande, utanför scope). `docs/LIFE_WORKFORCE_AUTHORIZATION_
+RACE_WINDOW.md` uppdaterad för att visa #431:s workforce-fix (primitiv-nivå, oförändrad) och
+denna PR:s agent_coordination-fix (fullständig end-to-end för auktoriseringsdimensionen) som
+två tydligt åtskilda resultat.
+
+**Rör INTE** `app.workforce` eller #431:s egen branch alls.
