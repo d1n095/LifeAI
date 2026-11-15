@@ -9054,3 +9054,35 @@ Kedja A i strikt ordning (#419→423→428→431→433→436), sedan Kedja B i s
 explicit — ingen branch rebasas i förväg.
 
 **Rör INTE** någon av de granskade PR:erna/brancherna.
+
+### PR #439 — `claude/first-supervised-development-cycle-spec` — Priority 4 (grundardirektiv "CONTINUE MAINAI INTEGRATION"): Life:s första övervakade utvecklingscykel — specifikation
+
+**Status: draft, CI väntas. Ej mergad.** Staplad ovanpå #438 via riktig `git merge` — #438:s
+EGNA branch orörd. **Specifikation och verifieringsplan ENDAST — aktiverar INGET.**
+`first_cycle_go` förblir `false`.
+
+**Den enda inramningsbeslutet, uttalat direkt:** den säkraste, minsta, mest
+återanvänd-befintlig-arkitektur-versionen av "första cykeln" formaliserar exakt den process
+den här sessionen redan har utfört manuellt hela tiden — som riktiga `MainAIGoal`/
+`MainAITask`/`MainAITaskEvent`-rader istället för bara en chatt-transkript — snarare än att
+aktivera `app.workforce`:s eller `app.agent_coordination`:s vilande automatiska
+dispatch-vägar. Steg 6 ("exekverar endast inom godkänt omfång") uppfylls av en
+människo-styrd Claude Code-session som arbetar under ett riktigt, registrerat godkännande —
+inte av en automatiserad adapter-dispatch.
+
+**Kartläggning av grundarens 8 steg mot BEFINTLIGA primitiv:** 5 av 8 redan fullt byggda OCH
+redan utövade av den här sessionen själv (läs GitHub, källbaserat förslag, begär
+auktorisering, samla bevis, presentera för granskning); 2 genuint obyggda, namngivna inte
+byggda (extraktion→KnowledgeClaim-kopplingen #437 redan namngav; en formell
+sessions-till-task-koppling); 1 (identifiera PROBLEMET) medvetet människo-grindat, inte
+automatiserat — citerar denna sessions egna uppmätta klassificerare-falsk-positiv-frekvenser
+(upp till 70% för den största kategorin) som skälet.
+
+**Rör INTE** `first_cycle_go`, någon aktiveringsgrind, eller väljer ett tekniskt problem på
+egen hand.
+
+---
+
+**Sammanfattning av denna omgång ("CONTINUE MAINAI INTEGRATION"):** fyra prioriteter, fyra
+PR:er (#433 slutverifierad grön, #436, #437, #438, #439 — fem PR:er egentligen, #433 var
+redan öppen). Ingen merge utförd. `first_cycle_go=false` genomgående.
