@@ -8764,3 +8764,33 @@ korpus), full semantisk kravextraktion via den riktiga ingestion-pipelinen.
 
 **PR #424:s tre uppskjutna produktområden promotas INTE till någon `ProjectEntity`-rad** —
 förblir exakt lika uppskjutna som #424 redan deklarerade.
+
+### Uppdatering 2026-11-15 — PR #428: riktigt CI-fel hittat+fixat, PLUS olöst concurrency-fynd dokumenterat (grundardirektiv "Complete Current Verification Before New Work")
+
+**Riktigt CI-fel (inte drift), hittat och fixat:** `Backend — unit/integration tests` på
+head `4c8b283f` gav `1 failed, 2288 passed` —
+`test_execution_authority_convergence_gap.py`s (ärvt från #423) gamla "gap"-test påstod att
+godkännande saknar effekt på workforce-dispatch; det stämde FÖRE den här PR:ns egen fix och
+är FALSKT efter den, eftersom fixen är exakt det som gör godkännande relevant. Döpt om och
+assertions uppdaterade i commit `4ea2cfdd` för att matcha verkligheten (före godkännande:
+"requires founder approval"; efter: träffar den oförändrade staged-raisen).
+
+**Nytt, explicit odokumenterat säkerhetsfynd (grundardirektiv Priority 2) — INTE löst, INTE
+påstått löst:** `docs/LIFE_WORKFORCE_AUTHORIZATION_RACE_WINDOW.md` (commit `404ec771`)
+dokumenterar att auktorisationskontrollen INTE är atomär med dispatchen. Verifierat direkt i
+koden: samma olåsta läs-sedan-agera-mönster finns REDAN i
+`app.agent_coordination.dispatch_assignment()` (`dispatch.py:187-256`) och
+`transition_status()` (`service.py:465-488`, jämför mot det in-memory-objektets AKTUELLA
+status, inte en färsk låst omläsning) — INTE workforce-specifikt, INTE introducerat av den
+här PR:n. För workforce idag specifikt: den ovillkorliga `ProviderActivationBlocked`-raisen
+gör att inget meningsfullt händer mellan grindens läsning och funktionens retur — så
+fönstret är reellt i princip men saknar konsekvens idag, av en tillfällighet, inte en
+avsiktlig motåtgärd mot just den här racen. Fyra kandidatlösningar namngivna (radlås,
+villkorlig atomär UPDATE, optimistisk versionskolumn, scoped advisory lock) UTAN att välja
+någon; de verkliga concurrency-testerna (riktiga separata databasanslutningar, inte
+sekventiell simulering) namngivna men INTE skrivna — de skulle vara tautologiska utan en
+mekanism att testa mot först.
+
+**TOCTOU-testet (`test_gate_always_rechecks_fresh_state_not_an_earlier_decision`) bevisar
+INTE atomicitet** — bara sekventiell omkontroll-säkerhet. Det här skiljs nu explicit åt i
+dokumentationen, per grundarens direktiv.
