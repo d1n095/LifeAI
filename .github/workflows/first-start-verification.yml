@@ -112,6 +112,7 @@ jobs:
           ref: ${{ env.CAND_TRUNK_BRANCH }}
           path: candidate
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Reconstruct integration candidate (deterministic, tree-verified)
         id: sha

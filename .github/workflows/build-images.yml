@@ -7,25 +7,27 @@ name: Build & push VPS images
 # && docker compose up -d` on the VPS himself. That manual step is the ONLY thing that ever
 # changes what the VPS actually runs — this workflow only ever populates the registry.
 #
-# Triggers on push to `main` (building/pushing an image to a registry is a safe, reversible,
-# non-deploying action) and manually via workflow_dispatch. It intentionally does NOT trigger
-# on push to claude/** branches like ci.yml does — there is no reason to publish an image for
-# every WIP branch push, only for what's actually on main.
+# Triggers only on push to `main` (building/pushing an image to a registry is a safe,
+# reversible, non-deploying action). Manual dispatch is intentionally disabled so an
+# unreviewed branch cannot run workflow code with package-write access.
 on:
   push:
     branches: [main]
-  workflow_dispatch: {}
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   build-backend:
     name: Build & push backend image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -51,8 +53,13 @@ jobs:
   build-frontend:
     name: Build & push frontend image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
