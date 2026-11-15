@@ -73,6 +73,50 @@ def test_child_receives_no_parent_secrets_or_attacker_filename(
     assert Path(captured["cwd"]).name == "backend"
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="Same-UID parser child can read parent process environment via procfs.",
+)
+def test_parser_child_cannot_read_parent_environment_through_procfs() -> None:
+    backend_root = Path(__file__).resolve().parents[3]
+    canary = "PARSER_PARENT_CANARY=synthetic-value"
+    probe = (
+        "import os, sys\n"
+        "try:\n"
+        "    parent_env = open(f'/proc/{os.getppid()}/environ', 'rb').read()\n"
+        "except OSError:\n"
+        "    sys.stdout.write('denied')\n"
+        "else:\n"
+        f"    sys.stdout.write({'visible'!r} if {canary.encode()!r} in parent_env else 'denied')\n"
+    )
+    harness = (
+        "import subprocess, sys\n"
+        "real_popen = subprocess.Popen\n"
+        "def simulated_parser(_command, **kwargs):\n"
+        f"    return real_popen([sys.executable, '-c', {probe!r}], **kwargs)\n"
+        "subprocess.Popen = simulated_parser\n"
+        "from app.rag.extract_isolated import extract_text_isolated\n"
+        "sys.stdout.write(extract_text_isolated('probe.txt', b'synthetic input'))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", harness],
+        cwd=backend_root,
+        env={
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": os.environ.get("PATH", ""),
+            "PYTHONPATH": str(backend_root),
+            canary.partition("=")[0]: canary.partition("=")[2],
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "denied"
+
+
 def test_stderr_warning_flood_is_discarded_instead_of_buffered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
