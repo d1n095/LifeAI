@@ -8350,3 +8350,18 @@ förlegen och ocertifierad, se ovan).
 
 **Koordinering:** Cursors 81 PR:er och Codex 27 triagerade endast på titel (utanför mitt
 mandat per grundardirektivet); inga filer delas med Codex/Copilot/Cursors ägda lanes.
+
+### Känd, FÖRVÄNTAD migration-revision-kollision: `0069` (flaggas, fixas INTE i förväg)
+
+Mina EGNA PR #408 (`0069_system_activation_authorization.py`) och #411
+(`0069_calendar_foundation.py`) deklarerar BÅDA `revision = "0069"`, `down_revision = "0068"`
+— eftersom båda grenades oberoende från samma dev-bas (`0068`-huvudet) innan den andra
+mergats. Det här är INTE ett misstag att fixa nu — det är exakt det mönster
+"Merge-regeln" (`CLAUDE.md`) beskriver: rebasa/omnumrera FÖRST när det faktiska beroendet
+(vem som mergas först) är känt, aldrig i förväg "för säkerhets skull". Bekräftat att detta är
+ett redan AKTIVT, pågående Codex-ansvar: `codex/founder-alpha-0069-security-remediation`
+(PR #412) innehåller redan TVÅ egna `0069_*.py`-filer
+(`0069_embedding_space_identity.py`, `0069_provider_disclosure_local_decision.py`) från
+tidigare kollisioner i samma nummerserie — Codex äger migration-remediation (grundardirektivet
+2026-11-15) och är redan mitt i exakt den här klassen av problem. Flaggas här för synlighet
+tills det löses vid faktisk mergeordning, rörs inte proaktivt av mig.
