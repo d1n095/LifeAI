@@ -75,14 +75,50 @@ were verified. The route source used for this stress run had SHA-256
 
 After restarting Redis, it became healthy and returned `PONG`. After restarting PostgreSQL,
 `SELECT 1` succeeded using both the migration role and the derived `mainai_app` runtime role
-through the `lifeai-db` data-network alias. A post-restart HTTP import was not verified:
-the disposable founder credentials available in this reused test database returned 401, so
-no further login attempts were made. This does not establish a product authentication defect;
-it leaves post-restart end-to-end import recovery unverified. External host ingress,
-full-stack resource saturation beyond the measured 512 KiB concurrency case, database or
-Redis restart during active worker processing, remote backend Actions, and formal
-independent security acceptance also remain unverified. No production host, secrets, or
-user documents were used; `first_cycle_go=false`.
+through the `lifeai-db` data-network alias. The initial post-restart HTTP upload was not
+verified because the reused disposable founder credentials returned 401; no further login
+attempts were made during that test round. A later fresh disposable-stack run completed the
+post-restart HTTP flow and separately injected PostgreSQL loss during advisory-lock wait;
+details follow. External host ingress, full-stack resource saturation beyond the measured
+512 KiB concurrency case, database or Redis restart during active worker processing, remote
+backend Actions, and formal independent security acceptance remain unverified. No
+production host, secrets, or user documents were used; `first_cycle_go=false`.
+
+## #425 upload concurrency and restart recovery follow-up
+
+The existing disposable `lifeai_hardening` Compose stack used synthetic credentials and
+documents. Seven simultaneous same-owner upload submissions included four unique files,
+two identical-content submissions, and an over-compressed archive. The six ordinary
+submissions completed, identical content produced one document row, and the archive was
+rejected by the compression-ratio guard. A valid eight-file archive completed; its extracted
+originals and uploaded archive matched expected SHA-256 checksums.
+
+Worker recovery was exercised by terminating the worker process during archive processing,
+then replaying content: processing completed with 160 unique documents. A separate
+byte-identical archive replay after a worker crash completed both jobs with 110 unique
+document checksums and an intact uploaded-archive checksum. During an active 80-file archive
+import, terminating the parser process caused its container restart; the job completed after
+restart with 80 unique documents and the uploaded archive checksum intact. PostgreSQL and
+Redis/Valkey were also restarted; both became healthy, and authenticated Caddy-proxied
+upload, indexing, and exact original download succeeded afterward.
+
+Advisory-lock interruption was tested with a deterministic 497,024-byte text payload whose
+SHA-256 was
+`f8fc0dada21d34f1c9e11298447c94fc5ece56cafa4233ea454594167e623b26`. While an authenticated
+upload waited on the owner's PostgreSQL advisory lock, the backend health endpoint continued
+to return HTTP 200. Restarting PostgreSQL caused the request to return HTTP 500; querying
+the disposable database and storage confirmed zero import jobs and no content-addressed blob
+for that checksum. Retrying the identical bytes after PostgreSQL became healthy completed
+indexing, and authenticated original retrieval returned bytes with the same SHA-256. This
+demonstrates failure without a partial stored upload and successful retry in this test
+topology; it does not prove that the entire worker/lease chain is safe under arbitrary
+database failover.
+
+The import endpoint is Founder-only, so cross-owner upload concurrency was not exercised.
+These tests used disposable synthetic data; they do not cover external host ingress,
+database/Redis restart while a worker is actively committing, sustained resource saturation,
+remote backend Actions, or formal independent security acceptance. No production
+credentials/documents were used; `first_cycle_go=false`.
 
 ## #416 integration failures and #413 coordination
 

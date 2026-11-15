@@ -16,21 +16,23 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 | `copilot/import-fence-test-corrections` | [#420](https://github.com/d1n095/LifeAI/pull/420) | **Open, draft; frozen at `31dd0cfe0a6127e21ea6bb9720f845da6cde155d`; locally verified, remote backend CI absent** | #413 at `23022662a78abb141792ea7439b715d670cdc640` | Test-only corrections; no production code changes. |
 | `copilot/import-security-validation-31dd0cf` | [#421](https://github.com/d1n095/LifeAI/pull/421) | **Open, draft; workflow SHA `f1de4ad417d1ac4c1252a36030c9d9ee0184cf3f`; run `43713479509` is `action_required`** | #420 at `31dd0cfe0a6127e21ea6bb9720f845da6cde155d` | Push-only, contents-read workflow checks out and verifies #420's fixed SHA; no secrets, deploy, or checkout credentials. |
 | `copilot/parser-proc-boundary-regression` | [#422](https://github.com/d1n095/LifeAI/pull/422) | **Open, draft; test SHA `d2f79d3132f9a9003557f2fb3199550c26987b50`; expected-failure containment reproducer** | #420 at `31dd0cfe0a6127e21ea6bb9720f845da6cde155d` | Test-only synthetic-canary proof that a same-UID parser child can read its parent environment through procfs; no production code changes. |
-| `copilot/parser-isolated-sidecar` | [#425](https://github.com/d1n095/LifeAI/pull/425) | **Open, draft; tested implementation commit `ce4d7de1dfe470cec8b8c965009393fd0b84de1d`; no merge/deploy** | #422 at `a4f6819fff04d6919d4b46b1c018ba38aad1ab88` | Parser UID/socket hardening, full-stack parser recovery, and 52 lease/import tests remain documented below. Three concurrent 512 KiB uploads completed after fixing the same-owner async-lock deadlock; exact network/restart evidence is in `docs/IMPORT_SECURITY_VALIDATION_MATRIX.md`. Remote backend Actions, external host ingress, post-restart HTTP import, sustained full-stack stress, and independent security acceptance remain unverified. |
+| `copilot/parser-isolated-sidecar` | [#425](https://github.com/d1n095/LifeAI/pull/425) | **Open, draft; tested implementation commit `ce4d7de1dfe470cec8b8c965009393fd0b84de1d`; no merge/deploy** | #422 at `a4f6819fff04d6919d4b46b1c018ba38aad1ab88` | Parser UID/socket hardening, full-stack parser recovery, 52 lease/import tests, same-owner concurrency and service-restart recovery are documented below. PostgreSQL loss during advisory-lock wait returned HTTP 500 without a job/blob; the identical-payload retry completed and checksum-verified original retrieval. Remote backend Actions, external host ingress, sustained full-stack stress, and independent security acceptance remain unverified. |
 
 **#425 latest verification update (implementation commit
 `ce4d7de1dfe470cec8b8c965009393fd0b84de1d`):** Disposable network probes confirmed that only Caddy
 publishes TCP 80/443, the local test PostgreSQL port is loopback-only, and frontend cannot
 resolve or connect to Redis/PostgreSQL on `lifeai_data`; `backend-internal` resolves to the
 backend's `lifeai_internal` address. Caddy can still reach backend directly on their shared
-network, while its configured route targets only frontend. Three concurrent 512 KiB
-uploads now complete and index with checksum verification and idempotent replay after
-correcting a reproduced async-route/advisory-lock event-loop deadlock. Redis restart/PING
-and PostgreSQL migration/runtime-role queries after restart passed. An HTTP import after
-PostgreSQL restart was not verified because the reused disposable founder credentials
-returned 401; no further authentication attempts were made. External host ingress,
-restart during active worker processing, sustained full-stack resource stress, remote
-backend Actions, and independent security acceptance remain open. See
+network, while its configured route targets only frontend. Concurrent same-owner uploads,
+duplicate reuse, archive integrity, worker crash/replay, parser restart during extraction,
+and authenticated HTTP upload/index/original retrieval after PostgreSQL and Redis restart
+passed in the disposable stack. Restarting PostgreSQL while an authenticated upload waited
+on its advisory lock yielded HTTP 500 with no import row or blob; retrying the same
+497,024-byte payload completed and original retrieval matched SHA-256
+`f8fc0dada21d34f1c9e11298447c94fc5ece56cafa4233ea454594167e623b26`. The health route
+remained HTTP 200 while the request waited. External host ingress, database/Redis restart
+during active worker commit, sustained full-stack resource stress, remote backend Actions,
+and independent security acceptance remain open. See
 `docs/IMPORT_SECURITY_VALIDATION_MATRIX.md`; these results do not change
 `first_cycle_go=false`.
 
