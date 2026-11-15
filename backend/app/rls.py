@@ -67,6 +67,14 @@ RLS_STATEMENTS = [
     # every owner-scoped table, matching the rest of this list.
     "ALTER TABLE messages ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE messages FORCE ROW LEVEL SECURITY",
+    # Founder calendar foundation (migration 0069, 2026-11-15) -- ordinary owner-scoped,
+    # mutable table (same simple tier as documents/conversations above, not the heavier
+    # append-only tier life_intents/_MAINAI_EXECUTION_TABLES use below -- the Founder must be
+    # able to edit or delete their own calendar events outright). Also enabled directly in the
+    # migration itself; listed here too so this idempotent reapply path stays the single
+    # source of truth for every owner-scoped table, matching the rest of this list.
+    "ALTER TABLE calendar_events ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE calendar_events FORCE ROW LEVEL SECURITY",
     # Life Source Foundation Bootstrap (migration 0037) — see docs/
     # LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md. source_import_batches/source_import_batch_failures
     # are ordinary owner-scoped tracking tables; message_source_units is S1C (docs/
@@ -164,6 +172,11 @@ POLICY_DEFINITIONS = [
         "table": "documents",
         "name": "documents_isolation",
         "expr": "uploaded_by = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "calendar_events",
+        "name": "calendar_events_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
     {
         "table": "knowledge_versions",

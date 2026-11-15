@@ -24,6 +24,7 @@ from app.models.active_context import (
     ContextMemberState,
 )
 from app.models.audit import AuditLog
+from app.models.calendar import CalendarEvent
 from app.models.capability_reality import (
     CAPABILITY_AUTHORITIES,
     CAPABILITY_OBSERVATION_EVENT_TYPES,
@@ -248,6 +249,7 @@ __all__ = [
     "ContextBasis",
     "ContextMemberState",
     "AuditLog",
+    "CalendarEvent",
     "CAPABILITY_AUTHORITIES",
     "CAPABILITY_OBSERVATION_EVENT_TYPES",
     "CAPABILITY_STATUSES",
