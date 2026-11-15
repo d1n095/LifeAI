@@ -56,6 +56,21 @@ a worker is actively committing, multi-owner upload stress (the endpoint is Foun
 sustained throughput, remote backend Actions, external host ingress and formal independent
 security acceptance remain unverified. This does not change `first_cycle_go=false`.
 
+**#425 prolonged-outage boundary:** the added route regression injects persistent DB lock
+failures in both upload and cleanup paths after blob publication. It verifies sanitized 503,
+retained hash/size-valid original, no job/temp file, then a same-owner retry completing one
+job; the complete route module passed 53 tests. The two-owner identical-content worker test
+also passed, verifying separate owner-scoped documents can safely share the same verified
+blob. These are route-boundary fault injection and worker-level concurrency, not a real
+prolonged PostgreSQL-service outage, active worker restart or multi-owner HTTP upload stress.
+The current pre-job canonical-write order has no durable owner/request intent when DB and
+cleanup are both unavailable. Therefore no safe age-based canonical-blob deletion/adoption
+is possible. The smallest proposed remedy is to use the existing ImportJob as a non-claimable
+`receiving` reservation and owner-scoped staging record before streaming; verify and promote
+from durable staging, then transition that same job to `pending`, retaining staging through
+the DB commit. This lifecycle is proposed only, not implemented or validated. See
+`docs/IMPORT_SECURITY_VALIDATION_MATRIX.md`; `first_cycle_go=false`.
+
 **Validation boundary:** #413's tests cover lease expiry during transactions, competing reclaim, stale writes, delayed completion, interrupted archive recovery, and a lock wait past expiry; parser coverage includes stderr flooding and process cleanup. Its run `43700873775` is `action_required` with zero jobs. To test that exact frozen code, #421 adds a dedicated push-only workflow with `contents: read`, no repository secrets, disabled checkout credentials, and a checkout SHA pinned to #420; GitHub also stopped this push event before scheduling jobs (`43713479509`, zero jobs). The Settings/Actions API returns 403, so the exact approval policy is unavailable to this installation. The one authorized maintainer action remains: inspect **Settings → Actions → General** and, if GitHub offers it, use **Actions → Import security regression tests (frozen SHA) → run 43713479509 → Approve and run**; do not change events or bypass protections. #420's local disposable PostgreSQL/Redis runs passed 58 worker/import/parser tests plus 9 Redis lock/fail-closed tests; its remote check list contains only Vercel. #416's exact integration run `43704034822` failed twice with two #413-lineage test defects: a missing `SessionLocal` import in a lock-thread test and an assertion that SQL NULL equals `[]`. Both test-only corrections are present in #420's fixed SHA and targeted tests pass there; #413 has been notified to carry those corrections and rerun. These corrections do not validate or certify lease-fencing correctness. #422's synthetic-canary test reproduces same-UID procfs exposure locally, not document-parser code execution in production. #425 now has disposable full-stack upload/index/search, parser-outage recovery, idempotency and archive partial-failure evidence, plus a separate PostgreSQL/Redis lease/import regression run. These remain local validation, not production security acceptance; remote backend Actions, external host ingress, sustained full-stack resource fault injection and independent acceptance remain unverified. See `docs/IMPORT_SECURITY_VALIDATION_MATRIX.md` for per-PR evidence. No merge, deployment, or activation is implied (`first_cycle_go=false`).
 
 ## Frontend npm-audit baseline-konsolidering (2026-10-31)

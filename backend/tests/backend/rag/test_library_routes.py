@@ -250,6 +250,58 @@ def test_import_database_failure_after_blob_write_reconciles_then_allows_retry(c
     assert superuser_db.query(ImportJob).filter_by(source_checksum=checksum).count() == 1
 
 
+def test_import_preserves_unreferenced_blob_when_database_stays_unavailable_then_retry_reuses_it(
+    client, monkeypatch, superuser_db
+):
+    import hashlib
+    import json
+
+    from sqlalchemy.exc import OperationalError
+
+    import app.routers.library as library_router
+    import app.storage.references as storage_references
+    from app.models.import_job import ImportJob
+    from app.storage import get_storage
+
+    csrf = _login(client)
+    original_lock = library_router.acquire_storage_key_lock
+    content = b"preserve uncertain original during prolonged database outage"
+    checksum = hashlib.sha256(content).hexdigest()
+
+    def _database_remains_unavailable(*_args, **_kwargs):
+        raise OperationalError("SELECT storage key lock", {}, RuntimeError("synthetic prolonged outage"))
+
+    monkeypatch.setattr(library_router, "acquire_storage_key_lock", _database_remains_unavailable)
+    monkeypatch.setattr(storage_references, "acquire_storage_key_lock", _database_remains_unavailable)
+    response = client.post(
+        "/api/library/import",
+        files={"file": ("prolonged-db-outage.txt", content, "text/plain")},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    storage = get_storage()
+    storage_key = f"{checksum[:2]}/{checksum}"
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "3"
+    assert "synthetic prolonged outage" not in response.text
+    assert superuser_db.query(ImportJob).filter_by(source_checksum=checksum).count() == 0
+    assert storage.verify(storage_key, expected_sha256=checksum, expected_size=len(content))
+    assert list((Path(os.environ["STORAGE_ROOT"]) / "tmp").iterdir()) == []
+
+    monkeypatch.setattr(library_router, "acquire_storage_key_lock", original_lock)
+    monkeypatch.setattr(storage_references, "acquire_storage_key_lock", original_lock)
+    retry = client.post(
+        "/api/library/import",
+        files={"file": ("prolonged-db-outage.txt", content, "text/plain")},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert retry.status_code == 200, retry.text
+    completed = _wait_for_job(client, retry.json()["id"])
+    assert completed["status"] == "completed", json.dumps(completed, sort_keys=True)
+    assert superuser_db.query(ImportJob).filter_by(source_checksum=checksum).count() == 1
+    assert storage.verify(storage_key, expected_sha256=checksum, expected_size=len(content))
+
+
 def test_postgres_disconnect_during_job_commit_rolls_back_row_and_reconciles_blob(client, monkeypatch, superuser_db):
     import hashlib
 

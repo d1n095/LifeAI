@@ -162,6 +162,59 @@ is pinned to the single Founder identity. Four-way same-owner duplicate concurre
 this is not a sustained throughput or multi-owner stress result. No production data or
 credentials were used; `first_cycle_go=false`.
 
+### Prolonged-outage preservation and missing recovery invariant
+
+The regression `test_import_preserves_unreferenced_blob_when_database_stays_unavailable_then_retry_reuses_it`
+injects persistent `OperationalError`s in both the request's storage-key lock and the
+canonical cleanup lock after the content-addressed write. It verified a sanitized 503, no
+ImportJob row, no temp upload file, and a final blob whose SHA-256 and size match the
+synthetic original. Restoring database access and retrying the same bytes for the same
+Founder produced one completed job while verifying the original hash again. This is bounded
+fault injection at the route/storage boundary, not a full PostgreSQL container outage or
+process-kill-during-upload test.
+
+The existing multi-owner regression
+`test_two_concurrent_jobs_uploading_identical_content_both_succeed_without_deadlock` also
+passed: two different owners concurrently imported identical bytes, each received its own
+indexed `Document`, and both referenced the same hash-verified content-addressed blob. This
+tests worker/import owner isolation and shared-blob reference behavior; the HTTP upload route
+itself is Founder-only and cannot provide multi-account endpoint stress evidence.
+
+**No safe automatic orphan deletion/adoption invariant exists yet.** The current order writes
+and publishes the canonical SHA-256 blob before inserting `ImportJob`. If PostgreSQL remains
+unavailable through both the request and its cleanup attempt, the filesystem has only a
+content hash and bytes; it has no durable owner, request/job identity, upload state, or
+age/lease proving the blob is abandoned. Content-addressing is global and intentionally
+allows multiple owners/references to share one physical blob, so the hash cannot identify an
+owner. A broad age-based scan could delete a live blob during the write-to-reference window;
+adopting it into a job would guess tenant ownership. Therefore uncertain canonical blobs must
+be preserved; this code does not sweep or adopt them.
+
+Smallest additive design, if automatic recovery is required: make the existing
+`knowledge_import_jobs` row the upload intent (not a second ledger). Persist a non-claimable
+`receiving` job with owner and unique server-generated staging key before accepting bytes.
+Stream only to that job-scoped staging object using the existing bounded/hash-verified
+storage abstraction. A bounded upload lease/fence prevents a recovery worker from touching
+an active request. After a finalized stage is durable, a recovery/worker path verifies its
+stored size and SHA-256, promotes it under the existing content-key lock, and atomically
+changes that same job to `pending` with its canonical key/checksum. Keep the staging copy
+until that DB transition commits; retries can then safely re-verify/re-promote after crashes
+or ambiguous commits. Expired incomplete stages can be cleaned only after the upload fence
+expires, the owning job is locked/revalidated, and stage-key ownership matches that job.
+Account erasure and the global reference-check protocol must explicitly understand receiving
+jobs/stage keys. This keeps the job table as the single source of truth and never uses
+unreferenced canonical blobs as an ownership signal. This schema/storage/worker lifecycle is
+**proposed, not implemented or validated**; it requires a separate scoped design/implementation
+review rather than an unsafe age-based sweep.
+
+Service-boundary gaps remain: no actual process kill exactly between canonical blob
+publication and DB commit, no prolonged PostgreSQL container outage after publication, no
+PostgreSQL/Redis restart while a worker is actively committing, no upload-route multi-owner
+test, and no sustained pool/queue/throughput measurements. Prior disposable-stack worker
+and parser crash/restart tests and the prior post-restart PostgreSQL/Redis HTTP flow are
+separate evidence, not proof of those untested combinations. Remote Actions and formal
+independent security acceptance remain blocked/pending; `first_cycle_go=false`.
+
 ## #416 integration failures and #413 coordination
 
 PR #416's full backend job failed twice on exact head
