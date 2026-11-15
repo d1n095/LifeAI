@@ -23,6 +23,12 @@ than asserted. `first_cycle_go` and the global activation gates are exercised on
 existing test-only reset/record helpers already used elsewhere in this suite
 (`reset_activation_gates_for_tests`, `record_gate_verification`) -- the same pattern
 test_workforce_activation_prep.py already relies on.
+
+ON THIS BRANCH ONLY (`claude/workforce-task-approval-enforcement`, stacked on this PR): the
+workforce side of the gap described above has since been closed by this same branch's own
+`require_live_task_authorization_for_workforce_dispatch()` fix. The workforce test below was
+updated here (not on the frozen PR this file originated from) to assert the CLOSED gap
+instead of leaving a now-false assertion that approval has zero effect.
 """
 
 from __future__ import annotations
@@ -108,10 +114,16 @@ def test_agent_coordination_dispatch_outcome_tracks_the_same_tasks_approval_stat
     assert after.outcome == OUTCOME_ASSIGNABLE
 
 
-def test_workforce_dispatch_outcome_is_blind_to_the_same_tasks_approval_state(superuser_db, owner_id):
-    """The gap: the SAME MainAITask (approval-required, then approved) produces the SAME
-    outcome either way on workforce's own activate_provider path, because nothing on this
-    path ever resolves or checks the task it is nominally for."""
+def test_workforce_dispatch_outcome_now_tracks_the_same_tasks_approval_state(superuser_db, owner_id):
+    """This test originally proved the gap this same PR's own
+    require_live_task_authorization_for_workforce_dispatch() fix (app/workforce/
+    provider_worker.py) closes: before the fix, the SAME MainAITask (approval-required,
+    then approved) produced the SAME outcome either way on workforce's activate_provider
+    path. With the fix applied, it no longer does -- updated here to assert the CLOSED gap
+    rather than leave a now-false assertion in place. The fuller regression suite for this
+    fix lives in tests/backend/mainai/test_workforce_task_approval_enforcement.py; this test
+    stays as a direct, minimal regression guard against the exact gap it originally
+    documented ever reopening."""
     goal, task = _goal_plan_task(superuser_db, owner_id)
 
     register_workforce_agent(
@@ -142,14 +154,19 @@ def test_workforce_dispatch_outcome_is_blind_to_the_same_tasks_approval_state(su
         return str(exc_info.value)
 
     before_message = _invoke()
-    assert "first real provider invoke remains staged" in before_message
+    # Pre-fix, this asserted "first real provider invoke remains staged" -- the gap. Now the
+    # new per-task gate fires FIRST, with a distinguishable reason, before the task is
+    # approved.
+    assert "requires founder approval" in before_message
 
     grant_task_approval(superuser_db, task=task, approved_by="founder")
     superuser_db.commit()
 
     after_message = _invoke()
-    # Same exception, same reason, same outcome -- approving the task this assignment is
-    # nominally for changed nothing observable on this dispatch path.
-    assert after_message == before_message
+    # Approving the task now changes the outcome: the per-task gate passes, and the call
+    # reaches the SAME pre-existing, untouched staged-raise every other legitimate
+    # activate_provider=True call already hits -- dormant execution paths stay disabled.
+    assert "first real provider invoke remains staged" in after_message
+    assert after_message != before_message
 
     reset_activation_gates_for_tests()
