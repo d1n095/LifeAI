@@ -8452,3 +8452,49 @@ implementationerna? (3) är `coordination_assignment_id` en död kolumn att ta b
 tänkta kopplingspunkten? (4) är workforce:s `ProviderActivationBlocked` permanent by design?
 (5) är `app.mainai_executive` tänkt att bli levande, eller vilande scaffolding som bör
 märkas som sådan?
+
+## KÄND, OLÖST KONFLIKT (upptäckt 2026-11-15) — Blueprint-kedjan grenad i två, aldrig återförenad
+
+**Upptäckt under research för nästa säkra integrationsökning (bakgrunds-fork, verifierat mot
+riktig `pull_request_read` innan det skrivs in här — inte gissat).** Flaggas här utan att
+röras, enligt samma disciplin som 0069-migrationskollisionen mellan PR #408 och #411 (se
+ovan): **rör INGEN av de två stackarnas egna branches/commits.**
+
+**Fyndet:** två HELT OBEROENDE PR-stackar grenar båda direkt från #340
+(`claude/founder-alpha-blueprint-draft`) men har aldrig återförenats med varandra:
+
+- Stack A: `#378 → #379` (`claude/blueprint-founder-acceptance-path` →
+  `claude/blueprint-readiness-approval-safety`)
+- Stack B: `#387 → #388 → #389 → #390 → #393 → #398 → #399 → #401` (8 PR:er djup, slutar i
+  `claude/blueprint-incremental-document-understanding`)
+
+Båda stackarnas nuvarande toppar (#379 och #401) skriver tungt om EXAKT SAMMA två filer
+(`_synthesis_prompt()`/`_generate()` i `app/blueprint/service.py`,
+`approve_blueprint_draft()`) utan att den ena stacken är byggd ovanpå den andra. Ingen av dem
+är stapplad på den andra; de har bara en gemensam förfader fem-till-åtta lager tillbaka.
+
+**CI-status (verifierad direkt mot GitHub, inte memorerad):** båda topparna är gröna på
+samtliga riktiga backend-checkar (Alembic, unit/integration, RLS, kontolivscykel) — faller
+bara på den redan kända npm-audit/E2E-driften, samma mönster som alla andra PR:er den här
+sessionen. CI-grönt är alltså INTE skälet att inte bygga vidare här.
+
+**Varför ingen integrationsökning byggs ovanpå #379 eller #401 just nu:**
+1. Det här är inte ett "disconnected prototype"-mönster (som #377/#380/#381 var) — #379 och
+   #401 är redan levande, inkopplade funktionstillägg i den riktiga Blueprint-routern/
+   -tjänsten. Det finns inget saknat kopplingsgränssnitt att bygga; PR:erna ÄR redan
+   integrationen.
+2. Bägge PR:erna begär själva oberoende säkerhetsgranskning som ännu inte skett.
+3. Att bygga vidare på endera toppen INNAN de två stackarna är återförenade — eller innan ett
+   grundarbeslut om vilken som är kanonisk — riskerar exakt det merge-regeln varnar för:
+   man flyttar bara konflikten, löser den inte.
+
+**Vad som krävs innan det här kan lösas:** ett beslut (grundaren eller den som äger
+Blueprint-arbetet) om vilken stack som är kanonisk, därefter en kompatibilitetsgranskning
+analog med PR #417:s arbete för 0069-kollisionen — men det är ett separat, substantiellt
+jobb, inte "minsta säkra mängd."
+
+**Genomsökt resten av inventeringen (other/security-gates/vps-infra-tabellerna) efter en ny
+#418-formad kandidat (vilande modul, noll anropare):** inget hittades i den här
+ögonblicksbilden — mönstret #377/#380/#381 representerade verkar vara uttömt i Claude-lane
+för tillfället. Nästa genomsökning bör ske EFTER att #414/#417/#418/#419 faktiskt mergats,
+inte tvinga fram en ny kandidat nu.
