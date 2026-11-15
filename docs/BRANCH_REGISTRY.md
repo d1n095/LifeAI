@@ -6,6 +6,20 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Import lease-fencing / parser-isolation remediation (2026-11-15)
+
+| Branch | PR | Status | Bas / beroende | Scope |
+|---|---|---|---|---|
+| `codex/founder-alpha-parser-isolation` | [#392](https://github.com/d1n095/LifeAI/pull/392) | **Open, frozen at `92d4ad3d76634473d1dc4a7a85913ff676090947`; ready for review** | `codex/founder-alpha-approved-precomposition` | Parser isolation candidate; do not modify. |
+| `codex/founder-alpha-import-lease-fencing` | [#402](https://github.com/d1n095/LifeAI/pull/402) | **Open, frozen at `5b66814b35a4889c68acab9ed9e0ed3edd9dfbf5`; ready for review** | #392 | Lease-loss stop behavior; do not modify. |
+| `copilot/import-lease-parser-hardening` | [#413](https://github.com/d1n095/LifeAI/pull/413) | **Open, draft; exact head `23022662a78abb141792ea7439b715d670cdc640`; Actions run `43700873775` is `action_required`** | #402 at `5b66814b35a4889c68acab9ed9e0ed3edd9dfbf5` | Database-wall-clock lease validation, transaction-coupled owner/claim fencing, and bounded parser stderr/process cleanup; no migration or changes to #392/#402. |
+| `copilot/import-fence-test-corrections` | [#420](https://github.com/d1n095/LifeAI/pull/420) | **Open, draft; frozen at `31dd0cfe0a6127e21ea6bb9720f845da6cde155d`; locally verified, remote backend CI absent** | #413 at `23022662a78abb141792ea7439b715d670cdc640` | Test-only corrections; no production code changes. |
+| `copilot/import-security-validation-31dd0cf` | [#421](https://github.com/d1n095/LifeAI/pull/421) | **Open, draft; workflow SHA `f1de4ad417d1ac4c1252a36030c9d9ee0184cf3f`; run `43713479509` is `action_required`** | #420 at `31dd0cfe0a6127e21ea6bb9720f845da6cde155d` | Push-only, contents-read workflow checks out and verifies #420's fixed SHA; no secrets, deploy, or checkout credentials. |
+| `copilot/parser-proc-boundary-regression` | [#422](https://github.com/d1n095/LifeAI/pull/422) | **Open, draft; test SHA `d2f79d3132f9a9003557f2fb3199550c26987b50`; expected-failure containment reproducer** | #420 at `31dd0cfe0a6127e21ea6bb9720f845da6cde155d` | Test-only synthetic-canary proof that a same-UID parser child can read its parent environment through procfs; no production code changes. |
+| `copilot/parser-isolated-sidecar` | [#425](https://github.com/d1n095/LifeAI/pull/425) | **Open, draft; validated implementation SHA `2fc520fa7c6e0f1c6550379b23ac852a936d2220`; subsequent commits are registry/evidence-only** | #422 at `a4f6819fff04d6919d4b46b1c018ba38aad1ab88` | Secretless parser sidecar over a bounded Unix socket for local/VPS Compose; 50 parser/import tests passed, one inherited expected failure remains, real Docker boundary test passed, independent review found no actionable issue. No remote CI or deployment-equivalent test; Render remains fail-closed/unavailable. |
+
+**Validation boundary:** #413's tests cover lease expiry during transactions, competing reclaim, stale writes, delayed completion, interrupted archive recovery, and a lock wait past expiry; parser coverage includes stderr flooding and process cleanup. Its run `43700873775` is `action_required` with zero jobs. To test that exact frozen code, #421 adds a dedicated push-only workflow with `contents: read`, no repository secrets, disabled checkout credentials, and a checkout SHA pinned to #420; GitHub also stopped this push event before scheduling jobs (`43713479509`, zero jobs). The Settings/Actions API returns 403, so the exact approval policy is unavailable to this installation. A repository administrator must inspect **Settings → Actions → General** and, if offered, use **Actions → Import security regression tests (frozen SHA) → run 43713479509 → Approve and run**; do not change events or bypass protections. #420's local disposable PostgreSQL/Redis runs passed 58 worker/import/parser tests plus 9 Redis lock/fail-closed tests; its remote check list contains only Vercel. #422's synthetic-canary test is marked strict xfail; with `--runxfail` it fails as intended (`visible` rather than `denied`). This proves same-UID procfs access locally, not document-parser code execution in production. No deployment-equivalent fault injection has been performed. See `docs/IMPORT_SECURITY_VALIDATION_MATRIX.md` for the per-PR evidence and proposed container boundary. No merge, deployment, or activation is implied (`first_cycle_go=false`).
+
 ## Section B, nästa steg: stateless GitHub-bevisrapport (2026-11-14)
 
 **Ny branch: `claude/github-work-queue-evidence-report`** (PR #396, bas: `claude/github-
@@ -30,6 +44,12 @@ kommer in i goal-skapande-pipelinen — exakt den typ av "unresolved authority d
 direktivet säger ska pausas på, inte avgöras enväldigt. Tills det beslutet finns gör #396
 BARA läsning: `build_github_work_queue_report()` returnerar fakta (draft/stale/ci_red/
 ci_green/merge_conflict) om öppna PR:er/issues, skriver ingenting, skapar inget mål.
+
+## Life Development Monitor — future/deferred
+
+| Branch | PR | Status | Bas / beroende | Scope |
+|---|---|---|---|---|
+| `copilot/life-development-monitor-architecture` | [#426](https://github.com/d1n095/LifeAI/pull/426) | **Open, draft; documentation SHA `dbc855fc560ae0f5e1c9d7c69a430b93cc05aa05`; registry follow-up only** | #396 at `371af5c3886c14237c50795c68d464e759c73713`; merge order #395 → #396 → #426 | Requirements for a read-only, provenance-preserving GitHub monitor integrated with MainAI's existing authority path. Leaves #396's proposal-staging decision unresolved; no new queue, supervisor, schema, API permission, or runtime. Do not rebase/update before #396 merges. Independent of parser sidecar #425. |
 
 ## Känd, repo-bred CI-blockad: npm audit-drift, EJ fixad här (2026-11-14)
 
