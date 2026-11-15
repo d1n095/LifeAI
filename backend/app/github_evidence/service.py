@@ -1,8 +1,9 @@
 """Life MainAI Intelligence program -- GitHub evidence staging (Continuous Build Directive,
 Section B). The staging layer between real, verified GitHub evidence (app.safe_planner.
 github_work_queue.build_github_work_queue_report()) and real, governed MainAI work
-(app.mainai_execution.planner.create_goal()). See migration 0069_github_evidence_staging's own
-module docstring, and app.models.github_evidence.GithubEvidenceCandidate's docstring, for the
+(app.mainai_execution.planner.create_goal()). See migration 0070_github_evidence_staging's own
+module docstring (0069 on its own PR branch, renumbered on the 0069-composition integration
+branch), and app.models.github_evidence.GithubEvidenceCandidate's docstring, for the
 full architecture and why this is a separate table from app.work_candidates rather than a reuse
 of it.
 

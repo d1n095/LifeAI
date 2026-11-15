@@ -12,17 +12,20 @@ app.github_evidence.service.authorize_github_evidence_candidate(), which always 
 explicit, caller-supplied authorized_by and delegates to the SAME create_goal() every other real
 goal already goes through -- this migration/module does not weaken or duplicate that boundary.
 
-NOTE on this revision's own numbering: this branch's own migration history still has 0068 as its
-head (0069-0074 exist only on the separate, as-yet-unmerged Blueprint intelligence PR chain
-rooted at PR #340/#387). This is the SAME accepted, documented pattern this repo already uses
-for codex/chatgpt-import-foundation's parallel 0037 -- renumber at merge time against whichever
-base actually lands first, never silently coexist past that point.
+NOTE on this revision's own numbering: originally authored as a standalone "0069" (down_revision
+"0068") on its own branch, like three sibling candidates that each independently claimed "0069"
+from the same dev tip (PR #408 system_activation_authorization, PR #411 calendar_foundation, PR
+#437 repository_file_source_units). Renumbered to 0070 ONLY on this integration branch
+(`claude/migration-0069-composition-integration`), which composes all four into one linear chain
+in the founder's stated order (activation authority, then GitHub evidence, then calendar, then
+repository-file source identity) -- the original PR branch's own file is untouched. See
+docs/BRANCH_REGISTRY.md for the composition record.
 """
 
 from alembic import op
 
-revision = "0069_github_evidence_staging"
-down_revision = "0068"
+revision = "0070"
+down_revision = "0069"
 branch_labels = None
 depends_on = None
 

@@ -1,4 +1,5 @@
-"""S1D (migration 0069, docs/LIFE_PROJECT_KNOWLEDGE_INGESTION_DESIGN.md §4) — schema/trigger/
+"""S1D (migration 0072 on the 0069-composition integration branch; 0069 on its own PR branch,
+docs/LIFE_PROJECT_KNOWLEDGE_INGESTION_DESIGN.md §4) — schema/trigger/
 RLS/find-or-create coverage for `repository_file_source_units`. Real local Postgres, mirroring
 tests/backend/rag/test_message_source_units.py's pattern exactly (RLS exercised for real, not
 mocked) for the THIRD `memory_source_units` subtype.
@@ -362,7 +363,8 @@ def test_direct_delete_of_repository_file_source_unit_rejected_outside_erasure()
 
 def test_exact_one_subtype_required_for_repository_file_source_kind():
     """S1A's exclusive-arc guarantee (migration 0019's deferred constraint trigger, widened by
-    migration 0069) applies identically to the new 'repository_file' arm: a memory_source_units
+    migration 0072 on the 0069-composition integration branch) applies identically to the new
+    'repository_file' arm: a memory_source_units
     row with source_kind='repository_file' but no matching repository_file_source_units row
     must be rejected at commit."""
     session = SessionLocal()

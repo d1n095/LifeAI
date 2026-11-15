@@ -1,4 +1,5 @@
-"""Founder calendar foundation (migration 0069) -- service-layer tests, RLS bypassed via
+"""Founder calendar foundation (migration 0071 on the 0069-composition integration branch;
+0069 on its own PR branch) -- service-layer tests, RLS bypassed via
 `superuser_db` (same pattern as other non-RLS-focused service tests in this codebase, e.g.
 tests/backend/mainai/test_system_activation_authorization.py's own `current_system_activation`
 tests) since these exercise `app.calendar.service`'s own owner_id filtering, not Postgres RLS

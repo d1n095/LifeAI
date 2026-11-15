@@ -1,4 +1,12 @@
-"""Founder calendar foundation -- migration 0069.
+"""Founder calendar foundation -- migration 0071.
+
+Originally authored as a standalone "0069" (down_revision "0068") on its own branch, like three
+sibling candidates that each independently claimed "0069" from the same dev tip (PR #408
+system_activation_authorization, PR #403 github_evidence_staging, PR #437
+repository_file_source_units). Renumbered to 0071 ONLY on the integration branch
+(`claude/migration-0069-composition-integration`) that composes all four into one linear chain
+in the founder's stated order; the original PR branch's own file is untouched. See
+docs/BRANCH_REGISTRY.md for the composition record.
 
 Founder directive 2026-11-15 ("Continue implementing MainAI's core functionality"), Priority
 3: "Context-aware calendar, task management and proactive assistance." No such domain existed
@@ -24,8 +32,8 @@ future external-source column change is additive, not a widening of an already-o
 
 from alembic import op
 
-revision = "0069"
-down_revision = "0068"
+revision = "0071"
+down_revision = "0070"
 branch_labels = None
 depends_on = None
 

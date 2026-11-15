@@ -1,5 +1,6 @@
 """Row-Level Security, exercised directly at the database layer through the restricted
-runtime role (mainai_app), for `calendar_events` (migration 0069). Mirrors
+runtime role (mainai_app), for `calendar_events` (migration 0071 on the 0069-composition
+integration branch; 0069 on its own PR branch). Mirrors
 tests/security/test_rls_isolation_work_candidates.py's own established pattern exactly --
 every new owner-scoped table gets a real behavioral proof, not just a structural one, from
 the moment it is added."""

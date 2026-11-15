@@ -37,28 +37,30 @@ create (mirroring `get_or_create_memory_source_unit()` exactly) — "incremental
 duplicating unchanged knowledge" is the existing `uq_msu_owner_identity` constraint doing
 exactly what it already does for documents, not a new mechanism.
 
-KNOWN MIGRATION-REVISION COLLISION (restated, not resolved, here): dev's actual head is 0068.
-Five branches already independently claim revision "0069" with down_revision "0068"
-(#412/#413 `0069_security_remediation`-lineage, #408 `0069_first_cycle_go_gate`, #403
-`0069_github_evidence_staging`, #411's own calendar migration) — all already tracked in
-`docs/BRANCH_REGISTRY.md`, with the founder's own stated composition order (#412/#413 -> #408
--> #403 -> #411) and explicit "do not merge or renumber in isolation" instruction for each.
-THIS migration is a sixth, independently-reviewable candidate for the same slot — exactly the
-same resolution this codebase already used once before for an identical collision (see
-migration 0037's own docstring: "THIS migration keeps 0037 unchanged... the other branch must
-be renumbered when it is next rebased onto mainline"). This branch does not merge, rebase, or
-renumber any of the other five; whoever composes that already-tracked queue decides this
-migration's final position in it, same as the other five.
+MIGRATION-REVISION COLLISION — RESOLVED HERE, ONLY FOR THIS INTEGRATION BRANCH: PR #417 (real
+DDL parsing of each candidate's actual catalog objects) established that Codex's #412/#413
+lineage bridge resolves a DIFFERENT, earlier, and entirely unrelated "0069" collision (rooted in
+PR #237/#400's own provider-disclosure lineage) — zero object-level overlap with this migration
+or its three siblings. The collision THIS migration is actually part of is narrower: four
+branches (#408 system_activation_authorization, #403 github_evidence_staging, #411
+calendar_foundation, this one) each independently claimed revision "0069" with down_revision
+"0068" from the same dev tip, with fully disjoint Postgres objects. Renumbered to 0072 ONLY on
+the integration branch (`claude/migration-0069-composition-integration`), in the founder's
+stated order (activation authority, then GitHub evidence, then calendar, then this); none of the
+four original PR branches' own files are touched, renamed, or rebased by this. Codex's #412/#413
+chain remains completely out of scope for this integration branch — a separate, not-yet-
+independently-reviewed candidate for its own, unrelated collision. See docs/BRANCH_REGISTRY.md
+for the full composition record.
 
-Revision ID: 0069
-Revises: 0068
+Revision ID: 0072
+Revises: 0071
 Create Date: 2026-11-15
 """
 
 from alembic import op
 
-revision = "0069"
-down_revision = "0068"
+revision = "0072"
+down_revision = "0071"
 branch_labels = None
 depends_on = None
 

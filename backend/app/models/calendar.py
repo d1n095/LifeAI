@@ -1,4 +1,5 @@
-"""Founder calendar foundation -- see alembic/versions/0069_calendar_foundation.py."""
+"""Founder calendar foundation -- see alembic/versions/0071_calendar_foundation.py (0069 on its
+own PR branch, renumbered on the 0069-composition integration branch)."""
 
 import uuid
 from datetime import datetime

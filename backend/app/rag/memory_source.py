@@ -209,7 +209,8 @@ def get_or_create_memory_source_unit(db: Session, locator: DocumentSourceLocator
 
 @dataclass
 class RepositoryFileSourceLocator:
-    """S1D (migration 0069) — identifies a git-tracked repository file at ONE exact commit.
+    """S1D (migration 0072 on the 0069-composition integration branch; 0069 on its own PR
+    branch) — identifies a git-tracked repository file at ONE exact commit.
     `commit_sha` MUST already be a resolved, real 40-hex-character git SHA (never "HEAD" or a
     branch name) — `ck_rfsu_commit_sha_format` rejects anything else at the database level, so
     a caller resolving a branch/ref to its real SHA is the caller's own responsibility, never

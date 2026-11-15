@@ -689,7 +689,9 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         db.execute(sa_text("SELECT erase_own_work_candidates_children()"))
 
         # --- Life MainAI Intelligence program: GitHub evidence staging (migration
-        # 0069_github_evidence_staging, see app/models/github_evidence.py): github_evidence_
+        # 0070_github_evidence_staging on the 0069-composition integration branch; originally
+        # 0069_github_evidence_staging on its own PR branch, see
+        # app/models/github_evidence.py): github_evidence_
         # candidates has DELETE revoked from mainai_app the same way, deletion only through
         # this one narrow SECURITY DEFINER function. Unlike work_candidates above, this table
         # has no FK into project_entities (deliberately -- GitHub evidence is not founder

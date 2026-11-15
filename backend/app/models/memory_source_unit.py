@@ -18,7 +18,8 @@ class SourceKind(str, enum.Enum):
     never a generic 'document' — see §4.8's "Dokumentgranularitet".
 
     `message` is S1C (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md, migration 0037) — see
-    message_source_units below. `repository_file` is S1D (migration 0069,
+    message_source_units below. `repository_file` is S1D (migration 0072 on the
+    0069-composition integration branch; 0069 on its own PR branch,
     docs/LIFE_PROJECT_KNOWLEDGE_INGESTION_DESIGN.md §4) — see RepositoryFileSourceUnit below;
     identified by (repo_identity, file_path, commit_sha), never a document_id, since a
     git-tracked repository file has never been uploaded through the Library pipeline. Future
@@ -212,7 +213,8 @@ class MessageSourceUnit(Base):
 
 
 class RepositoryFileSourceUnit(Base):
-    """S1D (migration 0069, docs/LIFE_PROJECT_KNOWLEDGE_INGESTION_DESIGN.md §4) — a git-tracked
+    """S1D (migration 0072 on the 0069-composition integration branch; 0069 on its own PR
+    branch, docs/LIFE_PROJECT_KNOWLEDGE_INGESTION_DESIGN.md §4) — a git-tracked
     repository file at one exact commit, as a THIRD `MemorySourceUnit` subtype, the same
     exclusive-arc pattern `DocumentSourceUnit`/`MessageSourceUnit` already established twice
     (composite FK to `memory_source_units(id, owner_id, source_kind)`, every field permanently

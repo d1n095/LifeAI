@@ -67,7 +67,8 @@ RLS_STATEMENTS = [
     # every owner-scoped table, matching the rest of this list.
     "ALTER TABLE messages ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE messages FORCE ROW LEVEL SECURITY",
-    # Founder calendar foundation (migration 0069, 2026-11-15) -- ordinary owner-scoped,
+    # Founder calendar foundation (migration 0071 on the 0069-composition integration branch;
+    # 0069 on its own PR branch, 2026-11-15) -- ordinary owner-scoped,
     # mutable table (same simple tier as documents/conversations above, not the heavier
     # append-only tier life_intents/_MAINAI_EXECUTION_TABLES use below -- the Founder must be
     # able to edit or delete their own calendar events outright). Also enabled directly in the
