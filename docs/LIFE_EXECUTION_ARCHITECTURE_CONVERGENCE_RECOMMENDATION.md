@@ -129,30 +129,39 @@ step after it to also happen. No step activates a dormant dispatcher, lifts the
 
 1. **(This PR.)** Record the gap with a real, executable regression test rather than a design
    claim. Done — see Section 2.
-2. **(Future, separate PR, mechanical.)** Fix `resolve_delegation()` to surface
-   `request.task_id` onto the `WorkforceAssignment` it creates — either as a new nullable
-   column (a real migration, additive, backward compatible: existing rows get `NULL`) or,
-   lower-risk and requiring no migration at all, into the assignment's existing
-   `provenance` JSON field under a stable, documented key. This PR intentionally does not
-   decide between the two or implement either — that choice, and its own isolated tests,
-   belongs to its own PR, not bundled into a recommendation document.
-3. **(Future, separate PR, security-reviewed — this is the real authority change and
-   deserves its own independent review, not a drive-by addition here.)** Inside
+2. **(Done — PR `claude/workforce-task-approval-enforcement`, same founder-directive cycle,
+   security-reviewed per the directive's own explicit requirements.)** Fixed
+   `resolve_delegation()` to surface `request.task_id` onto the assignment's existing
+   `provenance` JSON field (no migration — three open PRs, #408/#411/#412, already
+   independently claim revision 0069; a new column would be a fourth claimant of the exact
+   collision this registry already flags). Added
+   `require_live_task_authorization_for_workforce_dispatch()` inside
    `execute_workforce_assignment()`'s `activate_provider` branch, before the existing
-   unconditional raise, resolve the assignment's task link (however step 2 chose to store it)
-   and call `require_task_approval()` exactly the way `dispatch.py:160-178` already does. The
-   staged-raise stays in place below it — this step only makes the check exist for whenever
-   that raise is eventually, separately, lifted.
-4. **(Founder decision, not an engineering task.)** Decide `coordination_assignment_id`'s
+   unconditional staged-raise, which it does not modify: resolves the task (owner-filtered in
+   the query itself, not compared only after fetching), rejects a non-live task status
+   (cancelled/failed/completed/blocked/retryable_failed — the closest existing equivalent to
+   "revoked/rejected", since `MainAITaskEventType` is append-only and has no separate
+   approval-revocation event), and calls `require_task_approval()` exactly the way
+   `dispatch.py:160-178` already does — the SAME real gate, never a second approval engine.
+   Six new regression tests (real Postgres) in
+   `tests/backend/mainai/test_workforce_task_approval_enforcement.py` cover: missing task
+   link, unapproved task, approved task (still hits the untouched staged-raise — dormant path
+   preserved), cross-tenant task, cancelled-after-approved task, and a TOCTOU re-check proof
+   (the same assignment passes the gate once, the task is then cancelled, and the identical
+   call fails on its very next invocation — proving the gate re-queries fresh state rather
+   than trusting an earlier decision, the same doctrine `dispatch_assignment()`'s own
+   docstring states for itself).
+3. **(Founder decision, not an engineering task.)** Decide `coordination_assignment_id`'s
    fate, and whether `app.workforce`'s real-provider path is ever meant to go live or is
    permanently staged by design. Out of scope for any single PR per the founder's own
    standing instruction not to activate dormant dispatchers or create a fourth system.
 
 ## What this recommendation deliberately does not do
 
-- Does not add the `require_task_approval()` call to `provider_worker.py` itself (step 3 is
-  named, not implemented, here — it is a real authority change and belongs in its own
-  reviewed PR).
+- (Originally: step 3 — adding the `require_task_approval()` call to `provider_worker.py` —
+  was named, not implemented, here, pending its own reviewed PR. It has since been
+  implemented in `claude/workforce-task-approval-enforcement`, under the same founder
+  directive cycle, with its own executable regression evidence — see Section 5, step 2.)
 - Does not touch `coordination_assignment_id`.
 - Does not lift or weaken `ProviderActivationBlocked`'s unconditional raise.
 - Does not change `first_cycle_go`, which remains `false`.
