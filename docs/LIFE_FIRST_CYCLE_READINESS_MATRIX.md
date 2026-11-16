@@ -82,12 +82,123 @@ or re-implementing it here would duplicate real work already done by a different
 lineage, which this repo's own standing discipline explicitly warns against. What this session
 added is the exact-SHA reconciliation of that lineage's current status, not a competing fix.
 
+## Amended 2026-11-16 (round 2) — founder directive "SECURITY REMEDIATION + FIRST SUPERVISED DEVELOPMENT CYCLE"
+
+Four concrete, exact-SHA-evidenced developments since the amendment above, each verified by
+direct code reading and/or an executable test run this round, not re-asserted from memory:
+
+**A genuine, previously-undocumented gap found and fixed — row 1/5/7/9's `open_pr` path.**
+An independent review correctly identified that `GitHubClient.create_pull_request()` never
+set GitHub's own `draft` request parameter, and that `execution_job.py`'s `_handle_open_pr()`
+treated **any** open PR for the exact head/base as "ours, already done" with no check of that
+PR's `draft` field at all — meaning a human's own real, non-draft PR on the same branch name
+could have been silently attributed to MainAI's own work result. Both confirmed true by
+reading the actual source before changing anything, both fixed: `create_pull_request()` now
+always requests `draft: true`; `_handle_open_pr()` now fails closed (`TaskExecutionError`) on
+a non-draft or unknown-draft-state PR, and cross-checks a reused draft PR's head commit
+against the task's actual pushed SHA rather than trusting a branch-name match alone. 4 new
+regression tests, 213 tests passing across every file touching this path. PR #450
+(`2cbbc3a5`), branched off dev (not off PR #395's still-open, unrelated `github_client.py`
+additions, to avoid a conflicting edit). This directly strengthens rows 1, 5, 7 and 9's
+reliance on the `open_pr` task type being trustworthy — it was not, until this fix.
+
+**Row 8's confirming test, independently re-verified as genuinely sound, not merely green.**
+A separate independent review flagged that a cross-owner RLS write test for
+`github_evidence_candidates` (#403, composed into PR #440) contained a classic
+`try: write(); assert False; except Exception: ...` pattern — `AssertionError` is itself a
+subclass of `Exception`, so the except block could silently swallow the test's own intended
+failure, making it report PASSED even if cross-owner isolation were completely broken.
+**Confirmed true against the actual test source.** Fixed (rewritten to `pytest.raises` plus an
+independent row-count check); INSERT/UPDATE/DELETE cross-owner denial now all covered with two
+genuinely separate DB sessions. Run for real against local Postgres with RLS enabled: **the
+underlying RLS policy itself was never broken** — only the test's assertion logic was. All
+4 tests now genuinely pass; 61/61 in `tests/security/` with no regressions. Pushed in place to
+PR #440 (`d4542876`), per this repo's Merge-regel (fixing it where the bug already lives rather
+than opening a competing branch). The identical anti-pattern was also found, but deliberately
+left unfixed and flagged separately, in the sibling `test_rls_isolation_work_candidates.py` —
+its own follow-up, out of this round's scope.
+
+**Row 10's parser-isolation lineage (PR #447) — substantially further along, still not
+merged.** Real evidence gathered this round that did not exist before: `vps-compose-verify`
+reached 17 of 37 real infrastructure-verification steps on a genuine push-triggered run,
+including a confirmed real parser-socket extraction (`POST http://parser/v1/extract` → `200
+OK`) and real local-AI pipeline end to end — the first-ever confirmation the production socket
+path, not just the same-UID subprocess fallback, actually works. It still fails at step 18 (a
+DNS-resolution isolation check expecting `ENOTFOUND`, getting `EAI_AGAIN`) before reaching
+restart-survival (step 33). A drafted fix for that one check was blocked by the platform's own
+safety classifier and left unpushed, exactly as instructed, pending independent review — not
+bypassed. Separately, 5 backend test failures (lease-recovery/takeover tests) were
+investigated at length: one genuine clock-mismatch defect was found and fixed
+(`01709dcd`, confirmed via a dedicated regression test); the remaining 3 resisted every
+reproduction attempt this round (Python/Postgres clock skew, `now()`-staleness across a slow
+transaction, table-truncation/backlog effects, and privilege-narrowing test-order leakage were
+each tested directly and disproven, not just reasoned about) — diagnostic instrumentation was
+added (`0b18aeb2`) so the next real occurrence captures the job's exact row state instead of
+requiring another blind reproduction pass. **Row 10's classification is unchanged — still a
+standing BLOCKER** (`POST /api/library/import` remains active and ungated today) — but the
+evidence behind it is now real infrastructure verification, not a code-reading inference, and
+the remaining gap to a merge-ready state is narrower and precisely named: one independently
+reviewed DNS-check fix, and either a root cause or an accepted-as-environmental explanation for
+3 specific test failures.
+
+**Row 1/5's "no live execution path" framing — upgraded from code-reading inference to an
+executable, end-to-end proof.** Founder Priority 4 ("complete the real vertical slice") asked
+for the actual chain — GitHub discovery → evidence candidate → founder authorization → task
+dispatch → isolated worktree edit → verified commit → draft PR → checkpoint/recovery — to be
+exercised with real production functions, not simulated. This is now done:
+`test_first_supervised_development_cycle_real_dispatch.py` (PR #443, `e25ba3cc`) chains
+`app.github_evidence.service`'s real staging/authorization (PR #403/#440) through the real
+`Worker().run_once()` poll loop, real `dispatch_ready_task()`, a real local git worktree with
+real `init`/`fetch`/`checkout`/`commit`/`push` subprocess calls (never mocked), a real
+`python -m pytest` subprocess run against the file actually committed, and `open_pr`'s real
+(simulated-GitHub-HTTP) PR creation — proving fail-closed authorization three separate ways
+(staging alone never creates a goal; the real worker tick genuinely stalls on `repo_edit`/
+`open_pr` until explicit approval; an authorized/dismissed candidate can never be re-authorized)
+and real crash/resume survival through PR #447's own already-hardened recovery pipeline. One
+genuine, previously-unexercised production gap was found and fixed while building this:
+`_handle_run_tests()` always checked the shared backend root even when a sibling `repo_edit`
+task's real edit landed in an isolated worktree instead, so a separate `run_tests` task could
+never find the file that was actually committed — fixed with the same lookup `_handle_open_pr()`
+already used for the identical problem. 777/777 passed in `tests/backend/mainai/`, no
+regressions. **Explicit limitation, not glossed over:** GitHub's own HTTP API is simulated in
+this test, the same established convention every other test in this codebase already uses for
+it — this proves the chain is real, not that a PR was opened against the real repository. That
+last step requires the founder's own explicit authorization of one specific, real task, which
+this round deliberately did not self-authorize.
+
+**New, smaller finding — model-provider abstraction (not previously classified in this
+matrix).** Assessed for Groq/OpenRouter-compatible and local-inference support, per the
+founder's separate request. `OpenRouterProvider` and `OllamaProvider` are both already fully
+built and registered (`backend/app/providers/registry.py`); no dedicated Groq adapter is
+needed since OpenRouter already gateways Groq-hosted models. The one real gap is a
+cross-provider conformance test suite, not a missing adapter. All three safety properties the
+founder asked about check out: provider fallback does not bypass the separate spend-reservation
+gate (`app/provider_spend/service.py`); no live path hands a provider credential to a worker at
+all (`app/workforce/provider_worker.py`'s real-invoke path is hard-blocked,
+`ProviderActivationBlocked`, independent of this matrix's row 1 finding); checkpoints are
+provider-agnostic by construction, so a provider switch mid-task cannot lose continuity.
+**Classification: safely deferred** — none of this is triggered by the first cycle's own
+scope (#439's scenario never needs provider diversity), and preserving it as a backlog item
+rather than implementing it now matches the founder's own instruction not to merge future
+capability into the launch-critical path.
+
+### The founder's requested four-way classification, mapped from this matrix's existing labels
+
+| Founder's category | This matrix's rows |
+|---|---|
+| **Mandatory before first supervised cycle** | Row 11 (independent security acceptance — human-only, nothing left for engineering to prepare) and row 10 (parser-process isolation — live today via `POST /api/library/import`, not gated behind any future decision). Both remain the only two standing blockers; neither closed by this round. |
+| **Conditional on enabled capability** | Row 5 (the `run_tests` subprocess-environment finding — becomes a blocker only if unsupervised/non-human-reviewed code execution is ever enabled); row 1b (the separate older V1 autonomy stack — a reconciliation item, not triggered by #439's scope); row 6's V6/V7 egress gaps (matter for general chat usage, not the GitHub-evidence chain). |
+| **Safely deferred** | Model-provider abstraction (Groq/OpenRouter/Ollama — already built, conformance-test gap only); the five `FV-BLU-001`–`005` blueprint-driven-coordination gaps recorded separately in `docs/LIFE_FOUNDER_VISION_BACKLOG.md` §13a (multi-project isolation, cross-system replanning, builder/reviewer feedback loop, integration contracts, the blueprint↔coordination bridge). |
+| **Future product** | Everything the founder's broader ecosystem-vision directives named (Life Phone, Life Dating, Life Social, etc. — tracked in `docs/LIFE_ECOSYSTEM_VISION_RECONCILIATION.md`) and `app.agent_coordination`/`app.workforce`'s own currently-inert adapter dispatch (row 1) — deliberately not activated, not part of this cycle's scope, and explicitly not to be merged into the launch-critical path per this directive's own instruction. |
+
 ## Explicit confirmation
 
 No future product was activated. No automated adapter/provider dispatch was enabled. No
 approval boundary was bypassed to make any test pass — the one bypass finding in this matrix
-(row 1c) was found already fixed, not worked around. `first_cycle_go` remains `false`. No
-merge, deployment, or activation accompanies this document.
+(row 1c) was found already fixed, not worked around; this round's two newly-confirmed findings
+(the draft-PR gap, the swallowed-assertion test bug) were both fixed with evidence, not
+dismissed. `first_cycle_go` remains `false`. No merge, deployment, or activation accompanies
+this document.
 
 ---
 _Generated by [Claude Code](https://claude.ai/code/session_016d4iixQnxxqNhDrxHHxV4Q)_
