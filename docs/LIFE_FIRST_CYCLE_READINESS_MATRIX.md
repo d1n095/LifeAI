@@ -1,0 +1,204 @@
+# First supervised development cycle — exact-SHA readiness matrix
+
+## Status and scope
+
+Founder directive ("CLAUDE — FIRST-CYCLE READINESS + COMPLETE FOUNDER VISION PRESERVATION"),
+Priority 1. **This is a classification document, not an activation.** `first_cycle_go=false`
+throughout; nothing here merges, deploys, or activates anything. No gate is marked satisfied
+by this document alone — independent gate acceptance and explicit founder authorization
+remain separately required, as stated in the directive itself.
+
+**Exact-SHA baseline:** `dev` (`claude/det-kommer-mer-879lcm`) at `b5b60d05a589d220d820ee673f1b5da4cafec1bf`.
+Every PR-specific claim below cites the exact head SHA it was verified against. The repository
+currently has **100+ open pull requests** across several independent lineages (this session's
+own `claude/*` chain, a `codex/*` import-security lineage, a `copilot/*` lineage, and older
+Cursor-era work already merged and closed out per `docs/MAINAI_V1_READINESS.md`). This matrix
+does not attempt to audit all of them — it focuses on what is actually load-bearing for the
+**specific, narrow first-cycle scope PR #439 already defined**: a human-operated session
+reading authorized GitHub evidence, proposing a source-backed task, requesting approval
+through the existing gate, and executing within that approved scope — never an externally
+available consumer launch, and never unattended/autonomous dispatch (see Priority 1's own
+instruction to distinguish the two).
+
+## Distinguishing "supervised development cycle" from "consumer launch"
+
+This matters because several of the founder's 11 named categories have a COMPLETELY DIFFERENT
+answer depending on which scope is assumed. The first cycle, as #439 (open, draft) specifies
+it, is: one founder/trusted-operator session, one GitHub-evidence-derived task, approval
+granted explicitly by a human, execution performed by a human-operated Claude Code session
+(not an autonomous agent), evidence collected and presented for review. It is NOT: a public
+registration flow, unattended/scheduled autonomous dispatch, or a system serving requests from
+anyone other than the founder. Every classification below is made against the FIRST definition
+unless stated otherwise.
+
+## The matrix
+
+| # | Area | Finding | Evidence (exact citation) | Classification |
+|---|---|---|---|---|
+| 1 | **Canonical MainAI execution authority** | `app.mainai_execution` (`MainAITask`/`mainai_jobs`) is the canonical, decided execution authority — not a preference, a recorded decision cross-checked against an independent proposal from a different agent lineage (Copilot, PR #406's own comment thread). The two alternative systems named elsewhere in this repo are confirmed **structurally inert**, not merely policy-disabled: `app.agent_coordination.dispatch.dispatch_assignment()` has zero callers anywhere in `app/routers/` or `app/worker.py`; `app.workforce`'s `provider_worker.py` contains a literal, unconditional `raise ProviderActivationBlocked(...)` before any real provider invoke. | `docs/LIFE_EXECUTION_AUTHORITY_CANONICAL_MAPPING.md` (PR #410, `a5e5e5d2`); direct read of `backend/app/mainai_execution/executor.py:143-227`, `backend/app/agent_coordination/dispatch.py`, `backend/app/workforce/provider_worker.py` on dev tip `b5b60d05`. | **RESOLVED** (treated as a closed BLOCKER for first-cycle purposes — the decision exists and the losing alternatives are confirmed inert, not just assumed so). |
+| 1b | Separate, older "V1" autonomy stack | `docs/MAINAI_V1_READINESS.md` (dated 2026-08-30) describes an **already-merged, different** Operator/Driver/Supervisor/Worker/WorkCandidate/ExecutionScope chain from an earlier ("Cursor") lineage — a genuinely separate codebase from `app.mainai_execution`. Its relationship to the canonical decision above is addressed by `docs/LIFE_THREE_EXECUTION_SYSTEMS_BOUNDARY_MAP.md` (PR #419), not re-litigated here. | `docs/MAINAI_V1_READINESS.md`; `docs/LIFE_THREE_EXECUTION_SYSTEMS_BOUNDARY_MAP.md` (PR #419, `75f2709d`). | **POST-ALPHA** — a real reconciliation item, but not a first-cycle blocker since #439's own scenario only exercises `app.mainai_execution`. |
+| 1c | A real, now-fixed "second door" around the approval gate | A past security sweep (referenced in `MAINAI_V1_READINESS.md`) found `POST /api/mainai/jobs` (the generic founder-facing job-creation route) could create a `task_execution` job for an approval-required task with **zero approval check**, because `dispatch_ready_task()` is not the only code path into a `mainai_jobs` row. **Verified fixed on current dev**, not just claimed: `backend/app/jobs/service.py:147-194`'s `_validate_task_execution_input_refs()` now calls `require_task_approval()` explicitly for every caller, with the fix's own rationale recorded in its docstring ("the approval gate must hold at every door, not just the one door someone remembered to add it to"). | `backend/app/jobs/service.py:163-194` (dev tip `b5b60d05`) — read directly, not inferred from a doc claim. | **RESOLVED.** Confirmed by direct code reading, not by trusting the (now-stale) dated doc that originally found the gap. |
+| 2 | **Authentication and authorization boundaries** | Full cookie-session rewrite shipped and verified: HttpOnly access+refresh tokens, rotation + reuse-family revocation, JSON-body CSRF token (no double-submit cookie), strict CORS, no `Authorization`-header fallback. Verified by a 20-check Playwright suite plus 74+ backend tests (per `docs/SECURITY_BLOCKERS.md`). Residual, explicitly-accepted risks: no third-party CAPTCHA (honeypot + per-IP rate limit only); SMTP must be explicitly configured in production or verification/reset emails silently only log; unbounded growth of `email_verification_tokens`/`password_reset_tokens` (same fixable class as `refresh_tokens`). | `docs/AUTH_THREAT_MODEL.md:88-152`; `docs/SECURITY_BLOCKERS.md:48-278` (items marked `[LÖST 2026-07-18]`). | **RESOLVED** for the core boundary. Residual items are **POST-ALPHA** (single-founder-operator scope; no public registration surface in the first cycle). |
+| 3 | **Founder approval and step-up controls** | `require_task_approval()` is the single enforcement point, called at the top of `dispatch_ready_task()` AND (per item 1c above) at the generic job-creation door too. `grant_task_approval()`/`require_live_task_approval_for_dispatch()` provide the atomic, pre-invoke, `SELECT...FOR UPDATE`-based re-check closing the TOCTOU window between approval and dispatch (PR #433). `APPROVAL_POLICIES["standard_repo_work"]` marks every task_type the planner can currently propose AUTO by default, with per-task `approval_required=True` always able to override — by design, matching the founder's own stated default for work already reviewed and requested (`backend/app/mainai_execution/approval.py:41-62`). Step-up for SYSTEM-WIDE activation (not per-task) is a separate, correctly non-owner-scoped boundary: `system_activation_authorizations` (migration 0069, PR #408), verified this session to have no RLS and no owner_id by deliberate design, matching the existing `coordination_agents` precedent. | `backend/app/mainai_execution/approval.py` (full file, read repeatedly this session); `backend/tests/backend/mainai/test_system_activation_authorizations_composition_security.py` (this session's own new test file, CI-green on PR #440 at `73a96194`). | **RESOLVED.** |
+| 4 | **Task, dispatch and lease fencing** | Row-locked, atomic dispatch (`_lock_task()` before any mutation, PR #428/#431/#433 hardening pass — a genuine TOCTOU gap found and closed, not assumed closed). `MainAIJob` creation uses a pre-generated `job_id` specifically so the task-side state mutation and the job's own commit land in the SAME atomic operation (`executor.py:143-227`'s own documented hardening-pass finding). Generic job-lease fencing (`lease_expires_at`/`last_heartbeat_at`, `claim_next_job`'s `FOR UPDATE SKIP LOCKED` + expired-lease reclaim) already exists on dev for import jobs specifically (`backend/app/models/import_job.py:146-155`, `backend/app/jobs/lease.py`) — a different, already-solved mechanism from the parser-isolation gap in row 10 below. | `backend/app/mainai_execution/executor.py:143-227`; `backend/app/jobs/lease.py`; `backend/app/models/import_job.py:146-155` (dev tip `b5b60d05`). | **RESOLVED.** |
+| 5 | **Runtime agent isolation** | No live path to an autonomous external AI agent executing code exists (row 1's inert-systems finding). What DOES run live today for `repo_edit`/`run_tests` task types is `execution_job.py`'s in-process worker: real git commits in an isolated worktree, real `subprocess.run(["python","-m","pytest",...])` calls. **New finding, not previously documented anywhere in this repo:** that `subprocess.run()` call (`backend/app/mainai_execution/execution_job.py:369`) passes no `env=` argument — the test subprocess inherits the WORKER PROCESS'S FULL environment, including `DATABASE_URL` and any configured provider API keys. The command itself is a fixed argv list (not shell-interpolated, not task-controlled beyond the target path), so this is not an injection vector — but a `repo_edit` task that writes an adversarial test file, then run through `run_tests`, could read/exfiltrate those secrets via ordinary Python code inside the test, since nothing structurally prevents it. | `backend/app/mainai_execution/execution_job.py:353-378` (dev tip `b5b60d05`), read and verified directly — no existing doc in this repo mentions this. | **CONDITIONAL.** For a human-operated first cycle where the operator reviews `repo_edit` content before `run_tests` runs it (the actual #439 scenario), the realistic exposure is low — the same person who could write an exfiltrating test already has the same secrets by other means. **Becomes a BLOCKER** the moment any unsupervised/non-human-reviewed code path (including a future activation of row 1's currently-inert systems) is allowed to reach `run_tests` without a human reviewing the diff first. Not fixed in this pass — a real environment-allowlist design (which env vars tests genuinely need vs. which must never be inherited) is its own reviewable increment, not a "smallest safe correction," and a rushed fix risks either breaking real DB-backed test execution or failing to close the actual gap. Recorded here with its exact trigger condition instead. |
+| 6 | **Tool and outbound network restrictions** | A real, default-deny egress gate exists (`app/egress_policy/service.py`): `enforce_egress_policy()`, hard-denies `NEVER_EGRESS`-marked content outright, durably logs every attempt to `provider_disclosure_events`. Per `docs/LIFE_VAULT_EGRESS_CONTROL.md`'s own ranked-blocker table — verified directly against `backend/app/providers/registry.py:88-199`, not taken on the doc's claim alone — **V1 (chat endpoint) and V2 (RAG/document + query embedding) are both CLOSED**: `chat_with_fallback()` routes every attempt through `enforce_egress_policy()` when `owner_id` is passed (confirmed: `registry.py:102-106,185-199`). Named remaining gaps, per the same table: **V6** (disclosure-ledger cannot yet answer "what has provider X ever received about project/document Y" — PARTIAL) and **V7** (chat history replay — a prior turn's already-allowed content re-appears in every later turn's `history`; re-evaluated every call, not exempt, but not yet suppressed if already-disclosed — OPEN, not started). | `docs/LIFE_VAULT_EGRESS_CONTROL.md:94-104`; `backend/app/providers/registry.py:88-199`; `backend/app/egress_policy/service.py:1-16` (dev tip `b5b60d05`). | **RESOLVED** for the first-cycle's own path (Safe Planner / GitHub-evidence chain never calls `chat_with_fallback()` with conversational history at all). V6/V7 are **POST-ALPHA** — they matter for general chat usage, which is outside #439's scenario. |
+| 7 | **Recovery, rollback and auditability** | Full recovery pipeline exists and is exercised: `recovery_inspector.py` → `recovery_classifier.py` → `recovery_salvage.py` → `recovery_takeover.py`, gated behind an explicit approval step before any takeover, scoped per `(task_id, job_id, step)` so a genuinely new attempt never sees a stale attempt's checkpoint (`MainAICheckpoint`, `app/mainai_execution/checkpoint.py`). `cancel_task()` is the one idempotent, audited cancel entry point (three branches by current status). Every task transition is append-only (`MainAITaskEvent`) — this session's own #443 harness proved a failed task records only a `failed` event, never a `completed` one, as a real executable test. | `backend/app/mainai_execution/checkpoint.py`; `backend/app/mainai_execution/executor.py:285-370`; `backend/tests/backend/mainai/test_first_supervised_development_cycle_edge_cases.py` (this session, CI-green on PR #443 at `3f7caa63`). | **RESOLVED.** |
+| 8 | **Database migrations and RLS integrity** | `mainai_app`'s `SessionLocal` (used for every ordinary request) is bound ONLY to the restricted, RLS-enforced role — confirmed structurally, not just by application-code discipline: no code path in this application ever holds a connection privileged enough to bypass RLS for a normal request (`app/db.py`; a separate `migration_engine` exists only for migrations/boot-time privilege verification, never request serving). The one real migration-lineage collision this session found (#408/#403/#411/#437's four-way bare-`"0069"` collision) is resolved (PR #440, composed into a linear `0069→0072` chain); Codex's separate `#412/#413` lineage uses full descriptive revision strings and does not actually collide (verified by direct `git show` of their revision lines, not assumed from filenames). `test_rls_policy_registry.py`/`test_runtime_table_privileges.py` both pass in CI. | `docs/LIFE_EXECUTION_AUTHORITY_CANONICAL_MAPPING.md`'s "Security Kernel — corrected finding" section; this session's own PR #440 (`73a96194`, CI: `Backend — Alembic migration check` + `Backend — RLS & session-security tests` both green). | **RESOLVED.** |
+| 9 | **Knowledge ingestion trust boundaries** | `MemorySourceUnit`'s identity fields and lifecycle state machine are enforced by database triggers and two SECURITY DEFINER functions, never a plain ORM UPDATE — the database itself rejects a direct write outside `transition_own_memory_source()`/`transition_memory_source_admin()`. `source_role` defaults to `unknown` for every document source (uploading a file doesn't tell you who wrote it) and is immutable once set, except for message sources where the real, known `messages.role` is validated to match at write time. This is the actual, live SIGNAL-PRODUCER != TRUTH-WRITER boundary the first cycle's GitHub-evidence chain also follows: `GithubEvidenceCandidate` → `authorize_github_evidence_candidate()` → a real `MainAIGoal`, never a silent promotion. | `backend/app/models/memory_source_unit.py` (full file, read this session); `backend/app/github_evidence/service.py` (read this session, exercised by PR #443's own harness). | **RESOLVED** for the path the first cycle actually uses (live GitHub evidence, not founder-knowledge promotion). |
+| 10 | **Import and storage recovery risks** | **AMENDED 2026-11-16 — corrected by founder-provided evidence, see the addendum below.** Mixed. **Already resolved on dev:** import-job lease fencing (row 4) and `storage_deletion_tasks` authorization — `mainai_app` has ZERO direct privileges on that table; all writes go through the SECURITY DEFINER `enqueue_account_erasure_storage_task()` function (migration 0022), confirmed by this session's own CI logs showing the expected `permission denied for table storage_deletion_tasks` / `is not owned by the caller` errors when a restricted role attempts a direct write. **NOT yet on dev:** document-parser process isolation. `backend/app/rag/extract.py` calls `PdfReader`/`DocxDocument`/`BeautifulSoup` directly IN-PROCESS — no subprocess/sidecar boundary, no sandboxing, parsing untrusted uploaded files with the same process credentials as everything else. An entire `codex`/`copilot` PR lineage (#392, #402, #413, #415, #420-#422, #425, #427 — "isolate untrusted document parsers," "fence import writes and bound parser output," "isolate document parsing in a secretless sidecar") exists to close exactly this gap but has **not merged to dev** — confirmed by direct inspection of the actual parsing code, not by trusting any PR's own claim of being "done." | `backend/app/rag/extract.py:1-24`; `backend/app/models/import_job.py:146-155`; migration `0022_enqueue_account_erasure_storage_task.py:21` (dev tip `b5b60d05`); PR #425's own body text (`367ece55`) and `docs/IMPORT_SECURITY_VALIDATION_MATRIX.md` on that branch. | Lease fencing and storage-deletion authorization: **RESOLVED.** Parser process isolation: **originally classified CONDITIONAL here — now corrected to a live, standing exposure, not merely a future-capability trigger.** The founder confirmed `POST /api/library/import` "is active and required for the first supervised cycle," and PR #425's own body independently states the same thing in its own words: *"Founder Alpha requires `POST /api/library/import`; it is active and has no startup disable boundary."* This means the unsandboxed in-process parsing on dev is exposed TODAY, independent of whether `first_cycle_go` is ever set true — the Library import route is an ordinary, already-operating founder-only feature, not gated behind MainAI's own activation gate. This row's original "only becomes a BLOCKER if document ingestion is in scope" framing wrongly treated #439's narrow GitHub-evidence scenario as the only relevant scope; it is not. See `docs/LIFE_INDEPENDENT_REVIEW_HANDOFF.md`'s reconciliation addendum for the full evidence trail, the exact-SHA dependency chain, and why none of that chain's own test claims are independently CI-verified yet (the real backend Actions runs are blocked `action_required`/zero-jobs, requiring the founder's own GitHub-admin approval — confirmed live, not assumed). |
+| 11 | **Exact-SHA CI and independent security acceptance** | This session's own discipline (exact-SHA verification via `get_check_runs`, disposable-branch composition checks, one explanatory comment per genuine CI finding, never a second for the same already-explained drift) produces real EVIDENCE PACKETS — PR #441 ("independent review handoff") assembles verified CI snapshots and reviewer packets for the execution-authority and project-knowledge chains. **This is preparation for review, not review having happened.** No external (non-Claude) party has yet examined and signed off on any of this. The founder's own closing line on the current directive — "`first_cycle_go=false` until independent gate acceptance and explicit Founder authorization" — is itself confirmation that this step has NOT occurred yet. | PR #441 (`17a75f0e`) — read directly to confirm it is a handoff PACKAGE, not a completed review. | **BLOCKER — but not one engineering work can close.** The remediation path is the founder (or a founder-designated external reviewer) actually performing and recording the review, not further Claude-authored evidence. Everything engineering-side that CAN be prepared for that review already has been. |
+
+## Genuine blockers found, and who closes them
+
+**Amended 2026-11-16.** At the time this matrix was first written, exactly one item was a true
+first-cycle BLOCKER: row 11, independent security acceptance. The founder subsequently
+corrected row 10's scoping assumption with new evidence (`POST /api/library/import` is already
+active and required, confirmed independently by PR #425's own body text) — this promotes row
+10's parser-isolation gap from CONDITIONAL to a **second standing BLOCKER**, since the exposure
+it describes is live today, not gated behind any future decision. Row 1c (the approval "second
+door") remains a real, serious finding that is **already fixed on dev**, confirmed by direct
+code reading rather than trusted from a dated claim — no new fix was required there. Row 5's
+`run_tests` subprocess-environment finding remains correctly CONDITIONAL — nothing has changed
+its trigger condition (unsupervised code execution is still not enabled).
+
+**Current blocker count: two**, neither closed by this session:
+1. **Row 11 — independent security acceptance.** Owner: the founder, or a founder-designated
+   external human reviewer. See `docs/LIFE_INDEPENDENT_REVIEW_HANDOFF.md`'s acceptance-handoff
+   section.
+2. **Row 10 — document-parser process isolation.** Owner: the founder, for the one concrete
+   action only a repository administrator can take (approving the blocked backend Actions runs
+   in GitHub's UI so the #425 lineage's own test claims become independently verifiable) — and,
+   separately, whoever the founder designates to actually review and merge that lineage (or an
+   equivalent fix) once it has real CI evidence. See `docs/LIFE_INDEPENDENT_REVIEW_HANDOFF.md`'s
+   reconciliation addendum for the full chain and the options this presents.
+
+**No code change was made under this directive's Priority 2** — the one gap that would have
+qualified for a code fix (row 1c) was found to already be fixed. Row 5's CONDITIONAL finding
+remains deliberately unfixed (real design work, not triggered by current scope). Row 10's gap
+is NOT fixed here either: the proposed fix (PR #425's sidecar) already exists in substance on
+an open, unmerged, 7-PR-deep lineage with its own extensive validation evidence — re-deriving
+or re-implementing it here would duplicate real work already done by a different agent
+lineage, which this repo's own standing discipline explicitly warns against. What this session
+added is the exact-SHA reconciliation of that lineage's current status, not a competing fix.
+
+## Amended 2026-11-16 (round 2) — founder directive "SECURITY REMEDIATION + FIRST SUPERVISED DEVELOPMENT CYCLE"
+
+Four concrete, exact-SHA-evidenced developments since the amendment above, each verified by
+direct code reading and/or an executable test run this round, not re-asserted from memory:
+
+**A genuine, previously-undocumented gap found and fixed — row 1/5/7/9's `open_pr` path.**
+An independent review correctly identified that `GitHubClient.create_pull_request()` never
+set GitHub's own `draft` request parameter, and that `execution_job.py`'s `_handle_open_pr()`
+treated **any** open PR for the exact head/base as "ours, already done" with no check of that
+PR's `draft` field at all — meaning a human's own real, non-draft PR on the same branch name
+could have been silently attributed to MainAI's own work result. Both confirmed true by
+reading the actual source before changing anything, both fixed: `create_pull_request()` now
+always requests `draft: true`; `_handle_open_pr()` now fails closed (`TaskExecutionError`) on
+a non-draft or unknown-draft-state PR, and cross-checks a reused draft PR's head commit
+against the task's actual pushed SHA rather than trusting a branch-name match alone. 4 new
+regression tests, 213 tests passing across every file touching this path. PR #450
+(`2cbbc3a5`), branched off dev (not off PR #395's still-open, unrelated `github_client.py`
+additions, to avoid a conflicting edit). This directly strengthens rows 1, 5, 7 and 9's
+reliance on the `open_pr` task type being trustworthy — it was not, until this fix.
+
+**Row 8's confirming test, independently re-verified as genuinely sound, not merely green.**
+A separate independent review flagged that a cross-owner RLS write test for
+`github_evidence_candidates` (#403, composed into PR #440) contained a classic
+`try: write(); assert False; except Exception: ...` pattern — `AssertionError` is itself a
+subclass of `Exception`, so the except block could silently swallow the test's own intended
+failure, making it report PASSED even if cross-owner isolation were completely broken.
+**Confirmed true against the actual test source.** Fixed (rewritten to `pytest.raises` plus an
+independent row-count check); INSERT/UPDATE/DELETE cross-owner denial now all covered with two
+genuinely separate DB sessions. Run for real against local Postgres with RLS enabled: **the
+underlying RLS policy itself was never broken** — only the test's assertion logic was. All
+4 tests now genuinely pass; 61/61 in `tests/security/` with no regressions. Pushed in place to
+PR #440 (`d4542876`), per this repo's Merge-regel (fixing it where the bug already lives rather
+than opening a competing branch). The identical anti-pattern was also found, but deliberately
+left unfixed and flagged separately, in the sibling `test_rls_isolation_work_candidates.py` —
+its own follow-up, out of this round's scope.
+
+**Row 10's parser-isolation lineage (PR #447) — substantially further along, still not
+merged.** Real evidence gathered this round that did not exist before: `vps-compose-verify`
+reached 17 of 37 real infrastructure-verification steps on a genuine push-triggered run,
+including a confirmed real parser-socket extraction (`POST http://parser/v1/extract` → `200
+OK`) and real local-AI pipeline end to end — the first-ever confirmation the production socket
+path, not just the same-UID subprocess fallback, actually works. It still fails at step 18 (a
+DNS-resolution isolation check expecting `ENOTFOUND`, getting `EAI_AGAIN`) before reaching
+restart-survival (step 33). A drafted fix for that one check was blocked by the platform's own
+safety classifier and left unpushed, exactly as instructed, pending independent review — not
+bypassed. Separately, 5 backend test failures (lease-recovery/takeover tests) were
+investigated at length: one genuine clock-mismatch defect was found and fixed
+(`01709dcd`, confirmed via a dedicated regression test); the remaining 3 resisted every
+reproduction attempt this round (Python/Postgres clock skew, `now()`-staleness across a slow
+transaction, table-truncation/backlog effects, and privilege-narrowing test-order leakage were
+each tested directly and disproven, not just reasoned about) — diagnostic instrumentation was
+added (`0b18aeb2`) so the next real occurrence captures the job's exact row state instead of
+requiring another blind reproduction pass. **Row 10's classification is unchanged — still a
+standing BLOCKER** (`POST /api/library/import` remains active and ungated today) — but the
+evidence behind it is now real infrastructure verification, not a code-reading inference, and
+the remaining gap to a merge-ready state is narrower and precisely named: one independently
+reviewed DNS-check fix, and either a root cause or an accepted-as-environmental explanation for
+3 specific test failures.
+
+**Row 1/5's "no live execution path" framing — upgraded from code-reading inference to an
+executable, end-to-end proof.** Founder Priority 4 ("complete the real vertical slice") asked
+for the actual chain — GitHub discovery → evidence candidate → founder authorization → task
+dispatch → isolated worktree edit → verified commit → draft PR → checkpoint/recovery — to be
+exercised with real production functions, not simulated. This is now done:
+`test_first_supervised_development_cycle_real_dispatch.py` (PR #443, `e25ba3cc`) chains
+`app.github_evidence.service`'s real staging/authorization (PR #403/#440) through the real
+`Worker().run_once()` poll loop, real `dispatch_ready_task()`, a real local git worktree with
+real `init`/`fetch`/`checkout`/`commit`/`push` subprocess calls (never mocked), a real
+`python -m pytest` subprocess run against the file actually committed, and `open_pr`'s real
+(simulated-GitHub-HTTP) PR creation — proving fail-closed authorization three separate ways
+(staging alone never creates a goal; the real worker tick genuinely stalls on `repo_edit`/
+`open_pr` until explicit approval; an authorized/dismissed candidate can never be re-authorized)
+and real crash/resume survival through PR #447's own already-hardened recovery pipeline. One
+genuine, previously-unexercised production gap was found and fixed while building this:
+`_handle_run_tests()` always checked the shared backend root even when a sibling `repo_edit`
+task's real edit landed in an isolated worktree instead, so a separate `run_tests` task could
+never find the file that was actually committed — fixed with the same lookup `_handle_open_pr()`
+already used for the identical problem. 777/777 passed in `tests/backend/mainai/`, no
+regressions. **Explicit limitation, not glossed over:** GitHub's own HTTP API is simulated in
+this test, the same established convention every other test in this codebase already uses for
+it — this proves the chain is real, not that a PR was opened against the real repository. That
+last step requires the founder's own explicit authorization of one specific, real task, which
+this round deliberately did not self-authorize.
+
+**New, smaller finding — model-provider abstraction (not previously classified in this
+matrix).** Assessed for Groq/OpenRouter-compatible and local-inference support, per the
+founder's separate request. `OpenRouterProvider` and `OllamaProvider` are both already fully
+built and registered (`backend/app/providers/registry.py`); no dedicated Groq adapter is
+needed since OpenRouter already gateways Groq-hosted models. The one real gap is a
+cross-provider conformance test suite, not a missing adapter. All three safety properties the
+founder asked about check out: provider fallback does not bypass the separate spend-reservation
+gate (`app/provider_spend/service.py`); no live path hands a provider credential to a worker at
+all (`app/workforce/provider_worker.py`'s real-invoke path is hard-blocked,
+`ProviderActivationBlocked`, independent of this matrix's row 1 finding); checkpoints are
+provider-agnostic by construction, so a provider switch mid-task cannot lose continuity.
+**Classification: safely deferred** — none of this is triggered by the first cycle's own
+scope (#439's scenario never needs provider diversity), and preserving it as a backlog item
+rather than implementing it now matches the founder's own instruction not to merge future
+capability into the launch-critical path.
+
+### The founder's requested four-way classification, mapped from this matrix's existing labels
+
+| Founder's category | This matrix's rows |
+|---|---|
+| **Mandatory before first supervised cycle** | Row 11 (independent security acceptance — human-only, nothing left for engineering to prepare) and row 10 (parser-process isolation — live today via `POST /api/library/import`, not gated behind any future decision). Both remain the only two standing blockers; neither closed by this round. |
+| **Conditional on enabled capability** | Row 5 (the `run_tests` subprocess-environment finding — becomes a blocker only if unsupervised/non-human-reviewed code execution is ever enabled); row 1b (the separate older V1 autonomy stack — a reconciliation item, not triggered by #439's scope); row 6's V6/V7 egress gaps (matter for general chat usage, not the GitHub-evidence chain). |
+| **Safely deferred** | Model-provider abstraction (Groq/OpenRouter/Ollama — already built, conformance-test gap only); the five `FV-BLU-001`–`005` blueprint-driven-coordination gaps recorded separately in `docs/LIFE_FOUNDER_VISION_BACKLOG.md` §13a (multi-project isolation, cross-system replanning, builder/reviewer feedback loop, integration contracts, the blueprint↔coordination bridge). |
+| **Future product** | Everything the founder's broader ecosystem-vision directives named (Life Phone, Life Dating, Life Social, etc. — tracked in `docs/LIFE_ECOSYSTEM_VISION_RECONCILIATION.md`) and `app.agent_coordination`/`app.workforce`'s own currently-inert adapter dispatch (row 1) — deliberately not activated, not part of this cycle's scope, and explicitly not to be merged into the launch-critical path per this directive's own instruction. |
+
+## Explicit confirmation
+
+No future product was activated. No automated adapter/provider dispatch was enabled. No
+approval boundary was bypassed to make any test pass — the one bypass finding in this matrix
+(row 1c) was found already fixed, not worked around; this round's two newly-confirmed findings
+(the draft-PR gap, the swallowed-assertion test bug) were both fixed with evidence, not
+dismissed. `first_cycle_go` remains `false`. No merge, deployment, or activation accompanies
+this document.
+
+---
+_Generated by [Claude Code](https://claude.ai/code/session_016d4iixQnxxqNhDrxHHxV4Q)_
