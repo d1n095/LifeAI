@@ -3,6 +3,7 @@ import uuid
 from sqlalchemy.orm import Session
 
 from app.providers.registry import embed_with_policy, resolve_active
+from app.rag.embedding_space import native_dim_of
 from app.rag.vector_store import search
 
 
@@ -33,4 +34,18 @@ async def retrieve_context(
         purpose="rag_retrieval",
         requested_by="rag.retrieve.retrieve_context",
     )
-    return search(db, owner_id, vectors[0], top_k=top_k, project_id=project_id, document_id=document_id)
+    # Scope retrieval to the ACTIVE embedding space (model + this query's native dim) so a
+    # query embedded with model X can only ever match chunks embedded with model X — no
+    # silent cross-model mixing (app/rag/embedding_space.py). search() zero-pads the query to
+    # the storage width itself.
+    native_dim = native_dim_of(vectors)
+    return search(
+        db,
+        owner_id,
+        vectors[0],
+        top_k=top_k,
+        project_id=project_id,
+        document_id=document_id,
+        embedding_model=model,
+        embedding_native_dim=native_dim,
+    )

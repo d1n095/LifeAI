@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
+from app.rag.embedding_space import pad_to_storage
 
 
 def upsert_chunks(
@@ -13,6 +14,9 @@ def upsert_chunks(
     owner_id: uuid.UUID,
     chunks: list[str],
     vectors: list[list[float]],
+    *,
+    embedding_model: str | None = None,
+    embedding_native_dim: int | None = None,
 ) -> int:
     """Writes chunk rows scoped to owner_id (see app/models/document_chunk.py and the
     document_chunks_isolation policy in app/rls.py). The caller MUST have already run
@@ -31,6 +35,12 @@ def upsert_chunks(
             chunk_index=idx,
             text=chunk,
             embedding=vector,
+            # Embedding-space identity: stamp the model + native dim that produced this
+            # vector so retrieval can filter strictly to the active space and never compare
+            # across incompatible models/dims (app/rag/embedding_space.py). The caller has
+            # already zero-padded `vector` to the storage width.
+            embedding_model=embedding_model,
+            embedding_native_dim=embedding_native_dim,
         )
         for idx, (chunk, vector) in enumerate(zip(chunks, vectors))
     ]
@@ -69,6 +79,8 @@ def search(
     *,
     project_id: uuid.UUID | None = None,
     document_id: uuid.UUID | None = None,
+    embedding_model: str | None = None,
+    embedding_native_dim: int | None = None,
 ) -> list[dict]:
     """Explicit owner_id filter in addition to RLS — see upsert_chunks's docstring on why
     this isn't relying on a single layer.
@@ -89,12 +101,26 @@ def search(
     is also what app/rag/retrieve.py's chat-context retrieval calls, so a deleted source can
     never be quoted back to the founder as if it still existed either.
     """
+    # Zero-pad a native query vector up to the storage column width (no-op when it already is
+    # that width). Cosine ranking is identical to a native-width column — see
+    # app/rag/embedding_space.py.
+    vector = pad_to_storage(vector)
     distance = DocumentChunk.embedding.cosine_distance(vector)
     stmt = (
         select(DocumentChunk, distance.label("distance"))
         .join(Document, Document.id == DocumentChunk.document_id)
         .where(DocumentChunk.owner_id == owner_id, Document.deleted_at.is_(None))
     )
+    # Active-embedding-space guard: when the caller names the active (model, native_dim), only
+    # chunks stamped with that exact space are comparable — a zero-padded 768-d vector and a
+    # genuine 1536-d vector share this column but are semantically incomparable. Filtering here
+    # is the no-silent-mixing guarantee; chunks from any other model/dim (or legacy NULL
+    # identity) are simply never ranked against this query.
+    if embedding_model is not None and embedding_native_dim is not None:
+        stmt = stmt.where(
+            DocumentChunk.embedding_model == embedding_model,
+            DocumentChunk.embedding_native_dim == embedding_native_dim,
+        )
     if project_id is not None:
         stmt = stmt.where(Document.project_id == project_id)
     if document_id is not None:
@@ -114,6 +140,8 @@ def hybrid_search(
     project_id: uuid.UUID | None = None,
     classification: str | None = None,
     active_truth_status: str | None = None,
+    embedding_model: str | None = None,
+    embedding_native_dim: int | None = None,
 ) -> list[dict]:
     """DEL 5's hybrid search: combines the same semantic (pgvector) channel `search()` uses
     with a plain case-insensitive substring match on chunk text/document title, then merges
@@ -139,11 +167,20 @@ def hybrid_search(
 
     semantic_rows = []
     if vector is not None:
+        vector = pad_to_storage(vector)
+        semantic_filters = list(base_filters)
+        # Same active-embedding-space guard as search(): the semantic channel never compares
+        # across incompatible models/dims. The independent ILIKE text channel below is
+        # unaffected, so a model switch degrades hybrid search to exact-text matches rather
+        # than returning semantically meaningless cross-model "matches".
+        if embedding_model is not None and embedding_native_dim is not None:
+            semantic_filters.append(DocumentChunk.embedding_model == embedding_model)
+            semantic_filters.append(DocumentChunk.embedding_native_dim == embedding_native_dim)
         distance = DocumentChunk.embedding.cosine_distance(vector)
         semantic_stmt = (
             select(DocumentChunk, distance.label("distance"))
             .join(Document, Document.id == DocumentChunk.document_id)
-            .where(*base_filters)
+            .where(*semantic_filters)
             .order_by(distance)
             .limit(top_k)
         )
