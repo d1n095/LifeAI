@@ -80,7 +80,7 @@ async def test_basic_startup_upload_extract_persist_with_no_model(
     db_session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user.id)})
 
     # --- HTTP upload: original + hash committed durably before any indexing ---
-    doc = await upload_document(
+    doc = upload_document(
         request=None,  # type: ignore[arg-type]
         file=_upload_file("forsta_uppstart.txt", RAW),
         category="notes",
@@ -146,7 +146,7 @@ async def test_basic_startup_survives_a_further_restart(
     current_user_id_var.set(str(user.id))
     db_session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user.id)})
 
-    doc = await upload_document(
+    doc = upload_document(
         request=None,  # type: ignore[arg-type]
         file=_upload_file("restart.txt", RAW),
         category=None,
