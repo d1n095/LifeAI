@@ -9557,3 +9557,48 @@ Copilot-workflow rört.
 
 **Väntar på resultat** av CI på exakt SHA `2e69fbe2` (F2+F3+CI-gating). Ingen merge/deploy/
 aktivering/säkerhetsgrind ändrad. `first_cycle_go=false` genomgående.
+
+## Slutgiltig konsoliderad handoff på PR #447 (2026-11-16) — exakt SHA `48a6d63e`, verklig CI, kvarstående öppna punkter
+
+**Andra F3-instans hittad av OpenCodes granskning, fixad** (`1319125d`): `import_uploads.py`:s
+`_job_clock_is_live()` hade samma blandade-klocka-mönster som den första F3-fixen inte
+täckte — motsatt farlig riktning (en genuint levande lease kan se ut som redan utgången om
+sessionens TimeZone ligger FÖRE UTC). Fixat på samma sätt, eget regressionstest.
+
+**Tre genuina CI/compose-fynd**, hittade EFTERSOM verklig evidens (Priority 4) för första
+gången någonsin körde den här kodkombinationen: (1) `vps-compose-verify` kunde inte ens
+tolka `docker-compose.vps.yml` — #425:s merge lade till två nya KRÄVDA interpolationsvariabler
+(`DEFAULT_LLM_MODEL`/`DEFAULT_EMBEDDING_MODEL`) jobbet aldrig levererade — fixat (`79d6a848`).
+(2) Samma merge ändrade `DEFAULT_LLM_PROVIDER`/`DEFAULT_EMBEDDING_PROVIDER`:s compose-standard
+till `ollama`, vilket tyst upphävde ett orelaterat, redan existerande tests egen förutsättning
+("provider genuint okonfigurerad") — vilket avbröt jobbet INNAN det nådde parser-isolerings-
+steget. Fixat (`48a6d63e`).
+
+**Verklig CI vid `48a6d63e`:** hela standardpipelinen grön. `vps-compose-verify` — det ENDA
+jobbet som bygger/kör den RIKTIGA separata parser-containern — nådde 17 av 37 steg, inklusive
+en RIKTIG uppladdning → RIKTIG parser-socket-extraktion → RIKTIG Ollama embed/chat, end-to-end
+(första gången någonsin bekräftat, inte bara subprocess-fallbacken), och samtliga strukturella
+nätverksisoleringskontroller. Föll vid steg 18:s SISTA, redundanta delkontroll — en DNS-
+probe förväntar `ENOTFOUND`, fick `EAI_AGAIN` (vilket, om något, är STARKARE bevis för
+isolering på ett nätverk utan utgång, inte svagare — den egentliga isoleringsegenskapen var
+redan oberoende bekräftad av nätverksmedlemskapskontrollerna precis innan).
+
+**En tredje fix förberedd men INTE pushad:** plattformens egen auto-mode-säkerhetsklassificerare
+avböjde den specifika push-åtgärden (en tredje CI-ändring i rad som lättar på en
+säkerhetsisoleringskontrolls assertion) som förtjänar en andra granskning innan den går ut —
+respekterat, inte kringgått. Diffen är inkluderad i PR #447:s slutgiltiga handoff-kommentar
+för granskning.
+
+**Kvarstående öppna punkter, INGEN löst av denna runda:** (1) oberoende MÄNSKLIG
+säkerhetsacceptans (aldrig en AI-session, OpenCodes egen granskning inkluderad — enligt dess
+egen explicita disclaimer); (2) #425-kedjans EGNA `action_required`-körningar, oförändrat;
+(3) #440 vs #447 migrationssekvensering — grundarens eget mergeordnings-beslut; (4) funktionell
+socket-transport-evidens i den STANDARD pytest-baserade CI:n saknas fortfarande
+(`PARSER_SOCKET_PATH`/`RUN_PARSER_CONTAINER_SECURITY_TESTS` sätts aldrig där — skilt från vad
+`vps-compose-verify` nu täcker på infrastrukturnivå); (5) DNS-kontrollen ovan, fix föreslagen
+men inte pushad; (6) ej verifierad prediktion: `vps-deploy-rollback-test`/`vps-backup-restore-
+test` kommer troligen också behöva samma `DEFAULT_LLM_MODEL`/`DEFAULT_EMBEDDING_MODEL`-fix.
+
+**Ingen merge/deploy/aktivering/säkerhetsgrind ändrad. `first_cycle_go=false` genomgående.**
+Grundaren avgör om denna evidens räcker för att gå vidare, och i vilken ordning relativt
+punkterna ovan.
