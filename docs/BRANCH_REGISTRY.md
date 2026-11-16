@@ -9494,3 +9494,66 @@ kräver fortfarande grundaren personligen i GitHub:s UI.
 
 **Ingen merge/deploy/aktivering/säkerhetsgrind ändrad. `first_cycle_go=false` genomgående.**
 Detta är inte ett beslut — grundarens egna ord styr: "Do not make that decision on my behalf."
+
+## Grundardirektiv "PR #447 VERIFICATION AND SECURITY CORRECTIONS" (2026-11-16) — OpenCodes F2/F3 fixade, real Compose-evidens påslagen
+
+**Grundaren bekräftade självständigt** (oberoende av denna session) att PR #447 vid SHA
+`ca352bcd` har grön riktig CI. OpenCodes oberoende granskning av #425 gav fyra fynd (F1–F4);
+grundaren prioriterade F2/F3 för fix, F1 för verifiering (inte omskrivning), #440-relationen
+för kontroll, och riktig parser-/Compose-evidens istället för att räkna skippade jobb som
+godkända.
+
+**F2 — fail-open parser-fallback vid tvetydig `ENVIRONMENT` (fixat, `974bd8ae`):**
+`extract_isolated.py` jämförde `os.environ.get("ENVIRONMENT") == "production"` — en
+blocklist på EN sträng. Osatt, `"Production"`, `"prod"`, en felstavning: alla föll igenom till
+den SVAGARE, samma-host subprocess-fallbacken istället för att neka. Fixat genom att vända om
+till en allowlist av kända säkra värden (`{"development", "test"}`, normaliserad) — allt
+oigenkänt nekar nu, precis som produktion. `tests/conftest.py` sätter nu `ENVIRONMENT=
+development` explicit (samma redan etablerade `setdefault`-mönster som `DATABASE_URL` m.fl.).
+Två parametriserade regressionstester tillagda (8 osäkra värden, 4 säkra variant-värden).
+Verifierat att ingen av de två gröna E2E-jobben (`e2e-tests`, `same-origin-proxy-test`) kör
+upload/extraction-specs, så detta påverkar inte dem.
+
+**F3 — blandad Python-UTC/Postgres-sessionsklocka i upload-leases (fixat, `d16ef153`):**
+`_claim_expired_upload()` i `import_staging.py` avgjorde "är detta lease utgånget" TVÅ gånger
+för samma logiska villkor — en gång mot Postgres egen `clock_timestamp()` (castad till en
+tidszonslös kolumn under SESSIONENS `TimeZone`), en gång mot Pythons `datetime.utcnow()`
+(alltid sann UTC) — i den EFTERFÖLJANDE omvalideringsfrågan. När sessionens TimeZone inte är
+UTC, och ligger EFTER UTC, väljs ett genuint utgånget lease aldrig som kandidat alls —
+återhämtning stannar tyst. Fixat genom att beräkna EN Python-tidsstämpel och återanvända den
+för båda frågorna, vilket tar bort `clock_timestamp()` (och sessionens TimeZone-beroende) helt
+ur beslutet. `app/jobs/lease.py`:s EGEN, separata `clock_timestamp()`-mekanism är självkonsekvent
+(samma klocka vid varje läsning/skrivning där) och berörs INTE — det är inte detta fynds ämne.
+Ett nytt regressionstest sätter sessionens TimeZone 12 timmar efter UTC och bekräftar att
+återhämtning ändå lyckas.
+
+**F1 — verifierat, INTE omskrivet:** De tre dedikerade Copilot-verifieringsworkflow-filerna
+(`first-start-verification.yml`, `founder-alpha-verification.yml`, `real-local-ai-verification.yml`)
+är grenbegränsade till SINA EGNA specifika branch-namn (inte #447:s) och rör inte detta fynd —
+de lämnas helt orörda. Istället ger den redan existerande, alltid-på standard-CI-pipelinen
+(`backend-tests` m.fl., nu grön på #447:s exakta sammanslagna kod) genuin, obehindrad
+CI-exekvering för DEN INTEGRERADE branchen specifikt — vilket löser F1 för #447 utan att röra
+de ORIGINALA blockerade #413/#421-körningarna (de kvarstår oförändrat, kräver fortfarande
+grundaren som repo-admin).
+
+**#440-relationen omverifierad, exakt teknisk natur preciserad:** Inte en bokstavlig
+sträng-krock (revisions-ID-strängarna skiljer sig: #440 använder bara `"0069"` osv., #447
+använder `"0069_embedding_space_identity"` osv.) utan en GRAF-FORK — båda kedjorna sätter
+`down_revision = "0068"` oberoende av varandra, så Alembic skulle se TVÅ huvuden om båda fanns
+samtidigt. Ingen av branchernas filer rörda (Merge-regeln: vidrör inte förrän den faktiska
+mergeordningen är känd).
+
+**Riktig parser-container-/Compose-omstart-evidens påslagen (`2e69fbe2`):** `vps-compose-verify`
+("Strato VPS compose topology — build, run, verify") visade som SKIPPED på #447 (grenbegränsad
+till en liten allowlist, ett avsiktligt, redan etablerat mönster i denna repo — inte ett fel).
+Det är det ENDA jobbet som bygger/kör den RIKTIGA separata parser-containern
+(`docker-compose.vps.yml`) och redan innehåller exakt de två steg som behövs: "Verify private
+data-network membership and parser isolation" och "Restart survival — kill the worker mid-job
+... confirm the lease is reclaimed" (övar direkt F3:s fix). `claude/import-security-
+integration-on-dev` tillagd till jobbets `if:`-allowlist — samma redan etablerade, redan
+granskade mönster som varje tidigare branch i listan (t.ex. `claude/mainai-core-loop-v1`:s
+egen kommentar). En rad ändrad i ett jobbs `if:`-villkor; inget annat workflow-fil rört, ingen
+Copilot-workflow rört.
+
+**Väntar på resultat** av CI på exakt SHA `2e69fbe2` (F2+F3+CI-gating). Ingen merge/deploy/
+aktivering/säkerhetsgrind ändrad. `first_cycle_go=false` genomgående.
