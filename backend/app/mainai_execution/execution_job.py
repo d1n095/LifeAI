@@ -380,12 +380,29 @@ def _run_pytest(target: str, *, cwd: Path, timeout_seconds: int = 300) -> dict:
     return {"target": target, "returncode": result.returncode, "passed": result.returncode == 0, "stdout_tail": result.stdout[-4000:], "stderr_tail": result.stderr[-2000:]}
 
 
-def _handle_run_tests(task: MainAITask) -> dict:
+def _handle_run_tests(db: Session, task: MainAITask, *, goal: MainAIGoal) -> dict:
+    """Hardening-pass finding (real production-scope gap, same class as the one
+    `_handle_repo_edit()`'s own docstring already describes): a `run_tests` task is always a
+    SEPARATE task from the `repo_edit` task whose change it verifies (see
+    `_DEMO1_PLAN_JSON`-shaped plans) -- once `github_write_enabled` is on, `repo_edit`'s own
+    edit lands in its real, isolated worktree (worktree.py), never in this shared backend
+    checkout. Running this task's own targeted tests against `_backend_root()` unconditionally
+    -- as this function did before this fix -- meant they could never find the file a sibling
+    repo_edit task actually committed, in the one mode (real git) this task type exists to
+    verify for real. Fixed the exact same way `_handle_open_pr()` already finds its sibling's
+    branch: `_find_repo_edit_branch()` locates the completed repo_edit event for this goal and,
+    if it ran for real, its `worktree_path` -- identical fallback logic to the one
+    `run_task_execution_job()` already uses for this task's OWN post-dispatch verification
+    step (`verify_cwd`), now also applied to this task's internal pytest invocation so both
+    checks agree on where the real code actually lives."""
     targets = [step["target"] for step in task.verification_plan if step.get("kind") == "targeted_tests" and step.get("target")]
     if not targets:
         raise TaskExecutionError("run_tests task has no 'targeted_tests' entries in its verification_plan to run.")
+    edit_info = _find_repo_edit_branch(db, goal_id=goal.id)
+    worktree_path = edit_info.get("worktree_path") if edit_info else None
+    cwd = Path(worktree_path) / "backend" if worktree_path else _backend_root()
     try:
-        results = [_run_pytest(target, cwd=_backend_root()) for target in targets]
+        results = [_run_pytest(target, cwd=cwd) for target in targets]
     except VerificationStepError as exc:
         raise TaskExecutionError(str(exc)) from exc
     return {"results": results}
@@ -551,7 +568,7 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
                     db.rollback()
                     return
             elif task.task_type == "run_tests":
-                work_result = _handle_run_tests(task)
+                work_result = _handle_run_tests(db, task, goal=goal)
             elif task.task_type == "open_pr":
                 work_result = await _handle_open_pr(db, task, goal)
             else:
