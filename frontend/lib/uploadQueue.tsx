@@ -13,11 +13,11 @@
  * client-side — so the UI can't show "done" before the server actually is.
  *
  * DEL 3 (server recovery): on mount, the provider also fetches the founder's still-active
- * (pending/running) server jobs and adds them as "processing" items, resuming polling — this
- * is what makes a page reload or fresh login not lose track of an upload still running
- * server-side. Recovered items have no local File (the browser never kept the original
- * bytes across a reload), so they cannot be retried — only queue items created via
- * enqueue() in this same session can be.
+ * (receiving/pending/running) server jobs and adds them as "processing" items, resuming
+ * polling — this is what makes a page reload or fresh login not lose track of an upload or
+ * import still running server-side. Recovered items have no local File (the browser never
+ * kept the original bytes across a reload), so they cannot be retried — only queue items
+ * created via enqueue() in this same session can be.
  */
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
@@ -50,9 +50,9 @@ interface UploadQueueContextValue {
 
 const MAX_CONCURRENT = 3;
 const POLL_INTERVAL_MS = 700;
-// ~4.5 minutes of polling per file before giving up and marking it failed — generous for a
-// large ZIP package, but still bounded so a genuinely stuck job doesn't spin forever.
-const POLL_MAX_ATTEMPTS = 400;
+// Seven minutes covers the server's five-minute receiving lease plus a recovery poll while
+// remaining bounded for genuinely stuck jobs.
+const POLL_MAX_ATTEMPTS = 600;
 
 const UploadQueueContext = createContext<UploadQueueContextValue | null>(null);
 
@@ -286,7 +286,7 @@ export function UploadQueueProvider({ children }: { children: React.ReactNode })
       .listImportJobs()
       .then((jobs) => {
         if (stopped) return;
-        const active = jobs.filter((j) => j.status === "pending" || j.status === "running");
+        const active = jobs.filter((j) => j.status === "receiving" || j.status === "pending" || j.status === "running");
         if (active.length === 0) return;
         setItems((prev) => [
           ...prev,

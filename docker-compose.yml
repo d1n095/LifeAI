@@ -17,7 +17,8 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./backend/db-init:/docker-entrypoint-initdb.d:ro
     ports:
-      - "5432:5432"
+      # Host access is for local development tools only; application containers use postgres:5432.
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U lifeos"]
       interval: 5s
@@ -51,6 +52,32 @@ services:
       timeout: 5s
       retries: 10
 
+  parser:
+    build: ./backend
+    image: lifeai-parser:local
+    restart: unless-stopped
+    init: true
+    user: "10002:10001"
+    entrypoint: ["python", "-m", "app.rag.parser_service"]
+    environment:
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      PYTHONDONTWRITEBYTECODE: "1"
+      PARSER_SOCKET_PATH: /run/lifeai-parser/parser.sock
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: "0.50"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    network_mode: none
+    volumes:
+      - parser_socket:/run/lifeai-parser
+
   mailhog:
     image: mailhog/mailhog:v1.0.1
     restart: unless-stopped
@@ -74,13 +101,18 @@ services:
       OLLAMA_BASE_URL: http://ollama:11434
       FRONTEND_ORIGINS: ${FRONTEND_ORIGINS:-http://localhost:3000}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      PARSER_SOCKET_PATH: /run/lifeai-parser/parser.sock
     depends_on:
+      parser:
+        condition: service_started
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     ports:
       - "8000:8000"
+    volumes:
+      - parser_socket:/run/lifeai-parser:ro
 
   frontend:
     build:
@@ -103,3 +135,9 @@ volumes:
   postgres_data:
   ollama_data:
   redis_data:
+  parser_socket:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=1m,uid=10002,gid=10001,mode=0710

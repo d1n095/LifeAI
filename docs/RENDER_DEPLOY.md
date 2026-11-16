@@ -64,6 +64,16 @@ Det finns bara **en** tjänst i `render.yaml`: `LifeAI-1`, `plan: free`. Ingen
 `mainai-backend`-tjänst ska någonsin skapas separat — det vore både en extra kostnad och
 onödigt, eftersom loopback-bindningen redan ger samma isolering.
 
+### Begränsning för isolerad dokumentparser
+
+Den secretless parser-sidecaren finns för närvarande bara i lokal Docker Compose och VPS-
+topologin. Renders `Dockerfile.combined` kör backend i samma container och ger inte parsern
+separata PID-/mount-/network-namespaces. Därför failar den isolerade extraktionsvägen stängt
+i produktion när `PARSER_SOCKET_PATH` saknas: dokumentparsning och import är otillgängliga på
+Render tills en likvärdig, auktoriserad och isolerad parser-tjänst tillhandahålls. Ta inte
+bort fail-closed-kontrollen och återgå inte till en parserprocess som delar backendens
+processnamespace för att återställa funktionen.
+
 ### Verifierat lokalt (utan Docker — se `docker`-anmärkningen nedan)
 
 Docker-daemonen är inte tillgänglig i den sandlåda det här arbetet gjordes i, så

@@ -1,10 +1,12 @@
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from sqlalchemy.exc import OperationalError
 
 from app.bootstrap import bootstrap_founder_user
 from app.config import get_settings
@@ -17,6 +19,7 @@ from app.routers import (
     admin,
     agents,
     auth,
+    blueprint,
     chat,
     conversations,
     documents,
@@ -44,6 +47,22 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
 
+
+@app.exception_handler(OperationalError)
+async def _database_unavailable(request: Request, exc: OperationalError):
+    logger.warning(
+        "Database operation unavailable for %s %s (%s).",
+        request.method,
+        request.url.path,
+        type(exc.orig).__name__,
+    )
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Tjänsten är tillfälligt otillgänglig. Försök igen med samma begäran."},
+        headers={"Retry-After": "3"},
+    )
+
+
 # CSRF verification is folded into app/deps.py's get_current_user (every mutating route
 # requires it) plus an explicit check in /refresh and /logout, which authenticate via the
 # refresh-token cookie instead — not a standalone middleware, because the CSRF value can no
@@ -65,6 +84,7 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(account.router)
+app.include_router(blueprint.router)
 app.include_router(chat.router)
 app.include_router(conversations.router)
 app.include_router(documents.router)

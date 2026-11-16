@@ -90,6 +90,13 @@ function LibrarySourceDetailInner() {
     }
   );
 
+  // Blueprint §16.6: download the untouched original the founder uploaded (backend endpoint
+  // from PR #329). Kept in component state (not a plain <a href>) so a 404/503 from the
+  // integrity-verifying endpoint shows as an inline message instead of navigating the founder
+  // away to a raw error page.
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
   const [otherSources, setOtherSources] = useState<KnowledgeSourceItem[]>([]);
   const [relTarget, setRelTarget] = useState("");
   const [relType, setRelType] = useState("supports");
@@ -132,6 +139,33 @@ function LibrarySourceDetailInner() {
       setRelError(e.message);
     } finally {
       setAddingRelationship(false);
+    }
+  }
+
+  async function handleDownloadOriginal() {
+    setDownloading(true);
+    setDownloadError(null);
+    let objectUrl: string | null = null;
+    try {
+      const { blob, filename } = await api.downloadLibraryOriginal(params.id);
+      // Trigger a browser download from the in-memory blob. No navigation, so the SPA stays
+      // put and the authenticated fetch (not a bare link) is what carried the session cookie.
+      objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (e: any) {
+      setDownloadError(e.message);
+    } finally {
+      // Revoke on the next tick so the click's navigation has already picked up the URL.
+      if (objectUrl) {
+        const toRevoke = objectUrl;
+        setTimeout(() => URL.revokeObjectURL(toRevoke), 0);
+      }
+      setDownloading(false);
     }
   }
 
@@ -204,6 +238,24 @@ function LibrarySourceDetailInner() {
         <p className="text-white/50 text-sm mt-1">
           {source.original_filename} · {source.media_type || "okänd filtyp"}
         </p>
+        {source.original_filename && (
+          <div className="mt-3">
+            <button
+              type="button"
+              onClick={handleDownloadOriginal}
+              disabled={downloading}
+              className="inline-flex items-center gap-2 rounded-lg border border-border px-3 py-1.5 text-sm text-white/80 hover:text-white disabled:opacity-50"
+              aria-label={`Ladda ner originalfilen ${source.original_filename}`}
+            >
+              {downloading ? "Laddar ner…" : "⬇ Ladda ner original"}
+            </button>
+            {downloadError && (
+              <div role="alert" className="mt-2 text-sm text-red-300">
+                {downloadError}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">

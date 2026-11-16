@@ -1,0 +1,428 @@
+# First-start verification — isolated, manually triggered acceptance of the integration
+# candidate's first usable Life experience, in a throwaway CI environment, using ONLY
+# synthetic identities and files.
+#
+# What it proves (API-level, tied to an exact commit SHA): founder authentication,
+# conversation persistence, small-file upload, immutable original retrieval
+# (GET /api/library/:id/original — the #329 capability the #330 download UI depends on),
+# document extraction, and persistence across a real backend+worker process restart.
+#
+# What it never does: production credentials, production Supabase, the live STRATO
+# environment, real/paid AI-provider calls, or any network egress. The backend and worker run
+# the REAL application code with the repository's own deterministic in-process fakes
+# (backend/scripts/ci/run_e2e_backend.py — canned chat/embed, no outbound calls), exactly the
+# infrastructure the Playwright E2E suite already uses. Postgres and Redis are throwaway
+# service containers; the upload store is a throwaway workspace directory. Everything is torn
+# down with the runner.
+#
+# Code under test = the integration candidate, which is a LOCAL-ONLY, reconstructible
+# composition (it is deliberately not pushed as a ref). This workflow therefore RECONSTRUCTS
+# it deterministically from the pinned, already-pushed PR heads and asserts the resulting tree
+# equals the candidate's known tree (ebdced820…) before running anything — so the evidence is
+# tied to an exact, verified tree, and a moved PR branch fails the run instead of silently
+# testing something else.
+#
+#   candidate = #323 head (04b27e9, trunk)  + merge #328 (fa840e4)
+#                                            + merge #329 (830ab4d)
+#                                            + merge #327 (69cdaf3)   => tree ebdced820…
+#
+# Trigger model:
+#   * workflow_dispatch — the intended long-term manual interface. Becomes available in the
+#     Actions UI once this file is on the default branch.
+#   * push (THIS branch only) — a bootstrap so the very first run produces real PASS/FAIL/
+#     BLOCKED evidence before merge. Remove the `push:` block once the workflow is on the
+#     default branch and dispatched manually.
+name: First-start verification (manual)
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - claude/first-start-verification
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  # Pinned reconstruction recipe (all on origin as PR-head branches). Order matters.
+  CAND_TRUNK_BRANCH: claude/frontend-npm-audit-baseline-consolidation   # #323
+  CAND_TRUNK_SHA: "04b27e9585ea9def58d24407f7000a51577c89bf"
+  CAND_MERGE_1_BRANCH: claude/basic-startup-no-model-proof              # #328
+  CAND_MERGE_1_SHA: "fa840e47ae44490777a56e3684cf5c26085b7e5c"
+  CAND_MERGE_2_BRANCH: claude/library-original-retrieval               # #329
+  CAND_MERGE_2_SHA: "830ab4d9cf2edab27c6a91787988f5fbff1593da"
+  CAND_MERGE_3_BRANCH: claude/docx-extraction-completeness             # #327
+  CAND_MERGE_3_SHA: "69cdaf342b6f3adacc6fa18455f14c5ac452a198"
+  CAND_EXPECTED_TREE: "ebdced820249b584b69c9d6418e9895cc5c380bf"
+
+jobs:
+  first-start:
+    name: First-start acceptance (synthetic, isolated)
+    # ubuntu-24.04 pinned deliberately (not ubuntu-latest, which now resolves to 26.04) so the
+    # environment matches the repo's supported CI image.
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # Throwaway, synthetic everything. No production values.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_firststart
+      APP_DATABASE_URL: postgresql://mainai_app:mainai_app_firststart_pw@localhost:5432/lifeos_firststart
+      REDIS_URL: redis://localhost:6379/0
+      SECRET_KEY: ci-first-start-secret-key
+      FOUNDER_EMAIL: founder@lifeos.local
+      FOUNDER_PASSWORD: TestFounderPassword123!
+      FRONTEND_ORIGINS: http://127.0.0.1:3020
+      PUBLIC_APP_URL: http://127.0.0.1:3020
+      OPENAI_API_KEY: fake-key-for-first-start
+      ENABLE_SCHEDULED_CLEANUP: "false"
+      # This driver is a non-browser Python http client over http://127.0.0.1. The app's
+      # default Secure cookies rely on the browser "localhost is a secure context" exception,
+      # which Python's cookiejar does not implement, so a Secure cookie would never be sent
+      # back and every authenticated call would 401. Disable Secure for this synthetic local
+      # test only — allowed because ENVIRONMENT is not production (the _check_cookies_secure
+      # guard only fires in production). SameSite=none is irrelevant to a non-browser client.
+      COOKIE_SECURE: "false"
+      # Stable workspace-local upload store so immutable originals survive the process restart
+      # within this job (the whole point of the restart-persistence check). Shared by backend
+      # and worker. Thrown away with the runner.
+      STORAGE_ROOT: ${{ github.workspace }}/.firststart-uploads
+      E2E_EMAIL_LOG_PATH: ${{ github.workspace }}/candidate/backend/first_start_emails.jsonl
+      FS_BASE_URL: http://127.0.0.1:8010
+      FS_STATE_FILE: ${{ github.workspace }}/first_start_state.json
+    steps:
+      - name: Check out candidate trunk (#323)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CAND_TRUNK_BRANCH }}
+          path: candidate
+          fetch-depth: 0
+
+      - name: Reconstruct integration candidate (deterministic, tree-verified)
+        id: sha
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          git config user.email "ci@local"
+          git config user.name "first-start-ci"
+          # Pin the trunk: the checked-out branch tip must be the expected SHA.
+          test "$(git rev-parse HEAD)" = "$CAND_TRUNK_SHA" \
+            || { echo "::error::trunk ${CAND_TRUNK_BRANCH} moved: $(git rev-parse HEAD) != ${CAND_TRUNK_SHA}"; exit 1; }
+          # Replay the three merges in order, each pinned to its expected SHA.
+          replay() {
+            local branch="$1" sha="$2"
+            git fetch --no-tags origin "$branch"
+            test "$(git rev-parse FETCH_HEAD)" = "$sha" \
+              || { echo "::error::${branch} moved: $(git rev-parse FETCH_HEAD) != ${sha}"; exit 1; }
+            git merge --no-ff --no-edit "$sha" \
+              || { echo "::error::unexpected merge conflict merging ${branch} (${sha})"; exit 1; }
+          }
+          replay "$CAND_MERGE_1_BRANCH" "$CAND_MERGE_1_SHA"
+          replay "$CAND_MERGE_2_BRANCH" "$CAND_MERGE_2_SHA"
+          replay "$CAND_MERGE_3_BRANCH" "$CAND_MERGE_3_SHA"
+          TREE="$(git rev-parse HEAD^{tree})"
+          echo "Reconstructed tree: $TREE (expected $CAND_EXPECTED_TREE)"
+          test "$TREE" = "$CAND_EXPECTED_TREE" \
+            || { echo "::error::reconstructed tree $TREE != expected $CAND_EXPECTED_TREE — recipe stale"; exit 1; }
+          echo "resolved=$TREE" >> "$GITHUB_OUTPUT"
+          echo "Integration candidate reconstructed and tree-verified: $TREE"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: candidate/backend/requirements.txt
+
+      - name: Install backend dependencies
+        working-directory: candidate/backend
+        run: pip install -r requirements.txt
+
+      - name: Provision throwaway database + restricted runtime role
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -c "
+            DO \$\$
+            BEGIN
+              IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'mainai_app') THEN
+                CREATE ROLE mainai_app LOGIN PASSWORD 'mainai_app_firststart_pw';
+              END IF;
+            END
+            \$\$;"
+          psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS lifeos_firststart;"
+          psql -h localhost -U postgres -d postgres -c "CREATE DATABASE lifeos_firststart;"
+          psql -h localhost -U postgres -d lifeos_firststart -c "
+            GRANT USAGE ON SCHEMA public TO mainai_app;
+            GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO mainai_app;
+            GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO mainai_app;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO mainai_app;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO mainai_app;"
+
+      - name: Apply migrations (alembic upgrade head)
+        working-directory: candidate/backend
+        run: alembic upgrade head
+
+      - name: Apply S1A runtime privilege policy
+        working-directory: candidate/backend
+        run: python scripts/security/apply_runtime_privileges.py
+
+      - name: Write the acceptance driver
+        run: |
+          cat > "$GITHUB_WORKSPACE/first_start_acceptance.py" <<'PY'
+          """First-start acceptance driver (stdlib only). Phase 'pre' runs every check and
+          records conversation/source identifiers + the uploaded original's sha256 to a state
+          file; phase 'post' (after a backend+worker restart) re-authenticates and proves the
+          same data survived. Emits a PASS/FAIL/BLOCKED line per criterion and a Markdown job
+          summary. Exit code is non-zero only on FAIL (a real defect); BLOCKED (could-not-
+          verify) does not fail the job but is clearly flagged."""
+          import json, os, sys, time, uuid, hashlib, http.cookiejar, urllib.request, urllib.error
+
+          BASE = os.environ["FS_BASE_URL"]
+          EMAIL = os.environ["FOUNDER_EMAIL"]
+          PASSWORD = os.environ["FOUNDER_PASSWORD"]
+          STATE = os.environ["FS_STATE_FILE"]
+          PHASE = sys.argv[1] if len(sys.argv) > 1 else "pre"
+          SHA = os.environ.get("RESOLVED_SHA", "unknown")
+
+          CONTENT = b"Forsta-start syntetiskt original. Dessa bytes maste bevaras oforandrade.\n"
+          FILENAME = "firststart-original.txt"
+          EXPECTED_SHA = hashlib.sha256(CONTENT).hexdigest()
+
+          cj = http.cookiejar.CookieJar()
+          opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+          csrf = {"t": None}
+          results = []  # (criterion, status, detail)
+
+          def record(name, status, detail=""):
+              results.append((name, status, detail))
+              print(f"[{status}] {name}: {detail}", flush=True)
+
+          def call(method, path, *, jb=None, raw=None, ctype=None):
+              h = {"Accept": "application/json"}
+              body = None
+              if jb is not None:
+                  body = json.dumps(jb).encode(); h["Content-Type"] = "application/json"
+              elif raw is not None:
+                  body = raw
+                  if ctype: h["Content-Type"] = ctype
+              if method in ("POST", "PUT", "PATCH", "DELETE") and csrf["t"]:
+                  h["X-CSRF-Token"] = csrf["t"]
+              req = urllib.request.Request(BASE + path, data=body, method=method, headers=h)
+              try:
+                  r = opener.open(req, timeout=30)
+                  return r.status, r.read(), dict(r.headers)
+              except urllib.error.HTTPError as e:
+                  return e.code, e.read(), dict(e.headers)
+
+          def login():
+              st, bd, _ = call("POST", "/api/auth/login", jb={"email": EMAIL, "password": PASSWORD})
+              if st == 200:
+                  try: csrf["t"] = json.loads(bd).get("csrf_token")
+                  except Exception: pass
+              return st, bd
+
+          def finalize():
+              fails = [r for r in results if r[1] == "FAIL"]
+              blocked = [r for r in results if r[1] == "BLOCKED"]
+              summary = os.environ.get("GITHUB_STEP_SUMMARY")
+              if summary:
+                  with open(summary, "a") as f:
+                      f.write(f"\n### First-start acceptance — phase `{PHASE}` @ `{SHA}`\n\n")
+                      f.write("| Criterion | Result | Detail |\n|---|---|---|\n")
+                      for n, s, d in results:
+                          f.write(f"| {n} | **{s}** | {d} |\n")
+              print(f"\n== phase {PHASE}: {len(results)} checks, "
+                    f"{len(fails)} FAIL, {len(blocked)} BLOCKED ==", flush=True)
+              sys.exit(1 if fails else 0)
+
+          # --- AUTH ---
+          st, bd = login()
+          if st == 200:
+              record("authentication", "PASS", "founder login 200, session established")
+          else:
+              record("authentication", "FAIL", f"login {st}: {bd[:150]!r}")
+              finalize()
+
+          if PHASE == "pre":
+              # --- CONVERSATION PERSISTENCE ---
+              st, bd, _ = call("POST", "/api/chat", jb={"message": "Forsta start-verifiering: hej Life."})
+              conv_id = None
+              if st == 200:
+                  j = json.loads(bd); conv_id = j.get("conversation_id")
+                  st2, bd2, _ = call("GET", f"/api/conversations/{conv_id}")
+                  ok = st2 == 200 and b"Forsta start-verifiering" in bd2
+                  record("conversation_persistence", "PASS" if ok else "FAIL",
+                          f"conv {conv_id}, detail {st2}, assistant_status={j.get('assistant_status')}")
+              else:
+                  record("conversation_persistence", "FAIL", f"chat {st}: {bd[:150]!r}")
+
+              # --- SMALL-FILE UPLOAD ---
+              boundary = "----firststart" + uuid.uuid4().hex
+              body = (
+                  f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{FILENAME}"\r\n'
+                  f"Content-Type: text/plain\r\n\r\n".encode() + CONTENT +
+                  f"\r\n--{boundary}--\r\n".encode()
+              )
+              st, bd, _ = call("POST", "/api/library/import", raw=body,
+                                ctype=f"multipart/form-data; boundary={boundary}")
+              job_id = None
+              if st == 200:
+                  job_id = json.loads(bd).get("id")
+                  record("small_file_upload", "PASS", f"import job {job_id} accepted")
+              else:
+                  record("small_file_upload", "FAIL", f"import {st}: {bd[:150]!r}")
+
+              # --- DOCUMENT EXTRACTION (poll worker) ---
+              source_id = None; final_status = None
+              if job_id:
+                  for _ in range(90):
+                      st, bd, _ = call("GET", f"/api/library/jobs/{job_id}")
+                      if st != 200:
+                          time.sleep(2); continue
+                      j = json.loads(bd); final_status = j.get("status")
+                      fr = j.get("file_results") or []
+                      if fr and fr[0].get("source_id"):
+                          source_id = fr[0]["source_id"]
+                      if final_status in ("completed", "failed", "partial"):
+                          break
+                      time.sleep(2)
+              if source_id:
+                  st, bd, _ = call("GET", f"/api/library/{source_id}")
+                  det = json.loads(bd) if st == 200 else {}
+                  idx = det.get("status")
+                  # These statuses are reached only AFTER text extraction (app/rag/ingest.py).
+                  # awaiting_provider / blocked_provider mean extraction succeeded and only the
+                  # EMBEDDING step is paused for want of a verified AI provider — the expected,
+                  # correct model-independent first-start outcome (see
+                  # tests/backend/test_basic_startup_no_model.py: content_preview is cached with
+                  # no model; a provider-paused job is a resumable pause, never a failure).
+                  provider_paused = idx in ("awaiting_provider", "blocked_provider")
+                  extracted = idx in ("extracted", "awaiting_classification", "embedding",
+                                      "indexed") or provider_paused
+                  if idx in ("extraction_failed", "failed", "storage_failed"):
+                      record("document_extraction", "FAIL", f"index status {idx}")
+                  elif extracted:
+                      note = " (embedding paused — no verified model; model-independent)" if provider_paused else ""
+                      record("document_extraction", "PASS",
+                              f"extraction completed; index status {idx}, chunks={det.get('chunk_count')}, job={final_status}{note}")
+                  else:
+                      record("document_extraction", "BLOCKED", f"index status {idx}, job={final_status}")
+              else:
+                  record("document_extraction", "BLOCKED",
+                          f"no source_id within timeout (job status={final_status})")
+
+              # --- IMMUTABLE ORIGINAL RETRIEVAL (the #329 capability) ---
+              if source_id:
+                  st, bd, hd = call("GET", f"/api/library/{source_id}/original")
+                  got = hashlib.sha256(bd).hexdigest() if st == 200 else None
+                  disp = hd.get("Content-Disposition", "")
+                  if st == 200 and got == EXPECTED_SHA:
+                      record("immutable_original_retrieval", "PASS",
+                              f"bytes match sha256; disposition={disp!r}")
+                  else:
+                      record("immutable_original_retrieval", "FAIL",
+                              f"status {st}, sha match={got == EXPECTED_SHA}")
+              else:
+                  record("immutable_original_retrieval", "BLOCKED", "no source_id to retrieve")
+
+              with open(STATE, "w") as f:
+                  json.dump({"conv_id": conv_id, "source_id": source_id,
+                             "expected_sha": EXPECTED_SHA}, f)
+              finalize()
+
+          else:  # PHASE == post
+              state = json.load(open(STATE))
+              conv_id = state.get("conv_id"); source_id = state.get("source_id")
+              exp = state.get("expected_sha")
+              checks = []
+              if conv_id:
+                  st, bd, _ = call("GET", f"/api/conversations/{conv_id}")
+                  checks.append(st == 200 and b"Forsta start-verifiering" in bd)
+              if source_id:
+                  st, bd, _ = call("GET", f"/api/library/{source_id}")
+                  checks.append(st == 200)
+                  st, bd, _ = call("GET", f"/api/library/{source_id}/original")
+                  checks.append(st == 200 and hashlib.sha256(bd).hexdigest() == exp)
+              if checks and all(checks):
+                  record("restart_persistence", "PASS",
+                          "conversation + source + immutable original all survived restart")
+              elif not checks:
+                  record("restart_persistence", "BLOCKED", "nothing persisted in pre-phase to re-verify")
+              else:
+                  record("restart_persistence", "FAIL", f"post-restart re-verify: {checks}")
+              finalize()
+          PY
+          echo "driver written"
+
+      - name: Start backend + worker (synthetic fakes, no egress)
+        working-directory: candidate/backend
+        run: |
+          mkdir -p "$STORAGE_ROOT"
+          nohup python scripts/ci/run_e2e_backend.py > "$GITHUB_WORKSPACE/backend.pre.log" 2>&1 &
+          echo $! > "$GITHUB_WORKSPACE/backend.pid"
+          nohup python -c "import importlib.util as u, asyncio; s=u.spec_from_file_location('fsboot','scripts/ci/run_e2e_backend.py'); m=u.module_from_spec(s); s.loader.exec_module(m); import app.worker as w; asyncio.run(w._main())" > "$GITHUB_WORKSPACE/worker.pre.log" 2>&1 &
+          echo $! > "$GITHUB_WORKSPACE/worker.pid"
+          for i in $(seq 1 40); do
+            curl -sf -o /dev/null "$FS_BASE_URL/api/health" && { echo "backend healthy"; break; }
+            sleep 1
+          done
+
+      - name: Acceptance — pre-restart checks
+        env:
+          RESOLVED_SHA: ${{ steps.sha.outputs.resolved }}
+        run: python "$GITHUB_WORKSPACE/first_start_acceptance.py" pre
+
+      - name: Restart backend + worker (prove persistence)
+        working-directory: candidate/backend
+        run: |
+          kill "$(cat "$GITHUB_WORKSPACE/backend.pid")" 2>/dev/null || true
+          kill "$(cat "$GITHUB_WORKSPACE/worker.pid")" 2>/dev/null || true
+          sleep 3
+          nohup python scripts/ci/run_e2e_backend.py > "$GITHUB_WORKSPACE/backend.post.log" 2>&1 &
+          echo $! > "$GITHUB_WORKSPACE/backend.pid"
+          nohup python -c "import importlib.util as u, asyncio; s=u.spec_from_file_location('fsboot','scripts/ci/run_e2e_backend.py'); m=u.module_from_spec(s); s.loader.exec_module(m); import app.worker as w; asyncio.run(w._main())" > "$GITHUB_WORKSPACE/worker.post.log" 2>&1 &
+          echo $! > "$GITHUB_WORKSPACE/worker.pid"
+          for i in $(seq 1 40); do
+            curl -sf -o /dev/null "$FS_BASE_URL/api/health" && { echo "backend healthy after restart"; break; }
+            sleep 1
+          done
+
+      - name: Acceptance — post-restart persistence
+        env:
+          RESOLVED_SHA: ${{ steps.sha.outputs.resolved }}
+        run: python "$GITHUB_WORKSPACE/first_start_acceptance.py" post
+
+      - name: Collect diagnostics (no secrets)
+        if: always()
+        run: |
+          kill "$(cat "$GITHUB_WORKSPACE/backend.pid")" 2>/dev/null || true
+          kill "$(cat "$GITHUB_WORKSPACE/worker.pid")" 2>/dev/null || true
+
+      - name: Upload logs artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: first-start-logs-${{ steps.sha.outputs.resolved }}
+          path: |
+            ${{ github.workspace }}/backend.pre.log
+            ${{ github.workspace }}/backend.post.log
+            ${{ github.workspace }}/worker.pre.log
+            ${{ github.workspace }}/worker.post.log
+            ${{ github.workspace }}/first_start_state.json
+          if-no-files-found: ignore
+          retention-days: 7

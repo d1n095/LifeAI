@@ -17,6 +17,8 @@ RLS_STATEMENTS = [
     # real product requirement (see app/models/document.py's docstring update).
     "ALTER TABLE documents ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE documents FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE blueprint_drafts ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE blueprint_drafts FORCE ROW LEVEL SECURITY",
     "ALTER TABLE knowledge_versions ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE knowledge_versions FORCE ROW LEVEL SECURITY",
     "ALTER TABLE knowledge_import_jobs ENABLE ROW LEVEL SECURITY",
@@ -164,6 +166,11 @@ POLICY_DEFINITIONS = [
         "table": "documents",
         "name": "documents_isolation",
         "expr": "uploaded_by = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "blueprint_drafts",
+        "name": "blueprint_drafts_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
     {
         "table": "knowledge_versions",

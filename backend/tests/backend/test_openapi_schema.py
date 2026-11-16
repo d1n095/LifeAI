@@ -38,10 +38,13 @@ def test_every_founder_knowledge_studio_route_is_present():
     assert expected <= fks_paths
 
 
-# GET .../media deliberately returns raw audio/video bytes, never JSON (see
-# test_media_route_is_not_falsely_documented_as_json below) — the one intentional
-# exception to "every FKS route returns a documented JSON schema".
-_NON_JSON_ROUTES = {"/api/library/{source_id}/media"}
+# GET .../media and GET .../original deliberately return raw bytes, never JSON (see
+# test_media_route_is_not_falsely_documented_as_json and
+# test_original_route_is_not_falsely_documented_as_json below) — the intentional
+# exceptions to "every FKS route returns a documented JSON schema". /original streams the
+# untouched content-addressed original as application/octet-stream (app/routers/library.py's
+# get_source_original).
+_NON_JSON_ROUTES = {"/api/library/{source_id}/media", "/api/library/{source_id}/original"}
 
 
 def test_every_founder_knowledge_studio_route_declares_a_response_schema():
@@ -81,3 +84,14 @@ def test_media_route_is_not_falsely_documented_as_json():
     assert "application/json" not in content
     assert "audio/mpeg" in content
     assert "video/mp4" in content
+
+
+def test_original_route_is_not_falsely_documented_as_json():
+    """GET /api/library/{source_id}/original returns the untouched original's raw bytes as
+    application/octet-stream (a download), never JSON — same documentation-accuracy guarantee
+    as the media route above. See app/routers/library.py's get_source_original."""
+    schema = _schema()
+    response_200 = schema["paths"]["/api/library/{source_id}/original"]["get"]["responses"]["200"]
+    content = response_200.get("content", {})
+    assert "application/json" not in content
+    assert "application/octet-stream" in content

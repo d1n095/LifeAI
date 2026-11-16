@@ -39,6 +39,17 @@ def test_write_then_read_round_trips_exact_bytes(tmp_path):
         assert f.read() == payload
 
 
+def test_only_canonical_content_address_exposes_a_trusted_integrity_anchor(tmp_path):
+    storage = LocalFilesystemStorage(str(tmp_path))
+    payload = b"server generated content identity"
+    blob = storage.write_stream(_chunks(payload), max_bytes=10_000_000)
+
+    assert storage.trusted_sha256_for_key(blob.storage_key) == blob.sha256
+    assert storage.trusted_sha256_for_key(f"00/{blob.sha256}") is None
+    assert storage.trusted_sha256_for_key("../../etc/passwd") is None
+    assert storage.trusted_sha256_for_key(blob.sha256) is None
+
+
 def test_a_blob_survives_being_read_by_a_brand_new_storage_instance(tmp_path):
     """Durability doesn't depend on any single process's in-memory state: a fresh
     LocalFilesystemStorage constructed against the same root (standing in for a backend or
@@ -55,6 +66,41 @@ def test_a_blob_survives_being_read_by_a_brand_new_storage_instance(tmp_path):
     assert reader.verify(blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes)
     with reader.open_read(blob.storage_key) as f:
         assert f.read() == payload
+
+
+def test_staged_upload_is_owner_job_scoped_durable_and_not_canonical(tmp_path):
+    owner_id = "0b56d608-675f-4f0e-bb4f-2f96d810ff7b"
+    job_id = "f1b5bde6-7a82-4ac7-a429-d50d3d251a25"
+    staging_key = f"staging/{owner_id}/{job_id}"
+    payload = b"durable staged original" * 100
+
+    writer = LocalFilesystemStorage(str(tmp_path))
+    staged = writer.write_staged_stream(staging_key, _chunks(payload), max_bytes=10_000_000)
+    assert staged.sha256 == hashlib.sha256(payload).hexdigest()
+    assert staged.size_bytes == len(payload)
+    assert not writer.exists(f"{staged.sha256[:2]}/{staged.sha256}")
+
+    reader = LocalFilesystemStorage(str(tmp_path))
+    assert reader.inspect_staged(staging_key) == staged
+    assert reader.verify_staged(staging_key, expected_sha256=staged.sha256, expected_size=staged.size_bytes)
+    with reader.open_staged_read(staging_key) as stream:
+        assert stream.read() == payload
+
+    reader.delete_staged(staging_key)
+    assert reader.inspect_staged(staging_key) is None
+
+
+def test_staged_upload_integrity_failure_is_not_reported_as_missing(tmp_path):
+    staging_key = "staging/0b56d608-675f-4f0e-bb4f-2f96d810ff7b/f1b5bde6-7a82-4ac7-a429-d50d3d251a25"
+    storage = LocalFilesystemStorage(str(tmp_path))
+    staged = storage.write_staged_stream(staging_key, _chunks(b"original"), max_bytes=100)
+    (tmp_path / "staging" / staging_key.split("/")[1] / staging_key.split("/")[2] / "content").write_bytes(
+        b"corrupted"
+    )
+
+    with pytest.raises(StorageIntegrityError):
+        storage.inspect_staged(staging_key)
+    assert staged.sha256 != hashlib.sha256(b"corrupted").hexdigest()
 
 
 def test_identical_content_deduplicates_to_the_same_key_and_a_single_file_on_disk(tmp_path):
@@ -201,8 +247,6 @@ def test_a_file_vanishing_between_the_failed_link_and_the_stat_now_fails_loudly_
     storage = LocalFilesystemStorage(str(tmp_path))
     payload = b"pass 31/32 test A: race window" * 20
     storage.write_stream(_chunks(payload), max_bytes=10_000_000)
-
-    real_link = os.link
 
     def _flaky_link(src, dst, *a, **kw):
         # Simulates something outside this process's lock discipline removing the file in

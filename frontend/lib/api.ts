@@ -130,6 +130,28 @@ async function request<T>(path: string, options: RequestInit = {}, isRetry = fal
   return parsed;
 }
 
+// Parses the download filename from a Content-Disposition header. The backend emits both the
+// RFC 5987 `filename*=UTF-8''<percent-encoded>` form and a quoted ASCII `filename="..."`
+// fallback (see backend/app/routers/library.py _content_disposition); prefer the former. The
+// value is only ever used as a download target name, never written to disk by this code, and
+// the backend has already sanitized it to ASCII `[A-Za-z0-9._ -]`. Falls back to "original"
+// so a download always has a name even if the header is missing or malformed.
+function filenameFromContentDisposition(header: string | null): string {
+  if (!header) return "original";
+  const ext = /filename\*=UTF-8''([^;]+)/i.exec(header);
+  if (ext) {
+    try {
+      const decoded = decodeURIComponent(ext[1].trim());
+      if (decoded) return decoded;
+    } catch {
+      /* malformed percent-encoding — fall through to the quoted form */
+    }
+  }
+  const quoted = /filename="([^"]*)"/i.exec(header);
+  if (quoted && quoted[1]) return quoted[1];
+  return "original";
+}
+
 export type ChatSource = {
   document_id: string;
   title: string;
@@ -319,7 +341,7 @@ export type FileOutcome = {
 
 export type ImportJobItem = {
   id: string;
-  status: "pending" | "running" | "completed" | "failed" | "partial";
+  status: "receiving" | "pending" | "running" | "completed" | "failed" | "partial";
   source_filename: string | null;
   source_checksum: string | null;
   progress_current: number;
@@ -736,6 +758,44 @@ export type MainAIGoalReport = {
   generated_at: string;
 };
 
+// Founder Alpha item 8/9 — source-grounded, versioned, approval-gated Blueprint drafts
+// (backend/app/routers/blueprint.py). A draft is always created as `status="draft"`; the
+// approve endpoint is the only path to `approved`.
+export type BlueprintSourceRef = {
+  document_id: string;
+  similarity: number | null;
+  excerpt: string | null;
+};
+
+export type BlueprintDraftSummary = {
+  id: string;
+  title: string;
+  version: number;
+  status: string;
+  source_count: number;
+  model_provider: string | null;
+  model_name: string | null;
+  created_at: string | null;
+  approved_at: string | null;
+};
+
+export type BlueprintDraft = {
+  id: string;
+  title: string;
+  version: number;
+  status: string;
+  body: string;
+  generated_from_query: string | null;
+  source_document_ids: string[];
+  source_refs: BlueprintSourceRef[];
+  model_provider: string | null;
+  model_name: string | null;
+  provenance: Record<string, unknown>;
+  created_at: string | null;
+  approved_at: string | null;
+  approved_by: string | null;
+};
+
 export const api = {
   login: (email: string, password: string) =>
     request<CurrentUser>("/api/auth/login", {
@@ -843,6 +903,42 @@ export const api = {
   // same-origin-proxied deployment — see this file's top comment), so no fetch/blob-URL
   // indirection is needed here.
   getLibraryMediaUrl: (id: string) => `${API_URL}/api/library/${id}/media`,
+  // Downloads the untouched ORIGINAL bytes of a source (GET /api/library/:id/original —
+  // founder-only, served as attachment; octet-stream; nosniff). Unlike getLibraryMediaUrl's
+  // inline <audio>/<video> src, this is a real download that can legitimately fail (404 if
+  // the original isn't available, 503 if its integrity can't be verified right now), so it
+  // goes through fetch() — not a plain <a href> that would navigate away to a raw JSON error
+  // page — to surface the backend's already-Swedish detail message and keep the SPA in place.
+  // Returns the blob plus the server-chosen filename; the caller turns it into a download.
+  // GET carries no CSRF requirement; the session cookie rides along via credentials:"include".
+  downloadLibraryOriginal: async (id: string): Promise<{ blob: Blob; filename: string }> => {
+    let res: Response;
+    try {
+      res = await fetch(`${API_URL}/api/library/${id}/original`, {
+        credentials: "include",
+        cache: "no-store",
+      });
+    } catch {
+      throw new NetworkError();
+    }
+    if (!res.ok) {
+      // Mirror request()'s error surfacing: FastAPI's HTTPException(detail=...) is a clean,
+      // already-Swedish, user-facing string — show it directly (e.g. "Originalet hittades
+      // inte.", "Originalet kunde inte verifieras just nu.").
+      const body = await res.text();
+      let detail: string | undefined;
+      try {
+        const parsed = JSON.parse(body);
+        if (parsed && typeof parsed.detail === "string") detail = parsed.detail;
+      } catch {
+        /* not JSON — fall through to the generic message */
+      }
+      const err = new Error(detail ?? `API-fel (${res.status})`);
+      (err as Error & { status?: number }).status = res.status;
+      throw err;
+    }
+    return { blob: await res.blob(), filename: filenameFromContentDisposition(res.headers.get("Content-Disposition")) };
+  },
   deleteLibrarySource: (id: string) =>
     request(`/api/library/${id}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) }),
   createSourceRelationship: (sourceId: string, toSourceId: string, relationshipType: string, note?: string) =>
@@ -937,4 +1033,16 @@ export const api = {
   mainaiExecutionTaskWaits: (id: string) => request<MainAITaskWait[]>(`/api/mainai/execution/tasks/${id}/waits`),
   mainaiExecutionLessons: (statusFilter?: string) =>
     request<EngineeringLesson[]>(`/api/mainai/execution/lessons${statusFilter ? `?status_filter=${statusFilter}` : ""}`),
+
+  // Blueprint drafts (backend/app/routers/blueprint.py). Sources are derived server-side from
+  // the founder's own indexed documents — the client supplies only a title + optional query.
+  blueprintDrafts: (title?: string) =>
+    request<BlueprintDraftSummary[]>(`/api/blueprint/drafts${title ? `?title=${encodeURIComponent(title)}` : ""}`),
+  blueprintDraft: (id: string) => request<BlueprintDraft>(`/api/blueprint/drafts/${id}`),
+  blueprintGenerate: (payload: { title: string; query?: string; top_k?: number }) =>
+    request<BlueprintDraft>("/api/blueprint/drafts", { method: "POST", body: JSON.stringify(payload) }),
+  blueprintRegenerate: (id: string, payload: { query?: string; top_k?: number }) =>
+    request<BlueprintDraft>(`/api/blueprint/drafts/${id}/regenerate`, { method: "POST", body: JSON.stringify(payload) }),
+  blueprintApprove: (id: string) =>
+    request<BlueprintDraft>(`/api/blueprint/drafts/${id}/approve`, { method: "POST" }),
 };
