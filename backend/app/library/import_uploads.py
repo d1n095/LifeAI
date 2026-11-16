@@ -45,14 +45,23 @@ def _staging_key(owner_id: uuid.UUID, job_id: uuid.UUID) -> str:
 
 
 def _job_clock_is_live(db: Session, job: ImportJob, upload_token: uuid.UUID) -> bool:
+    # Fresh Python "now", not Postgres's clock_timestamp(): upload_lease_expires_at is written
+    # with datetime.utcnow() (always true UTC); clock_timestamp() is cast to this naive column
+    # under the DB SESSION's own TimeZone setting, which can disagree with true UTC (the same
+    # class of bug as F3 in app/library/import_staging.py — OpenCode's independent review of
+    # #425 found this second instance). Must be computed HERE, not reused from the timestamp
+    # that originally set the lease: the whole point of this check is "has real time actually
+    # passed since then," including the acquire_owner_erasure_lock() wait right before this
+    # call, which can itself take a non-trivial amount of time.
+    now = datetime.utcnow()
     row = db.execute(
         text("""
-            SELECT owner_id, status, upload_lease_token, upload_lease_expires_at >= clock_timestamp()
+            SELECT owner_id, status, upload_lease_token, upload_lease_expires_at >= :now
             FROM knowledge_import_jobs
             WHERE id = :job_id
             FOR UPDATE
         """),
-        {"job_id": str(job.id)},
+        {"job_id": str(job.id), "now": now},
     ).first()
     return bool(
         row

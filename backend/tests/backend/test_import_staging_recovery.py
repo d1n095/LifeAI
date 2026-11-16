@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 from app.config import get_settings
 from app.library.import_staging import cleanup_import_stages, recover_expired_import_uploads
+from app.library.import_uploads import _job_clock_is_live
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.storage import get_storage
 
@@ -107,6 +108,42 @@ def test_recovery_is_independent_of_the_db_sessions_timezone_setting(superuser_d
     recovered = superuser_db.get(ImportJob, job.id)
     assert recovered.status == ImportJobStatus.pending
     assert recovered.source_checksum == hashlib.sha256(payload).hexdigest() == staged.sha256
+
+
+def test_job_clock_is_live_is_independent_of_the_db_sessions_timezone_setting(
+    superuser_db, make_verified_user
+):
+    """F3, second instance (OpenCode's independent review of #425 caught this one in
+    app/library/import_uploads.py that the first F3 fix, in import_staging.py, did not
+    cover): _job_clock_is_live() checked "is my lease still live" with
+    `upload_lease_expires_at >= clock_timestamp()` — the same naive-column-under-session-
+    TimeZone cast as the other instance, compared against a column written with Python's
+    datetime.utcnow(). Here the dangerous direction is the OPPOSITE one: if the session's
+    TimeZone is AHEAD of UTC, clock_timestamp() cast to naive reads later than true UTC, so a
+    lease that is still genuinely live (just created, minutes from expiring) can look already
+    expired — wrongly aborting an in-progress upload, not just delaying a cleanup.
+
+    Sets the session's TimeZone 12 hours ahead of UTC (enough to swamp the whole lease
+    window) and asserts a freshly-created lease still reads as live."""
+    superuser_db.execute(text("SET TIME ZONE 'Etc/GMT-12'"))
+    superuser_db.commit()
+
+    user, _ = make_verified_user()
+    job_id = uuid.uuid4()
+    upload_token = uuid.uuid4()
+    job = ImportJob(
+        id=job_id,
+        owner_id=user.id,
+        status=ImportJobStatus.receiving,
+        source_filename="clock-skew.txt",
+        staging_storage_key=f"staging/{user.id}/{job_id}",
+        upload_lease_token=upload_token,
+        upload_lease_expires_at=datetime.utcnow() + timedelta(minutes=5),
+    )
+    superuser_db.add(job)
+    superuser_db.commit()
+
+    assert _job_clock_is_live(superuser_db, job, upload_token) is True
 
 
 def test_corrupt_expired_stage_fails_closed_and_retains_the_original_pointer(
