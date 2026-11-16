@@ -32,6 +32,7 @@ from app.models.provider_spend import (
     ProviderSpendUsageStatus,
 )
 from app.providers.pricing import estimate_cost
+from app.workforce.cost import CostGovernanceError, assert_scopes_allow_spend
 
 # Conservative defaults when grant omits per-call token ceilings but still requires a
 # pre-call hold. Callers with unknown pricing must set max_cost_per_request_usd.
@@ -457,6 +458,26 @@ def reserve_provider_spend_call(
         db.flush()
         raise ProviderSpendError("provider spend completion-token ceiling exhausted")
 
+    # TWO LEDGERS != TWO SOURCES OF TRUTH (see docs/mainai_v2/MAINAI_V2_SPEND_AUTHORITY_
+    # RECONCILIATION.md): app.workforce.cost's organizational ceilings are optional, coarser
+    # caps checked BEFORE a reservation is held, never a competing spend-authority record --
+    # this call never writes to workforce_cost_budgets, it only reads and refuses. An unset
+    # scope (no WorkforceCostBudget row configured) is a genuine no-op, by
+    # assert_scopes_allow_spend()'s own existing, unchanged logic -- zero behavior change for
+    # every goal/provider that has no organizational ceiling configured, which today is all
+    # of them (confirmed: no WorkforceCostBudget row is ever created in production yet).
+    # Wrapped (never left as a bare CostGovernanceError): existing real callers of this
+    # function (e.g. app.provider_planning.service) already catch ProviderSpendError
+    # specifically at this call boundary -- letting a different exception type escape here
+    # would be a real behavior change/regression for them, not the additive, backward-
+    # compatible protection this reconciliation is meant to be.
+    try:
+        assert_scopes_allow_spend(
+            db, owner_id=owner_id, scopes=[("goal", str(goal_id)), ("provider", provider)], amount_usd=float(cost)
+        )
+    except CostGovernanceError as exc:
+        raise ProviderSpendError(f"organizational cost ceiling blocked this reservation: {exc}") from exc
+
     event_id = uuid.uuid4()
     result = db.execute(
         pg_insert(ProviderSpendUsageEvent)
@@ -536,6 +557,15 @@ def settle_provider_spend_call(
             ProviderSpendUsageEvent.source_ref == source_ref,
         )
     ).scalar_one()
+    # Raw SQL (the SECURITY DEFINER call above) updated the row -- refresh so the identity
+    # map does not keep this object's PRE-settle attributes ("reserved"/cost_usd=0) for any
+    # caller that reads them before its own later commit happens to trigger a refresh as a
+    # side effect. Same fix release_provider_spend_call() already applies for the identical
+    # reason, on the identical raw-SQL-then-reselect shape -- this function was simply
+    # missing it (found via this reconciliation's own adversarial test program: a caller
+    # composing a reserve+settle without an intervening commit -- a completely legitimate,
+    # supported calling pattern -- silently got stale event data back).
+    db.refresh(event)
     auth = db.get(ProviderSpendAuthorization, event.authorization_id)
     if auth is not None:
         _mark_terminal_if_needed(auth, now=datetime.utcnow())

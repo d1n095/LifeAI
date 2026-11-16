@@ -6,6 +6,42 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## MainAI V2 Sovereign Architecture Program (2026-09-07)
+
+**Deliberately isolated lane, separate from Stage T / the main swarm above.** Founder
+directive: build V2 fully in isolation, do NOT merge/wire into production, do NOT touch #245
+(`claude/final-blocker-closeout`, frozen SHA `818dfb7`), until Claude's own review track and
+Codex's separate runtime-P0 track are both independently done — then combine ("Claude-hjärnan
++ Codex-motorn"). Integration branch `claude/mainai-v2-sovereign`, worktree
+`.../claude-mainai-v2`, tracked as [#246](https://github.com/d1n095/LifeAI/pull/246) (**öppen,
+ej mergad**).
+
+| Sub-program | Branch (merged into sovereign) | Status |
+|---|---|---|
+| Sentinel Core + Security Event Mesh | (merged, `b740d9e`) | Klar |
+| Sovereign Identity + Recovery + Encrypted Life Image | (merged, `1c3bcec`) | Klar |
+| Operating Shell + Workspace Memory + Intent Objects | (merged, `f3fd0d3`) | Klar |
+| Intent/Goal reconciliation (`docs/mainai_v2/MAINAI_V2_INTENT_GOAL_RECONCILIATION.md`) | (merged, `3faf659`) | Klar |
+| LifeIntent state-machine P0 fix | (merged, `f0259cf`) | Klar |
+| File Ingest Quarantine + Attachment Chamber | (merged, `e894042`) | Klar |
+| Autonomous Development Director / continuous work loop (`app/dev_director/`) | (merged, `f2c9b4b` → `a44f514` → `ab1c0ce`) | **FRYST** — kandidat klar för oberoende granskning, SHA `ab1c0ce03a7a0f7b11f2f716304f9e1235a54d3e`. Rör INTE denna SHA. |
+| Founder Reasoning + Judgment + Strategic Initiative layer | (mergad, `2349c41` → sovereign `4814d78`) | **Klar** — se `docs/mainai_v2/MAINAI_FOUNDER_REASONING_JUDGMENT_RECONCILIATION.md` + [PR #246-kommentar](https://github.com/d1n095/LifeAI/pull/246#issuecomment-5585130276). 140/140 tester (106 bygg + 34 oberoende adversarial), redo för oberoende granskning som `dev_director`. |
+| Resource Intelligence + Context Lifecycle + Cost/Quota + Agent Efficiency | Round 1 (mergad, `ff729b2` → sovereign `97a621a`) + Round 2 (`063c256`) | **Klar (Round 2)** — se `docs/mainai_v2/MAINAI_RESOURCE_CONTEXT_COST_RECONCILIATION.md` (Round 1) + `docs/mainai_v2/MAINAI_RESOURCE_INTELLIGENCE_ROUND2_ADDENDUM.md` (Round 2: quota-tracking, cost-to-finish/reset/handoff-kostnadsmodellering, founder-attention-resurs, context-loss-risk-eskalering, decision stability/hysteres, Continuous-Supervision-kompatibilitetslager). `app.resource_intelligence`, komponerat med `app.agent_coordination`/`app.provider_spend`/`app.execution_envelopes`/`app.mainai_executive.judgment` — inget nytt spend-ledger, ingen ny agent-registry, ingen ny checkpoint-tabell. 141/141 tester (89 Round 1 + ~52 Round 2), redo för oberoende granskning (Codex, enligt rollseparations-planen). |
+| MainAI Cognitive Control Plane (Vision Compiler + Dynamic Completion Engine + Vision Gap Generator + Cognitive Loop + Statistics/Evidence Intelligence + Continuous Improvement + Founder Program Truth) | ny, `app.mainai_vision` | **Klar, redo för oberoende granskning** — se `docs/mainai_v2/MAINAI_COGNITIVE_CONTROL_PLANE_RECONCILIATION.md`. Kompositionslager ovanpå redan existerande `app.project_entities` (en additiv migration, 0072, breddar entity_type/relationship_type-vokabulär — ingen ny tabell), `app.mainai_executive` (judgment/loop/why_graph/missing_piece/meta_improvement/dashboard, ALLA återanvända oförändrade), `app.resource_intelligence`. Vikt graf-baserad completion med expanderbar nämnare (bevisat: 100% → ny vision-nod → completion sjunker), Evidence Intelligence (REPEATED SOURCE != INDEPENDENT EVIDENCE m.fl.), BUILD_LOOP/IMPROVEMENT_LOOP-separation. 60/60 egna tester + 339/339 regressionstester gröna, noll regressioner. |
+| MainAI Research, Truth & Advisory Intelligence (Deep Investigation Engine + Epistemic Caution + Recursive Falsification + Causal Reasoning + Words vs Actions + Multi-Specialist Council + Adversarial Counsel + Research Ledger + Evidence Reopening + Actor/Money/Relationship Graph + Statistics Integrity + Provider Economics/Procurement + Book-Grade Provenance) | ny, `app.mainai_research` | **Klar, redo för oberoende granskning** — se `docs/mainai_v2/MAINAI_RESEARCH_TRUTH_ADVISORY_RECONCILIATION.md` + `docs/mainai_v2/HANDOFF_CLAUDE_RESEARCH_TRUTH_ADVISORY.md`. Byggd ovanpå Cognitive Control Plane-kandidaten (`c4d336d`) utan att den ändras. En additiv migration (0073, fem nya ägar-scopade RLS-tabeller, två append-only via återanvänd `intelligence_governance_deny_mutation()`-trigger från 0038). Återanvänder `app.mainai_vision.evidence.EvidenceState`/`count_independent_sources` oförändrade (ny `EvidenceLifecycleStatus` är en egen, ortogonal axel); komponerar med `app.mainai_vision.completion`/`app.resource_intelligence.cost_bridge` via `adapters.py`. `SpecialistRole` medvetet skild från `WorkAssignmentRole`/strategy_evaluations "challenger". 67/67 egna tester + 344/344 bred regression (mainai_vision/project_entities/resource_intelligence/work_candidates/capability_reality) gröna, noll regressioner. Tre P1:or (cross-investigation reopen, durable graph-beslut, Resource→Provider Economics-bridge) stängda av nästa rad nedan. |
+| MainAI Cognitive Efficiency + Systemic Debugging + Situational Awareness + Information Lifecycle + Repo/Backup Intelligence (Founder Anti-Repetition + Cross-Agent Duplication Control + Compatibility Graph + Change Impact + Fragmentation/Defragmentation/Deduplication + Context Packaging + Self-Optimizing Context + Recovery Checkpoints + Repo/Backup Intelligence) | ny, `app.mainai_cognitive_ops` | **Klar, redo för oberoende granskning** — se `docs/mainai_v2/MAINAI_COGNITIVE_OPS_RECONCILIATION.md` + `docs/mainai_v2/HANDOFF_CLAUDE_COGNITIVE_OPS.md`. Byggd ovanpå Research/Truth/Advisory-kandidaten utan att ändra dess befintliga funktioner (endast tre nya read-only-hjälpfunktioner tillagda additivt i `research_ledger.py`). En additiv migration (0074: `mainai_ops_founder_communications`, append-only via samma återanvända 0038-trigger, + GIN-index på `mainai_research_evidence_links.provenance`). `repo_backup_intelligence.py` gör RIKTIG, read-only git-introspektion (fast argv, aldrig `shell=True`, aldrig en mutating subcommand — strukturellt bevisat). Stänger Research-rondens tre P1:or: cross-investigation auto-reopen, durable investigation graph-beslut (behåller JSONB + GIN-index + real validering, inte en ny tabell), och Resource Intelligence → Provider Economics-bridge (UNKNOWN != ZERO, MISSING != FREE). Hittade och fixade två riktiga buggar under bygget (self-referential append-only-trigger-brott, `.strip()` som korrupterade `git status --porcelain`-parsning) samt en konkret verklig upptäckt: branchen låg 5 commits före origin (endast lokalt) vid byggtillfället — rapporterat till grundaren, inte auto-pushat. 58/58 egna tester + 1 ny research_ledger-test gröna; bred regression se nedan. |
+
+**Merge-ordning / beroenden:** Founder Reasoning-lagret bygger ovanpå den frysta
+dev_director-kandidaten som bas men modifierar den inte — kan mergas till sovereign oberoende
+av dev_director-granskningen. Hela V2-sovereign-linjen väntar på oberoende granskning innan
+den vägs samman med Codex-spåret; ingen del av V2 ska mergas till huvudgrenen eller
+produktions-wireas under tiden.
+
+**Reglerna för hela V2-linjen:** BUILDER != FINAL EXAMINER (den som bygger en del cert­ifierar
+den inte själv), three-check-protokoll för varje ny/adversarial test, aldrig röra #245.
+
+---
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en

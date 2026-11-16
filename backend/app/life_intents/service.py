@@ -21,6 +21,58 @@ class IntentError(ValueError):
     pass
 
 
+class InvalidTransitionError(IntentError):
+    """The requested FROM/TO state pair is not a legitimate transition per
+    LIFE_INTENT_TRANSITIONS -- raised instead of silently applying it."""
+
+
+class TerminalStateError(InvalidTransitionError):
+    """The intent's current state has no outbound transitions at all (`completed`/
+    `abandoned`/`superseded`). STALE CALLER != CURRENT AUTHORITY: no generic call to
+    transition_intent() may resurrect a terminal intent -- this codebase defines no separate
+    reopen operation for LifeIntent (unlike e.g. app.strategy_evaluation's `invalidated`
+    exit from `completed`/`failed`); if one is ever needed it must be its own, explicitly
+    named, explicitly authorized function, never a side effect of this generic gate."""
+
+
+class StaleTransitionError(IntentError):
+    """The caller's `expected_current_state` no longer matches the row's real current state --
+    another actor already changed it since the caller last read it. READ STATE A -> another
+    actor changes A to B -> a stale caller's own A->C attempt is REJECTED here, even when
+    A->C would otherwise be a legitimate transition, because the caller's premise (the
+    intent is still in state A) is itself already wrong."""
+
+
+# Real, existing LifeIntent state vocabulary (confirmed by direct reading of
+# tests/backend/context/test_goals_dreams_dependencies.py, the original migration-0041 test
+# suite -- not invented for this fix): unknown (the column default, pre-classification),
+# future (a dream/goal not yet started), active, blocked, waiting, and the three terminal
+# states completed/abandoned/superseded. This is the SAME state vocabulary
+# app.life_intents.service.evaluate_feasibility() already treats
+# completed/abandoned/superseded/waiting/future/blocked/unknown as non-actionable -- this
+# table does not introduce a new model, it makes the existing one's legal transitions
+# explicit and enforced, following the exact same module-level-dict-of-allowed-targets
+# pattern already established by app.strategy_evaluation.service's
+# EXPERIMENT_TRANSITIONS/CANDIDATE_TRANSITIONS.
+#
+# STALE CALLER != CURRENT AUTHORITY: completed/abandoned/superseded map to an empty set --
+# nothing may transition OUT of a terminal LifeIntent via this function. No separate reopen
+# operation exists anywhere in this codebase today; if the product ever needs one, it must be
+# a new, explicitly-named, explicitly-authorized function, never a widening of this table.
+LIFE_INTENT_TRANSITIONS: dict[str, set[str]] = {
+    "unknown": {"future", "active", "blocked", "waiting", "completed", "abandoned", "superseded"},
+    "future": {"active", "blocked", "waiting", "completed", "abandoned", "superseded"},
+    "active": {"blocked", "waiting", "completed", "abandoned", "superseded"},
+    "blocked": {"active", "waiting", "abandoned", "superseded"},
+    "waiting": {"active", "blocked", "abandoned", "superseded"},
+    "completed": set(),
+    "abandoned": set(),
+    "superseded": set(),
+}
+
+TERMINAL_LIFE_INTENT_STATES = frozenset({"completed", "abandoned", "superseded"})
+
+
 @dataclass(frozen=True)
 class FeasibilityResult:
     intent_id: uuid.UUID
@@ -67,6 +119,8 @@ def create_intent(
     memory_thread_id=None,
     idempotency_key,
 ):
+    if state not in LIFE_INTENT_TRANSITIONS:
+        raise InvalidTransitionError(f"{state!r} is not a recognized LifeIntent state")
     if (
         db.execute(
             select(User.id).where(User.id == owner_id).with_for_update()
@@ -137,13 +191,42 @@ def create_intent(
 
 
 def transition_intent(
-    db: Session, *, owner_id, intent_id, state, reason, actor="founder"
+    db: Session, *, owner_id, intent_id, state, reason, actor="founder", expected_current_state=None
 ):
+    """Fail-closed LifeIntent state machine (see LIFE_INTENT_TRANSITIONS above).
+
+    `expected_current_state` is an optional optimistic-concurrency/currentness check: if
+    given, and the row's ACTUAL current state (read just now, under the row lock) no longer
+    matches it, raises StaleTransitionError immediately -- before even considering whether
+    the requested transition would otherwise be legal. This is deliberately separate from
+    transition-table validation: a caller can be stale (acting on out-of-date information)
+    even when the transition it's requesting would, in isolation, be a legal edge in the
+    table. Callers that don't need this guarantee may omit it, preserving the existing
+    unconditional-transition-table-only behavior other call sites already rely on.
+
+    A same-state call (old == state) remains a harmless no-op that records no new event --
+    unchanged from before this fix, and required by
+    tests/backend/context/test_goals_dreams_dependencies.py's own
+    test_concurrent_state_updates_serialize, which relies on exactly this to assert only ONE
+    state_changed event when two concurrent, both-correct actors race to set the same target
+    state.
+    """
     if not reason.strip():
         raise IntentError("state transition requires a reason")
+    if state not in LIFE_INTENT_TRANSITIONS:
+        raise InvalidTransitionError(f"{state!r} is not a recognized LifeIntent state")
     row = _intent(db, owner_id, intent_id, lock=True)
     old = row.state
+    if expected_current_state is not None and old != expected_current_state:
+        raise StaleTransitionError(
+            f"caller expected intent {intent_id} to currently be {expected_current_state!r}, but it is "
+            f"{old!r} -- another actor already changed it since this caller last read it"
+        )
     if old != state:
+        if old in TERMINAL_LIFE_INTENT_STATES:
+            raise TerminalStateError(f"intent {intent_id} is already terminal ({old!r}); cannot transition to {state!r}")
+        if state not in LIFE_INTENT_TRANSITIONS.get(old, set()):
+            raise InvalidTransitionError(f"cannot transition intent {intent_id} from {old!r} to {state!r}")
         row.state = state
         row.updated_at = datetime.utcnow()
         if state == "completed":
