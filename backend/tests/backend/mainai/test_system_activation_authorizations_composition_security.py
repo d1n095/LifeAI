@@ -81,11 +81,11 @@ def test_mainai_app_role_cannot_update_a_system_activation_authorization(superus
     superuser_db.add(row)
     superuser_db.commit()
 
-    db_session.execute(
-        sa_text("UPDATE system_activation_authorizations SET reason = 'tampered' WHERE id = :id"),
-        {"id": row.id},
-    )
     with pytest.raises(Exception):  # noqa: B017 -- exact exception varies by driver, same as every sibling REVOKE-rejection test
+        db_session.execute(
+            sa_text("UPDATE system_activation_authorizations SET reason = 'tampered' WHERE id = :id"),
+            {"id": row.id},
+        )
         db_session.commit()
     db_session.rollback()
 
@@ -95,8 +95,8 @@ def test_mainai_app_role_cannot_delete_a_system_activation_authorization(superus
     superuser_db.add(row)
     superuser_db.commit()
 
-    db_session.execute(sa_text("DELETE FROM system_activation_authorizations WHERE id = :id"), {"id": row.id})
     with pytest.raises(Exception):  # noqa: B017
+        db_session.execute(sa_text("DELETE FROM system_activation_authorizations WHERE id = :id"), {"id": row.id})
         db_session.commit()
     db_session.rollback()
 
