@@ -1509,6 +1509,24 @@ jobs:
       # is genuinely unconfigured at container start" check above.
       DEFAULT_LLM_MODEL: "qwen2.5:0.5b"
       DEFAULT_EMBEDDING_MODEL: "all-minilm"
+      # Same PR #425 merge also changed docker-compose.vps.yml's DEFAULT_LLM_PROVIDER/
+      # DEFAULT_EMBEDDING_PROVIDER from no-default to a SOFT default of `ollama`
+      # (${VAR:-ollama}), confirmed via a real run of this job: the worker successfully
+      # called http://ollama:11434/api/embeddings and /api/chat on a fresh container, with
+      # no explicit PUT /api/admin/providers/config call having happened yet — Ollama is now
+      # always on by default on the real VPS, a deliberate and reasonable production choice.
+      # That silently broke an EARLIER, unrelated step's own test precondition ("Verify a
+      # real upload now succeeds ... and the worker reads the SAME file", from the
+      # uploads-init permission fix): it explicitly relies on the embedding provider being
+      # genuinely unconfigured until it activates the CI Ollama stub itself, later in this
+      # same job, via that same admin endpoint — and its own assertion checks for the
+      # OpenAI-style "no API key configured" ("API-nyckel") pause reason, matching
+      # app/config.py's own Python-level default (default_llm_provider: str = "openai"),
+      # not Ollama's. Overriding back to "openai" here (with no OPENAI_API_KEY set, so it
+      # genuinely cannot verify) restores that step's original, correct precondition without
+      # changing its own test code or #425's deliberate compose default for a real VPS.
+      DEFAULT_LLM_PROVIDER: "openai"
+      DEFAULT_EMBEDDING_PROVIDER: "openai"
       LIFEAI_ENV_FILE: ${{ github.workspace }}/ci-secrets.env
     steps:
       - uses: actions/checkout@v4
