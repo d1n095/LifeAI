@@ -9380,3 +9380,24 @@ nästa faser / uppskjutna konsumentprodukter / långsiktig forskning). Inget nyt
 exekveringssystem, ingen ny auktoritets-/godkännandeväg, inget parallellt minne.
 
 **Ingen merge/deploy/aktivering någonstans. `first_cycle_go=false` genomgående.**
+
+## Grundardirektiv "MULTI-MODEL WORKFORCE + STRATO TERMINAL" (2026-11-16) — addendum på #445, commit `74e6542c`
+
+**Multi-modell AI-arbetskraft** (`docs/LIFE_FOUNDER_VISION_BACKLOG.md` §11, nio FV-WRK-*-
+poster): kontrollerade befintlig arkitektur FÖRST — `DeepSeek` är redan en egen
+leverantörsklass; `OpenRouter`/`Ollama` kan redan nå alla åtta namngivna kandidatmodeller
+(Qwen, gpt-oss, Mistral, Gemma, OLMo, GLM, MiniMax, DeepSeek) via modellsträng, utan någon ny
+leverantörsklass. Kodningsagent-adaptrar (`AgentAdapter`/`LocalCLIAdapter`, redan använt av
+#406 för Copilot), per-uppgift-worktree-isolering (`mainai_task_worktrees`) och
+utgiftsgodkännande (`ProviderSpendAuthorization`) finns ALLA redan — återanvändningsmål, inte
+luckor. Ingen leverantör kopplad, inget API-anrop, ingen modell aktiverad.
+
+**STRATO-terminalexekvering** (samma dokument §12, sex FV-TRM-*-poster): NOLL befintlig källa
+någonstans i repot (noll träffar för paramiko/ssh_client/en dedikerad fjärrskal-exekverare) —
+den befintliga "Strato VPS"-CI/driftverktygslådan driftsätter APPEN, ger inte en MODELL
+terminalåtkomst till den infrastrukturen. **FV-TRM-004 upphöjer explicit #446:s egna
+`run_tests`-subprocessmiljö-fynd till en namngiven aktiveringsförutsättning** för hela
+STRATO-avsnittet — inte duplicerat som en separat uppgift, exakt enligt grundarens instruktion.
+
+**Ingen merge/deploy/aktivering/API-utgift/modellaktivering. `first_cycle_go=false`
+genomgående.**
