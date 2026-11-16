@@ -307,7 +307,12 @@ jobs:
   # ---------------------------------------------------------------------------------------
   e2e-tests:
     name: E2E — Playwright (full stack)
-    runs-on: ubuntu-latest
+    # Pinned to an explicit, supported image: `ubuntu-latest` now resolves to Ubuntu 26.04,
+    # for which Playwright 1.56.1 has no Chromium build ("does not support chromium on
+    # ubuntu26.04-x64"), so `npx playwright install chromium` fails at the download step.
+    # 24.04 is a Playwright-supported LTS; pinning keeps the browser suite reproducible and
+    # preserves full coverage. Revisit once Playwright ships a 26.04 build (microsoft/playwright#40117).
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -473,7 +478,9 @@ jobs:
   # ---------------------------------------------------------------------------------------
   same-origin-proxy-test:
     name: E2E — same-origin proxy
-    runs-on: ubuntu-latest
+    # Same Playwright/Ubuntu-26.04 pin as e2e-tests above — this job also runs
+    # `npx playwright install chromium`. See that job's comment.
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -608,7 +615,10 @@ jobs:
   # ---------------------------------------------------------------------------------------
   combined-container-verify:
     name: Combined container — build, run, verify
-    runs-on: ubuntu-latest
+    # Same Playwright/Ubuntu-26.04 pin — this job also runs `npx playwright install chromium`.
+    # Branch-gated (see `if` below) so it is not exercised by this PR's matrix, but it carries
+    # the identical defect on the branches where it does run; pinned here for consistency.
+    runs-on: ubuntu-24.04
     if: github.ref == 'refs/heads/claude/verify-combined-container' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm'
     services:
       postgres:
