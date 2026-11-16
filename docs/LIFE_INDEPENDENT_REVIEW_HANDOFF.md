@@ -380,5 +380,79 @@ that decision on my behalf."*
 - Does not merge, rebase, or renumber any branch.
 - Does not authorize `first_cycle_go=true` or any production activation.
 
+## Final GO/NO-GO handoff (2026-11-16) — PR #447, exact SHA, real CI, remaining blockers
+
+Per the founder's follow-up directive ("FOUNDER RESPONSE: CONTINUE #447 INTEGRATION"), after
+the integration described in the addendum above. **This changes one material fact from
+section C**: the #425 lineage no longer depends on its own blocked, `action_required` Actions
+runs to be evaluated — a fresh, conflict-free merge of it onto the current `dev` tip now has
+its own real, repository-native, unblocked CI result.
+
+### What is new and independently confirmed
+
+- **PR #447** (`claude/import-security-integration-on-dev`, base `dev`): `git merge --no-ff`
+  of `origin/copilot/parser-isolated-sidecar` (#425's lineage) onto fresh `dev`, zero conflicts.
+- **Exact final SHA: `ca352bcd426de88b73bccfb40e368eb64b010d5e`.**
+- **Real CI on that exact SHA — full green**, verified live via `get_check_runs` (two parallel
+  runs, `43858061926` and `43858069778`, both concluded `success` on `All required checks
+  passed`): `Backend — Alembic migration check`, `Backend — RLS & session-security tests`,
+  `Backend — account lifecycle & rate-limit tests`, `Backend — unit/integration tests`
+  (2421 passed, 2 skipped, 1 xfailed — the xfail is #425's own honest acknowledgment of the
+  same-UID procfs environment-read gap, not hidden), both E2E jobs, `Frontend — npm audit`,
+  and all three frontend builds.
+- **One genuine regression found and fixed on this exact integration, not assumed resolved**:
+  the first CI run (SHA `757250b5`, the merge commit before any fix) failed
+  `test_basic_startup_no_model.py`'s two tests with `TypeError: object Document can't be used
+  in 'await' expression`. Traced to a real mismatch *within #425's own lineage* — a later
+  commit (`c7aeafe7`) changed `upload_document()` from `async def` to sync `def`, but this one
+  test file (added earlier in the same lineage) kept awaiting it. Confirmed against the sibling
+  test file's already-correct convention, fixed in a separate two-line commit (`ca352bcd`)
+  touching only the two stale `await` call sites, no production code. This is exactly the kind
+  of scoped, traceable fix the founder's standing branch discipline asks for — not a
+  mass-edit of Copilot's code.
+- This is new evidence of **mechanical correctness and non-regression** against this
+  repository's own real test suite — including automated exercises of parser-isolation
+  (the xfail), staged-upload recovery and restart survival (`test_basic_startup_no_model.py`,
+  `test_documents_upload_durable_delivery.py`), owner isolation and RLS (the dedicated session-
+  security suite), and database-failure/restart behavior (the same restart tests). It is
+  **not** independent human security review, and it does not supersede section C's point that
+  PR #425's own branch still carries unresolved, `action_required` Actions runs — those remain
+  exactly as described there; they are simply no longer the only evidence available, because
+  #447 gives the same code a second, unblocked verification path.
+
+### What remains open — three items, not resolved by #447's green CI
+
+1. **Independent human security acceptance.** Still unmet, still the same owner (the founder,
+   or a genuinely external human reviewer — never another AI session, this one or OpenCode's
+   independent review of #425 included). Green CI demonstrates the merged code doesn't break
+   existing behavior; it does not constitute a security sign-off on the new parser-isolation,
+   staged-upload, or blueprint surfaces #425 introduces.
+2. **PR #440 migration-sequencing reconciliation**, not yet landed on `dev`. `dev`'s own tip
+   currently stops at migration `0068`; #447 adds `0069_embedding_space_identity.py` through
+   `0074_import_job_staging_intents.py` under #425's own numbering. PR #440 (still unmerged,
+   still not rebased per the Merge-regel — correctly left alone until its own dependency lands)
+   separately renumbers an *different* four-way `0069` collision (#408/#403/#411/#437) to
+   `0069→0072`. These are two different revision chains both claiming the `0069` slot from
+   `dev`'s current tip. **Whichever of #440 or #447 merges to `dev` first must be reconciled
+   against the other's migration numbering before the second one can merge** — this is not
+   itself a defect in either PR, and per the Merge-regel this reconciliation should happen only
+   once the actual merge order is known, not preemptively now.
+3. **The original #425-chain's own CI runs remain blocked.** Runs `43713479509` (#421) and
+   `43700873775` (#413) are still `status: completed, conclusion: action_required` — this has
+   not changed and still requires the founder, as repository administrator, to approve in
+   GitHub's UI, or to adjust the repository's Actions-approval policy. #447's own green CI
+   (above) does not require this to be resolved, but the historical chain's own PRs remain in
+   that state regardless.
+
+### The decision this session is not making
+
+Per the founder's own instruction, repeated across every directive in this thread: this
+session presents evidence and residual risk, not an accept/reject recommendation.
+`first_cycle_go` remains `false`. No merge, deployment, production activation, or
+security-gate change has been made or is proposed here. The founder (or an independent human
+reviewer the founder designates) decides whether #447's now-green, now-reconciled-with-`dev`
+integration, together with item 1 above, is sufficient to proceed — and on what timeline
+relative to items 2 and 3.
+
 ---
 _Generated by [Claude Code](https://claude.ai/code/session_016d4iixQnxxqNhDrxHHxV4Q)_
