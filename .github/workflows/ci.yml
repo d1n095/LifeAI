@@ -1497,6 +1497,18 @@ jobs:
       FRONTEND_IMAGE: lifeai-vps-frontend:ci
       DOMAIN: ":80"
       REDIS_PASSWORD: ci-vps-compose-verify-redis-password-1234567890
+      # PR #425's merge (docker-compose.vps.yml) added these two REQUIRED `${VAR:?...}`
+      # compose-level interpolation guards; this job's env block was never updated to supply
+      # them, so `docker compose up` failed to even parse the file (found running this job for
+      # the first time against the merged code — see Priority 4 of "PR #447 VERIFICATION AND
+      # SECURITY CORRECTIONS"). Same model names already used as CI-only test values in
+      # founder-alpha-verification.yml/real-local-ai-verification.yml's own OLLAMA_CHAT_MODEL/
+      # OLLAMA_EMBED_MODEL — these two settings fields default harmlessly in app/config.py
+      # (default_llm_model/default_embedding_model) and are never read until a provider is
+      # independently verified/configured, so this does not affect this job's own "embedding
+      # is genuinely unconfigured at container start" check above.
+      DEFAULT_LLM_MODEL: "qwen2.5:0.5b"
+      DEFAULT_EMBEDDING_MODEL: "all-minilm"
       LIFEAI_ENV_FILE: ${{ github.workspace }}/ci-secrets.env
     steps:
       - uses: actions/checkout@v4
