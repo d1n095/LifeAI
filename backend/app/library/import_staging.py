@@ -29,16 +29,27 @@ def _expected_stage_key(owner_id: uuid.UUID, job_id: uuid.UUID) -> str:
 
 
 def _claim_expired_upload(db: Session) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID] | None:
+    # Both queries below MUST use the exact same "now" (F3, OpenCode's independent review of
+    # #425): the candidate SELECT previously used Postgres's own clock_timestamp(), cast to
+    # this table's naive (no-timezone) column under the SESSION's TimeZone setting, while the
+    # very next re-validation query used Python's datetime.utcnow() (always true UTC) against
+    # the same column. Whenever the session's TimeZone isn't UTC, those two "now"s disagree —
+    # in the direction where the session clock lags UTC, a genuinely-expired upload is never
+    # even selected as a candidate, so it never gets recovered at all. Computing one Python
+    # snapshot and reusing it for both queries removes Postgres's own clock from this decision
+    # entirely, so it no longer depends on the session's TimeZone setting being UTC.
+    now = datetime.utcnow()
     candidate = db.execute(
         text("""
             SELECT id, owner_id
             FROM knowledge_import_jobs
             WHERE status = 'receiving'
-              AND upload_lease_expires_at <= clock_timestamp()
-              AND (staging_reconcile_after IS NULL OR staging_reconcile_after <= clock_timestamp())
+              AND upload_lease_expires_at <= :now
+              AND (staging_reconcile_after IS NULL OR staging_reconcile_after <= :now)
             ORDER BY upload_lease_expires_at ASC, id ASC
             LIMIT 1
-        """)
+        """),
+        {"now": now},
     ).first()
     if candidate is None:
         db.commit()
@@ -51,7 +62,7 @@ def _claim_expired_upload(db: Session) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]
         .filter(
             ImportJob.id == job_id,
             ImportJob.status == ImportJobStatus.receiving,
-            ImportJob.upload_lease_expires_at <= datetime.utcnow(),
+            ImportJob.upload_lease_expires_at <= now,
         )
         .with_for_update()
         .first()

@@ -8,6 +8,8 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from sqlalchemy import text
+
 from app.config import get_settings
 from app.library.import_staging import cleanup_import_stages, recover_expired_import_uploads
 from app.models.import_job import ImportJob, ImportJobStatus
@@ -73,6 +75,38 @@ def test_expired_upload_intent_promotes_verified_stage_and_cleanup_is_idempotent
     assert superuser_db.get(ImportJob, job.id).staging_storage_key is None
     assert storage.inspect_staged(staging_key) is None
     assert cleanup_import_stages(superuser_db) == 0
+
+
+def test_recovery_is_independent_of_the_db_sessions_timezone_setting(superuser_db, make_verified_user):
+    """F3 (OpenCode independent review of #425): _claim_expired_upload() used to decide
+    "is this lease expired" with Postgres's clock_timestamp() in its candidate SELECT, then
+    re-validate the SAME condition with Python's datetime.utcnow() in its very next query.
+    Both are "now", but clock_timestamp() is cast to this table's timezone-naive column under
+    the session's own TimeZone setting, while datetime.utcnow() is always true UTC — so
+    whenever a Postgres session's TimeZone lags UTC (anything from a differently-configured
+    connection pool to a future deployment target), the candidate SELECT alone, using the old
+    code, would undercount: a job that is genuinely expired by the wall clock stops being
+    selected as a candidate at all, and recovery silently stops making progress for it.
+
+    This sets the session's TimeZone 12 hours behind UTC — large enough that the old,
+    Postgres-clock-based candidate query would never select a lease that only expired a few
+    minutes ago, while the fixed code (a single Python-computed timestamp reused for both
+    queries, no clock_timestamp() involved) must recover it correctly regardless."""
+    superuser_db.execute(text("SET TIME ZONE 'Etc/GMT+12'"))
+    superuser_db.commit()
+
+    user, _ = make_verified_user()
+    job = _receiving_job(superuser_db, user.id)
+    staging_key = job.staging_storage_key
+    payload = b"recovery must not depend on the db session's timezone setting"
+    storage = get_storage()
+    staged = storage.write_staged_stream(staging_key, _chunks(payload), max_bytes=1024)
+
+    assert recover_expired_import_uploads(superuser_db) == 1
+    superuser_db.expire_all()
+    recovered = superuser_db.get(ImportJob, job.id)
+    assert recovered.status == ImportJobStatus.pending
+    assert recovered.source_checksum == hashlib.sha256(payload).hexdigest() == staged.sha256
 
 
 def test_corrupt_expired_stage_fails_closed_and_retains_the_original_pointer(
