@@ -6,3 +6,6 @@ pytest-asyncio==0.24.0
 # (app/development_operator/service.py) — must be on PATH for tests that exercise that
 # governed capability for real, not just import it.
 ruff==0.15.8
+# Software WebAuthn authenticator for the passkey round-trip tests
+# (tests/test_webauthn_service.py).
+soft-webauthn==0.1.3

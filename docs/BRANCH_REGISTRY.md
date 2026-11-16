@@ -6,6 +6,29 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## MainAI passkeys / WebAuthn (2026-10-29)
+
+Grundarens P1: säker passkey-enrollment, autentisering, hantering och revokering för
+Founder-kontot (Pixel fingeravtryck / Android passkeys, Mac Touch ID). WebAuthn/FIDO2 med
+auktoritativ backend-verifiering (`py_webauthn`). RP ID/origin konfigurerbara, **ej** bundna
+till en ogodkänd domän i förväg. Bevarar befintlig auth/CSRF/sessioner/RLS/recovery.
+
+| Branch | PR | Status | Scope |
+|---|---|---|---|
+| `claude/mainai-passkeys-webauthn` | — | **Aktiv (grund lagd, ingen PR)** | Grenad `64c07d5b0`. **Denna commit:** konfigurerbara RP-settings i `app/config.py` + fullständig design/schema (`docs/PASSKEYS_WEBAUTHN_DESIGN.md`). **Nästa commits:** migration 0069 (`webauthn_credentials` RLS-ägarscoped + `webauthn_challenges` ej-RLS, single-use) + modeller, router `/api/auth/webauthn/*` (register/authenticate begin+complete, list, delete m. step-up), frontend-UI, round-trip-tester m. mjukvaruautentiserare. |
+
+**Beroenden/kollisionsrisk:** oberoende av PWA- (`claude/mainai-pwa-installable`) och Tauri-
+branchen (`claude/mainai-crossplatform-app-shell`) — olika filer. **Migration: icke-numeriskt
+revisions-id `webauthn_passkeys_01`** (`down_revision="0068"`), EJ ett nummer — numren 0069–0099
+är upptagna på andra linjer (#312 har `0069_workforce_authority_epoch`…`0089`; 0069 finns i 5
+varianter), så ett nummer skulle krocka. Pekas om / `alembic merge` vid integration mot
+mållinjens head, utan att röra frysta kandidater. **Status: backend KOMPLETT + VERIFIERAD** —
+verifieringskärna+tester `dba3d13b7`, migration-kompat `2a26610ae`, migration/modeller/RLS
+`a2d03ba5a` (RLS-registertest grönt), router+livscykel+integrationstester `895a11a45` (4 pass +
+33 regress: session-auth/RLS-register/RLS-isolation). Kvar: frontend-UI (enroll/hantera) + end-
+to-end på enhet (kräver godkänd HTTPS-domän, samma gate som Pixel-PWA) + Alembic merge-head vid
+integration. Separat granskare krävs; författaren självcertifierar ej.
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en

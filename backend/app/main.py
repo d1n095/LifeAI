@@ -31,6 +31,7 @@ from app.routers import (
     project_entities,
     projects,
     provider_spend,
+    webauthn,
     workbench,
 )
 from app.scheduler import start_scheduler, stop_scheduler
@@ -64,6 +65,7 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(auth.router)
+app.include_router(webauthn.router)
 app.include_router(account.router)
 app.include_router(chat.router)
 app.include_router(conversations.router)
