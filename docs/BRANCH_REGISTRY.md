@@ -9340,3 +9340,43 @@ ett generiskt högnivå-visionsdokument."
 
 **Ingen merge/deploy/aktivering någonstans i denna omgång heller. `first_cycle_go=false`
 genomgående.** Inget väntande arbete begärt förrän grundaren säger annat.
+
+## Grundardirektiv "FIRST-CYCLE READINESS + COMPLETE FOUNDER VISION PRESERVATION" (2026-11-16) — P1-P4 levererade
+
+**Priority 1+2 (ny PR #446, draft) — exakt-SHA first-cycle-readiness-matris.**
+`docs/LIFE_FIRST_CYCLE_READINESS_MATRIX.md`, verifierad mot dev-tipp `b5b60d05` (inte memorerad
+eller gissad). Klassificerar alla 11 namngivna områden som BLOCKER/CONDITIONAL/POST-ALPHA/
+FUTURE PRODUCT. Nyckelfynd, alla verifierade direkt mot KOD, inte bara mot dokumentpåståenden:
+kanonisk exekveringsmyndighet bekräftad (`app.mainai_execution`); `app.agent_coordination`/
+`app.workforce` bekräftat STRUKTURELLT INERTA (`dispatch_assignment()` har noll anropare;
+`workforce` har ett literalt, ovillkorligt `raise ProviderActivationBlocked` före varje riktig
+leverantörsanrop); en tidigare funnen godkännande-"andra dörr" (`POST /api/mainai/jobs` kunde
+skapa en `task_execution`-jobbrad utan godkännandekontroll) är REDAN FIXAD på dev — bekräftat
+genom direkt kodläsning, inte genom att lita på det daterade dokument som ursprungligen hittade
+den. NYTT fynd, aldrig tidigare dokumenterat: `run_tests`-uppgiftstypens `subprocess.run()`
+skickar inget `env=` och ärver därmed arbetarprocessens FULLA miljö (DB-uppgifter,
+leverantörsnycklar) — korrekt klassificerat CONDITIONAL (blir BLOCKER endast om oövervakad
+kodexekvering någonsin aktiveras), INTE fixat i denna omgång eftersom den riktiga lösningen
+(en miljövariabel-allowlist) är designarbete, inte en "minsta säkra korrigering", och den
+faktiska första-cykel-omfattningen aldrig utlöser den. Dokumentparser-isolering (en hel
+codex/copilot-PR-lineage) finns INTE på dev än — korrekt CONDITIONAL, utlöses bara om
+dokumentuppladdning ingår i cykelns omfattning. Exakt EN äkta BLOCKER kvarstår: oberoende
+säkerhetsgodkännande har inte faktiskt ÄGT RUM än (bara bevispaket förberedda) — ägs av
+grundaren/extern granskare, inte av fortsatt ingenjörsarbete. INGEN kodändring gjordes under
+Priority 2 — den enda luckan som skulle ha kvalificerat var redan fixad.
+
+**Priority 3+4 (addendum på #445, commit `fa1cc289`) — atomisk grundarvisions-backlog.**
+`docs/LIFE_FOUNDER_VISION_BACKLOG.md`: en post per INDIVIDUELLT krav (inte en generisk
+20-produktnamns-översikt), vardera med stabilt ID, källa/proveniens, beroenden, status,
+integritets-/säkerhetsimplikationer, acceptanskriterier, aktiveringsförutsättningar och fas.
+Korsrefererar istället för att duplicera #424 (Life Patent Intelligence, Life Compute &
+Mining, leverantörsfilosofi), #426 (Life Development Monitor), #444 (Life Workspaces). Bär
+vidare #445:s egna LifeOS-namnkollisionsfynd. Lägger till grundarens NYA ekonomiska-filosofi-
+språk (inklusive "framtida vinster kan finansiera tillgängliga samhällstjänster", aldrig
+tidigare nedtecknat denna session). Avsnitt 11 namnger explicit kunskaps-ingestion-kopplingen
+som ett SEPARAT, obyggt beroende — dokumentation som finns i GitHub betyder inte i sig att
+MainAI kan hämta den. Avsnitt 12 ger en koncis fyrdelad roadmap (first-cycle-förutsättningar /
+nästa faser / uppskjutna konsumentprodukter / långsiktig forskning). Inget nytt
+exekveringssystem, ingen ny auktoritets-/godkännandeväg, inget parallellt minne.
+
+**Ingen merge/deploy/aktivering någonstans. `first_cycle_go=false` genomgående.**
