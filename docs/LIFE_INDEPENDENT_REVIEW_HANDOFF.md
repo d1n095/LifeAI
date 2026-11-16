@@ -231,6 +231,148 @@ until now — the founder may adopt, amend, or replace this):
 - Does not invent urgency — the founder's own prior directives have consistently kept
   `first_cycle_go=false` deliberately, and this section changes none of that.
 
+## Reconciliation addendum (2026-11-16) — PR #425 and the import-security lineage
+
+Founder directive ("FOUNDER RESPONSE: ACCEPTANCE HANDOFF RECEIVED"): the founder correctly
+flagged that document import is active and required, and asked for #425 and its dependencies
+to be reconciled against the acceptance scope above, with completed engineering separated from
+unmerged changes, independently-unverified evidence, and known drift — and for any genuine
+safety-critical issue to be named rather than assumed resolved because a PR exists.
+
+**This addendum corrects the prior section above where it was wrong.** The snapshot in this
+document's acceptance-handoff section, and `docs/LIFE_FIRST_CYCLE_READINESS_MATRIX.md`'s
+original row 10, both scoped "document ingestion" as a future, conditional capability using
+PR #439's narrow GitHub-evidence scenario as the test. The founder's correction, independently
+confirmed by PR #425's own body text (*"Founder Alpha requires `POST /api/library/import`; it
+is active and has no startup disable boundary"*), shows that scoping was wrong: Library import
+is an ordinary, already-operating founder-only feature, not gated behind MainAI's own
+activation gate, so the underlying exposure is live today. `docs/LIFE_FIRST_CYCLE_READINESS_MATRIX.md`
+has been amended accordingly (commit `9e4067ec`) — this addendum is the detailed evidence
+behind that amendment.
+
+### A. Completed engineering (independently verified by this session, based on `dev`)
+
+Unchanged from the snapshot above — restated here only to anchor the contrast with sections
+B-D below, not re-verified again: #440/#442/#443/#444/#445/#446 (plus the earlier chain
+#423/#428/#431/#433/#436/#430/#432/#435/#437/#424/#429/#438/#439/#323), all green on real
+backend signal, all based on `dev`, all pulled live via `get_check_runs` by this session.
+
+### B. Unmerged changes — a separate lineage, not based on `dev`, never previously reconciled
+
+The full dependency chain, verified by walking each PR's actual `base`/`head` via
+`list_pull_requests`, not assumed from titles:
+
+```
+codex/life-founder-alpha-integration (root, not itself a numbered PR)
+  -> #391 (approved precomposition)
+    -> #392 (parser isolation)          head 92d4ad3d76634473d1dc4a7a85913ff676090947
+      -> #402 (import lease-loss fencing)  head 5b66814b35a4889c68acab9ed9e0ed3edd9dfbf5
+        -> #413 (lease/write fencing, parser stderr bounds)  head 23022662a78abb141792ea7439b715d670cdc640
+          -> #415 (workflow permission hardening, sibling)   head 8538f0f362f062f917debcdaab38935f13fc99cc
+          -> #420 (test corrections)      head 31dd0cfe0a6127e21ea6bb9720f845da6cde155d
+            -> #421 (exact-SHA validation workflow, evidence-only)  head f1de4ad417d1ac4c1252a36030c9d9ee0184cf3f
+            -> #422 (parser procfs boundary reproducer, evidence-only)  head a4f6819fff04d6919d4b46b1c018ba38aad1ab88
+              -> #425 (parser isolated-sidecar — the actual fix)  head 367ece55cf245250c061865f0c07f54e94913c34
+```
+
+None of these nine PRs are based on `dev` (`claude/det-kommer-mer-879lcm`); none are merged;
+#425's own `mergeable_state` is `clean` only against its immediate base (#422's branch), not
+against `dev`. Before #425 could ever reach `dev`, this entire chain would need its own review
+and merge, in order, exactly as `docs/IMPORT_SECURITY_VALIDATION_MATRIX.md` (on #425's branch)
+itself already documents — a thorough, pre-existing artifact this addendum cites rather than
+duplicates.
+
+### C. Independently-unverified evidence — real, substantial, but not confirmed by this repository's own CI
+
+Every test count #425's chain reports (64 passed / 52 passed / 219 passed / 54 passed, etc.)
+was run by the authoring session in disposable environments **outside this repository's GitHub
+Actions**, not confirmed by it. Verified live, just now, not assumed from the matrix's own
+claim:
+
+- Run `43713479509` (#421, frozen-SHA import regression workflow): `status: completed,
+  conclusion: action_required`, zero jobs executed.
+- Run `43700873775` (#413, main CI workflow): `status: completed, conclusion: action_required`,
+  zero jobs executed.
+
+`docs/IMPORT_SECURITY_VALIDATION_MATRIX.md` itself names the cause and the remedy: *"One
+repository administrator action is required: open Actions -> Import security regression tests
+(frozen SHA) -> run 43713479509. If GitHub presents Approve and run, approve this restricted
+run... The repository Actions-settings API returns 403 to this installation, so the exact
+approval policy is not visible here."* **This is not something any AI session can do** — not
+this one, not the one that wrote that line. It requires the founder, signed in to GitHub
+directly, to approve the run or adjust the repository's Actions approval policy. Until that
+happens, every test-count claim in this chain remains self-reported, not independently
+confirmed — exactly the distinction the founder's own instruction (#5: "AI reviews are
+supporting evidence, not final acceptance") already anticipates, now with a concrete, named
+blocker rather than a general caution.
+
+PR #425's own body is unusually explicit about this limitation in its own words, repeated
+across multiple of its update sections: *"is not security acceptance,"* *"Local tests are not
+production certification,"* *"Formal independent security acceptance remains pending,"*
+*"External host-port reachability, sustained full-stack resource exhaustion, and deployment-
+equivalent fault injection remain unverified."* None of this is this session's own finding —
+it is the authoring session's own, already-documented honesty about its work's limits, cited
+here rather than softened or restated as more final than it is.
+
+### D. Known CI drift — unchanged, unrelated
+
+`Frontend — npm audit` / both E2E jobs (PR #323) — present on PRs in both lineages, already
+understood, not reconciled further here.
+
+### The genuine safety-critical issue (per the founder's instruction not to assume resolved because a PR exists)
+
+**Document parsing on `dev`, today, runs in-process with the backend's full secrets, for an
+already-active, required, undisableable endpoint.** `backend/app/rag/extract.py` calls
+`PdfReader`/`DocxDocument`/`BeautifulSoup` directly, in the same process as everything else —
+no subprocess boundary, no sandboxing. The proposed fix (#425's dedicated, secretless,
+namespace-isolated parser container) is real, substantially built, and extensively
+self-tested — but is NOT merged, NOT based on `dev`, and NOT independently CI-verified in this
+repository for the reason in section C above. One containment gap PR #425's OWN adversarial
+testing already found (not this session's finding, cited from `docs/IMPORT_SECURITY_VALIDATION_MATRIX.md`):
+an adversarial child process with code execution can read a same-UID parent's
+`/proc/<pid>/environ` under the CURRENT (pre-sidecar) boundary — the same general class of
+exposure as `docs/LIFE_FIRST_CYCLE_READINESS_MATRIX.md` row 5's `run_tests` finding, but on the
+path that is actually live on `dev` right now, not a conditional one.
+
+### The precise acceptance decision — options and residual risk, not a recommendation this session is making
+
+**Option 1 — Accept the `dev`-based chain narrowly, explicitly excluding document import from
+that acceptance.** Residual risk: the unsandboxed parsing exposure continues exactly as it is
+today for as long as Library import keeps being used, independent of whatever is decided about
+`first_cycle_go`. This option answers "is MainAI's own supervised-cycle execution authority
+ready for review" without answering "is document import safe" — the founder would need to
+treat those as two separate acceptances, not one.
+
+**Option 2 — Treat document-import security as an equally required precondition before calling
+any part of LifeAI operational.** Concrete, sequenced path: (a) the founder personally approves
+the blocked Actions runs (or adjusts the repository's workflow-approval policy) so the #425
+chain's claims become independently verifiable the way #440-#446's already are; (b) the
+nine-PR chain in section B is reviewed and merged in its documented order, reconciled with
+`dev`'s own extensive, independent evolution since that chain was opened; (c) the resulting
+`dev`-based code is independently reviewed the same way the rest of this handoff asks for.
+Residual risk during this path: longer timeline, and `dev` has moved substantially since this
+chain branched (new tables, new RLS policies, new migrations this session added) — reconciling
+the two is real integration work, not a fast-forward merge.
+
+**Option 3 — A narrower interim mitigation, faster than Option 2, not yet attempted by anyone.**
+The specific exposure (full-environment inheritance for untrusted code, whether in the parser
+path or `run_tests`) could potentially be narrowed with a smaller, `dev`-native change — an
+environment allowlist for both subprocess call sites — without importing the full 3200-line,
+38-file sidecar architecture. This has not been designed, scoped, or attempted by this session
+or any other; naming it as a possibility is not a claim that it is sufficient or easy.
+
+This session makes none of these choices. The founder's own words govern here: *"Do not make
+that decision on my behalf."*
+
+## What this addendum does not do
+
+- Does not approve, merge, or request the blocked Actions runs be approved on the founder's
+  behalf — that action belongs to the founder alone.
+- Does not merge, rebase, or build on any PR in the #425 chain.
+- Does not implement Option 3 or any other mitigation.
+- Does not change `docs/IMPORT_SECURITY_VALIDATION_MATRIX.md` on #425's own branch — that
+  document is cited, not duplicated or edited.
+
 ## What this document does not do
 
 - Does not perform independent review itself — every finding above is restated from each
