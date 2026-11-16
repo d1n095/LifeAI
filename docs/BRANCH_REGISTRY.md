@@ -16,7 +16,7 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 | `copilot/import-fence-test-corrections` | [#420](https://github.com/d1n095/LifeAI/pull/420) | **Open, draft; frozen at `31dd0cfe0a6127e21ea6bb9720f845da6cde155d`; locally verified, remote backend CI absent** | #413 at `23022662a78abb141792ea7439b715d670cdc640` | Test-only corrections; no production code changes. |
 | `copilot/import-security-validation-31dd0cf` | [#421](https://github.com/d1n095/LifeAI/pull/421) | **Open, draft; workflow SHA `f1de4ad417d1ac4c1252a36030c9d9ee0184cf3f`; run `43713479509` is `action_required`** | #420 at `31dd0cfe0a6127e21ea6bb9720f845da6cde155d` | Push-only, contents-read workflow checks out and verifies #420's fixed SHA; no secrets, deploy, or checkout credentials. |
 | `copilot/parser-proc-boundary-regression` | [#422](https://github.com/d1n095/LifeAI/pull/422) | **Open, draft; test SHA `d2f79d3132f9a9003557f2fb3199550c26987b50`; expected-failure containment reproducer** | #420 at `31dd0cfe0a6127e21ea6bb9720f845da6cde155d` | Test-only synthetic-canary proof that a same-UID parser child can read its parent environment through procfs; no production code changes. |
-| `copilot/parser-isolated-sidecar` | [#425](https://github.com/d1n095/LifeAI/pull/425) | **Open, draft; tested import-recovery implementation commit `2740d37940afe6762987fd2b66307b923ba4aab0`; no merge/deploy** | #422 at `a4f6819fff04d6919d4b46b1c018ba38aad1ab88` | Parser UID/socket hardening, full-stack parser recovery, database-interruption handling and lease/import evidence are documented below. PostgreSQL backend termination during import commit returned sanitized 503, rolled back the row, reconciled the blob, released advisory locks, and allowed one-job retry. Prolonged total database outage can still leave an unreferenced durable blob; remote backend Actions, external ingress, active-worker database restart and independent security acceptance remain unverified. |
+| `copilot/parser-isolated-sidecar` | [#425](https://github.com/d1n095/LifeAI/pull/425) | **Open, draft; staged upload-recovery implementation `c7aeafe762451f753d324313235b86b4dbbd517a`; no merge/deploy** | #422 at `a4f6819fff04d6919d4b46b1c018ba38aad1ab88` | Parser UID/socket hardening, full-stack parser recovery, database-interruption handling, and owner-bound staged ImportJob recovery. 219 PostgreSQL-backed regression tests pass; process death after stage publication and migration downgrade guard were exercised. Compose service-restart recovery, remote backend Actions, external ingress, and formal independent security acceptance remain unverified. |
 
 **#425 latest verification update (implementation commit
 `ce4d7de1dfe470cec8b8c965009393fd0b84de1d`):** Disposable network probes confirmed that only Caddy
@@ -56,19 +56,19 @@ a worker is actively committing, multi-owner upload stress (the endpoint is Foun
 sustained throughput, remote backend Actions, external host ingress and formal independent
 security acceptance remain unverified. This does not change `first_cycle_go=false`.
 
-**#425 prolonged-outage boundary:** the added route regression injects persistent DB lock
-failures in both upload and cleanup paths after blob publication. It verifies sanitized 503,
-retained hash/size-valid original, no job/temp file, then a same-owner retry completing one
-job; the complete route module passed 53 tests. The two-owner identical-content worker test
-also passed, verifying separate owner-scoped documents can safely share the same verified
-blob. These are route-boundary fault injection and worker-level concurrency, not a real
-prolonged PostgreSQL-service outage, active worker restart or multi-owner HTTP upload stress.
-The current pre-job canonical-write order has no durable owner/request intent when DB and
-cleanup are both unavailable. Therefore no safe age-based canonical-blob deletion/adoption
-is possible. The smallest proposed remedy is to use the existing ImportJob as a non-claimable
-`receiving` reservation and owner-scoped staging record before streaming; verify and promote
-from durable staging, then transition that same job to `pending`, retaining staging through
-the DB commit. This lifecycle is proposed only, not implemented or validated. See
+**#425 staged upload-recovery update (implementation `c7aeafe762451f753d324313235b86b4dbbd517a`):**
+The first-cycle `/api/library/import` path is active and required; it has no disable boundary.
+Both upload adapters now persist an owner-bound `receiving` ImportJob before writing a
+job-scoped staged original, verify and promote under the canonical storage lock, and transition
+that same row to `pending`. The existing worker performs one fenced recovery per poll and
+bounded stage cleanup; account erasure and global storage-reference checks protect staged
+keys. The expanded PostgreSQL-backed upload/storage/erasure/purge suite passed 219 tests,
+including child-process death after the staged object was atomically published, foreign-owner
+stage rejection in recovery and cleanup, idempotent retry, and storage-reference drift guards.
+Migration 0074 upgraded, downgraded and re-upgraded on a disposable DB; a live receiving row
+correctly blocked downgrade. Full Compose service-restart recovery, prolonged DB outage with
+restart, Redis restart during active import, external ingress, sustained performance, remote
+backend Actions, and formal independent security acceptance remain unverified. See
 `docs/IMPORT_SECURITY_VALIDATION_MATRIX.md`; `first_cycle_go=false`.
 
 **Validation boundary:** #413's tests cover lease expiry during transactions, competing reclaim, stale writes, delayed completion, interrupted archive recovery, and a lock wait past expiry; parser coverage includes stderr flooding and process cleanup. Its run `43700873775` is `action_required` with zero jobs. To test that exact frozen code, #421 adds a dedicated push-only workflow with `contents: read`, no repository secrets, disabled checkout credentials, and a checkout SHA pinned to #420; GitHub also stopped this push event before scheduling jobs (`43713479509`, zero jobs). The Settings/Actions API returns 403, so the exact approval policy is unavailable to this installation. The one authorized maintainer action remains: inspect **Settings → Actions → General** and, if GitHub offers it, use **Actions → Import security regression tests (frozen SHA) → run 43713479509 → Approve and run**; do not change events or bypass protections. #420's local disposable PostgreSQL/Redis runs passed 58 worker/import/parser tests plus 9 Redis lock/fail-closed tests; its remote check list contains only Vercel. #416's exact integration run `43704034822` failed twice with two #413-lineage test defects: a missing `SessionLocal` import in a lock-thread test and an assertion that SQL NULL equals `[]`. Both test-only corrections are present in #420's fixed SHA and targeted tests pass there; #413 has been notified to carry those corrections and rerun. These corrections do not validate or certify lease-fencing correctness. #422's synthetic-canary test reproduces same-UID procfs exposure locally, not document-parser code execution in production. #425 now has disposable full-stack upload/index/search, parser-outage recovery, idempotency and archive partial-failure evidence, plus a separate PostgreSQL/Redis lease/import regression run. These remain local validation, not production security acceptance; remote backend Actions, external host ingress, sustained full-stack resource fault injection and independent acceptance remain unverified. See `docs/IMPORT_SECURITY_VALIDATION_MATRIX.md` for per-PR evidence. No merge, deployment, or activation is implied (`first_cycle_go=false`).

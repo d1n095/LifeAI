@@ -162,58 +162,55 @@ is pinned to the single Founder identity. Four-way same-owner duplicate concurre
 this is not a sustained throughput or multi-owner stress result. No production data or
 credentials were used; `first_cycle_go=false`.
 
-### Prolonged-outage preservation and missing recovery invariant
+### First-cycle upload exposure and staged-intent recovery
 
-The regression `test_import_preserves_unreferenced_blob_when_database_stays_unavailable_then_retry_reuses_it`
-injects persistent `OperationalError`s in both the request's storage-key lock and the
-canonical cleanup lock after the content-addressed write. It verified a sanitized 503, no
-ImportJob row, no temp upload file, and a final blob whose SHA-256 and size match the
-synthetic original. Restoring database access and retrying the same bytes for the same
-Founder produced one completed job while verifying the original hash again. This is bounded
-fault injection at the route/storage boundary, not a full PostgreSQL container outage or
-process-kill-during-upload test.
+**Exposure: required and reachable.** The documented Founder Alpha journey calls
+`POST /api/library/import`; it is Founder-authenticated, included in the running API, and
+serviced by the active worker. No startup feature flag or route boundary disables it. The
+previous implementation could leave a canonical orphan after a prolonged PostgreSQL outage
+without a durable owner/request identity, so the recovery gap was first-cycle-blocking rather
+than safely deferrable.
 
-The existing multi-owner regression
-`test_two_concurrent_jobs_uploading_identical_content_both_succeed_without_deadlock` also
-passed: two different owners concurrently imported identical bytes, each received its own
-indexed `Document`, and both referenced the same hash-verified content-addressed blob. This
-tests worker/import owner isolation and shared-blob reference behavior; the HTTP upload route
-itself is Founder-only and cannot provide multi-account endpoint stress evidence.
+The tested #425 implementation is exact SHA
+`c7aeafe762451f753d324313235b86b4dbbd517a`. It uses the existing
+`knowledge_import_jobs` row as its only durable upload intent. Both Library and Documents
+upload adapters create an owner-bound, server-ID-bound `receiving` row and committed audit
+event before writing a per-job stage. The stage is
+published atomically with a hash/size manifest; canonical content is re-verified and promoted
+under the existing storage-key lock before that same job becomes `pending`. The worker
+reconciles at most one expired receiving intent per poll using owner locking, row locking,
+upload lease tokens, bounded retries, and exponential backoff. It deletes at most two
+redundant stages per poll, and only after verifying the canonical reference. Corrupt,
+identity-mismatched, and ambiguous staged originals are not adopted or destructively removed.
+Account erasure and the global reference check now protect stage pointers. There is no second
+storage ledger.
 
-**No safe automatic orphan deletion/adoption invariant exists yet.** The current order writes
-and publishes the canonical SHA-256 blob before inserting `ImportJob`. If PostgreSQL remains
-unavailable through both the request and its cleanup attempt, the filesystem has only a
-content hash and bytes; it has no durable owner, request/job identity, upload state, or
-age/lease proving the blob is abandoned. Content-addressing is global and intentionally
-allows multiple owners/references to share one physical blob, so the hash cannot identify an
-owner. A broad age-based scan could delete a live blob during the write-to-reference window;
-adopting it into a job would guess tenant ownership. Therefore uncertain canonical blobs must
-be preserved; this code does not sweep or adopt them.
+The expanded PostgreSQL-backed upload/storage, account-erasure, and purge suite passed
+**219 tests**. This includes
+verified recovery after an expired upload lease, idempotent stage cleanup, retained corrupt
+stages, rejection of a stage key bound to another owner in both recovery and cleanup, both
+upload adapters, and existing concurrent/retry behavior. A child process was also terminated
+with `os._exit` immediately after atomically publishing its stage; the parent process verified
+the committed receiving intent, expired its lease, recovered the same ImportJob to pending,
+re-verified the canonical hash/size, and cleaned the stage. Migration 0074 upgraded on a fresh
+disposable PostgreSQL database, successfully downgraded to 0073 with no live staging records,
+re-upgraded to head, and reported `0074_import_job_staging_intents (head)`. A separate
+disposable-database check confirmed downgrade is refused while a receiving intent remains.
+The storage-reference drift tests passed after
+adding explicit staged-key coverage and registering all new canonical write paths. Ruff,
+frontend ESLint, and `next typegen && tsc --noEmit` passed.
 
-Smallest additive design, if automatic recovery is required: make the existing
-`knowledge_import_jobs` row the upload intent (not a second ledger). Persist a non-claimable
-`receiving` job with owner and unique server-generated staging key before accepting bytes.
-Stream only to that job-scoped staging object using the existing bounded/hash-verified
-storage abstraction. A bounded upload lease/fence prevents a recovery worker from touching
-an active request. After a finalized stage is durable, a recovery/worker path verifies its
-stored size and SHA-256, promotes it under the existing content-key lock, and atomically
-changes that same job to `pending` with its canonical key/checksum. Keep the staging copy
-until that DB transition commits; retries can then safely re-verify/re-promote after crashes
-or ambiguous commits. Expired incomplete stages can be cleaned only after the upload fence
-expires, the owning job is locked/revalidated, and stage-key ownership matches that job.
-Account erasure and the global reference-check protocol must explicitly understand receiving
-jobs/stage keys. This keeps the job table as the single source of truth and never uses
-unreferenced canonical blobs as an ownership signal. This schema/storage/worker lifecycle is
-**proposed, not implemented or validated**; it requires a separate scoped design/implementation
-review rather than an unsafe age-based sweep.
-
-Service-boundary gaps remain: no actual process kill exactly between canonical blob
-publication and DB commit, no prolonged PostgreSQL container outage after publication, no
-PostgreSQL/Redis restart while a worker is actively committing, no upload-route multi-owner
-test, and no sustained pool/queue/throughput measurements. Prior disposable-stack worker
-and parser crash/restart tests and the prior post-restart PostgreSQL/Redis HTTP flow are
-separate evidence, not proof of those untested combinations. Remote Actions and formal
-independent security acceptance remain blocked/pending; `first_cycle_go=false`.
+**Not verified:** the process-death test exercises the stage-publication boundary only; it is
+not a process/container kill at every persistence boundary or a full Compose upload→service-
+restart→recovery test using the new staged code. No prolonged PostgreSQL outage plus process
+restart, Redis restart during active import, upload HTTP cross-owner stress, or
+sustained pool/queue/throughput measurements have been run for this implementation. The
+frontend queue now recognizes `receiving` jobs and polls for seven minutes to cover the
+five-minute upload lease, but no browser E2E for that recovery state was run. Remote Actions
+authorization and independent security acceptance remain open. Accordingly, this closes the
+previous missing-owner-intent invariant in code but **does not certify first-cycle launch**;
+the exact committed SHA still requires independent review and deployment-equivalent recovery
+testing. `first_cycle_go=false`.
 
 ## #416 integration failures and #413 coordination
 
