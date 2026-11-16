@@ -130,7 +130,17 @@ def test_first_supervised_development_cycle_end_to_end(superuser_db, owner_id):
         db,
         goal=goal,
         rationale="Read-only audit of the CI-red signal before any change is proposed.",
-        tasks=[PlannedTaskSpec(description="Audit PR #440's reported CI failure", task_type="read_only_audit")],
+        tasks=[
+            PlannedTaskSpec(
+                description="Audit PR #440's reported CI failure",
+                task_type="read_only_audit",
+                # standard_repo_work marks every task_type AUTO by default (app/mainai_execution/
+                # approval.py's APPROVAL_POLICIES) -- the per-task override is what actually
+                # requires approval here, exercising the real "founder reviewed this one task"
+                # path rather than a task_type this policy would wave through regardless.
+                approval_required=True,
+            )
+        ],
         created_by="founder-first-cycle-harness",
     )
     db.commit()

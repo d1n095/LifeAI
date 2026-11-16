@@ -18,6 +18,7 @@ individual task-level approval has no expiry concept to test. Recorded here accu
 than fabricated."""
 
 import uuid
+from datetime import datetime
 
 import pytest
 from sqlalchemy import select
@@ -271,6 +272,7 @@ def test_a_failed_task_records_only_a_failed_event_never_a_completed_one(superus
         )
     )
     task.status = MainAITaskStatus.failed
+    task.completed_at = datetime.utcnow()  # ck_mainai_tasks_completed_at_matches_terminal_status
     db.commit()
 
     events = db.execute(select(MainAITaskEvent.event_type).where(MainAITaskEvent.task_id == task.id)).scalars().all()
