@@ -18,6 +18,7 @@ or certify any frozen source candidate.
 | Embedding-space identity | #349 `6598559` | Frozen; independent review required | Required |
 | Grounded Blueprint + approval | #340 `add0da8` | Builder candidate; independent review required | Required |
 | Durable restart acceptance | Founder Alpha real-local workflow | Implemented in CI; exact composed SHA pending | Required |
+| Durable upload intent/recovery | #425 `c7aeafe762451f753d324313235b86b4dbbd517a`, migration 0074 | 219 PostgreSQL-backed storage/import/erasure tests pass; child-process death after stage publication recovers; migration upgrade/downgrade guard verified; Compose restart recovery and formal independent acceptance pending | Required; release blocker until verified |
 | Infinite Canvas, OCR, unattended autonomy | Separate future work | Deferred | No |
 
 The machine-readable source of this table is

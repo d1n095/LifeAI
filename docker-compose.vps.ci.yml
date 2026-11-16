@@ -55,8 +55,9 @@ services:
     command: ["python", "/stub/ci_provider_stub.py"]
     volumes:
       - ./scripts/vps/ci_provider_stub.py:/stub/ci_provider_stub.py:ro
-    networks:
-      - lifeai_internal
+    # Keep the base service's lifeai_data-only membership. Compose merges service
+    # network lists, so adding lifeai_internal here would expose even this test provider
+    # to the frontend-facing network.
     # This CI override keeps `ollama` as the egress-free fake provider stub for the existing
     # vps-compose-verify job. It must neutralize the fields docker-compose.vps.yml's REAL ollama
     # service sets, which do not apply to the python stub:
@@ -71,5 +72,5 @@ services:
       timeout: 3s
       retries: 10
       start_period: 5s
-    # Deliberately no `ports:` — only worker/backend (same network) ever need to reach this,
-    # never the host, matching every other internal-only service in this topology.
+    # Deliberately no `ports:` — only worker/backend on lifeai_data need to reach this,
+    # never the frontend-facing network or host.

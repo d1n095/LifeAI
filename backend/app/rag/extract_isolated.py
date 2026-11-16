@@ -14,8 +14,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+import httpx
+
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_SOCKET_PATH = "/run/lifeai-parser/parser.sock"
 _MAX_INPUT_BYTES = 25 * 1024 * 1024
 _MAX_OUTPUT_BYTES = 50 * 1024 * 1024
 _DEFAULT_TIMEOUT_SECONDS = 30.0
@@ -23,6 +26,10 @@ _DEFAULT_TIMEOUT_SECONDS = 30.0
 
 class ExtractionIsolationError(RuntimeError):
     """The isolated parser failed without exposing parser internals or host paths."""
+
+
+class ParserServiceUnavailableError(ExtractionIsolationError, ConnectionError):
+    """The configured parser transport is unavailable and may recover on retry."""
 
 
 def _child_environment() -> dict[str, str]:
@@ -42,6 +49,34 @@ def _safe_child_filename(filename: str) -> str:
     return f"input{Path(filename).suffix.lower()}"
 
 
+def _extract_via_socket(filename: str, raw: bytes, socket_path: str, timeout_seconds: float) -> str:
+    suffix = Path(filename).suffix.lower() or ".txt"
+    transport = httpx.HTTPTransport(uds=socket_path)
+    try:
+        with httpx.Client(transport=transport, timeout=timeout_seconds) as client:
+            with client.stream(
+                "POST",
+                "http://parser/v1/extract",
+                headers={"x-document-suffix": suffix},
+                content=raw,
+            ) as response:
+                if response.status_code == 503:
+                    raise ParserServiceUnavailableError("Isolated parser service is temporarily overloaded.")
+                if response.status_code != 200:
+                    raise ExtractionIsolationError("Document could not be parsed in the isolated service.")
+                output = bytearray()
+                for chunk in response.iter_bytes():
+                    if len(output) + len(chunk) > _MAX_OUTPUT_BYTES:
+                        raise ExtractionIsolationError("Parser output exceeds the hard size limit.")
+                    output.extend(chunk)
+    except httpx.TransportError as exc:
+        raise ParserServiceUnavailableError("Isolated parser service is unavailable.") from exc
+    try:
+        return output.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ExtractionIsolationError("Parser returned invalid text encoding.") from exc
+
+
 def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
     try:
         os.killpg(process.pid, signal.SIGKILL)
@@ -57,18 +92,13 @@ def _kill_process_group(process: subprocess.Popen[bytes]) -> None:
         process.wait()
 
 
-def extract_text_isolated(
+def extract_text_in_subprocess(
     filename: str,
     raw: bytes,
     *,
     timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
 ) -> str:
-    """Extract text in a disposable, resource-bounded subprocess.
-
-    No shell is involved. Failure, timeout, oversized input/output, invalid UTF-8 output,
-    or abnormal termination all fail closed with a generic error. The original bytes are
-    passed read-only over stdin and are never modified.
-    """
+    """Run the parser process locally; used only inside the secretless parser service."""
     if len(raw) > _MAX_INPUT_BYTES:
         raise ExtractionIsolationError("Document exceeds the parser input limit.")
     if timeout_seconds <= 0:
@@ -101,3 +131,27 @@ def extract_text_isolated(
         return stdout.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
         raise ExtractionIsolationError("Parser returned invalid text encoding.") from exc
+
+
+def extract_text_isolated(
+    filename: str,
+    raw: bytes,
+    *,
+    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> str:
+    """Use the secretless parser service when configured, otherwise use local isolation in dev.
+
+    Production deliberately fails closed if the dedicated service is unavailable or
+    unconfigured. No shell is used and source bytes are passed only over stdin or a UDS.
+    """
+    if len(raw) > _MAX_INPUT_BYTES:
+        raise ExtractionIsolationError("Document exceeds the parser input limit.")
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+
+    socket_path = os.environ.get("PARSER_SOCKET_PATH")
+    if socket_path:
+        return _extract_via_socket(filename, raw, socket_path, timeout_seconds)
+    if os.environ.get("ENVIRONMENT") == "production":
+        raise ExtractionIsolationError("Isolated parser service is not configured.")
+    return extract_text_in_subprocess(filename, raw, timeout_seconds=timeout_seconds)

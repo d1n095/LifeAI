@@ -30,6 +30,7 @@ from app.models.document import ActiveTruthStatus, Document, IndexStatus, Knowle
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_version import KnowledgeVersion
 from app.rag.library_import import _store_bytes_with_reference_lock, run_import_job
+from app.rag.extract_isolated import ParserServiceUnavailableError
 from app.storage import StorageError, get_storage
 from app.storage.references import acquire_storage_key_lock, delete_if_unreferenced
 
@@ -547,9 +548,9 @@ def _fast_backoff(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_transient_failure_is_retried_and_eventually_succeeds(db_session, make_verified_user, monkeypatch):
-    """A per-file extraction error (extract_text raising) is caught INSIDE
-    _import_one_file and turned into a FileOutcome — it never reaches the job-level retry
-    loop (see the test below, which documents that explicitly). A genuinely job-level
+    """A content-level per-file extraction error is caught INSIDE _import_one_file and
+    turned into a FileOutcome. The explicitly typed parser transport outage is retried
+    separately. A genuinely job-level
     transient failure — the orchestration itself failing between files, e.g. a dropped DB
     connection — is what app/worker.py's process_claimed_job retry loop actually reacts to,
     so this test injects the failure at that level (patching _import_one_file itself) rather
@@ -583,6 +584,84 @@ async def test_transient_failure_is_retried_and_eventually_succeeds(db_session, 
 
 
 @pytest.mark.asyncio
+async def test_parser_service_outage_retries_archive_without_duplicate_documents(
+    db_session, make_verified_user, monkeypatch
+):
+    from app.rag import library_import as li
+    from app.worker import process_claimed_job
+
+    user, _ = make_verified_user()
+    job = _make_job(
+        db_session,
+        user.id,
+        _make_zip({"first.txt": b"First recovery file", "second.txt": b"Second recovery file"}),
+        "parser-recovery.zip",
+    )
+    calls = 0
+    outage_raised = False
+    real_extract = li.extract_text
+
+    def fail_once_then_extract(filename, content):
+        nonlocal calls, outage_raised
+        calls += 1
+        if filename == "second.txt" and not outage_raised:
+            outage_raised = True
+            raise ParserServiceUnavailableError("synthetic parser restart")
+        return real_extract(filename, content)
+
+    monkeypatch.setattr(li, "extract_text", fail_once_then_extract)
+
+    await process_claimed_job(db_session, job.id, user.id)
+
+    db_session.refresh(job)
+    documents = db_session.query(Document).filter_by(import_job_id=job.id).all()
+    assert job.status == ImportJobStatus.completed
+    assert job.attempt_count == 1
+    assert job.last_failure_transient is True
+    assert calls == 3
+    assert {document.original_filename for document in documents} == {"first.txt", "second.txt"}
+    assert len(documents) == 2
+    assert all(document.status == IndexStatus.indexed for document in documents)
+
+
+@pytest.mark.asyncio
+async def test_exhausted_parser_outage_is_terminal_and_not_reconciled_forever(
+    db_session, make_verified_user, monkeypatch
+):
+    from app.rag import library_import as li
+    from app.worker import Worker, process_claimed_job
+
+    user, _ = make_verified_user()
+    job = _make_job(db_session, user.id, b"Persistent parser outage", "parser-outage.txt")
+    job.max_attempts = 2
+    db_session.add(job)
+    db_session.commit()
+    calls = 0
+
+    def parser_stays_unavailable(*_args):
+        nonlocal calls
+        calls += 1
+        raise ParserServiceUnavailableError("synthetic persistent outage")
+
+    monkeypatch.setattr(li, "extract_text", parser_stays_unavailable)
+
+    await process_claimed_job(db_session, job.id, user.id)
+
+    db_session.refresh(job)
+    documents = db_session.query(Document).filter_by(import_job_id=job.id).all()
+    assert calls == job.max_attempts
+    assert job.status == ImportJobStatus.failed
+    assert job.attempt_count == job.max_attempts - 1
+    assert job.last_failure_transient is True
+    assert len(documents) == 1
+    assert documents[0].status == IndexStatus.extraction_failed
+
+    Worker()._reconcile_orphaned_documents(db_session)
+    db_session.refresh(job)
+    assert job.status == ImportJobStatus.failed
+
+
+@pytest.mark.asyncio
 async def test_permanent_failure_is_not_retried(db_session, make_verified_user):
     """A malformed ZIP (ZipSecurityError, classified permanent — see app/jobs/retry.py)
     must fail immediately, not burn through retry attempts on something retrying can never
@@ -603,7 +682,7 @@ async def test_permanent_failure_is_not_retried(db_session, make_verified_user):
 
 @pytest.mark.asyncio
 async def test_a_persistently_flaky_extractor_degrades_to_a_failed_file_not_a_job_level_retry(db_session, make_verified_user, monkeypatch):
-    """A per-file extraction error never reaches the job-level retry loop at all — it's
+    """An ordinary per-file extraction error never reaches the job-level retry loop — it's
     caught inside _import_one_file and turned into a FileOutcome(status="failed"), matching
     this codebase's established "one file's error must not corrupt the whole batch"
     principle. attempt_count staying at 0 here is the actual proof that retry/backoff is

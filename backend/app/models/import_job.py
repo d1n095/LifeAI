@@ -10,6 +10,7 @@ from app.db import Base
 
 
 class ImportJobStatus(str, enum.Enum):
+    receiving = "receiving"
     pending = "pending"
     running = "running"
     completed = "completed"
@@ -133,6 +134,15 @@ class ImportJob(Base):
     # is_transient_error() — lets the Library UI show "kommer försökas igen automatiskt" vs.
     # "kräver en ny manuell import" instead of a single generic "misslyckades".
     last_failure_transient: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+    # --- Durable upload intent and staged original ---
+    # Persisted before accepting bytes; retained until canonical publication and cleanup
+    # have both been reconciled.
+    staging_storage_key: Mapped[str | None] = mapped_column(String(140), nullable=True, unique=True)
+    upload_lease_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    upload_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    staging_reconcile_count: Mapped[int] = mapped_column(Integer, default=0)
+    staging_reconcile_after: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
 
     # --- Life Library durable-worker package (app/storage/, app/worker.py) ---
     # The RAW uploaded package (a single file or a ZIP) as streamed durably to app/storage/

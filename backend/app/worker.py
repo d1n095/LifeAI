@@ -52,6 +52,7 @@ from app.jobs.lease import (
 from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.jobs.service import mark_failed, record_claimed
+from app.library.import_staging import cleanup_import_stages, recover_expired_import_uploads
 from app.mainai_execution.approval import ApprovalRequiredError
 from app.mainai_execution.execution_job import _finalize_task_outcome, resume_waiting_ci_task, run_task_execution_job
 from app.mainai_execution.executor import dispatch_ready_task, retry_task, task_for_job
@@ -63,7 +64,7 @@ from app.mainai_execution.recovery_inspector import get_or_create_recovery_recor
 from app.mainai_execution.recovery_takeover import TakeoverError, execute_takeover
 from app.mainai_execution.replan import find_replan_trigger, trigger_replan
 from app.mainai_runtime_contract import CapabilityUnavailableError, require_capability
-from app.models.document import Document, RESUMABLE_INDEX_STATUSES
+from app.models.document import Document, IndexStatus, RESUMABLE_INDEX_STATUSES
 from app.models.execution_envelope import ExecutionAuthorizationEnvelope
 from app.models.import_job import ImportJob, ImportJobStatus, PROVIDER_REQUEUE_STATUSES
 from app.models.mainai_execution import (
@@ -82,6 +83,7 @@ from app.models.mainai_wait import MainAITaskWait, MainAITaskWaitStatus
 from app.models.provider_verification import VerificationResult
 from app.models.storage_deletion_task import StorageDeletionTask
 from app.providers.verification import ensure_verified
+from app.rag.extract_isolated import ParserServiceUnavailableError
 from app.rag.library_import import run_import_job
 from app.request_context import current_user_id
 from app.rag.zip_import import ZipSecurityError
@@ -186,6 +188,19 @@ async def process_claimed_job(
                     else f"Oväntat fel under import: {exc}"
                 )
                 job.completed_at = datetime.utcnow()
+                if isinstance(exc, ParserServiceUnavailableError):
+                    incomplete_documents = (
+                        db.query(Document)
+                        .filter(
+                            Document.import_job_id == job.id,
+                            Document.status == IndexStatus.extracting,
+                        )
+                        .all()
+                    )
+                    for document in incomplete_documents:
+                        document.status = IndexStatus.extraction_failed
+                        document.error_message = "Isolerad parser var otillgänglig efter max antal försök."
+                        db.add(document)
                 db.add(job)
                 db.commit()
                 return
@@ -866,6 +881,8 @@ class Worker:
         single-job-at-a-time budget."""
         claim_db = _ClaimSession()
         try:
+            recover_expired_import_uploads(claim_db)
+            cleanup_import_stages(claim_db)
             await self._requeue_blocked_jobs(claim_db)
             self._reconcile_orphaned_documents(claim_db)
             self._retry_storage_deletion_tasks(claim_db)

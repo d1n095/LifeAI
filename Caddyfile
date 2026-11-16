@@ -19,10 +19,10 @@
 		max_size 30MB
 	}
 
-	# Everything — /api/* and the app UI — goes to the frontend's own Next.js server, which
-	# proxies /api/* to the backend server-side over the private lifeai_internal network
-	# (see frontend/app/api/[...path]/route.ts, INTERNAL_API_URL=http://backend:8000). Caddy
-	# never talks to the backend directly, matching docker-compose.vps.yml's isolation.
+	# Everything — /api/* and the app UI — is routed to the frontend's Next.js server, which
+	# proxies /api/* to the backend server-side over lifeai_internal. Caddy and backend share
+	# that Docker network, so Caddy can technically reach the backend listener directly; no
+	# direct backend route is configured here. See docs/VPS_ARCHITECTURE.md for this boundary.
 	reverse_proxy frontend:3000
 
 	header {

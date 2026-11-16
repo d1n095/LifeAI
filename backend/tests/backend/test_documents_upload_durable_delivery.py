@@ -62,7 +62,7 @@ async def test_documents_upload_commits_durable_import_job_before_indexing(
     db_session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user.id)})
 
     raw = b"Durable documents upload content for crash-boundary A."
-    doc = await upload_document(
+    doc = upload_document(
         request=None,  # type: ignore[arg-type]
         file=_upload_file("durable.txt", raw),
         category="notes",
@@ -110,7 +110,7 @@ async def test_documents_upload_survives_process_death_then_worker_indexes(
     db_session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user.id)})
 
     raw = b"Enough text content for the durable upload worker resume path to chunk and embed."
-    doc = await upload_document(
+    doc = upload_document(
         request=None,  # type: ignore[arg-type]
         file=_upload_file("resume.txt", raw),
         category=None,
@@ -168,7 +168,7 @@ async def test_documents_upload_identical_bytes_returns_completed_document(
     db_session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user.id)})
 
     raw = b"Idempotent durable documents upload payload."
-    first = await upload_document(
+    first = upload_document(
         request=None,  # type: ignore[arg-type]
         file=_upload_file("same.txt", raw),
         category=None,
@@ -180,7 +180,7 @@ async def test_documents_upload_identical_bytes_returns_completed_document(
     first = db_session.get(Document, first.id)
     assert first is not None and first.status == IndexStatus.indexed
 
-    second = await upload_document(
+    second = upload_document(
         request=None,  # type: ignore[arg-type]
         file=_upload_file("same.txt", raw),
         category=None,
@@ -240,7 +240,7 @@ async def test_documents_upload_crash_before_commit_leaves_blob_purgeable(
 
     monkeypatch.setattr(db_session, "commit", _process_death)
     with pytest.raises(RuntimeError):
-        await upload_document(
+        upload_document(
             request=None,  # type: ignore[arg-type]
             file=_upload_file("crash.txt", raw),
             category=None,
@@ -294,7 +294,7 @@ async def test_documents_upload_committed_reference_retains_blob_against_cleanup
     raw = f"documents upload committed reference retains blob {uuid.uuid4().hex}".encode()
     storage_key, operation_id = _blob_with_pending_cleanup_task(raw)
 
-    doc = await upload_document(
+    doc = upload_document(
         request=None,  # type: ignore[arg-type]
         file=_upload_file("retained.txt", raw),
         category=None,
@@ -324,7 +324,7 @@ async def test_documents_upload_rejects_empty_file(db_session, make_verified_use
     from fastapi import HTTPException
 
     with pytest.raises(HTTPException) as exc:
-        await upload_document(
+        upload_document(
             request=None,  # type: ignore[arg-type]
             file=_upload_file("empty.txt", b""),
             category=None,

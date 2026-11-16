@@ -28,6 +28,7 @@ produktionslinjen på Render.
 | `request_body { max_size 30MB }` | `Caddyfile` | Ny CI-kontroll i `vps-compose-verify`: en förfrågan över gränsen avvisas av Caddy INNAN den når frontend/backend |
 | `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Strict-Transport-Security` | `Caddyfile` | Verifierade lågrisk-headers som inte kräver käll-specifik justering (till skillnad från CSP, se nedan) |
 | `HOSTNAME=0.0.0.0` för frontend | `docker-compose.vps.yml` | Fixar en verklig, tidigare oupptäckt bugg — se `docs/VPS_ARCHITECTURE.md` |
+| Secretless parser-service med egna PID-/mount-/network-namespaces | `parser` i `docker-compose.vps.yml`; enda delade resursen är en rättighetsbegränsad Unix-socket-volym | `backend/tests/backend/rag/test_parser_container_boundary.py` verifierar syntetisk parent-env-canary nekas via parserns `/proc`, medan riktig text-extraktion fungerar; kontrollerar även nätverk `none`, UID 10001, skrivskyddat root, capabilities, `no-new-privileges`, tmpfs, minnes-/CPU-/PID-gränser |
 
 ## Vad varje container faktiskt skriver till (grund för `read_only: true`)
 
@@ -37,6 +38,15 @@ produktionslinjen på Render.
   efter `open(..., "w"/"a")`/`mkdir`/`tempfile`-användning utanför test-bara verktyg
   (`run_e2e_backend.py`, aldrig körd i produktion) och den lokala e-postutkorgs-fallbacken
   (`dev_mail_outbox_dir`, uttryckligen dokumenterad att aldrig sättas i produktion).
+- **Parser**: separat container med samma backend-image och UID 10001, men egna PID-/mount-
+  namespaces, `network_mode: none`, inga app-hemligheter, ingen databas-/Redis-anslutning och
+  ingen mount av originalfilernas persistenta volym. Backend/worker skickar filbytes och en
+  suffix-header med allowlistad längd över en socket i en 1 MiB tmpfs-volym. Socketkatalogen
+  är UID-begränsad. Parserns child-process behåller CPU-, adressrymds-, FD-, filstorleks- och
+  väggklockegränser. Produktion failar stängt om parser-socketen saknas. `Dockerfile.combined`
+  och Render har ännu inte denna sidcar-gräns; dokumentimport där blir otillgänglig i
+  `ENVIRONMENT=production` tills en motsvarande isolerad tjänst finns. Se
+  `docs/IMPORT_SECURITY_VALIDATION_MATRIX.md` och parser-containment-PR:n.
 - **Frontend**: den fristående (`standalone`) Next.js-servern serverar förbyggd
   statisk/server-utdata och proxar `/api/*` — inget eget diskbaserat cacheläge eller
   uppladdningsmål i den här appen (uppladdningar går rakt igenom till backend). `tmpfs /tmp`

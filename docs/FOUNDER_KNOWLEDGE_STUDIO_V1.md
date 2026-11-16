@@ -63,8 +63,22 @@ checksummor verifieras. 22 säkerhetstester i
 (`extract-v1`), manifest-styrd klassificering/status, ett fils fel avbryter aldrig hela
 batchen (`FileOutcome` per fil), `manifest.json` självt importeras aldrig som dokument.
 `app/routers/library.py`s `ImportJob`-idempotens på hela uppladdningens checksumma
-förhindrar dubbla jobb för identiskt innehåll. Deterministiska mock-embeddings i alla tester
-— aldrig riktiga AI-nycklar.
+förhindrar dubbla jobb för identiskt innehåll. En identisk uppladdning återanvänder också ett
+befintligt resumable jobb (`pending`, `running`, `blocked` eller `partial` med blockerade
+filer), så en klient kan säkert skicka om samma innehåll efter ett tvetydigt databas-commit;
+terminalt `failed` jobb kan fortfarande startas om. Vid SQLAlchemy `OperationalError` lämnar
+API:t en sanerad `503` med `Retry-After`; efter att originalet skrivits försöker routen
+referenskontrollerad blob-städning under samma ägar-/storage-låsprotokoll. Om databasen
+fortfarande är otillgänglig under städningen kan en orrefererad, hållbar blob bli kvar tills
+klienten skickar om samma innehåll; någon generell automatisk orphan-sweep är inte garanterad.
+Hashen i den nuvarande content-addressed lagringen ger inte ägar-/request-proveniens och
+får därför aldrig användas för automatisk adoption eller åldersbaserad radering. Om automatisk
+återhämtning efter processkrasch krävs är den minsta säkra utökningen att använda samma
+`ImportJob` som en beständig `receiving`-intent med ägarspecifik staging-nyckel och bounded
+upload lease, verifiera staging-hash och storlek och först därefter promota blobben samt göra
+jobbet `pending` i samma DB-övergång. Staging-kopian måste finnas kvar tills DB-commit är
+bekräftad; den föreslagna livscykeln är inte implementerad ännu.
+Deterministiska mock-embeddings i alla tester — aldrig riktiga AI-nycklar.
 
 ## Founder Library-API och UI (DEL 4)
 

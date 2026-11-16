@@ -17,6 +17,7 @@ Internet
 │  - ENDA processen som publicerar värdportar (80/443)                   │
 │  - terminerar TLS, sätter X-Forwarded-For/-Proto/-Host mot frontend    │
 │  - reverse_proxy frontend:3000 (Docker-DNS på lifeai_internal)         │
+│  - delar lifeai_internal med backend och kan nå dess listener internt  │
 └────────────────────────────────────────────────────────────────────────┘
    │  privat Docker-nätverk (lifeai_internal), okrypterat HTTP internt
    ▼
@@ -29,14 +30,14 @@ Internet
 │    backendens adress, och Set-Cookie-headers vidarebefordras byte-för- │
 │    byte så sessionskakan förblir samma-ursprung ur webbläsarens synvinkel│
 └────────────────────────────────────────────────────────────────────────┘
-   │  privat Docker-nätverk (lifeai_internal), server-till-server fetch()
+   │  privat Docker-nätverk (lifeai_internal), alias backend-internal
+   │  server-till-server fetch()
    ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │ backend (FastAPI/uvicorn, python:3.12-slim)                            │
-│  - ingen egen ports:-publicering — bara nåbar från frontend            │
+│  - ingen egen ports:-publicering; nåbar internt från frontend och Caddy│
 │  - uvicorn --proxy-headers --forwarded-allow-ips=* : litar på          │
-│    X-Forwarded-For från VARJE anslutande part — säkert ENDAST för att  │
-│    den enda parten som någonsin ansluter är frontend-proxyn ovan       │
+│    X-Forwarded-For från anslutande peers; Caddy kan ansluta direkt     │
 │  - CORS-allowlist (FRONTEND_ORIGINS), CSRF via app/deps.py, RLS via    │
 │    Postgres SET LOCAL app.current_user_id                              │
 └────────────────────────────────────────────────────────────────────────┘
@@ -48,6 +49,16 @@ Supabase (Postgres, Session Pooler,     redis (valkey/valkey:8.1.9-alpine, diges
   port 5432)                              pinnad, requirepass, tmpfs /data — ingen
                                            disk-persistens, se "Redis vs Valkey" nedan)
 ```
+
+Den faktiska nätverksmedlemskapen är: Caddy och frontend på `lifeai_internal`;
+backend och worker på både `lifeai_internal` och `lifeai_data`; Redis/Valkey och
+Ollama endast på `lifeai_data` (`internal: true`). Parsern har `network_mode: none`
+och kommunicerar endast via den begränsade Unix-socket-volymen. Frontend använder
+`backend-internal`, ett alias endast på `lifeai_internal`; det styr DNS-adressen men
+ger inte åtkomst till `lifeai_data`. Caddyfile skickar publik trafik endast till
+frontend, men eftersom Caddy delar `lifeai_internal` med backend kan en komprometterad
+Caddy-container ändå nå backendens interna listener direkt. Det är en faktisk intern
+nätverksmöjlighet, inte en publik host-port eller en konfigurerad Caddy-route.
 
 ## Redis vs Valkey — vald lösning och motivering
 
@@ -142,17 +153,20 @@ samma gamla, nu explicit dokumenterad istället för underförstådd.
 |---|---|---|
 | Internet → Caddy | Rå HTTP/HTTPS, okänd klient | TLS-terminering, brandvägg (bara 80/443/22 öppna), inga andra containrar publicerade |
 | Caddy → frontend | Vidarebefordrad HTTP, `X-Forwarded-*`-headers | Privat Docker-nätverk, ingen extern åtkomst möjlig eftersom frontend saknar `ports:` |
-| Frontend → backend | Server-till-server `fetch()`, `INTERNAL_API_URL=http://backend:8000` | Samma privata nätverk; webbläsaren når ALDRIG detta hopp direkt |
+| Frontend → backend | Server-till-server `fetch()`, `INTERNAL_API_URL=http://backend-internal:8000` | Aliaset är bara registrerat på `lifeai_internal`; frontend kan inte nå `lifeai_data` |
+| Caddy → backend | Ingen Caddy-route; direkt HTTP är dock nätverksmässigt möjligt | Caddy och backend delar `lifeai_internal`; verifierat i den körande Compose-stacken. Backend-porten saknar host-publicering, men detta är inte per-container-brandvägg |
 | Backend → Supabase | TLS, Session Pooler-uppkoppling, två separata roller (superuser för migrationer, `mainai_app` för request-serving) | RLS med `FORCE ROW LEVEL SECURITY`, `mainai_app` kan aldrig kringgå RLS eftersom den inte är ägare/superuser |
-| Backend → redis (lokal container) | Okrypterat inom Docker, `REDIS_URL` med lösenord (`requirepass`) | Privat `lifeai_data`-nätverk (`internal: true`, ingen route ut alls) — inte "brandväggat", konstruktivt onåbart för allt utom backend; ingen känslig data lagras i Redis (bara räknare/nycklar), och ingen disk-persistens (tmpfs) |
-| frontend/caddy → redis | — (finns inte) | frontend/caddy är inte anslutna till `lifeai_data` överhuvudtaget — inte ens ett nätverkslager att försöka autentisera mot |
+| Backend/worker → Redis och Ollama | Okrypterat inom Docker | Privat `lifeai_data` (`internal: true`); frontend/Caddy saknar nätverksanslutning och service-DNS; dessa services har inga publicerade host-portar |
+| Parser → applikation | Längd- och tidsbegränsad IPC över Unix-socket | Parsern saknar nätverksnamnrymd, rootfs är read-only, capabilities är borttagna och socketen är enda delade resursen |
 | Hemlighetsfil → containrar | `/etc/lifeai/lifeai.env` (root-ägd, `chmod 600`) läses via `env_file:` | Aldrig i Git, aldrig läsbar för den vanliga deploy-användaren, bara för root/Docker-daemonen |
 
 ## Publika kontra privata gränssnitt
 
 - **Publikt (nått från internet):** enbart Caddy på 80/443. Verifierat i CI (`vps-compose-verify`s "Verify Caddy is the only container publishing anything to the host").
-- **Privat (bara Docker-nätverket `lifeai_internal`):** frontend:3000, backend:8000. Ingen av dem har en `ports:`-rad i `docker-compose.vps.yml` — inte "brandväggad", utan konstruktivt onåbar utifrån eftersom ingen NAT/DNAT-regel någonsin skapas för dem.
-- **Privat, ett steg smalare (bara Docker-nätverket `lifeai_data`, `internal: true`):** redis:6379. Bara backend är anslutet till detta nätverk — frontend och caddy är inte anslutna till det överhuvudtaget, så de kan inte ens *försöka* nå det (ingen DNS-post, ingen route), inte bara nekas med lösenord. Verifierat i CI (`vps-compose-verify`s nätverksisoleringssteg).
+- **Publikt host-gränssnitt:** enbart Caddy TCP 80/443. Den disponibla stacken visade inga host-bindningar för frontend, backend, worker, parser, Redis eller Ollama. Den separata lokala test-Postgresen var bunden till `127.0.0.1:5432`; den ingår inte i VPS-produktionstopologin.
+- **Privat (Docker-nätverket `lifeai_internal`):** Caddy, frontend, backend och worker. Frontend:3000 och backend:8000 har inga `ports:`-rader, så de exponeras inte via host-portar. Detta är inte en intern-only Docker-brygga; medlemmarna kan också initiera utgående anslutningar. Caddyfile routar bara till frontend, men Caddy kan nå backend direkt på nätverksnivå.
+- **Privat data-nätverk (`lifeai_data`, `internal: true`):** backend, worker, Redis/Valkey och Ollama. Frontend och Caddy är inte medlemmar och kan varken lösa deras service-DNS eller routa till deras IP-adresser. Nätverket har ingen utgående route.
+- Parsern använder `network_mode: none`; processgränsen till backend/worker är den begränsade Unix-socketen. Detta bekräftades av Docker-boundary-testet och den disponibla Compose-topologin.
 - **Extern, utanför VPS:en helt:** Supabase (Session Pooler, port 5432) — extraherad text/embeddings/metadata. Redis kör privat på VPS:en (se `redis`-tjänsten i `docker-compose.vps.yml`), utan disk-persistens (tmpfs `/data`). **Sedan durable-worker-paketet har VPS:en dock ETT eget permanent stateful datalager:** `lifeai_uploads` (Life Library-originalfiler, innehållsadresserade) — se ovanstående "Filsystem, uppladdningar och persistens"-avsnitt och `docs/VPS_BACKUP_RESTORE.md` för vad som faktiskt behöver säkerhetskopieras (hemlighetsfilen, Caddys TLS-certifikat, OCH nu `lifeai_uploads`; Redis förblir medvetet exkluderat).
 
 ## Autentisering, cookies och CSRF (`backend/app/deps.py`, `backend/app/cookies.py`)
@@ -269,7 +283,7 @@ mitt i en förfrågan — se filens egen kommentar för den fullständiga förkl
 | Antagande på Render | Varför det INTE gäller VPS:en |
 |---|---|
 | En enda Web Service kör både FastAPI och Next.js som syskonprocesser (`Dockerfile.combined`) | VPS:en kör dem som separata containrar bakom en riktig reverse proxy — se `docs/RENDER_DEPLOY.md`s "ROTORSAK BEKRÄFTAD AV RENDER SUPPORT" för varför detta bytdes bort |
-| `INTERNAL_API_URL=http://127.0.0.1:8000` (loopback, samma nätverksnamnrymd) | VPS:en använder `http://backend:8000` (Docker-DNS över `lifeai_internal`) — se `render.yaml` kontra `docker-compose.vps.yml` |
+| `INTERNAL_API_URL=http://127.0.0.1:8000` (loopback, samma nätverksnamnrymd) | VPS:en använder `http://backend-internal:8000` (nätverksspecifikt Docker-DNS-alias på `lifeai_internal`) — se `render.yaml` kontra `docker-compose.vps.yml` |
 | Renders egen hälsokontroll kan nå tjänsten via en annan väg än publik trafik (roten till 502-incidenten) | Caddy är den enda process som någonsin route:ar publik trafik — ingen dold andra väg finns att förväxlas med |
 | Render tillhandahåller TLS automatiskt utan egen konfiguration | Caddy måste själv hantera Let's Encrypt (automatiskt, men kräver att DNS pekar rätt FÖRE första start — se `docs/STRATO_VPS_DEPLOY.md`) |
 | `MAINAI_APP_ROTATE_PASSWORD` och `ensure_app_role.py`s Supavisor-specifika beteende (pooler-inloggningsidentitet med `.`-suffix) | Gäller lika mycket på VPS:en — samma Supabase-databas, samma Session Pooler, ingen ändring behövs |

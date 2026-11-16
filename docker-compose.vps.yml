@@ -27,9 +27,9 @@
 # starting points sized for a small VPS, not a hard architectural ceiling — tune them to the
 # real server's specs during the first deployment (docs/STRATO_VPS_DEPLOY.md).
 #
-# Two private Docker networks, not one: `lifeai_internal` (Caddy/frontend/backend) and
-# `lifeai_data` (backend/redis only, `internal: true` — no route out to the internet even
-# for the containers on it). Redis holds nothing frontend or Caddy ever need, and a
+# Two private Docker networks, not one: `lifeai_internal` (Caddy/frontend/backend/worker)
+# and `lifeai_data` (backend/worker/redis/Ollama, `internal: true` — no route out to the
+# internet even for the containers on it). Redis holds nothing frontend or Caddy ever need, and a
 # vulnerability in either of those two is a much more likely first foothold than one in
 # backend — putting Redis on a network they can't even resolve, let alone connect to, is a
 # free extra containment layer beyond "Redis requires a password".
@@ -128,6 +128,40 @@ services:
     # network) — this container never talks to anything, it exits within a second of
     # starting.
 
+  parser:
+    # Secretless parser boundary. The Unix socket is the only shared resource with the
+    # application; network_mode none gives the parser neither Internet nor service-network
+    # access. A distinct UID plus separate container PID/mount namespaces prevent /proc
+    # inspection of backend/worker processes. No env_file, credentials, or upload volume.
+    image: ${BACKEND_IMAGE:?sätt BACKEND_IMAGE i /etc/lifeai/lifeai.env, t.ex. ghcr.io/d1n095/lifeai-backend@sha256:...}
+    user: "10002:10001"
+    entrypoint: ["python", "-m", "app.rag.parser_service"]
+    restart: unless-stopped
+    init: true
+    environment:
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      PYTHONDONTWRITEBYTECODE: "1"
+      PARSER_SOCKET_PATH: /run/lifeai-parser/parser.sock
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: "0.50"
+    network_mode: "none"
+    volumes:
+      - parser_socket:/run/lifeai-parser
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
+
   backend:
     # Digest-pinned, e.g. ghcr.io/d1n095/lifeai-backend@sha256:... — never a mutable tag like
     # :latest. See docs/STRATO_VPS_DEPLOY.md's "Första manuella deploy" section for why the
@@ -156,6 +190,7 @@ services:
       - /tmp
     volumes:
       - lifeai_uploads:/var/lib/lifeai/uploads
+      - parser_socket:/run/lifeai-parser:ro
     pids_limit: 200
     mem_limit: 512m
     cpus: "1.00"
@@ -163,6 +198,7 @@ services:
       - ${LIFEAI_ENV_FILE:-/etc/lifeai/lifeai.env}
     environment:
       ENVIRONMENT: production
+      PARSER_SOCKET_PATH: /run/lifeai-parser/parser.sock
       # Single `$` deliberately (not `$$`) — Compose SHOULD substitute the real value here,
       # baking the finished connection string into this one container's env, exactly like
       # BACKEND_IMAGE/DOMAIN above are baked in from the same secrets file. app/config.py's
@@ -185,6 +221,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      parser:
+        condition: service_started
       ollama:
         condition: service_healthy
       uploads-init:
@@ -196,8 +234,10 @@ services:
       retries: 5
       start_period: 20s
     networks:
-      - lifeai_internal
-      - lifeai_data
+      lifeai_internal:
+        aliases:
+          - backend-internal
+      lifeai_data: {}
     logging:
       driver: json-file
       options:
@@ -226,6 +266,7 @@ services:
       - /tmp
     volumes:
       - lifeai_uploads:/var/lib/lifeai/uploads
+      - parser_socket:/run/lifeai-parser:ro
     # Deliberately low: worker_concurrency defaults to 1 (app/config.py) and this process
     # does nothing but poll Postgres and process at most one import at a time — no HTTP
     # server, no request concurrency. Raise WORKER_CONCURRENCY/mem_limit/cpus together if a
@@ -238,6 +279,7 @@ services:
       - ${LIFEAI_ENV_FILE:-/etc/lifeai/lifeai.env}
     environment:
       ENVIRONMENT: production
+      PARSER_SOCKET_PATH: /run/lifeai-parser/parser.sock
       # See docker-entrypoint.sh: only `backend` runs `alembic upgrade head` on startup — the
       # worker shares its image but must not race it against the same database.
       RUN_MIGRATIONS: "false"
@@ -267,6 +309,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      parser:
+        condition: service_started
       ollama:
         condition: service_healthy
       uploads-init:
@@ -318,9 +362,10 @@ services:
     env_file:
       - ${LIFEAI_ENV_FILE:-/etc/lifeai/lifeai.env}
     environment:
-      # Docker DNS on lifeai_internal — same mechanism docker-compose.yml already uses
-      # locally, just now crossing a real container boundary instead of a loopback one.
-      INTERNAL_API_URL: http://backend:8000
+      # Use the network-scoped alias: `backend` is attached to both lifeai_internal and
+      # lifeai_data, and Docker DNS can return its data-network address to this frontend,
+      # which is intentionally not attached to lifeai_data.
+      INTERNAL_API_URL: http://backend-internal:8000
       # Docker auto-injects HOSTNAME=<container id> into every container's environment.
       # Next.js's standalone server.js (frontend/Dockerfile's CMD) reads process.env.HOSTNAME
       # as its bind address when set, falling back to 0.0.0.0 only if it's unset — so without
@@ -513,7 +558,7 @@ networks:
     driver: bridge
   # internal: true — Docker never gives this network a route out (no NAT to the internet,
   # not even for the containers on it) on top of it already having no host port publication
-  # for redis. Backend is the only service on both networks; frontend/caddy are on neither.
+  # for data services. Backend and worker are the only services on both networks.
   lifeai_data:
     driver: bridge
     internal: true
@@ -527,6 +572,12 @@ volumes:
   # scripts/vps/backup.sh/restore.sh alongside caddy_data/caddy_config — see those scripts'
   # own comments and docs/VPS_OPERATIONS_RUNBOOK.md for the backup/restore procedure.
   lifeai_uploads:
+  parser_socket:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=1m,uid=10002,gid=10001,mode=0710
   # Founder Alpha local models (ollama). Persistent so pulled/provisioned models survive
   # restarts without re-pulling (and so the no-egress runtime never needs to). MUST be added to
   # scripts/vps/backup.sh/restore.sh alongside the other named volumes.

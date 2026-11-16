@@ -529,7 +529,13 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
             .filter(ImportJob.owner_id == owner_id, ImportJob.source_storage_key.isnot(None))
             .all()
         }
-        storage_keys = document_keys | import_job_keys  # unique keys, deduplicated across both sources
+        import_stage_keys = {
+            row[0]
+            for row in db.query(ImportJob.staging_storage_key)
+            .filter(ImportJob.owner_id == owner_id, ImportJob.staging_storage_key.isnot(None))
+            .all()
+        }
+        storage_keys = document_keys | import_job_keys | import_stage_keys  # deduplicate all owner-scoped references
         # Pass 28: `mainai_app` now has ZERO direct privileges on `storage_deletion_tasks` (see
         # module docstring) — a plain ORM `db.add(StorageDeletionTask(...))` would fail with
         # permission denied. The SECURITY DEFINER `enqueue_account_erasure_storage_task()`

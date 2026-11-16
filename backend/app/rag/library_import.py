@@ -38,6 +38,7 @@ from app.request_context import current_user_id as current_user_id_var
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_version import KnowledgeVersion
 from app.rag.claims import extract_claims_for_document
+from app.rag.extract_isolated import ParserServiceUnavailableError
 from app.rag.extract_isolated import extract_text_isolated as extract_text
 from app.rag.ingest import index_document
 from app.rag import media_import
@@ -291,6 +292,8 @@ async def _resume_incomplete_document(
         db.commit()
         try:
             text_content = extract_text(filename, content)
+        except ParserServiceUnavailableError:
+            raise
         except Exception as exc:  # noqa: BLE001 - same per-file-failure handling as a first attempt
             document.status = IndexStatus.extraction_failed
             document.error_message = f"Kunde inte extrahera text: {exc}"
@@ -592,6 +595,8 @@ async def _import_one_file(
         db.commit()
         try:
             text_content = extract_text(filename, content)
+        except ParserServiceUnavailableError:
+            raise
         except Exception as exc:  # noqa: BLE001 - one file's extraction failure must not abort the batch
             # P1: reclassified from the old undifferentiated `failed` — the file's CONTENT is
             # the problem here, not the provider or storage, so this is terminal too (see
@@ -740,8 +745,9 @@ async def run_import_job(
     backoff instead of racing without coordination. Contended locks (`acquire() is False`)
     still fail the job as a permanent "identical import already in progress" outcome.
 
-    Never raises for a normal per-file failure (those become FileOutcome entries); DOES
-    raise for a genuine, unexpected orchestration-level error AND for JobLockUnavailable.
+    Never raises for a normal per-file failure (those become FileOutcome entries); a
+    transient parser-service transport outage is the exception and reaches the worker retry
+    loop. Also raises for unexpected orchestration errors and JobLockUnavailable.
     Unlike the old synchronous-BackgroundTask design, this function itself does NOT retry —
     app/worker.py's caller owns the retry/backoff loop (app/jobs/retry.py, reused unchanged).
     """

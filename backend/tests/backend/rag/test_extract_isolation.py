@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 
 from app.rag import library_import
-from app.rag.extract_isolated import ExtractionIsolationError, extract_text_isolated
+from app.rag.extract_isolated import (
+    ExtractionIsolationError,
+    ParserServiceUnavailableError,
+    extract_text_isolated,
+)
+from app.jobs.retry import is_transient_error
 
 
 def test_runtime_import_path_is_bound_to_isolated_extractor() -> None:
@@ -187,3 +192,71 @@ def test_oversized_input_is_rejected_before_starting_child(
     )
     with pytest.raises(ExtractionIsolationError, match="input limit"):
         extract_text_isolated("large.txt", b"x" * (25 * 1024 * 1024 + 1))
+
+
+def test_production_fails_closed_when_isolated_parser_is_unconfigured(monkeypatch) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.delenv("PARSER_SOCKET_PATH", raising=False)
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("production must not run a same-container parser"),
+    )
+
+    with pytest.raises(ExtractionIsolationError, match="not configured"):
+        extract_text_isolated("input.txt", b"secret document")
+
+
+def test_configured_parser_outage_is_fail_closed_and_retryable(monkeypatch) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("PARSER_SOCKET_PATH", "/run/lifeai-parser/not-running.sock")
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("production must not fall back to local parsing"),
+    )
+
+    with pytest.raises(ParserServiceUnavailableError, match="unavailable") as exc_info:
+        extract_text_isolated("input.txt", b"source bytes")
+
+    assert isinstance(exc_info.value, ExtractionIsolationError)
+    assert isinstance(exc_info.value, ConnectionError)
+
+
+def test_parser_overload_response_is_retryable(monkeypatch) -> None:
+    from contextlib import nullcontext
+
+    import httpx
+
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("PARSER_SOCKET_PATH", "/run/lifeai-parser/overloaded.sock")
+
+    class FakeResponse:
+        status_code = 503
+
+    class FakeClient:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def stream(self, *_args, **_kwargs):
+            return nullcontext(FakeResponse())
+
+    monkeypatch.setattr(httpx, "Client", FakeClient)
+
+    with pytest.raises(ParserServiceUnavailableError) as exc_info:
+        extract_text_isolated("input.txt", b"source bytes")
+
+    assert is_transient_error(exc_info.value)
+
+
+def test_only_parser_transport_errors_are_retryable() -> None:
+    import httpx
+
+    assert is_transient_error(ParserServiceUnavailableError("connection refused"))
+    assert not is_transient_error(httpx.DecodingError("invalid response encoding"))
