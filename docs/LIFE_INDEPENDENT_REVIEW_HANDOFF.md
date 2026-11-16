@@ -154,6 +154,83 @@ rebased or updated in anticipation of another merging.
   actually how a reviewer reads it too, since this is the one place a misreading could be
   mistaken for a request to activate automation.
 
+## Final acceptance handoff (2026-11-16) — engineering status, who approves, and what acceptance looks like
+
+Founder directive ("CONFIRMED. CONTINUE."), 2026-11-16: *"If engineering is complete and
+independent security acceptance is the only remaining blocker, provide the exact acceptance
+handoff and identify who must approve it."* This section answers that directly, building on
+`docs/LIFE_FIRST_CYCLE_READINESS_MATRIX.md` (PR #446) rather than re-deriving it.
+
+### Is engineering complete?
+
+**Yes, for the first supervised development cycle's own actual scope** (PR #439's scenario:
+one human-operated session, one GitHub-evidence-derived task, explicit approval, execution
+within that approved scope, evidence collected for review). PR #446's matrix classified all
+11 founder-named security areas; every item is either **RESOLVED** or correctly scoped
+**CONDITIONAL** on a capability (autonomous dispatch, document ingestion, STRATO terminal
+execution) that is not part of this scope and has not been activated. Nothing engineering-side
+remains open for THIS scope.
+
+### Fresh exact-SHA snapshot (pulled live via `get_check_runs` at the time of this update, not
+restated from the table above, which predates #440 finishing CI and predates #442-#446 existing
+entirely)
+
+| PR | Head SHA | Backend signal (Alembic / unit+integration / RLS / account-lifecycle) | Drift-only red? |
+|---|---|---|---|
+| #440 (0069 composition + the two test-construction fixes) | `73a9619451` | all four green | yes — only `Frontend — npm audit` + both E2E jobs |
+| #442 (P3 integration verification evidence) | `d0c669ad58` | all four green | yes |
+| #443 (first-cycle harness, two genuine test-construction bugs found and fixed this round) | `3f7caa6325` | all four green | yes |
+| #444 (Life Workspaces gap analysis + acceptance-tests addendum) | `6c71866b3a` | all four green | yes |
+| #445 (ecosystem vision reconciliation + founder-vision backlog, incl. multi-model workforce + STRATO terminal items) | `74e6542c7a` | all four green | yes |
+| #446 (first-cycle readiness matrix) | `abb729edb2` | all four green | yes |
+
+Every PR above shows the identical shape already established by the table at the top of this
+document: real backend security signal green, only the pre-existing, already-tracked baseline
+drift (PR #323) red. No new, undocumented CI failure exists anywhere in this chain as of this
+snapshot.
+
+### The one true remaining blocker, and who must close it
+
+**Independent security acceptance has not actually happened.** Every document this session has
+produced — this handoff, the reviewer packets above, `docs/LIFE_FIRST_CYCLE_READINESS_MATRIX.md`,
+`docs/LIFE_EXECUTION_AUTHORITY_CANONICAL_MAPPING.md`, every exact-SHA CI snapshot — is
+**preparation for review**, produced by the same AI system whose own work is under review. None
+of it is, or can be, the independent acceptance itself. Self-certification is explicitly what
+this entire handoff exists to avoid.
+
+**Who must approve:** the founder, as the sole human principal with authority over this
+single-operator system — there is no other internal stakeholder today. The founder may
+optionally designate a genuinely external, independent reviewer (a person, not another Claude/
+Codex/Copilot session, which would just move the self-certification problem rather than solve
+it) to perform the technical review on their behalf, but the ACCEPTANCE decision itself —
+whether to permit `first_cycle_go=true` — is the founder's to make or delegate explicitly, not
+something any AI session can confer on itself or on another AI session.
+
+**What the acceptance artifact concretely looks like** (a proposal, since none has existed
+until now — the founder may adopt, amend, or replace this):
+1. The founder (or their designated reviewer) reads, at minimum: this handoff's fresh snapshot
+   above, `docs/LIFE_FIRST_CYCLE_READINESS_MATRIX.md` in full, and Packet 2 above (the
+   highest-risk authorization/dispatch chain).
+2. The founder records an explicit, dated acceptance decision — e.g. a comment on this PR
+   naming exactly what is being accepted (by PR number and head SHA, matching the snapshot
+   above) — not a verbal or implied go-ahead elsewhere.
+3. Only AFTER that recorded acceptance does flipping `first_cycle_go` become a founder-
+   authorized action, implemented as its own small, isolated, separately-reviewable change
+   (never bundled into a documentation PR, and never performed by this session without that
+   explicit, already-recorded authorization preceding it).
+4. Merging the documentation PRs in this chain (#440-#446) is independent of step 3 and does
+   not itself grant or imply activation — they can be merged as ordinary documentation/fixes
+   whenever the founder is ready, per the review order already recommended above, without that
+   constituting acceptance.
+
+### What this section does not do
+
+- Does not grant acceptance, perform it on the founder's behalf, or assume it.
+- Does not flip `first_cycle_go`, and recommends against any future session doing so without a
+  prior, explicitly recorded founder acceptance decision matching the shape above.
+- Does not invent urgency — the founder's own prior directives have consistently kept
+  `first_cycle_go=false` deliberately, and this section changes none of that.
+
 ## What this document does not do
 
 - Does not perform independent review itself — every finding above is restated from each
