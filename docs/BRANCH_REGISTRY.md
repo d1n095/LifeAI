@@ -9302,5 +9302,41 @@ nytt planeringsdokument (per direktivets egen instruktion).
 
 **Ingen merge/deploy/aktivering någonstans. `first_cycle_go=false` genomgående.**
 
-`first_cycle_go=false` genomgående. Inget väntande arbete begärt förrän grundaren säger
-annat.
+## Grundardirektiv "CONTINUE ENGINEERING + ECOSYSTEM VISION AUDIT" (2026-11-15/16) — P1-P3 levererade
+
+**Priority 1 — äkta CI-fynd, inte drift (på #440/#443).** `Backend — unit/integration tests`
+misslyckades GENUINT på båda (`1e38c4008b28`/`46ea907a4f73`): 2 failed, 2366 passed, 1 skipped.
+Rotorsak: `test_system_activation_authorizations_composition_security.py`:s två nya
+UPDATE/DELETE-nekande-tester anropade `db_session.execute(...)` UTANFÖR `pytest.raises()`-
+blocket, som bara omslöt `commit()`. För den här tabellen kastar Postgres behörighetsfelet
+OMEDELBART vid `execute()`, inte uppskjutet till `commit()` — så undantaget undslapp
+fångstblocket. Den underliggande säkerheten var redan korrekt (UPDATE/DELETE nekas genuint);
+bara testets egen assertion var felplacerad. Fixat på #440 (`73a96194`), propagerat till #443
+(`873c44cb`) innan dess egen CI hann träffa samma ärvda fel. En förklarande kommentar postad
+på var-och-en.
+
+**Priority 2 (addendum på #444, commit på samma branch).** `docs/LIFE_DURABLE_WORKSPACES_
+GAP_ANALYSIS.md` utökad med ett nytt avsnitt: exakta acceptanstester och beroenden för de
+två redan bekräftade luckorna (arbetsyta-grupperingsenhet; källändringsdetektering på
+arbetsyta-nivå) — per grundarens egen instruktion, eftersom INGEN konkret konsumerande
+funktion ännu finns som motiverar att bygga dem nu. Fyra beroenden + sex acceptanstester för
+lucka 1, två beroenden + fyra acceptanstester för lucka 2. Inget byggt.
+
+**Priority 3 (ny PR #445, draft) — "Founder Ecosystem Vision Audit".**
+`docs/LIFE_ECOSYSTEM_VISION_RECONCILIATION.md`. Huvudfynd: en repo-bred grep efter 20 av
+grundarens namngivna ekosystemtermer ger NOLL träffar på dev för 19 av dem — för merparten av
+avsnitt D/F/G i direktivet är detta det FÖRSTA skriftliga underlaget, inte en avstämning mot
+befintlig dokumentation. Den 20:e termen, "LifeOS", ger 61 träffar som visar sig vara något
+helt annat: det HISTORISKA/alternativa namnet för denna samma LifeAI/MainAI-backend
+(`README.md`:1 är ordagrant `# Life OS / MainAI`; `MAINAI_ARCHITECTURE.md`:3-4 flaggar det
+själv som historiskt) — INTE grundarens nya koncept för en framtida enhetsnivå-operativsystem.
+En genuin namnkollision, den andra denna session hittat (den första var #444:s `/api/
+workbench`). Korsrefererar två ÖPPNA, ännu ej mergade syskon-PR:er istället för att duplicera
+dem: #424 (Life Patent Intelligence, Life Compute & Mining) och #426 (Life Development
+Monitor, av en annan session). Bekräftar att avsnitt C:s "modell-/leverantörsoberoende"-krav
+redan ÄR implementerat (`AI_PROVIDER_ARCHITECTURE.md`:s capability-baserade gränssnitt). Inget
+nytt planeringsdokument utöver detta ena, per direktivets egen instruktion att undvika "ännu
+ett generiskt högnivå-visionsdokument."
+
+**Ingen merge/deploy/aktivering någonstans i denna omgång heller. `first_cycle_go=false`
+genomgående.** Inget väntande arbete begärt förrän grundaren säger annat.
