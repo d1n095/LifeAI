@@ -889,6 +889,148 @@ source anywhere in this repository.
 - **Phase:** Future phase, but one of the lowest-risk, earliest-doable items in this entire
   backlog (it is pure measurement, not a security-sensitive capability).
 
+## 12a. Adaptive multi-step reasoning and verification
+
+Founder directive ("MULTI-STEP REASONING & VERIFICATION", refined by "ADAPTIVE INTELLIGENCE &
+VERIFICATION", 2026-11-16). The second message explicitly refines the first into an
+evidence-driven, effort-proportional capability — this section records the refined version;
+the original 8-point list is superseded, not duplicated. Per both directives' own instruction
+("first determine what is already implemented... preserve only genuinely missing
+requirements"), checked against `app.mainai_execution` directly before writing anything.
+
+**Already substantially implemented — not re-recorded as gaps:**
+- *Incremental execution with checkpoints* (req: "execute changes incrementally with
+  checkpoints"): `MainAICheckpoint`, job-scoped, append-only, with the full recovery pipeline
+  already exercised this session.
+- *Auditable decision/evidence trail, never private model reasoning* (req: "record decisions
+  and evidence, not private model reasoning"): `MainAITaskEvent.detail` is structured JSON
+  evidence only; `app/mainai_execution/lesson_from_verification.py`'s own docstring states the
+  exact discipline the founder is asking for, already enforced: *"never `str(exc)`, provider
+  prose, or free-form logs."*
+- *Learning from verified outcomes to improve future strategy* (req: "measure results and
+  improve future task strategies from verified outcomes"): `EngineeringLesson`
+  (`app/models/mainai_execution.py:302`) + `apply_lessons_to_verification_plan()`
+  (`app/mainai_execution/lessons.py`), already wired into `planner.py`'s `create_plan()` — a
+  past exhausted-verification failure can add a regression test to a FUTURE task's
+  verification plan automatically, with mandatory provenance and durable event-recorded
+  effect. This is real, live, already-built machinery for exactly this requirement, not a
+  future one.
+- *Bounded retries, no infinite loops* (req: "prevent infinite retry loops"):
+  `ck_mainai_tasks_attempts_within_budget` + `max_attempts`, enforced at the database level.
+- *No unsafe self-approval* (req: "never allow self-review... to bypass authorization"):
+  `require_task_approval()`'s design already requires a distinct, separately-recorded
+  `approved_by` event — no code path lets the same call that requests approval also grant it.
+- *Existing approval gates hold regardless* (req: same): confirmed structurally, not just by
+  convention — see `docs/LIFE_FIRST_CYCLE_READINESS_MATRIX.md` row 3.
+
+**Genuine gaps** (the actual content to preserve):
+
+### FV-RSN-001 — Candidate-approach comparison before plan selection
+- **Domain:** Planning.
+- **Source/provenance:** Founder-provided (2026-11-16); no historical repository source.
+- **Requirement:** Develop and compare candidate approaches before selecting an execution
+  plan, rather than committing to the first plan produced.
+- **Dependencies:** None technical — this would extend `planner.py`'s `create_plan()` input
+  shape, not replace it.
+- **Status:** No source. `create_plan()` today takes exactly one already-decided list of
+  `PlannedTaskSpec`s; there is no concept of multiple candidate plans or a comparison step
+  anywhere in `app.mainai_execution`.
+- **Privacy/security implications:** None beyond existing planning-authority boundaries.
+- **Acceptance criteria:** Not yet defined.
+- **Activation prerequisites:** A concrete consuming scenario that needs it — none exists yet.
+- **Phase:** Future phase.
+
+### FV-RSN-002 — Pre-mortem risk analysis proportional to consequence
+- **Domain:** Risk assessment.
+- **Source/provenance:** Founder-provided (2026-11-16); no historical repository source.
+- **Requirement:** Perform pre-mortem risk analysis "when consequences justify it" — not for
+  every task uniformly.
+- **Dependencies:** `MainAIGoalRiskLevel` (`low`/`medium`/`high`, already a real field on
+  goals/tasks) is the natural signal to key "justify it" against — reuse, don't duplicate.
+- **Status:** No source. The risk-level FIELD already exists; nothing currently reads it to
+  trigger a deeper analysis step.
+- **Privacy/security implications:** None directly.
+- **Acceptance criteria:** Not yet defined.
+- **Activation prerequisites:** None blocking; could in principle reuse the existing
+  `risk_level` field without new schema.
+- **Phase:** Future phase.
+
+### FV-RSN-003 — Effort-proportional investigation and execution depth
+- **Domain:** Planning / execution strategy.
+- **Source/provenance:** Founder-provided (2026-11-16): "dynamically allocate investigation,
+  planning, execution and verification effort according to task complexity, uncertainty,
+  risk, reversibility and potential impact... the right amount of thinking, not maximum
+  thinking."
+- **Requirement:** Lightweight execution for simple tasks; deeper analysis for complex or
+  security-critical ones; identify the most valuable missing evidence before inspecting more
+  files or acting.
+- **Dependencies:** FV-RSN-002 (shares the same risk-signal reuse principle).
+- **Status:** No source. This is a reasoning-strategy concept, not missing infrastructure —
+  the signals to key off (`risk_level`, task_type, `verification_plan` depth) already exist;
+  nothing currently varies effort based on them.
+- **Privacy/security implications:** None directly.
+- **Acceptance criteria:** Not yet defined.
+- **Activation prerequisites:** None blocking.
+- **Phase:** Future phase.
+
+### FV-RSN-004 — Independent model-family and adversarial review before acceptance
+- **Domain:** Quality / security review.
+- **Source/provenance:** Founder-provided (2026-11-16): "support independent model-family
+  review," "use independent adversarial review where warranted."
+- **Requirement:** A change is reviewed by a genuinely different model family (not the one
+  that produced it) and, where warranted, an adversarial reviewer, before proposing
+  acceptance.
+- **Dependencies:** **This is the same requirement as `FV-WRK-005`**, recorded in §11 above —
+  not duplicated here, only cross-referenced, since this directive restates it from the
+  reasoning-architecture angle rather than the multi-model-workforce angle.
+- **Status:** No source — see FV-WRK-005 for the full status (deterministic CI already exists;
+  cross-model-family review does not).
+- **Privacy/security implications:** See FV-WRK-005.
+- **Acceptance criteria:** See FV-WRK-005.
+- **Activation prerequisites:** See FV-WRK-005.
+- **Phase:** Future phase.
+
+### FV-RSN-005 — Explicit reasoning, tool-use, and cost budgets
+- **Domain:** Resource governance.
+- **Source/provenance:** Founder-provided (2026-11-16): "apply explicit reasoning, tool-use,
+  cost and retry budgets" / "enforce bounded reasoning/execution iterations, token budgets."
+- **Requirement:** Hard-enforced limits on reasoning iterations, tool calls, and cost per
+  task — not just retry count.
+- **Dependencies:** `backend/app/providers/pricing.py` already tracks token cost per call
+  (noted in `docs/SECURITY_BLOCKERS.md` item 4 as "estimated, not invoice-grade") — a partial
+  foundation for cost VISIBILITY, not an enforced BUDGET/limit.
+- **Status:** Partial. Retry budget exists and is enforced (`max_attempts`). Reasoning-
+  iteration and tool-use budgets, and a hard (not just visible) cost ceiling, do not exist.
+- **Privacy/security implications:** An unenforced cost signal is itself a minor spend-control
+  gap, related to but distinct from `FV-WRK-007`'s spend-authorization reuse.
+- **Acceptance criteria:** Not yet defined.
+- **Activation prerequisites:** None blocking; a natural extension of existing
+  `ProviderSpendAuthorization` machinery rather than a new mechanism.
+- **Phase:** Future phase.
+
+### FV-RSN-006 — Mid-execution plan revision when evidence contradicts assumptions
+- **Domain:** Planning / execution.
+- **Source/provenance:** Founder-provided (2026-11-16): "validate intermediate results and
+  revise the plan when evidence contradicts assumptions."
+- **Requirement:** A plan can be revised DURING a task's own execution attempt when new
+  evidence contradicts what the plan assumed — not only between separate goal-level
+  replanning passes.
+- **Dependencies:** The lessons system (see the "already implemented" list above) already
+  revises FUTURE tasks' verification plans from PAST failures; `create_plan()` already
+  supersedes a goal's previous plan wholesale. Neither is mid-attempt, intra-task revision.
+- **Status:** Partial — the two adjacent, already-built mechanisms above are not quite this
+  requirement; genuinely missing is revision WITHIN one execution attempt, not just between
+  attempts or between goal-level plan versions.
+- **Privacy/security implications:** A plan revision mid-execution must not silently widen
+  approval scope — any new work implied by a revision should require the same approval gate
+  fresh work already does, never inherit the original plan's approval by default.
+- **Acceptance criteria:** Not yet defined.
+- **Activation prerequisites:** FV-RSN-001 (candidate comparison) likely informs the design.
+- **Phase:** Future phase.
+
+No new orchestration authority, planning engine, or execution system is introduced by this
+section. `first_cycle_go=false`; documentation only, as directed.
+
 ## 13. Making this backlog recoverable — ingestion wiring is a separate dependency
 
 **Documentation existing in GitHub does not by itself prove MainAI can discover or retrieve
