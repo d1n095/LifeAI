@@ -9456,3 +9456,41 @@ sidovagnsarkitekturen.
 
 **Ingen merge/deploy/aktivering/Actions-körningsgodkännande utfört. `first_cycle_go=false`
 genomgående.**
+
+## Grundardirektiv "FOUNDER RESPONSE: CONTINUE #447 INTEGRATION" (2026-11-16) — PR #447 öppnad, grön CI, en genuin regression fixad, slutgiltig handoff skriven
+
+**PR #447 — `claude/import-security-integration-on-dev` (ny, draft), bas `dev`.** Alternativ (2)
+ovan genomfört för den del som är möjlig utan grundarens egen Actions-godkännande: `git merge
+--no-ff` av #425:s hela 9-PR-kedja (`origin/copilot/parser-isolated-sidecar`) ovanpå `dev`:s
+färska topp — NOLL konflikter, migrationsgrafen verifierad fri från forks (dev:s egen topp
+stannar vid `0068`; #425-kedjans `0069_embedding_space_identity.py`…`0074_import_job_staging_
+intents.py` krockar INTE än, men KOMMER krocka med #440:s egen, ännu ej mergade `0069→0072`-
+omnumrering — se nästa stycke).
+
+**En genuin CI-regression hittades och fixades, inom #425:s EGEN kedja, inte introducerad av
+denna integration:** `test_basic_startup_no_model.py`:s två tester föll (`TypeError: object
+Document can't be used in 'await' expression`) eftersom en senare commit i #425:s egen kedja
+(`c7aeafe7`) gjorde `upload_document()` synkron men testfilen (skriven tidigare i samma kedja)
+fortsatte `await`a den — bekräftat mot syskontestfilens redan korrekta konvention. Fixat i en
+separat, tvåradig commit (`ca352bcd`) som bara rör de två call-sites, ingen produktionskod,
+ingen omskrivning av Copilots kod. Ett förklarande PR-kommentar postat, ingen upprepning.
+
+**Slutgiltig, verifierad grön CI på exakt SHA `ca352bcd426de88b73bccfb40e368eb64b010d5e`:**
+samtliga riktiga backend-grindar (`Backend — Alembic migration check`, `Backend — RLS &
+session-security tests`, `Backend — account lifecycle & rate-limit tests`, `Backend — unit/
+integration tests` — 2421 passed/2 skipped/1 xfailed), båda E2E-jobben, `Frontend — npm audit`,
+samtliga frontend-builds. Detta är ny evidens för mekanisk korrekthet mot denna repos EGNA,
+obehindrade CI — inte oberoende säkerhetsgranskning, och ersätter INTE kravet på mänsklig
+säkerhetsacceptans.
+
+**Slutgiltig GO/NO-GO-handoff skriven** (`docs/LIFE_INDEPENDENT_REVIEW_HANDOFF.md`, ny sektion,
+commit `fe3cdbc2` på PR #441). Tre öppna punkter kvar, ingen stängd av denna session: (1)
+oberoende MÄNSKLIG säkerhetsacceptans (ägare: grundaren eller en genuint extern granskare,
+aldrig en AI-session — inklusive OpenCodes egen oberoende granskning av #425, som endast är
+stödjande evidens); (2) PR #440:s migrationsnummer-försoning mot #447:s egen `0069–0074`-kedja
+— medvetet INTE förhandsrebasad (Merge-regeln), måste lösas när faktisk mergeordning är känd;
+(3) #425-kedjans EGNA `action_required`-körningar (#413, #421) förblir blockerade, oförändrat,
+kräver fortfarande grundaren personligen i GitHub:s UI.
+
+**Ingen merge/deploy/aktivering/säkerhetsgrind ändrad. `first_cycle_go=false` genomgående.**
+Detta är inte ett beslut — grundarens egna ord styr: "Do not make that decision on my behalf."
