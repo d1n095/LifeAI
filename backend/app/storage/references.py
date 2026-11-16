@@ -63,15 +63,13 @@ Locking: `acquire_storage_key_lock()` is a Postgres advisory lock scoped to the 
 session's current transaction (`pg_advisory_xact_lock` -- released automatically at that
 transaction's next commit or rollback, never leaked across a crash the way a Redis lease with
 a TTL could be). It exists to close a real TOCTOU race a founder review caught: POST
-/api/library/import's storage.write_stream() call durably writes a blob to disk BEFORE any DB
-row references it (content-addressing means the key isn't even known until the bytes are
-fully hashed, so it's structurally impossible to lock the key any earlier than that). Without
-a shared lock, a concurrent retry_source_blob_purge() could run its own reference check in
-that exact window, see nothing pointing at the just-written key yet, and physically delete it
-before the new ImportJob row is created -- leaving that row committed with a
-source_storage_key pointing at nothing. Both call sites take the SAME lock (same hashed key)
-before doing their own check-then-act sequence, so whichever side gets there first fully
-commits or rolls back before the other's check can even run. Schema-qualified
+/api/library/import persists an owner-bound receiving intent and stage before canonical
+publication. The canonical key is unknown until staged bytes are hashed, so its lock cannot
+be acquired earlier; the upload helper takes that lock before write_stream() publishes the
+canonical blob and commits the source_storage_key. Without the shared lock, a concurrent
+retry_source_blob_purge() could delete a blob between publication and reference commit.
+Both paths take the SAME lock before their check-then-act sequence, so whichever side gets
+there first fully commits or rolls back before the other's check can run. Schema-qualified
 (`pg_catalog.pg_advisory_xact_lock`/`pg_catalog.hashtextextended`) for the same reason every
 relation reference inside a `SET search_path = pg_catalog` function is -- this call itself
 runs on an ordinary mainai_app session, not inside a pinned-search_path function, but staying
@@ -107,10 +105,10 @@ logger = logging.getLogger("mainai.storage.references")
 _MaintenanceSession = sessionmaker(bind=migration_engine)
 
 # Pass 29: the canonical, hand-maintained registry of every table.column known to persist a
-# value returned by `StorageBackend.write_stream()` (app/storage/) -- i.e. every place a live
-# row can make a content-addressed physical blob unsafe to delete. `storage_key_still_
-# referenced_global()` (migration 0020, extended by migration 0023 for the two Project Memory
-# entries below) MUST check every single one of these; this constant exists so that claim is
+# canonical or staged storage key -- i.e. every place a live row can make a physical blob
+# unsafe to delete. `storage_key_still_
+# referenced_global()` (extended by migrations 0023 and 0074) MUST check every single one of
+# these; this constant exists so that claim is
 # machine-checkable rather than a comment someone has to remember to re-read.
 #
 # A founder review found migration 0020 checked only the first two entries -- `project_sources`/
@@ -132,6 +130,7 @@ _MaintenanceSession = sessionmaker(bind=migration_engine)
 KNOWN_STORAGE_KEY_COLUMNS: tuple[tuple[str, str], ...] = (
     ("documents", "storage_key"),
     ("knowledge_import_jobs", "source_storage_key"),
+    ("knowledge_import_jobs", "staging_storage_key"),
     ("project_sources", "storage_key"),
     ("project_checkpoints", "brief_storage_key"),
 )
@@ -155,25 +154,28 @@ KNOWN_STORAGE_KEY_COLUMNS: tuple[tuple[str, str], ...] = (
 # Format: (relative file path under app/, enclosing function name, lock protocol + status).
 KNOWN_STORAGE_WRITE_PATHS: tuple[tuple[str, str, str], ...] = (
     (
-        "routers/library.py",
-        "import_package",
-        "acquire_owner_erasure_lock() held for the whole request BEFORE write_stream() runs; "
-        "no storage-key lock needed around the ordinary accept path itself, since the fresh "
-        "ImportJob row referencing the new key is created and committed in this SAME request "
-        "-- acquire_storage_key_lock() instead protects the EMPTY-upload rejection branch "
-        "specifically, via delete_if_unreferenced() below.",
+        "library/import_uploads.py",
+        "receive_import_upload",
+        "Commits an owner-bound receiving ImportJob before staging; holds the owner-erasure "
+        "lock while writing the stage, then acquires the canonical storage-key lock before "
+        "write_stream() promotes it. The same transaction commits the pending job (and "
+        "Document for /api/documents/upload); staged bytes remain referenced until verified "
+        "cleanup. Verified by upload-route and staging-recovery tests.",
     ),
     (
-        "routers/documents.py",
-        "upload_document",
-        "Legacy /api/documents/upload thin adapter onto the Library durable path: "
-        "acquire_owner_erasure_lock() before write_stream(); after the blob returns, "
-        "acquire_storage_key_lock() then commit ImportJob(pending) + Document "
-        "(storage_key/checksum/import_job_id) in the same request; retain_pending_* is called "
-        "AFTER that commit -- never pre-commit, since retain commits on its own maintenance "
-        "connection and would outlive a rolled-back reference (see retain_pending_rejected_"
-        "upload_cleanup_tasks()'s own docstring). No BackgroundTasks. Verified by "
-        "tests/backend/test_documents_upload_durable_delivery.py.",
+        "library/import_staging.py",
+        "_recover_claimed_upload",
+        "Recovers only a lease-claimed receiving job after rechecking owner, job, and token "
+        "under the owner-erasure lock; verifies the staged hash/size and acquires the "
+        "canonical storage-key lock before write_stream(), then commits that same job as "
+        "pending. Verified by tests/backend/test_import_staging_recovery.py.",
+    ),
+    (
+        "library/import_staging.py",
+        "cleanup_import_stages",
+        "Holds the owner-erasure lock and canonical storage-key lock; repairs a missing "
+        "canonical blob only from a matching verified stage, then commits stage-pointer "
+        "cleanup after canonical verification. Verified by storage and staging-recovery tests.",
     ),
     (
         "storage/references.py",
@@ -231,16 +233,15 @@ def acquire_owner_erasure_lock(db: Session, owner_id: uuid.UUID) -> None:
     Both call sites take this SAME lock (same hashed owner_id) before doing their own
     check-then-act sequence:
       - Account erasure acquires it FIRST, before inventorying `Document.storage_key`/
-        `ImportJob.source_storage_key` for this owner -- so a concurrent upload either fully
-        commits (and its fresh ImportJob row is correctly swept into the inventory) or is
-        still blocked (and so cannot yet have written anything a rolled-back erasure would
-        need to account for) before erasure's own inventory query ever runs.
+        `ImportJob.source_storage_key` and `staging_storage_key` for this owner -- so a
+        concurrent upload either fully commits (and its intent/stage is swept into the
+        inventory) or remains blocked before writing any bytes that a rolled-back erasure
+        would need to account for.
       - The upload endpoint acquires it as the FIRST thing it does, before
-        `storage.write_stream()` even starts (never after) -- if erasure already committed
-        and holds this owner_id's row gone, the upload path re-verifies the owner still
-        exists (see app/routers/library.py) and fails closed BEFORE writing any bytes at all,
-        rather than writing an orphaned blob and finding out only when the later `ImportJob`
-        insert hits the now-dangling `owner_id` foreign key.
+        staged bytes are written (never after) -- if erasure already committed and holds this
+        owner_id's row gone, the upload path re-verifies the owner still exists and fails
+        closed before writing any bytes, rather than creating storage without an owner-bound
+        intent.
 
     Seed `1` (distinct from acquire_storage_key_lock's seed `0` above): hashtextextended's
     seed parameter puts the two lock kinds in separate hash namespaces, so a storage_key that

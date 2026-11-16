@@ -150,11 +150,11 @@ def test_import_database_failure_before_blob_write_returns_retryable_unavailable
 
     from sqlalchemy.exc import OperationalError
 
-    import app.routers.library as library_router
+    import app.library.import_uploads as upload_service
     from app.storage import get_storage
 
     csrf = _login(client)
-    original_lock = library_router.acquire_owner_erasure_lock
+    original_lock = upload_service.acquire_owner_erasure_lock
     fail_once = True
 
     def _fail_before_storage(db, owner_id):
@@ -164,7 +164,7 @@ def test_import_database_failure_before_blob_write_returns_retryable_unavailable
             raise OperationalError("SELECT advisory lock", {}, RuntimeError("synthetic private detail"))
         return original_lock(db, owner_id)
 
-    monkeypatch.setattr(library_router, "acquire_owner_erasure_lock", _fail_before_storage)
+    monkeypatch.setattr(upload_service, "acquire_owner_erasure_lock", _fail_before_storage)
     content = b"retry after database outage before storage"
     checksum = hashlib.sha256(content).hexdigest()
     response = client.post(
@@ -208,12 +208,12 @@ def test_import_database_failure_after_blob_write_reconciles_then_allows_retry(c
 
     from sqlalchemy.exc import OperationalError
 
-    import app.routers.library as library_router
+    import app.library.import_uploads as upload_service
     from app.models.import_job import ImportJob
     from app.storage import get_storage
 
     csrf = _login(client)
-    original_lock = library_router.acquire_storage_key_lock
+    original_lock = upload_service.acquire_storage_key_lock
     fail_once = True
 
     def _fail_after_storage(db, storage_key):
@@ -223,7 +223,7 @@ def test_import_database_failure_after_blob_write_reconciles_then_allows_retry(c
             raise OperationalError("SELECT advisory lock", {}, RuntimeError("synthetic connection failure"))
         return original_lock(db, storage_key)
 
-    monkeypatch.setattr(library_router, "acquire_storage_key_lock", _fail_after_storage)
+    monkeypatch.setattr(upload_service, "acquire_storage_key_lock", _fail_after_storage)
     content = b"retry after database outage after durable blob write"
     checksum = hashlib.sha256(content).hexdigest()
     response = client.post(
@@ -258,21 +258,19 @@ def test_import_preserves_unreferenced_blob_when_database_stays_unavailable_then
 
     from sqlalchemy.exc import OperationalError
 
-    import app.routers.library as library_router
-    import app.storage.references as storage_references
-    from app.models.import_job import ImportJob
+    import app.library.import_uploads as upload_service
+    from app.models.import_job import ImportJob, ImportJobStatus
     from app.storage import get_storage
 
     csrf = _login(client)
-    original_lock = library_router.acquire_storage_key_lock
+    original_lock = upload_service.acquire_storage_key_lock
     content = b"preserve uncertain original during prolonged database outage"
     checksum = hashlib.sha256(content).hexdigest()
 
     def _database_remains_unavailable(*_args, **_kwargs):
         raise OperationalError("SELECT storage key lock", {}, RuntimeError("synthetic prolonged outage"))
 
-    monkeypatch.setattr(library_router, "acquire_storage_key_lock", _database_remains_unavailable)
-    monkeypatch.setattr(storage_references, "acquire_storage_key_lock", _database_remains_unavailable)
+    monkeypatch.setattr(upload_service, "acquire_storage_key_lock", _database_remains_unavailable)
     response = client.post(
         "/api/library/import",
         files={"file": ("prolonged-db-outage.txt", content, "text/plain")},
@@ -285,11 +283,14 @@ def test_import_preserves_unreferenced_blob_when_database_stays_unavailable_then
     assert response.headers["retry-after"] == "3"
     assert "synthetic prolonged outage" not in response.text
     assert superuser_db.query(ImportJob).filter_by(source_checksum=checksum).count() == 0
-    assert storage.verify(storage_key, expected_sha256=checksum, expected_size=len(content))
+    receiving_job = superuser_db.query(ImportJob).filter_by(
+        source_filename="prolonged-db-outage.txt", status=ImportJobStatus.receiving
+    ).one()
+    assert storage.inspect_staged(receiving_job.staging_storage_key).sha256 == checksum
+    assert storage.verify(storage_key, expected_sha256=checksum, expected_size=len(content)) is False
     assert list((Path(os.environ["STORAGE_ROOT"]) / "tmp").iterdir()) == []
 
-    monkeypatch.setattr(library_router, "acquire_storage_key_lock", original_lock)
-    monkeypatch.setattr(storage_references, "acquire_storage_key_lock", original_lock)
+    monkeypatch.setattr(upload_service, "acquire_storage_key_lock", original_lock)
     retry = client.post(
         "/api/library/import",
         files={"file": ("prolonged-db-outage.txt", content, "text/plain")},
@@ -317,10 +318,12 @@ def test_postgres_disconnect_during_job_commit_rolls_back_row_and_reconciles_blo
     checksum = hashlib.sha256(content).hexdigest()
     original_commit = ORMSession.commit
     terminate_once = True
+    commit_count = 0
 
     def _terminate_connection_before_commit(session):
-        nonlocal terminate_once
-        if not terminate_once:
+        nonlocal terminate_once, commit_count
+        commit_count += 1
+        if not terminate_once or commit_count == 1:
             return original_commit(session)
 
         terminate_once = False
@@ -345,8 +348,11 @@ def test_postgres_disconnect_during_job_commit_rolls_back_row_and_reconciles_blo
 
     assert failed.status_code == 503
     assert failed.headers["retry-after"] == "3"
-    assert superuser_db.query(ImportJob).filter_by(source_checksum=checksum).count() == 0
-    assert get_storage().exists(f"{checksum[:2]}/{checksum}") is False
+    interrupted = superuser_db.query(ImportJob).filter_by(source_filename="db-commit-interruption.txt").one()
+    assert interrupted.status.value == "receiving"
+    assert interrupted.source_checksum is None
+    assert get_storage().inspect_staged(interrupted.staging_storage_key).sha256 == checksum
+    assert get_storage().verify(f"{checksum[:2]}/{checksum}", expected_sha256=checksum, expected_size=len(content))
     assert list((Path(os.environ["STORAGE_ROOT"]) / "tmp").iterdir()) == []
     owner_id = client.get("/api/auth/me").json()["id"]
     assert superuser_db.execute(
@@ -385,11 +391,13 @@ def test_import_retry_reuses_job_when_commit_succeeds_but_acknowledgment_is_lost
     checksum = hashlib.sha256(content).hexdigest()
     original_commit = ORMSession.commit
     lose_acknowledgment = True
+    commit_count = 0
 
     def _commit_then_lose_acknowledgment(session):
-        nonlocal lose_acknowledgment
+        nonlocal lose_acknowledgment, commit_count
         original_commit(session)
-        if lose_acknowledgment:
+        commit_count += 1
+        if lose_acknowledgment and commit_count == 2:
             lose_acknowledgment = False
             raise OperationalError("COMMIT", {}, RuntimeError("synthetic lost acknowledgment"))
 
@@ -830,32 +838,36 @@ def test_import_rejects_oversized_upload(client):
 def test_concurrent_blob_deletion_during_upload_finalization_fails_closed_without_creating_a_job(
     client, superuser_db, monkeypatch
 ):
-    """Pass 22, router-level companion to tests/backend/storage/test_source_purge.py's low-level
-    advisory-lock proof (test_storage_key_lock_serializes_upload_and_purge_...): if the
-    just-written blob vanishes between storage.write_stream() finishing and this request's own
-    storage_key lock being acquired (e.g. a concurrent retry_source_blob_purge() call), the
-    endpoint must fail closed -- no ImportJob committed referencing a blob that no longer
-    exists -- rather than silently proceeding as if nothing happened."""
+    """If canonical publication cannot be verified, the request must not finalize an import
+    job; its already durable stage remains available to the bounded recovery path."""
     from app.storage.local_fs import LocalFilesystemStorage
 
     csrf = _login(client)
 
-    def _pretend_missing(self, storage_key):
-        return False
+    original_write = LocalFilesystemStorage.write_stream
 
-    monkeypatch.setattr(LocalFilesystemStorage, "exists", _pretend_missing)
+    def _delete_after_write(self, read_chunk, *, max_bytes, chunk_size=1 << 20):
+        blob = original_write(self, read_chunk, max_bytes=max_bytes, chunk_size=chunk_size)
+        self.delete(blob.storage_key)
+        return blob
+
+    monkeypatch.setattr(LocalFilesystemStorage, "write_stream", _delete_after_write)
     res = client.post(
         "/api/library/import",
         files={"file": ("raced-away.txt", b"deleted by a concurrent purge", "text/plain")},
         headers={"X-CSRF-Token": csrf},
     )
 
-    assert res.status_code == 409
+    assert res.status_code == 500
 
-    from app.models.import_job import ImportJob
+    from app.models.import_job import ImportJob, ImportJobStatus
+    from app.storage import get_storage
 
     matching_jobs = superuser_db.query(ImportJob).filter_by(source_filename="raced-away.txt").all()
-    assert matching_jobs == [], "no ImportJob may exist referencing a blob that was gone at commit time"
+    assert len(matching_jobs) == 1
+    assert matching_jobs[0].status == ImportJobStatus.receiving
+    assert matching_jobs[0].source_storage_key is None
+    assert get_storage().inspect_staged(matching_jobs[0].staging_storage_key) is not None
 
 
 def test_import_zip_security_violation_returns_failed_job_not_500(client):

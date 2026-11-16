@@ -150,7 +150,13 @@ def _store_real_blob(content: bytes) -> str:
 
 
 def _make_import_job(
-    session, owner_id, *, source_storage_key, status=ImportJobStatus.pending, blocked_count=0
+    session,
+    owner_id,
+    *,
+    source_storage_key=None,
+    staging_storage_key=None,
+    status=ImportJobStatus.pending,
+    blocked_count=0,
 ) -> ImportJob:
     """Pass 22: a durable ImportJob row referencing `source_storage_key` -- knowledge_import_jobs
     is RLS-protected (app/rls.py), same as Document/DocumentChunk, so _set_rls_user is required
@@ -160,6 +166,7 @@ def _make_import_job(
         owner_id=owner_id,
         status=status,
         source_storage_key=source_storage_key,
+        staging_storage_key=staging_storage_key,
         blocked_count=blocked_count,
     )
     session.add(job)
@@ -1439,6 +1446,13 @@ def test_known_storage_key_columns_registry_matches_the_sql_functions_real_behav
                 _make_document(session, owner.id, storage_key=storage_key)
             elif table == "knowledge_import_jobs" and column == "source_storage_key":
                 _make_import_job(session, owner.id, source_storage_key=storage_key, status=ImportJobStatus.pending)
+            elif table == "knowledge_import_jobs" and column == "staging_storage_key":
+                _make_import_job(
+                    session,
+                    owner.id,
+                    staging_storage_key=storage_key,
+                    status=ImportJobStatus.receiving,
+                )
             elif table == "project_sources" and column == "storage_key":
                 session.add(
                     ProjectSource(source_type="doc", source_ref="drift-test", storage_key=storage_key, ingested_by="test")
@@ -1494,26 +1508,10 @@ def test_delete_if_unreferenced_race_against_a_concurrent_reference_commit_never
     other's own check-then-act can run -- the end state must NEVER be "a live DB row
     references a storage_key whose physical blob is gone."
 
-    A note on what this test does NOT cover, found while building it (not asked for this
-    round, documented in docs/BRANCH_REGISTRY.md's Pass 30 entry as a distinct, separate
-    finding rather than silently expanded into this fix): app/routers/library.py's REAL
-    upload sequence calls `storage.write_stream()` BEFORE acquiring
-    `acquire_storage_key_lock()` (the key isn't even known until the bytes are hashed, so it
-    structurally can't be locked any earlier). A first draft of this test reproduced that
-    exact real ordering (write_stream, THEN lock, THEN commit) and found a real, narrower
-    TOCTOU purely inside `LocalFilesystemStorage.write_stream()`'s own existence-check vs. a
-    concurrent `delete()`'s `unlink()` -- both file-level operations that happen OUTSIDE any
-    lock (the lock only ever protects the DB-facing commit/delete decision, never the raw
-    filesystem calls themselves). Closing that would mean restructuring write_stream() itself
-    (e.g. hashing to a value BEFORE deciding whether to write, then holding the storage-key
-    lock across the existence-check-and-rename) -- a real architectural change to the
-    SAME-SHAPED protocol `app/storage/purge.py`'s already-shipped, previously-reviewed
-    Phase B relies on too, not something specific to this pass's `delete_if_unreferenced()`.
-    Out of scope for "close the empty-upload direct-delete bypass"; flagged for its own
-    review. The test below instead proves the narrower, well-defined guarantee THIS pass
-    actually owns: once both sides are inside the lock-protected commit/delete decision (the
-    part `delete_if_unreferenced()` and library.py's real ImportJob/Document commit both
-    genuinely share), the advisory lock correctly serializes them with no dangling result."""
+    The route-level upload sequence now persists an owner-bound receiving intent and stage
+    before acquiring the canonical key lock; it takes that lock before write_stream() promotes
+    the stage and commits the reference. This test isolates the database-side check/delete
+    protocol, while upload-route and recovery tests exercise the full staged flow."""
     from app.models.document import ActiveTruthStatus, Document, DocumentSource, IndexStatus
 
     def _run_once(*, cleanup_goes_first: bool) -> None:

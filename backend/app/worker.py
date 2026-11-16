@@ -52,6 +52,7 @@ from app.jobs.lease import (
 from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.jobs.service import mark_failed, record_claimed
+from app.library.import_staging import cleanup_import_stages, recover_expired_import_uploads
 from app.mainai_execution.approval import ApprovalRequiredError
 from app.mainai_execution.execution_job import _finalize_task_outcome, resume_waiting_ci_task, run_task_execution_job
 from app.mainai_execution.executor import dispatch_ready_task, retry_task, task_for_job
@@ -880,6 +881,8 @@ class Worker:
         single-job-at-a-time budget."""
         claim_db = _ClaimSession()
         try:
+            recover_expired_import_uploads(claim_db)
+            cleanup_import_stages(claim_db)
             await self._requeue_blocked_jobs(claim_db)
             self._reconcile_orphaned_documents(claim_db)
             self._retry_storage_deletion_tasks(claim_db)

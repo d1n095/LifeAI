@@ -341,7 +341,7 @@ export type FileOutcome = {
 
 export type ImportJobItem = {
   id: string;
-  status: "pending" | "running" | "completed" | "failed" | "partial";
+  status: "receiving" | "pending" | "running" | "completed" | "failed" | "partial";
   source_filename: string | null;
   source_checksum: string | null;
   progress_current: number;

@@ -59,6 +59,13 @@ class StoredBlob:
     size_bytes: int  # Plaintext byte length; never encrypted/compressed envelope size.
 
 
+@dataclass(frozen=True)
+class StagedBlob:
+    staging_key: str
+    sha256: str
+    size_bytes: int
+
+
 class StorageBackend(ABC):
     def trusted_sha256_for_key(self, storage_key: str) -> str | None:
         """Return the SHA-256 integrity anchor encoded by a canonical, server-generated
@@ -84,6 +91,33 @@ class StorageBackend(ABC):
         returned StoredBlob's `storage_key` is only valid to read once this call has
         returned successfully — a caller must never persist a storage_key for a write that
         raised."""
+
+    @abstractmethod
+    def write_staged_stream(
+        self, staging_key: str, read_chunk: Callable[[], bytes], *, max_bytes: int, chunk_size: int = 1 << 20
+    ) -> StagedBlob:
+        """Durably writes to a server-generated owner/job-scoped staging key without
+        publishing a canonical content-addressed blob. A completed stage is atomically
+        visible; an interrupted write is never mistaken for a complete stage."""
+
+    @abstractmethod
+    def inspect_staged(self, staging_key: str) -> StagedBlob | None:
+        """Re-hashes a complete stage and returns its verified size and digest, or None if
+        no completed stage has been published."""
+
+    @abstractmethod
+    def verify_staged(self, staging_key: str, *, expected_sha256: str, expected_size: int | None = None) -> bool:
+        """Confirms that a completed, owner/job-scoped stage matches its recorded plaintext
+        hash and optional size."""
+
+    @abstractmethod
+    def open_staged_read(self, staging_key: str) -> BinaryIO:
+        """Opens a staged object using only its validated server-generated key."""
+
+    @abstractmethod
+    def delete_staged(self, staging_key: str) -> None:
+        """Idempotently removes the staged object and any interrupted temp file for its
+        server-generated identity."""
 
     @abstractmethod
     def open_read(self, storage_key: str) -> BinaryIO:
