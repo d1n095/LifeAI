@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
+import PasskeyManager from "@/components/PasskeyManager";
 
 export default function AccountPage() {
   const router = useRouter();
@@ -112,6 +113,8 @@ export default function AccountPage() {
           {loggingOutAll ? "Loggar ut…" : "Logga ut från alla enheter"}
         </button>
       </section>
+
+      <PasskeyManager />
 
       <section aria-labelledby="delete-heading" className="space-y-3 rounded-xl border border-red-500/30 p-5">
         <h2 id="delete-heading" className="text-sm font-medium text-red-300">

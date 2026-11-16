@@ -736,6 +736,15 @@ export type MainAIGoalReport = {
   generated_at: string;
 };
 
+// Passkeys / WebAuthn (see backend/app/routers/webauthn.py, frontend/lib/webauthn.ts).
+export type PasskeyItem = {
+  id: string;
+  label: string;
+  transports: string[];
+  created_at: string;
+  last_used_at: string | null;
+};
+
 export const api = {
   login: (email: string, password: string) =>
     request<CurrentUser>("/api/auth/login", {
@@ -937,4 +946,29 @@ export const api = {
   mainaiExecutionTaskWaits: (id: string) => request<MainAITaskWait[]>(`/api/mainai/execution/tasks/${id}/waits`),
   mainaiExecutionLessons: (statusFilter?: string) =>
     request<EngineeringLesson[]>(`/api/mainai/execution/lessons${statusFilter ? `?status_filter=${statusFilter}` : ""}`),
+
+  // Passkeys / WebAuthn. The option/credential payloads are opaque WebAuthn JSON built and
+  // consumed by lib/webauthn.ts; register/authenticate-complete issue the normal session.
+  webauthnRegisterBegin: () =>
+    request<{ handle: string; options: Record<string, unknown> }>("/api/auth/webauthn/register/begin", {
+      method: "POST",
+    }),
+  webauthnRegisterComplete: (handle: string, credential: Record<string, unknown>, label: string) =>
+    request<CurrentUser>("/api/auth/webauthn/register/complete", {
+      method: "POST",
+      body: JSON.stringify({ handle, credential, label }),
+    }),
+  webauthnAuthenticateBegin: (email: string) =>
+    request<{ handle: string; options: Record<string, unknown> }>("/api/auth/webauthn/authenticate/begin", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+  webauthnAuthenticateComplete: (handle: string, credential: Record<string, unknown>) =>
+    request<CurrentUser>("/api/auth/webauthn/authenticate/complete", {
+      method: "POST",
+      body: JSON.stringify({ handle, credential }),
+    }),
+  listPasskeys: () => request<PasskeyItem[]>("/api/auth/webauthn/credentials"),
+  deletePasskey: (id: string, password: string) =>
+    request(`/api/auth/webauthn/credentials/${id}`, { method: "DELETE", body: JSON.stringify({ password }) }),
 };
