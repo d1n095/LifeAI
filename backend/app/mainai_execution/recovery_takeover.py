@@ -53,7 +53,7 @@ GOVERNED DECLINE (0.5 above): for an EVER_GOVERNED goal, steps 2-4 above are rep
 `_decline_takeover_for_governed_goal()` — the task still returns to `ready` (step 1, unchanged)
 but NO new `mainai_jobs` row is minted and NO salvage runs (both are meaningless without a
 V0.1-executed job to attach to). The dead job is instead finalized `failed` (no successor to
-record) via `mark_job_failed_after_governed_recovery_decline()`, and the recovery record moves
+record) via `mark_job_failed_after_recovery_decline()`, and the recovery record moves
 detected->...->classified->taking_over->completed (never `taken_over` — no takeover occurred).
 The goal's OWN Supervisor tick (`app.worker.py`'s `_advance_authorized_supervisor_goals`,
 driven by `eligible_authorized_goals()`) rediscovers the now-`ready` task on its own schedule
@@ -73,10 +73,11 @@ from app.execution_envelopes.service import goal_has_ever_been_envelope_governed
 from app.jobs.mainai_job_lease import (
     JobNotDeclinableError,
     JobNotSupersedableError,
-    mark_job_failed_after_governed_recovery_decline,
+    mark_job_failed_after_recovery_decline,
     mark_job_superseded,
 )
 from app.mainai_execution import executor
+from app.mainai_execution.execution_job import finalize_cancelled_task
 from app.mainai_execution.recovery_approval import require_recovery_approval
 from app.mainai_execution.recovery_inspector import record_recovery_event
 from app.mainai_execution.recovery_salvage import salvage_recovery_record
@@ -126,6 +127,33 @@ async def execute_takeover(
         select(MainAIGoal).where(MainAIGoal.id == goal.id, MainAIGoal.owner_id == goal.owner_id).with_for_update()
     ).scalar_one()
 
+    # Freebuff independent-review finding AV-1a/AV-2a: cancel_task() (executor.py) can only
+    # ever be COOPERATIVE for a `running` task -- it sets `cancel_requested` on the task's
+    # OWN live job and leaves task.status at `running` until execution_job.py's own next safe
+    # checkpoint (`_check_cancel_requested()`) actually acknowledges it (see that function's
+    # docstring). If the job instead crashes/dies BEFORE ever reaching one of those
+    # checkpoints, the founder's cancellation intent is durably recorded on the DEAD job's own
+    # `cancel_requested` column -- but a plain takeover mints a genuinely NEW `mainai_jobs` row
+    # (dispatch_ready_task()) whose own `cancel_requested` defaults to False. Nothing about that
+    # new job's identity carries the old job's `cancel_requested` forward, so execution_job.py's
+    # checkpoints on the NEW job would never fire and the cancelled task would silently resume
+    # and complete as if cancellation had never happened. Checked BEFORE the governance check
+    # (and takes priority over it): a cancelled task must end `cancelled`, never get sent back
+    # to `ready` for governed redispatch either -- that would just discard the founder's cancel
+    # request a different way.
+    # populate_existing=True, not a plain db.get(): a plain get() returns an ALREADY-identity-
+    # mapped Python object (e.g. _task_and_dead_job()/inspect_recovery_record() in callers that
+    # already loaded this exact job earlier in the same session) without refreshing its
+    # cancel_requested from the row a concurrent cancel_task() call may have committed since --
+    # this project's SessionLocal uses expire_on_commit=False (app/db.py), so a stale in-memory
+    # object would otherwise silently show cancel_requested=False even after a real commit. Same
+    # staleness class planner.py's own goal-row lock already documents and defends against.
+    dead_job = db.execute(
+        select(MainAIJob).where(MainAIJob.id == dead_job_id).execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if dead_job is not None and dead_job.cancel_requested:
+        return await _decline_takeover_for_cancelled_task(db, task=task, record=record, dead_job_id=dead_job_id)
+
     if goal_has_ever_been_envelope_governed(db, owner_id=goal.owner_id, goal_id=goal.id):
         return await _decline_takeover_for_governed_goal(db, task=task, record=record, dead_job_id=dead_job_id)
 
@@ -165,6 +193,54 @@ async def execute_takeover(
     return record, new_job
 
 
+async def _decline_takeover_for_cancelled_task(
+    db: Session, *, task: MainAITask, record: MainAIRecoveryRecord, dead_job_id
+) -> tuple[MainAIRecoveryRecord, None]:
+    """Freebuff AV-1a/AV-2a: the dead job this recovery record is for already had
+    `cancel_requested=True` when it died -- the founder's own cancellation request, recorded
+    by `cancel_task()` (executor.py) but never reached by a cooperative checkpoint before the
+    job crashed. Reviving the task under a fresh V0.1 job (the ordinary takeover path) would
+    silently discard that cancellation -- the new job has no memory of the old job's
+    cancel_requested flag. Finalizes the task `cancelled` instead of ever dispatching it again,
+    using the SAME `finalize_cancelled_task()` execution_job.py already uses for an in-flight
+    job's own cooperative-cancel acknowledgment -- one honest cancellation finalization path,
+    not a second one duplicated here.
+
+    No new `mainai_jobs` row is minted (mirrors `_decline_takeover_for_governed_goal()`'s own
+    shape) and `salvage_recovery_record()` is skipped for the same reason that function's
+    docstring gives: there is no successor job for salvaged evidence to attach to. Reuses the
+    existing `recovery_blocked` event type (defined, never emitted elsewhere) rather than
+    adding a new `mainai_recovery_events.event_type` CHECK-constraint value for this one case
+    -- deliberately avoiding yet another branch racing PR #440's already-in-flight '0069'
+    migration-numbering composition for a logic fix that doesn't need a schema change."""
+    finalize_cancelled_task(db, task, reason="cancel_requested_before_takeover")
+
+    record.status = MainAIRecoveryStatus.taking_over
+    db.add(record)
+    db.flush()
+
+    try:
+        mark_job_failed_after_recovery_decline(db, job_id=dead_job_id)
+    except JobNotDeclinableError as exc:
+        raise TakeoverError(f"could not fence the dead job {dead_job_id}: {exc}") from exc
+
+    record_recovery_event(
+        db, record=record, event_type=MainAIRecoveryEventType.recovery_blocked,
+        detail={
+            "dead_job_id": str(dead_job_id),
+            "reason": "task's cancel_requested was already set on the dead job before it died; "
+                      "finalized cancelled instead of taking over, never redispatched",
+        },
+    )
+
+    record.status = MainAIRecoveryStatus.completed
+    record.completed_at = datetime.utcnow()
+    db.add(record)
+    db.flush()
+
+    return record, None
+
+
 async def _decline_takeover_for_governed_goal(
     db: Session, *, task: MainAITask, record: MainAIRecoveryRecord, dead_job_id
 ) -> tuple[MainAIRecoveryRecord, None]:
@@ -195,7 +271,7 @@ async def _decline_takeover_for_governed_goal(
     db.flush()
 
     try:
-        mark_job_failed_after_governed_recovery_decline(db, job_id=dead_job_id)
+        mark_job_failed_after_recovery_decline(db, job_id=dead_job_id)
     except JobNotDeclinableError as exc:
         raise TakeoverError(f"could not fence the dead job {dead_job_id}: {exc}") from exc
 
