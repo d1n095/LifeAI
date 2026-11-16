@@ -93,7 +93,7 @@ for the wait table's full column-level rationale.
 |---|---|
 | `app/models/mainai_wait.py` | `MainAITaskWait`, `MainAITaskWaitSourceType` (closed vocabulary, only `github_check_runs` implemented), `MainAITaskWaitStatus` |
 | `app/mainai_execution/ci_wait.py` | `start_ci_wait()`, `evaluate_check_runs()` (pure), `poll_ci_wait()` (real GitHub Checks API call, stale-SHA/repo-drift fail-closed), `cancel_ci_wait()` |
-| `app/mainai_execution/execution_job.py` | `_check_cancel_requested()`/`TaskCancelledCooperatively` (cancellation checkpoints), `_finalize_cancelled_task()`, `resume_waiting_ci_task()` (locks task first — see SECURITY INVARIANTS), CI-wait branch inside `run_task_execution_job()`, `next_retry_at` scheduling inside `_finalize_task_outcome()` |
+| `app/mainai_execution/execution_job.py` | `_check_cancel_requested()`/`TaskCancelledCooperatively` (cancellation checkpoints), `finalize_cancelled_task()`, `resume_waiting_ci_task()` (locks task first — see SECURITY INVARIANTS), CI-wait branch inside `run_task_execution_job()`, `next_retry_at` scheduling inside `_finalize_task_outcome()` |
 | `app/mainai_execution/executor.py` | `cancel_task()` rewritten for three genuinely different mechanisms (pending/ready/blocked/retryable_failed vs. `waiting_ci` vs. `running`); `retry_task()` clears `next_retry_at` |
 | `app/mainai_execution/replan.py` | `find_replan_trigger()` (deterministic — first permanently-failed task in the ACTIVE plan only), `trigger_replan()` (reuses `propose_plan_via_ai()`/`create_plan()`) |
 | `app/mainai_execution/lesson_conflicts.py` | `find_conflict_candidate_pairs()` (deterministic narrowing), `detect_conflict()` (the one AI judgment call, fail-closed), `mark_conflict()` (disputes both, records `lesson_conflict_detected` events), `resolve_conflicts_among()` |
@@ -329,7 +329,7 @@ Named explicitly rather than silently left implicit:
 - A cooperative cancel's own commit ordering matches every other outcome path in
   `execution_job.py`: this function's own write is flushed first, `mark_cancelled()`'s commit
   happens last, so a crash between the two loses nothing durable either way.
-- `_finalize_cancelled_task()` is a genuinely separate terminal path from
+- `finalize_cancelled_task()` is a genuinely separate terminal path from
   `_finalize_task_outcome()` — a cancel never counts against `task.attempts`, never schedules a
   `next_retry_at`, and never records a `verification_failed` event that didn't actually happen.
 - `retry_task()` (both the manual and now the automatic-tick call site) clears `next_retry_at`
@@ -351,8 +351,8 @@ New `MainAITaskEventType` values, append-only like every other task event:
 | `wait_satisfied` | `execution_job.py`'s `resume_waiting_ci_task()`, on a passing CI outcome |
 | `wait_timed_out` | `resume_waiting_ci_task()`, once `deadline_at` elapses with no conclusion |
 | `cancel_requested` | `executor.py`'s `cancel_task()`, on a `running` task |
-| `cancelling` | `execution_job.py`'s `_finalize_cancelled_task()`, the in-flight acknowledgment |
-| `cancelled` (task-level) | `_finalize_cancelled_task()` / `cancel_task()`'s immediate branches |
+| `cancelling` | `execution_job.py`'s `finalize_cancelled_task()`, the in-flight acknowledgment |
+| `cancelled` (task-level) | `finalize_cancelled_task()` / `cancel_task()`'s immediate branches |
 | `auto_recovery_triggered` | `worker.py`'s `_advance_mainai_execution_auto_recovery`, before an automatic takeover attempt |
 | `lesson_conflict_detected` | `lesson_conflicts.py`'s `mark_conflict()`, on every task that applied a now-disputed lesson |
 
