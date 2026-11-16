@@ -74,6 +74,23 @@ async def test_create_blob_returns_sha(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_create_pull_request_always_requests_draft_status(monkeypatch):
+    """Draft-PR security contract (founder directive, independent review finding): every PR
+    this client creates must be a draft -- never a caller-controlled option, since this is
+    the only place in the codebase that creates a PR at all
+    (app/mainai_execution/execution_job.py's `_handle_open_pr()`, the sole caller). Asserts
+    the real request body, not just the return value."""
+    calls = _fake_github(
+        monkeypatch, {("POST", "/repos/d1n095/LifeAI/pulls"): {"number": 1, "draft": True, "head": {"sha": "abc"}}}
+    )
+    client = _configured_client(monkeypatch)
+
+    await client.create_pull_request(title="t", body="b", head="claude/x", base="main")
+
+    assert calls[0]["json"]["draft"] is True
+
+
+@pytest.mark.asyncio
 async def test_commit_multiple_files_makes_exactly_the_expected_sequence_of_calls(monkeypatch):
     calls = _fake_github(
         monkeypatch,

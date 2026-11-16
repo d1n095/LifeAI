@@ -120,8 +120,18 @@ class GitHubClient:
         return await self._request("PUT", f"/repos/{repo}/contents/{path}", json=payload)
 
     async def create_pull_request(self, *, title: str, body: str, head: str, base: str) -> dict:
+        """Always requests a draft PR (`"draft": true` — GitHub's own `POST .../pulls`
+        parameter). This is the ONLY place this client creates a PR; every PR it ever
+        produces must be reviewable-but-not-mergeable-yet until a human marks it ready —
+        never a caller-controlled option, since nothing in this codebase has a legitimate
+        reason to ask this client for anything else. See
+        `app/mainai_execution/execution_job.py`'s `_handle_open_pr()` for the matching
+        read-side check that refuses to treat an existing *non-draft* PR as this client's
+        own prior work."""
         repo = self._require_configured()
-        return await self._request("POST", f"/repos/{repo}/pulls", json={"title": title, "body": body, "head": head, "base": base})
+        return await self._request(
+            "POST", f"/repos/{repo}/pulls", json={"title": title, "body": body, "head": head, "base": base, "draft": True}
+        )
 
     async def update_pull_request(self, number: int, *, title: str | None = None, body: str | None = None) -> dict:
         repo = self._require_configured()
