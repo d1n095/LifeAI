@@ -1061,6 +1061,170 @@ through that pipeline, and doing so is explicitly **not authorized by this docum
 None of this is built, authorized, or scheduled by this document. It is named here precisely
 so that "this is now in GitHub" is never mistaken for "MainAI can now retrieve this."
 
+## 13a. Blueprint-driven collaborative AI development
+
+Founder directive ("BLUEPRINT-DRIVEN COLLABORATIVE AI DEVELOPMENT"): LifeAI should eventually
+manage a collaborative AI development workforce — founder+LifeAI jointly create a living
+project blueprint, LifeAI decomposes it into independently executable tasks with interfaces,
+dependencies, acceptance criteria and security constraints, then coordinates multiple AI
+agents/model families (possibly across several simultaneous projects) exploring complementary
+or competing solutions, reviewing each other, and converging at controlled integration points
+— while never letting an agent approve its own work, bypass founder authority, or auto-merge
+unsafe changes. **Explicit instruction: audit code vs. architecture-only documentation first;
+record only genuinely missing capabilities here; do not implement or activate anything;
+`first_cycle_go` stays `false`.**
+
+**Checked first, per standing instruction, against real code, not assumption:**
+`backend/app/agent_coordination/` (service.py, dispatch.py, routing.py, adapters.py,
+runtime_view.py, execution_control.py — 1,017+408+290+285+343+338 lines) and
+`backend/app/workforce/` (selector.py, cost.py, broker.py, authority.py, kill_switch.py,
+activation_gates.py, lifecycle.py, and 18 more files — ~7,700 lines total across both
+packages) are a substantially real, independently tested implementation, not the
+"structurally inert" schema-only state this backlog's §10/matrix row 1 describes for
+*activation* — real test coverage exists in `tests/backend/mainai/test_multi_agent_work_
+coordination.py`, `test_agent_dispatch_foundation.py`, `test_capability_reality_foundation.py`,
+`test_workforce_foundation.py`, `test_agent_real_execution_bridge.py`, and five more files.
+Confirmed genuinely built and tested, not merely documented — **no backlog entry for these**:
+- Distinguishing AI inference (API `_PROVIDERS`) from persistent tool-capable coding-agent
+  execution (`AgentAdapter` Protocol, `LocalCLIAdapter` — already FV-WRK-003).
+- Scope leases preventing overlapping writers (`AgentScopeLease`, `test_overlapping_writers_
+  rejected`, `test_lease_takeover_fences_old_worker`, `test_takeover_concurrency_race`,
+  `test_lease_replay_idempotency`) — real fencing and concurrency-race coverage, not a stub.
+- Parallel exploration groups for intentional multi-agent competition on the same work
+  (`ParallelExplorationGroup`, `create_parallel_exploration_group()`,
+  `_shares_parallel_exploration_group()` — the scope-lease overlap rule explicitly
+  distinguishes "accidental duplication" from "intentional `PARALLEL_EXPLORATION`").
+- Capability- and cost-aware assignment scoring, not self-claimed: `workforce/selector.py`'s
+  `score_candidates()` combines `_cost_penalty()` with `verified_success_rate()` (performance
+  evidence), explicitly never a model's own self-reported capability
+  (`test_selector_prefers_verified_evidence_not_self_confidence`,
+  `test_planned_capability_never_reports_as_verified_available`).
+- Founder-authority gates that cannot be bypassed or self-approved: `workforce/authority.py`,
+  `activation_gates.py`, `kill_switch.py` (`test_registering_agent_grants_zero_extra_
+  authority`, `test_kill_switch_blocks_further_execution`,
+  `test_activation_commit_disabled_by_default`); `dispatch.py` reuses
+  `app.mainai_execution.approval.require_task_approval()` directly rather than
+  reimplementing a second approval gate.
+- Auditable, append-only outcomes (`AgentWorkAssignmentEvent`) and bounded spend governance
+  (`workforce/cost.py`'s `WorkforceCostBudget`, reusing `app.provider_spend` — already
+  FV-WRK-007).
+
+**Genuinely missing — recorded below, not built or activated by this document.**
+
+### FV-BLU-001 — Blueprint artifact and the planner→coordination bridge
+- **Domain:** Architecture / orchestration.
+- **Source/provenance:** Founder-provided (2026-11-16); no historical repository source.
+- **Requirement:** A structured, jointly-authored "blueprint" (interfaces, dependencies,
+  acceptance criteria, security constraints as first-class fields) that MainAI decomposes
+  into independently executable tasks, each routed to the multi-agent coordination layer.
+- **Dependencies:** None technical; this is the foundational missing link.
+- **Status:** **No source for a "blueprint" artifact anywhere** — a repo-wide, case-
+  insensitive search of `backend/app` (code and migrations) for the literal word
+  "blueprint" returns zero hits. What exists instead: `app.mainai_execution.planner`'s
+  `create_plan()`/`propose_plan_via_ai()` already turns a `MainAIGoal` (title + free-text
+  instruction) into a versioned `MainAITask`/`MainAITaskDependency` graph — real, tested,
+  but the INPUT is an informal instruction, not a structured blueprint with explicit
+  interfaces/acceptance criteria/security constraints as fields. Separately, confirmed by
+  direct cross-reference: `app/agent_coordination/dispatch.py` and `service.py` DO reference
+  `MainAITask`/`MainAIGoal` (an `AgentWorkAssignment` can optionally carry a `task_id`/
+  `goal_id` and reuse the real approval gate when it does) — but the reverse link does not
+  exist: `app/mainai_execution/` and `app/development_supervisor/` contain zero references
+  to `app.agent_coordination`. Nothing in the planner automatically creates a work assignment
+  from a task; the two systems are wired one-directionally and only when a caller manually
+  supplies the link.
+- **Privacy/security implications:** A blueprint carrying security constraints must feed the
+  SAME approval/egress/spend gates every other path already uses — explicitly not a new,
+  parallel authority mechanism (FV-WRK-002's reuse principle applies here too).
+- **Acceptance criteria:** Not yet defined.
+- **Activation prerequisites:** Independent security acceptance; explicit founder
+  authorization, same as every other activation item in this backlog.
+- **Phase:** Future phase.
+
+### FV-BLU-002 — Multiple simultaneous isolated projects/workspaces
+- **Domain:** Architecture / data isolation.
+- **Source/provenance:** Founder-provided (2026-11-16); no historical repository source.
+- **Requirement:** LifeAI coordinates work across multiple, simultaneous, isolated
+  projects/workspaces, not one global space.
+- **Dependencies:** None beyond what exists.
+- **Status:** No source. Confirmed directly in `app/models/mainai_execution.py`:
+  `MainAIGoal`/`MainAITask` carry `owner_id` only — no `project_id`/workspace column or
+  equivalent grouping concept. Today's isolation is per-owner (RLS), not per-project within
+  one owner; an owner with several unrelated initiatives has one flat goal/task space, not
+  several isolated ones. (A separate `ProjectEntity`/`project_entities` table exists for a
+  different purpose — S1 source-identity extraction, not execution isolation — and was not
+  confused with this requirement.)
+- **Privacy/security implications:** Cross-project leakage (one project's agent reading
+  another's context/credentials) would be a real isolation failure if built carelessly —
+  should reuse the existing RLS/owner-scoping pattern as the template, not invent a new one.
+- **Acceptance criteria:** Not yet defined.
+- **Activation prerequisites:** FV-BLU-001 (a blueprint needs somewhere to belong first).
+- **Phase:** Future phase.
+
+### FV-BLU-003 — Cross-system safe replanning on blueprint change or agent unavailability
+- **Domain:** Orchestration resilience.
+- **Source/provenance:** Founder-provided (2026-11-16); no historical repository source.
+- **Requirement:** Safely replan when a blueprint changes or an assigned agent becomes
+  unavailable, without losing already-valid work.
+- **Dependencies:** FV-BLU-001.
+- **Status:** Partial foundation exists, but confined within each silo, not across them.
+  `app.mainai_execution.planner.create_plan()` already replans at the goal level — but its
+  own docstring states this is "a full fresh breakdown, not a surgical patch" (cancels all
+  unstarted/in-flight tasks). `app.mainai_execution.recovery_takeover.execute_takeover()`
+  already handles one specific unavailability case — a dead `task_execution` job — through a
+  real inspect→classify→salvage→takeover pipeline. Neither reaches into
+  `app.agent_coordination`'s `AgentWorkAssignment`/`AgentScopeLease` state: confirmed zero
+  references either direction between `app/mainai_execution/recovery_*.py` and
+  `app/agent_coordination/`. A blueprint change or a coordination-layer agent going
+  unavailable has no reconciliation path back into the planner's task graph, or vice versa.
+- **Privacy/security implications:** A replan must re-validate authority/approval for any
+  NEWLY implied work, never inherit the original blueprint's approval by default — same
+  principle FV-RSN-003 (§12a) already states for plan revisions generally.
+- **Acceptance criteria:** Not yet defined.
+- **Activation prerequisites:** FV-BLU-001, FV-BLU-002.
+- **Phase:** Future phase.
+
+### FV-BLU-004 — Iterative builder/reviewer feedback loop
+- **Domain:** Quality / coordination process.
+- **Source/provenance:** Founder-provided (2026-11-16); no historical repository source.
+- **Requirement:** A builder/reviewer cycle where a reviewer can request changes, the
+  builder revises, and re-review occurs — not a one-shot pass/fail.
+- **Dependencies:** FV-BLU-001.
+- **Status:** No source for an iterative cycle specifically. What exists: scope-lease rules
+  already let a read-only reviewer lease coexist with a writer's lease
+  (`test_read_only_reviewer_may_overlap_writer`), and a dependency-completion mechanism
+  already releases a waiting reviewer once its dependency assignment completes
+  (`test_dependency_completion_releases_reviewer`) — real, tested primitives for reviewer
+  concurrency and sequencing. No "reviewer requested changes → builder must revise → re-
+  review required" state exists on top of them; today's review step (FV-WRK-005, already
+  recorded) is a single pass/fail decision, not a cycle.
+- **Privacy/security implications:** None beyond what the existing lease/approval mechanisms
+  already enforce.
+- **Acceptance criteria:** Not yet defined.
+- **Activation prerequisites:** FV-WRK-005 (cross-model independent review must exist before
+  an iterative version of it does).
+- **Phase:** Future phase.
+
+### FV-BLU-005 — Explicit integration contracts for dependent work
+- **Domain:** Architecture / integration quality.
+- **Source/provenance:** Founder-provided (2026-11-16); no historical repository source.
+- **Requirement:** Dependent work synchronizes through explicit integration contracts
+  (agreed interfaces/schemas/acceptance tests committed to before work starts) and verified
+  artifacts at convergence — not just ordering.
+- **Dependencies:** FV-BLU-001.
+- **Status:** No source for a contract artifact specifically. What exists:
+  `AgentWorkAssignmentDependency` enforces real ordering/wait-for-completion between
+  assignments (`test_dependency_wait`, `test_dependency_completion_releases_reviewer`) — a
+  genuine, tested sequencing gate. It is an ordering mechanism, not a contract: nothing
+  records what interface the upstream assignment promises, or verifies the downstream side
+  against it once both complete.
+- **Privacy/security implications:** None beyond what dependency ordering already enforces.
+- **Acceptance criteria:** Not yet defined.
+- **Activation prerequisites:** FV-BLU-001.
+- **Phase:** Future phase.
+
+No new orchestration authority, planning engine, project/workspace model, or execution system
+is introduced by this section. `first_cycle_go=false`; documentation only, as directed.
+
 ## 14. Concise roadmap
 
 **First-cycle prerequisites** (from `docs/LIFE_FIRST_CYCLE_READINESS_MATRIX.md`, PR #446 —
@@ -1089,9 +1253,11 @@ own classification language): LifeOS/Life Phone/Life App/Store (§1), Life Datin
 Social/Life Causes (§4), Life Word/Sheets/Teams (§6), Life Engineering/Security Lab (§7, except
 FV-DEV-001 which already has its own PR), portable installation (§8), multi-tenant business AI
 (§8), the multi-model AI workforce (§11, except FV-WRK-007/008/002/003 which are reusable
-principles satisfiable now) and STRATO terminal execution (§12) in their entirety as
-*capabilities*, though §12's measurement item (FV-TRM-006) and §11's spend-reuse item
-(FV-WRK-007) are exceptions already noted above.
+principles satisfiable now), STRATO terminal execution (§12), and blueprint-driven
+collaborative AI development (§13a, FV-BLU-001 through FV-BLU-005 — the planner↔coordination
+bridge, multi-project isolation, cross-system replanning, iterative review, and integration
+contracts) in their entirety as *capabilities*, though §12's measurement item (FV-TRM-006)
+and §11's spend-reuse item (FV-WRK-007) are exceptions already noted above.
 
 **Long-horizon platform research** (explicitly research questions, not assumed-missing
 implementations): AOSP viability (FV-OS-001); dating-matching scientific evidence base
