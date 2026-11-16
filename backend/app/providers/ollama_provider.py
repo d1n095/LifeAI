@@ -1,7 +1,16 @@
+from urllib.parse import urlparse
+
 import httpx
 
 from app.config import get_settings
 from app.providers.base import ChatResult, LLMProvider, Message, ProviderError
+
+# Hosts that mean "this Ollama runs on the same host/deployment as the backend, so a call to
+# it is NOT an external-AI disclosure": the loopback addresses, and the in-compose service
+# name `ollama` (the default ollama_base_url, resolved on the deployment's own internal
+# network, never over the public internet). Anything else is a real remote endpoint and is
+# treated as external egress -- see is_external_egress below.
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "ollama"})
 
 
 class OllamaProvider(LLMProvider):
@@ -15,6 +24,20 @@ class OllamaProvider(LLMProvider):
     def is_configured(self) -> bool:
         # Local provider is always "configured" — availability is checked at call time.
         return True
+
+    @property
+    def is_external_egress(self) -> bool:
+        """False (on-host, no external-AI disclosure) only when the CONFIGURED base URL points
+        at the loopback interface or the in-deployment `ollama` container; True otherwise.
+
+        Deliberately derived from the live `ollama_base_url`, never hardcoded to False for the
+        provider class: `ollama_base_url` is operator-configurable and could legitimately point
+        at a remote Ollama host over the network, which IS external egress. Classifying by the
+        provider name alone would let a misconfigured remote endpoint be ledgered as "nothing
+        left the machine" -- exactly the false-negative this fail-safe exists to prevent. A
+        URL we cannot parse a host from counts as external (the safe side)."""
+        host = (urlparse(self.settings.ollama_base_url).hostname or "").lower().strip("[]")
+        return host not in _LOCAL_HOSTS
 
     async def chat(self, messages: list[Message], model: str, *, timeout: float | None = None, **kwargs) -> ChatResult:
         payload = {
