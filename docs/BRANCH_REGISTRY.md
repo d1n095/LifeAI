@@ -9602,3 +9602,25 @@ test` kommer troligen också behöva samma `DEFAULT_LLM_MODEL`/`DEFAULT_EMBEDDIN
 **Ingen merge/deploy/aktivering/säkerhetsgrind ändrad. `first_cycle_go=false` genomgående.**
 Grundaren avgör om denna evidens räcker för att gå vidare, och i vilken ordning relativt
 punkterna ovan.
+
+## New branch: `claude/founder-requirements-consolidation` (2026-11-16) — docs-only, PR TBD
+
+**Scope:** `docs/LIFE_FOUNDER_REQUIREMENTS_INDEX.md` (new file) — a founder-requirements/audit-
+findings consolidation sidequest ("FOUNDER SIDEQUEST — CONSOLIDATE LIFEAI REQUIREMENTS, NOTES &
+AUDIT FINDINGS"). Maps every universal founder requirement and independent-audit finding to its
+authoritative existing document, with current-code-revalidated status for each finding (not a new
+source of truth — an index into #440/#443/#445/#446/#447/#450 and the existing `docs/*.md` set).
+Two new P0 engineering defects confirmed present at the current `dev` tip while preparing this index
+(not fixed here, docs-only): `PROV-1` (GitHub write token persisted in cleartext into a worktree's
+`.git/config` via `worktree.py`'s `_authed_remote_url()`) and `VS-1` (an empty `verification_plan`
+on a `repo_edit`/`open_pr` task is never rejected at plan-validation time, only trivially "passes"
+at verification time — `verify.py`/`planner.py`). Neither overlaps any currently open branch's own
+diff.
+
+**Depends on:** nothing merges-wise — branched fresh from `dev` tip (`69dc5ea5`), same Merge-regel
+discipline as #450. Reads (never merges) `claude/ecosystem-vision-reconciliation` (#445) and
+`claude/first-cycle-readiness-matrix` (#446) by ref, to cross-reference without duplicating their
+content while they're still open.
+
+**Blocks nothing; blocked by nothing.** Pure documentation; safe to merge independently of #440/
+#443/#445/#446/#447/#450's own merge order. `first_cycle_go=false`, no merge/deploy/activation.
