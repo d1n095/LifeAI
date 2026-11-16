@@ -155,6 +155,16 @@ class AdapterTimeoutError(RuntimeError):
     background."""
 
 
+class AdapterScopeNotEnforceableError(RuntimeError):
+    """Founder directive (independent review, Freebuff finding AT-1b/AT-1c): raised by
+    `LocalCLIAdapter.start_assignment()` when the assignment requests an `allowed_paths` scope
+    narrower than this adapter's own `cwd` -- the ONLY boundary it can genuinely enforce today
+    (a plain subprocess `cwd`, no chroot/namespace/landlock sandbox beneath it; the external CLI
+    tool it execs can read/write anywhere its own OS permissions allow once running). An
+    unenforceable restriction must fail closed here, never be silently accepted as if it were
+    actually being honored."""
+
+
 class LocalCLIAdapter:
     """Provider-neutral real adapter over a LOCAL CLI executable -- the SAME bounded
     subprocess mechanism serves Claude Code, Cursor Agent, or Codex, parametrized entirely by
@@ -176,7 +186,15 @@ class LocalCLIAdapter:
 
     `send_instruction()`/`resume()` are deliberately `NotImplementedError` -- this is a bounded,
     single-shot, non-interactive invocation (start, wait up to the bound, capture the result),
-    not an interactive session this coordination layer would have to trust mid-flight."""
+    not an interactive session this coordination layer would have to trust mid-flight.
+
+    `allowed_paths`, if ever supplied non-empty, is a FAIL-CLOSED guard, not an enforcement
+    mechanism (hardening finding AT-1b/AT-1c): `AgentWorkAssignment.allowed_paths` can express
+    a path-prefix scope narrower than the whole worktree (e.g. a single file within a larger
+    checkout), but this adapter has no subprocess-level sandbox capable of actually confining
+    the external CLI tool to anything narrower than its own `cwd`. Rather than silently running
+    with an unenforced restriction the caller believes is being honored, `start_assignment()`
+    refuses outright whenever a narrower-than-cwd scope is requested."""
 
     def __init__(
         self,
@@ -187,6 +205,7 @@ class LocalCLIAdapter:
         cwd: str,
         timeout_seconds: int,
         env: dict[str, str] | None = None,
+        allowed_paths: tuple[str, ...] = (),
     ):
         self._provider_key = provider_key
         self._executable = executable
@@ -194,6 +213,7 @@ class LocalCLIAdapter:
         self._cwd = cwd
         self._timeout_seconds = timeout_seconds
         self._env = dict(env or {})
+        self._allowed_paths = tuple(allowed_paths)
         self._processes: dict[UUID, asyncio.subprocess.Process] = {}
 
     async def health(self) -> AgentHealth:
@@ -212,6 +232,13 @@ class LocalCLIAdapter:
         return AdapterCapabilities(supports_cancel=True)
 
     async def start_assignment(self, assignment_id: UUID) -> None:
+        if self._allowed_paths:
+            raise AdapterScopeNotEnforceableError(
+                f"assignment {assignment_id} requests allowed_paths={self._allowed_paths!r}, narrower than "
+                f"this adapter's own cwd ({self._cwd!r}) -- LocalCLIAdapter has no sandbox capable of "
+                "enforcing anything narrower than its full working directory, so it refuses to start "
+                "rather than silently run the external CLI tool with an unenforced path restriction."
+            )
         argv = [self._executable, *self._args_template]
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -258,7 +285,9 @@ class LocalCLIAdapter:
         )
 
 
-def get_real_adapter(provider_key: str, *, cwd: str, env: dict[str, str] | None = None) -> "AgentAdapter":
+def get_real_adapter(
+    provider_key: str, *, cwd: str, env: dict[str, str] | None = None, allowed_paths: tuple[str, ...] = ()
+) -> "AgentAdapter":
     """The founder-controlled factory: returns a real `LocalCLIAdapter` ONLY when
     `app.agent_coordination.adapter_config.real_adapter_config()` confirms every precondition
     (enabled, executable found, an explicit args_template configured); returns
@@ -271,7 +300,13 @@ def get_real_adapter(provider_key: str, *, cwd: str, env: dict[str, str] | None 
     `app.agent_coordination.adapter_config.resolve_adapter_env(provider_key)` -- the founder's
     own explicit per-provider allowlist of ambient variable NAMES, never a blind inheritance of
     this process's full environment. Passing `env={}` explicitly still means "no environment at
-    all," exactly as before -- only an OMITTED `env` triggers the allowlist default."""
+    all," exactly as before -- only an OMITTED `env` triggers the allowlist default.
+
+    `allowed_paths`, when the caller has an `AgentWorkAssignment.allowed_paths` narrower than
+    the whole worktree, is passed straight through to `LocalCLIAdapter` -- which will then
+    refuse to start rather than run with an unenforceable restriction (see its own docstring,
+    hardening finding AT-1b/AT-1c). Omitted (the default `()`) preserves prior behavior exactly:
+    the adapter's only real boundary remains `cwd` itself."""
 
     from app.agent_coordination.adapter_config import real_adapter_config, resolve_adapter_env
 
@@ -281,5 +316,6 @@ def get_real_adapter(provider_key: str, *, cwd: str, env: dict[str, str] | None 
     executable, args_template, timeout_seconds = config
     resolved_env = resolve_adapter_env(provider_key) if env is None else env
     return LocalCLIAdapter(
-        provider_key=provider_key, executable=executable, args_template=args_template, cwd=cwd, timeout_seconds=timeout_seconds, env=resolved_env
+        provider_key=provider_key, executable=executable, args_template=args_template, cwd=cwd, timeout_seconds=timeout_seconds,
+        env=resolved_env, allowed_paths=allowed_paths,
     )
