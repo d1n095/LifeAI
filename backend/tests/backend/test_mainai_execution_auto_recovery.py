@@ -18,6 +18,7 @@ Covers:
     auto-taken-over -- execute_takeover()'s own approval gate (recovery_approval.py) stops the
     tick exactly like it stops a founder-triggered call, and the tick must not auto-approve it."""
 
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -144,6 +145,47 @@ async def test_demo_auto_recovery_tick_detects_and_takes_over_a_dead_job_with_no
     assert call_counter[0] == 1
     db_session.refresh(task)
     assert task.status == MainAITaskStatus.completed
+
+
+@pytest.mark.asyncio
+async def test_auto_recovery_tick_detects_a_dead_job_even_if_the_workers_own_clock_lags(
+    db_session, superuser_db, owner_id, monkeypatch
+):
+    """Found investigating a genuine CI failure (two independent runs, same 5 tests, both
+    deterministic -- not flaky): _advance_mainai_execution_auto_recovery()'s own detection
+    query compared mainai_jobs.lease_expires_at (always written and otherwise always compared
+    via Postgres's own now()/clock_timestamp() everywhere else in this codebase -- see
+    app/jobs/mainai_job_lease.py) against Python's datetime.utcnow(). Any clock skew between
+    the worker process and the database server -- plausible under the severe disk I/O
+    contention this run's own Postgres log showed (one checkpoint write took ~270 seconds) --
+    could make a genuinely dead job invisible to this tick for as long as the skew persists,
+    with no error raised at all.
+
+    Monkeypatches app.worker's datetime so utcnow() reads a full hour BEHIND the real time --
+    far more skew than any plausible real clock drift, to prove the fix (comparing against
+    Postgres's own clock_timestamp(), never Python's) no longer depends on this value at all.
+    Before the fix, this would have made the lease (expired ~1 second ago in real, Postgres
+    time) look like it still had ~1 hour left, and the assertion below would fail with
+    NoResultFound exactly like the real CI failure did."""
+    import app.worker as worker_module
+
+    class _LaggingClock(worker_module.datetime):
+        @classmethod
+        def utcnow(cls):
+            return super().utcnow() - timedelta(hours=1)
+
+    monkeypatch.setattr(worker_module, "datetime", _LaggingClock)
+
+    task, _goal, dead_job = _dispatch_and_claim(db_session, superuser_db, owner_id, task_type="read_only_audit")
+    dead_job_id = dead_job.id
+    _kill_lease(superuser_db, db_session, owner_id, dead_job_id)
+
+    worker = Worker()
+    await worker._advance_mainai_execution_auto_recovery(superuser_db)
+
+    record = superuser_db.query(MainAIRecoveryRecord).filter(MainAIRecoveryRecord.job_id == dead_job_id).one()
+    assert record.classification == RecoveryClassification.nothing_done
+    assert record.status == MainAIRecoveryStatus.completed
 
 
 @pytest.mark.asyncio

@@ -30,7 +30,7 @@ import socket
 import uuid
 from datetime import datetime
 
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.account.erasure import attempt_storage_deletion_task, claim_storage_deletion_tasks
@@ -649,15 +649,23 @@ class Worker:
             POST /tasks/{id}/recover as a path -- and even that used to fail at
             mark_job_superseded() until that fence accepted the terminal-without-finalize case.
         """
-        now = datetime.utcnow()
         dead_jobs_by_id: dict = {}
+        # DB-side clock_timestamp(), not Python's datetime.utcnow(): app/jobs/mainai_job_lease.py
+        # (the canonical writer of this exact column) always sets and compares lease_expires_at
+        # using Postgres's own now()/clock_timestamp(), never Python's. Comparing a
+        # Postgres-set deadline against a Python-read timestamp reintroduces the same class of
+        # cross-clock mismatch already found and fixed twice elsewhere this round (F3, OpenCode's
+        # independent review of #425) -- here it can cause a genuinely dead task_execution job to
+        # go undetected by this tick for as long as any clock skew/drift between the Python
+        # process and the database server persists, silently stalling auto-recovery rather than
+        # raising an error.
         lease_dead = (
             db.query(MainAIJob)
             .filter(
                 MainAIJob.job_type == "task_execution",
                 MainAIJob.status == MainAIJobStatus.running,
                 MainAIJob.lease_expires_at.isnot(None),
-                MainAIJob.lease_expires_at < now,
+                MainAIJob.lease_expires_at < func.clock_timestamp(),
             )
             .order_by(MainAIJob.lease_expires_at.asc())
             .limit(self._MAX_AUTO_RECOVERY_SCANS_PER_TICK)
