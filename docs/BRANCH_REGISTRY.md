@@ -9401,3 +9401,26 @@ STRATO-avsnittet — inte duplicerat som en separat uppgift, exakt enligt grunda
 
 **Ingen merge/deploy/aktivering/API-utgift/modellaktivering. `first_cycle_go=false`
 genomgående.**
+
+## Grundardirektiv "CONFIRMED. CONTINUE." (2026-11-16) — slutgiltig acceptans-handoff på #441, commit `c2e936da`
+
+**Ingenjörsarbetet är KLART för första cykelns faktiska omfattning** — varje post i #446:s
+beredskapsmatris är antingen RESOLVED eller korrekt klassificerad CONDITIONAL på en förmåga
+(autonom dispatch, dokumentingestion, STRATO-terminalexekvering) som inte ingår i omfattningen
+och inte är aktiverad. Färsk exakt-SHA-ögonblicksbild (direkt via `get_check_runs`, inte
+återgiven) tvärs #440/#442/#443/#444/#445/#446: alla fyra riktiga backend-signaler gröna
+överallt, bara den kända, redan spårade driften (PR #323) röd — ingen ny, odokumenterad CI-
+brist någonstans.
+
+**Den enda äkta kvarstående blockeraren: oberoende säkerhetsgodkännande har INTE faktiskt ägt
+rum.** Varje dokument i den här kedjan — inklusive detta — är FÖRBEREDELSE för granskning,
+producerat av samma system vars eget arbete granskas, aldrig granskningen själv. **Vem måste
+godkänna:** grundaren, som den ensamma mänskliga principalen i detta enoperatörsystem — kan
+delegera till en genuint EXTERN mänsklig granskare, ALDRIG till en annan AI-session (det skulle
+bara flytta självcertifieringsproblemet, inte lösa det). **Vad acceptans konkret innebär**
+(ett förslag, inget har funnits tidigare): ett daterat, nedtecknat beslut som namnger exakt vad
+som accepteras per PR/SHA — FÖRE någon `first_cycle_go`-flipp, som själv blir en egen liten,
+separat granskad ändring, aldrig buntad in i en dokumentations-PR och aldrig utförd utan det
+redan nedtecknade godkännandet.
+
+**Ingen kodändring. Ingen merge/deploy/aktivering. `first_cycle_go=false` genomgående.**
