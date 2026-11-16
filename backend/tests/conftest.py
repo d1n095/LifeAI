@@ -27,6 +27,10 @@ os.environ.setdefault("FOUNDER_PASSWORD", "TestFounderPassword123!")
 os.environ.setdefault("FRONTEND_ORIGINS", "http://127.0.0.1:3020")
 os.environ.setdefault("PUBLIC_APP_URL", "http://127.0.0.1:3020")
 os.environ.setdefault("ENABLE_SCHEDULED_CLEANUP", "false")  # tests trigger cleanup explicitly
+# app/rag/extract_isolated.py fails closed (same as production) unless ENVIRONMENT is
+# explicitly a recognized safe value — make the existing "pytest runs as dev" assumption
+# explicit here instead of relying on an absent variable meaning the same thing by accident.
+os.environ.setdefault("ENVIRONMENT", "development")
 os.environ.setdefault("REDIS_URL", f"redis://localhost:6379/{_redis_db}")  # isolated per pytest process; dev uses DB 0
 os.environ.setdefault("OPENAI_API_KEY", "fake-key-for-tests")
 # Life Library durable-worker package: a disposable directory outside the repo, unique per

@@ -23,6 +23,13 @@ _MAX_INPUT_BYTES = 25 * 1024 * 1024
 _MAX_OUTPUT_BYTES = 50 * 1024 * 1024
 _DEFAULT_TIMEOUT_SECONDS = 30.0
 
+# Allowlist, not a "!= production" blocklist: an allowlist fails closed on anything
+# unrecognized (unset, "Production", "PRODUCTION", "prod", "staging", a typo) — a blocklist
+# that only special-cased the literal string "production" would silently take the weaker,
+# same-host subprocess path for every one of those, which is exactly the failure mode this
+# guards against. Normalized (stripped, lowercased) before comparison for the same reason.
+_LOCAL_FALLBACK_SAFE_ENVIRONMENTS = {"development", "test"}
+
 
 class ExtractionIsolationError(RuntimeError):
     """The isolated parser failed without exposing parser internals or host paths."""
@@ -141,8 +148,11 @@ def extract_text_isolated(
 ) -> str:
     """Use the secretless parser service when configured, otherwise use local isolation in dev.
 
-    Production deliberately fails closed if the dedicated service is unavailable or
-    unconfigured. No shell is used and source bytes are passed only over stdin or a UDS.
+    Fails closed unless ENVIRONMENT is recognized as a safe non-production value. This is
+    deliberately an allowlist, not a check for the absence of "production": an unset,
+    misspelled, or differently-cased ENVIRONMENT must never silently downgrade to the
+    weaker, same-host subprocess fallback — it must behave exactly like production and
+    refuse. No shell is used and source bytes are passed only over stdin or a UDS.
     """
     if len(raw) > _MAX_INPUT_BYTES:
         raise ExtractionIsolationError("Document exceeds the parser input limit.")
@@ -152,6 +162,7 @@ def extract_text_isolated(
     socket_path = os.environ.get("PARSER_SOCKET_PATH")
     if socket_path:
         return _extract_via_socket(filename, raw, socket_path, timeout_seconds)
-    if os.environ.get("ENVIRONMENT") == "production":
+    environment = os.environ.get("ENVIRONMENT", "").strip().lower()
+    if environment not in _LOCAL_FALLBACK_SAFE_ENVIRONMENTS:
         raise ExtractionIsolationError("Isolated parser service is not configured.")
     return extract_text_in_subprocess(filename, raw, timeout_seconds=timeout_seconds)

@@ -207,6 +207,58 @@ def test_production_fails_closed_when_isolated_parser_is_unconfigured(monkeypatc
         extract_text_isolated("input.txt", b"secret document")
 
 
+@pytest.mark.parametrize(
+    "unsafe_environment_value",
+    [
+        None,  # ENVIRONMENT unset entirely — OpenCode finding F2
+        "",
+        "Production",
+        "PRODUCTION",
+        " production ",
+        "prod",
+        "staging",
+        "productio",
+    ],
+)
+def test_fails_closed_on_unset_or_non_exact_environment_value(
+    monkeypatch, unsafe_environment_value
+) -> None:
+    """F2 (OpenCode independent review of #425): the isolated parser must fail closed for
+    ANY ENVIRONMENT value it cannot positively confirm is safe for the weaker, same-host
+    subprocess fallback — not just the exact string "production". An unset variable, a
+    case/whitespace variant, or a near-miss like "prod" must behave exactly like a real
+    production deployment and refuse, never silently take the weaker path."""
+    if unsafe_environment_value is None:
+        monkeypatch.delenv("ENVIRONMENT", raising=False)
+    else:
+        monkeypatch.setenv("ENVIRONMENT", unsafe_environment_value)
+    monkeypatch.delenv("PARSER_SOCKET_PATH", raising=False)
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail(
+            "an unrecognized ENVIRONMENT value must never reach the local subprocess fallback"
+        ),
+    )
+
+    with pytest.raises(ExtractionIsolationError, match="not configured"):
+        extract_text_isolated("input.txt", b"secret document")
+
+
+@pytest.mark.parametrize("safe_environment_value", ["development", "test", " Development ", "TEST"])
+def test_recognized_safe_environments_still_use_the_local_fallback(
+    monkeypatch, safe_environment_value
+) -> None:
+    """Non-regression: the normalized allowlist must still accept the values dev/CI actually
+    use (including case/whitespace variants of them), so closing F2 doesn't also break the
+    legitimate local-development and test fallback path."""
+    monkeypatch.setenv("ENVIRONMENT", safe_environment_value)
+    monkeypatch.delenv("PARSER_SOCKET_PATH", raising=False)
+
+    raw = b"Founder decision: safe environments still parse locally.\n"
+    assert extract_text_isolated("note.txt", raw) == raw.decode()
+
+
 def test_configured_parser_outage_is_fail_closed_and_retryable(monkeypatch) -> None:
     monkeypatch.setenv("ENVIRONMENT", "production")
     monkeypatch.setenv("PARSER_SOCKET_PATH", "/run/lifeai-parser/not-running.sock")
