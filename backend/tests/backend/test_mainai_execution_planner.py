@@ -514,7 +514,7 @@ def _fake_chat(response_text: str):
 _VALID_PLAN_JSON = """{
   "tasks": [
     {"description": "Read the relevant files", "task_type": "read_only_audit", "depends_on": [], "risk_level": "low"},
-    {"description": "Apply the fix", "task_type": "repo_edit", "depends_on": [0], "risk_level": "medium", "approval_required": false},
+    {"description": "Apply the fix", "task_type": "repo_edit", "depends_on": [0], "risk_level": "medium", "approval_required": false, "verification_plan": [{"kind": "targeted_tests", "target": "tests/backend/test_repo_edit_fix.py"}]},
     {"description": "Run the targeted tests", "task_type": "run_tests", "depends_on": [1], "verification_plan": [{"kind": "targeted_tests", "target": "tests/backend/test_x.py"}]}
   ]
 }"""
@@ -580,6 +580,45 @@ async def test_propose_plan_via_ai_strips_markdown_code_fences(db_session, owner
 
     specs, _provider, _model = await planner.propose_plan_via_ai(db_session, goal=goal)
     assert len(specs) == 3
+
+
+@pytest.mark.asyncio
+async def test_propose_plan_via_ai_rejects_a_repo_edit_task_with_an_empty_verification_plan(db_session, owner_id, monkeypatch):
+    """Freebuff finding VS-1: an AI-proposed repo_edit task with NO verification_plan steps
+    at all must never parse into a usable PlannedTaskSpec -- app/mainai_execution/verify.py's
+    verify_task() deliberately passes an empty plan trivially, so without this check a
+    hallucinated or prompt-injected plan omitting verification would reach a real git push
+    with zero actual test evidence. Negative control: before this fix, propose_plan_via_ai()
+    never looked at this at all and this test's pytest.raises would fail."""
+    unverified_repo_edit = """{
+      "tasks": [
+        {"description": "Apply the fix", "task_type": "repo_edit", "depends_on": [], "risk_level": "medium"}
+      ]
+    }"""
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat(unverified_repo_edit))
+    goal = _goal(db_session, owner_id)
+
+    with pytest.raises(planner.PlanValidationError, match="empty verification_plan"):
+        await planner.propose_plan_via_ai(db_session, goal=goal)
+
+
+@pytest.mark.asyncio
+async def test_propose_plan_via_ai_still_accepts_an_empty_verification_plan_for_read_only_audit(db_session, owner_id, monkeypatch):
+    """Regression: the VS-1 check is scoped to task_type == 'repo_edit' only -- a
+    read_only_audit task (which legitimately has nothing to verify, per verify_task()'s own
+    docstring) with an empty verification_plan must still parse successfully, exactly as
+    before this fix."""
+    unverified_audit = """{
+      "tasks": [
+        {"description": "Just look at the files", "task_type": "read_only_audit", "depends_on": [], "risk_level": "low"}
+      ]
+    }"""
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat(unverified_audit))
+    goal = _goal(db_session, owner_id)
+
+    specs, _provider, _model = await planner.propose_plan_via_ai(db_session, goal=goal)
+    assert len(specs) == 1
+    assert specs[0].verification_plan == []
 
 
 @pytest.mark.asyncio
