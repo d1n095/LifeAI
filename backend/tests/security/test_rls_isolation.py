@@ -146,22 +146,52 @@ def test_user_never_searches_another_users_document_chunks(db_session, make_veri
     doc_b = _make_document(db_session, user_b.id)
 
     _set_rls_user(db_session, user_a.id)
-    upsert_chunks(db_session, doc_a.id, user_a.id, ["A:s sokbara innehall"], [_fake_vector(0.1)])
+    upsert_chunks(
+        db_session,
+        doc_a.id,
+        user_a.id,
+        ["A:s sokbara innehall"],
+        [_fake_vector(0.1)],
+        embedding_model="rls-test-model",
+        embedding_native_dim=EMBEDDING_DIM,
+    )
     db_session.commit()
 
     _set_rls_user(db_session, user_b.id)
-    upsert_chunks(db_session, doc_b.id, user_b.id, ["B:s sokbara innehall"], [_fake_vector(0.1)])
+    upsert_chunks(
+        db_session,
+        doc_b.id,
+        user_b.id,
+        ["B:s sokbara innehall"],
+        [_fake_vector(0.1)],
+        embedding_model="rls-test-model",
+        embedding_native_dim=EMBEDDING_DIM,
+    )
     db_session.commit()
 
     # Same query vector for both inserts (0.1) — if isolation were broken, A's search would
     # trivially also match B's chunk (identical embedding, distance 0), making this a
     # meaningful test instead of one that passes by accident because the vectors differ.
     _set_rls_user(db_session, user_a.id)
-    results_a = search(db_session, user_a.id, _fake_vector(0.1), top_k=10)
+    results_a = search(
+        db_session,
+        user_a.id,
+        _fake_vector(0.1),
+        top_k=10,
+        embedding_model="rls-test-model",
+        embedding_native_dim=EMBEDDING_DIM,
+    )
     assert [r["text"] for r in results_a] == ["A:s sokbara innehall"]
 
     _set_rls_user(db_session, user_b.id)
-    results_b = search(db_session, user_b.id, _fake_vector(0.1), top_k=10)
+    results_b = search(
+        db_session,
+        user_b.id,
+        _fake_vector(0.1),
+        top_k=10,
+        embedding_model="rls-test-model",
+        embedding_native_dim=EMBEDDING_DIM,
+    )
     assert [r["text"] for r in results_b] == ["B:s sokbara innehall"]
 
     # Attacker scenario: even if application code somewhere passed the WRONG owner_id to
@@ -170,7 +200,14 @@ def test_user_never_searches_another_users_document_chunks(db_session, make_veri
     # back to being unfiltered". This is what makes it defense in depth rather than two
     # copies of the same single point of failure.
     _set_rls_user(db_session, user_a.id)
-    results_mismatched = search(db_session, user_b.id, _fake_vector(0.1), top_k=10)
+    results_mismatched = search(
+        db_session,
+        user_b.id,
+        _fake_vector(0.1),
+        top_k=10,
+        embedding_model="rls-test-model",
+        embedding_native_dim=EMBEDDING_DIM,
+    )
     assert results_mismatched == []
 
 

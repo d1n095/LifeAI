@@ -23,7 +23,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.jobs.lease import renew_lease
+from app.jobs.lease import ImportJobLeaseLostError, renew_lease
 from app.jobs.lock import JobLock, JobLockUnavailable
 from app.models.document import (
     ActiveTruthStatus,
@@ -38,7 +38,8 @@ from app.request_context import current_user_id as current_user_id_var
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_version import KnowledgeVersion
 from app.rag.claims import extract_claims_for_document
-from app.rag.extract import extract_text
+from app.rag.extract_isolated import ParserServiceUnavailableError
+from app.rag.extract_isolated import extract_text_isolated as extract_text
 from app.rag.ingest import index_document
 from app.rag import media_import
 from app.rag.zip_import import ZipSecurityError, sha256_bytes, validate_and_extract_zip
@@ -291,6 +292,8 @@ async def _resume_incomplete_document(
         db.commit()
         try:
             text_content = extract_text(filename, content)
+        except ParserServiceUnavailableError:
+            raise
         except Exception as exc:  # noqa: BLE001 - same per-file-failure handling as a first attempt
             document.status = IndexStatus.extraction_failed
             document.error_message = f"Kunde inte extrahera text: {exc}"
@@ -592,6 +595,8 @@ async def _import_one_file(
         db.commit()
         try:
             text_content = extract_text(filename, content)
+        except ParserServiceUnavailableError:
+            raise
         except Exception as exc:  # noqa: BLE001 - one file's extraction failure must not abort the batch
             # P1: reclassified from the old undifferentiated `failed` — the file's CONTENT is
             # the problem here, not the provider or storage, so this is terminal too (see
@@ -693,7 +698,38 @@ async def _import_one_file(
     )
 
 
-async def run_import_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID) -> None:
+def _renew_import_authority(
+    db: Session,
+    job_id: uuid.UUID,
+    claim_worker_id: str | None,
+    lock: JobLock,
+    *,
+    commit_db: bool = True,
+) -> None:
+    """Fence both coordination layers; any lost fence stops the stale execution."""
+    if claim_worker_id is None:
+        # Unit-level direct callers predate the production worker boundary. The real worker
+        # always supplies its process-unique claimant id.
+        return
+    if not lock.renew():
+        raise ImportJobLeaseLostError(job_id, claim_worker_id)
+    if not renew_lease(
+        db,
+        job_id,
+        claim_worker_id,
+        WORKER_LEASE_SECONDS,
+        commit=commit_db,
+    ):
+        raise ImportJobLeaseLostError(job_id, claim_worker_id)
+
+
+async def run_import_job(
+    db: Session,
+    job_id: uuid.UUID,
+    owner_id: uuid.UUID,
+    *,
+    claim_worker_id: str | None = None,
+) -> None:
     """Restart-safe worker entry point (DEL 3): one attempt at the actual import work for a
     job app/worker.py's claim_next_job() has already atomically marked `running` under a
     Postgres lease (`FOR UPDATE SKIP LOCKED`) — that claim is what guarantees no two workers
@@ -709,8 +745,9 @@ async def run_import_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID) ->
     backoff instead of racing without coordination. Contended locks (`acquire() is False`)
     still fail the job as a permanent "identical import already in progress" outcome.
 
-    Never raises for a normal per-file failure (those become FileOutcome entries); DOES
-    raise for a genuine, unexpected orchestration-level error AND for JobLockUnavailable.
+    Never raises for a normal per-file failure (those become FileOutcome entries); a
+    transient parser-service transport outage is the exception and reaches the worker retry
+    loop. Also raises for unexpected orchestration errors and JobLockUnavailable.
     Unlike the old synchronous-BackgroundTask design, this function itself does NOT retry —
     app/worker.py's caller owns the retry/backoff loop (app/jobs/retry.py, reused unchanged).
     """
@@ -722,7 +759,7 @@ async def run_import_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID) ->
         raise ValueError("Jobbet saknar en lagrad originalfil att bearbeta.")
 
     lock_key = f"import:{owner_id}:{job.source_checksum or job_id}"
-    lock = JobLock(lock_key, lease_seconds=60)
+    lock = JobLock(lock_key, lease_seconds=max(60, WORKER_LEASE_SECONDS))
     # JobLockUnavailable means Redis itself is unreachable — FAIL CLOSED, do not proceed.
     # Proceeding without the (owner, checksum) lock was a documented fail-open that allowed
     # two ImportJob rows for byte-identical content (claimed by different workers) to both
@@ -737,6 +774,14 @@ async def run_import_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID) ->
         raise
 
     if lock_held is False:
+        if claim_worker_id is not None and not renew_lease(
+            db,
+            job_id,
+            claim_worker_id,
+            WORKER_LEASE_SECONDS,
+            commit=False,
+        ):
+            raise ImportJobLeaseLostError(job_id, claim_worker_id)
         job.status = ImportJobStatus.failed
         job.failure_reason = "En identisk import pågår redan i en annan process (jobblås upptaget)."
         job.completed_at = datetime.utcnow()
@@ -745,13 +790,29 @@ async def run_import_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID) ->
         return
 
     try:
-        await _run_once(db, job, owner_id, job_id)
+        _renew_import_authority(db, job_id, claim_worker_id, lock)
+        await _run_once(
+            db,
+            job,
+            owner_id,
+            job_id,
+            claim_worker_id=claim_worker_id,
+            lock=lock,
+        )
     finally:
         if lock_held:
             lock.release()
 
 
-async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uuid.UUID) -> None:
+async def _run_once(
+    db: Session,
+    job: ImportJob,
+    owner_id: uuid.UUID,
+    job_id: uuid.UUID,
+    *,
+    claim_worker_id: str | None,
+    lock: JobLock,
+) -> None:
     """The actual import work for one attempt — opens the durably-stored original from
     app/storage/ and runs it through the same zip/single-file pipeline as before. Raises on
     an unexpected orchestration-level error (never on a per-file failure, which becomes a
@@ -761,6 +822,13 @@ async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uu
         with storage.open_read(job.source_storage_key) as f:
             raw = f.read()
     except (FileNotFoundError, StorageError) as exc:
+        _renew_import_authority(
+            db,
+            job_id,
+            claim_worker_id,
+            lock,
+            commit_db=False,
+        )
         job.status = ImportJobStatus.failed
         job.failure_reason = f"Originalfilen kunde inte läsas från lagringen: {exc}"
         job.completed_at = datetime.utcnow()
@@ -768,6 +836,13 @@ async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uu
         db.commit()
         return
 
+    _renew_import_authority(
+        db,
+        job_id,
+        claim_worker_id,
+        lock,
+        commit_db=False,
+    )
     job.status = ImportJobStatus.running
     job.started_at = job.started_at or datetime.utcnow()
     db.add(job)
@@ -781,6 +856,13 @@ async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uu
         # P2: outer_filename seeds the first segment of any nested entry's archive_path (e.g.
         # "backup.zip!/users/docs.zip!/contracts/lease.pdf") — see zip_import.py's docstring.
         zip_result = validate_and_extract_zip(raw, outer_filename=filename)  # ZipSecurityError propagates — permanent, see app/worker.py
+        _renew_import_authority(
+            db,
+            job_id,
+            claim_worker_id,
+            lock,
+            commit_db=False,
+        )
         job.manifest = zip_result.manifest
         entries = zip_result.entries
         job.progress_total = len(entries)
@@ -788,6 +870,7 @@ async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uu
         db.commit()
 
         for entry in entries:
+            _renew_import_authority(db, job_id, claim_worker_id, lock)
             if _job_is_cancelled(db, job_id):
                 outcomes.append(FileOutcome(filename=entry.filename, status="cancelled", reason="Importen avbröts."))
                 job.progress_current = len(outcomes)
@@ -857,19 +940,19 @@ async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uu
             job.file_results = [o.__dict__ for o in outcomes]
             db.add(job)
             db.commit()
-            # Heartbeat: renews the Postgres lease so a large package doesn't outlive its
-            # claim while still genuinely being worked on — see app/jobs/lease.py's
-            # renew_lease docstring. A failed renewal (locked_by no longer matches — the
-            # lease already expired and another worker reclaimed this job as abandoned) is
-            # logged, not fatal: the import keeps going rather than aborting mid-batch over
-            # a coordination signal, matching the same "per-file idempotency is the real
-            # safety net, not the lock itself" philosophy STEG 11 already established.
-            if job.locked_by and not renew_lease(db, job_id, job.locked_by, WORKER_LEASE_SECONDS):
-                logger.warning("Import %s: kunde inte förnya jobbleasen — kan ha övertagits som övergivet.", job_id)
+            _renew_import_authority(db, job_id, claim_worker_id, lock)
     else:
+        _renew_import_authority(
+            db,
+            job_id,
+            claim_worker_id,
+            lock,
+            commit_db=False,
+        )
         job.progress_total = 1
         db.add(job)
         db.commit()
+        _renew_import_authority(db, job_id, claim_worker_id, lock)
         if _job_is_cancelled(db, job_id):
             outcomes.append(FileOutcome(filename=filename, status="cancelled", reason="Importen avbröts."))
         else:
@@ -892,7 +975,17 @@ async def _run_once(db: Session, job: ImportJob, owner_id: uuid.UUID, job_id: uu
         job.file_results = [o.__dict__ for o in outcomes]
         db.add(job)
         db.commit()
+        _renew_import_authority(db, job_id, claim_worker_id, lock)
 
+    # Hold the authoritative job row through the terminal-state commit. A separate reclaim
+    # cannot interleave between this final fence and the outcome write.
+    _renew_import_authority(
+        db,
+        job_id,
+        claim_worker_id,
+        lock,
+        commit_db=False,
+    )
     succeeded = sum(1 for o in outcomes if o.status == "indexed")
     duplicates = sum(1 for o in outcomes if o.status == "duplicate")
     failed = sum(1 for o in outcomes if o.status == "failed")

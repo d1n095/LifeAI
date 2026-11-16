@@ -30,7 +30,7 @@ import socket
 import uuid
 from datetime import datetime
 
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.account.erasure import attempt_storage_deletion_task, claim_storage_deletion_tasks
@@ -42,10 +42,17 @@ from app.jobs.handlers.corpus_review import run_corpus_review_job
 from app.jobs.handlers.message_sequence_backfill import MESSAGE_SEQUENCE_BACKFILL_JOB_TYPE, run_message_sequence_backfill_job
 from app.jobs.handlers.message_source_backfill import MESSAGE_SOURCE_BACKFILL_JOB_TYPE, run_message_source_backfill_job
 from app.jobs.heartbeat import record_worker_heartbeat
-from app.jobs.lease import claim_next_job
+from app.jobs.lease import (
+    ImportJobLeaseLostError,
+    claim_next_job,
+    clear_import_lease_fence,
+    configure_import_lease_fence,
+    renew_lease,
+)
 from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.jobs.service import mark_failed, record_claimed
+from app.library.import_staging import cleanup_import_stages, recover_expired_import_uploads
 from app.mainai_execution.approval import ApprovalRequiredError
 from app.mainai_execution.execution_job import _finalize_task_outcome, resume_waiting_ci_task, run_task_execution_job
 from app.mainai_execution.executor import dispatch_ready_task, retry_task, task_for_job
@@ -57,7 +64,7 @@ from app.mainai_execution.recovery_inspector import get_or_create_recovery_recor
 from app.mainai_execution.recovery_takeover import TakeoverError, execute_takeover
 from app.mainai_execution.replan import find_replan_trigger, trigger_replan
 from app.mainai_runtime_contract import CapabilityUnavailableError, require_capability
-from app.models.document import Document, RESUMABLE_INDEX_STATUSES
+from app.models.document import Document, IndexStatus, RESUMABLE_INDEX_STATUSES
 from app.models.execution_envelope import ExecutionAuthorizationEnvelope
 from app.models.import_job import ImportJob, ImportJobStatus, PROVIDER_REQUEUE_STATUSES
 from app.models.mainai_execution import (
@@ -76,6 +83,7 @@ from app.models.mainai_wait import MainAITaskWait, MainAITaskWaitStatus
 from app.models.provider_verification import VerificationResult
 from app.models.storage_deletion_task import StorageDeletionTask
 from app.providers.verification import ensure_verified
+from app.rag.extract_isolated import ParserServiceUnavailableError
 from app.rag.library_import import run_import_job
 from app.request_context import current_user_id
 from app.rag.zip_import import ZipSecurityError
@@ -97,41 +105,108 @@ def _worker_id(settings) -> str:
     return settings.worker_id or socket.gethostname()
 
 
-async def process_claimed_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID) -> None:
+def _import_claim_id(worker_id: str) -> str:
+    """A unique fencing identity for one import claim, including same-process reclaims."""
+    return f"{worker_id[:94]}:{uuid.uuid4().hex}"
+
+
+async def process_claimed_job(
+    db: Session,
+    job_id: uuid.UUID,
+    owner_id: uuid.UUID,
+    worker_id: str | None = None,
+) -> None:
     """Runs run_import_job to completion for one already-claimed job, retrying transient
     orchestration-level failures with STEG 11's existing backoff policy (app/jobs/retry.py) —
     a straight port of the retry loop that used to live inside library_import.py's
     run_import_job before the durable-worker package split claim/retry (worker-owned) from
     per-attempt work (library_import.py-owned). Never raises: every terminal outcome is
     written to the job row itself, exactly as before."""
-    while True:
-        try:
-            await run_import_job(db, job_id, owner_id)
-            return
-        except Exception as exc:  # noqa: BLE001 - the job row is the only place this failure can safely surface
-            db.rollback()
-            job = db.get(ImportJob, job_id)
-            if job is None:
+    if worker_id is not None:
+        configure_import_lease_fence(
+            db,
+            job_id,
+            owner_id,
+            worker_id,
+            get_settings().worker_lease_seconds,
+        )
+    try:
+        while True:
+            try:
+                await run_import_job(db, job_id, owner_id, claim_worker_id=worker_id)
                 return
-            transient = is_transient_error(exc)
-            job.last_failure_transient = transient
-            if transient and job.attempt_count + 1 < job.max_attempts:
-                job.attempt_count += 1
-                job.status = ImportJobStatus.pending
+            except ImportJobLeaseLostError:
+                # Never translate a stale worker's loss of authority into a retry or terminal
+                # status. The current claimant (or a future reclaim) alone owns subsequent writes.
+                db.rollback()
+                logger.warning("Import %s: lease lost; stale worker stops without mutation.", job_id)
+                return
+            except Exception as exc:  # noqa: BLE001 - the job row is the only place this failure can safely surface
+                db.rollback()
+                job = db.get(ImportJob, job_id)
+                if job is None:
+                    return
+                if worker_id is not None and not renew_lease(
+                    db,
+                    job_id,
+                    worker_id,
+                    get_settings().worker_lease_seconds,
+                    commit=False,
+                ):
+                    db.rollback()
+                    logger.warning(
+                        "Import %s: exception arrived after lease loss; refusing stale outcome write.",
+                        job_id,
+                    )
+                    return
+                db.refresh(job)
+                transient = is_transient_error(exc)
+                job.last_failure_transient = transient
+                if transient and job.attempt_count + 1 < job.max_attempts:
+                    job.attempt_count += 1
+                    # Keep this authoritative claim while the bounded in-process backoff runs.
+                    # Marking it pending here would let another worker claim the same job before
+                    # this loop retries it.
+                    job.status = ImportJobStatus.running
+                    db.add(job)
+                    db.commit()
+                    delay = compute_backoff_seconds(job.attempt_count)
+                    logger.warning(
+                        "Import %s: tillfälligt fel (%s), försök %d/%d om %.1fs.",
+                        job_id,
+                        exc,
+                        job.attempt_count,
+                        job.max_attempts,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                job.status = ImportJobStatus.failed
+                job.failure_reason = (
+                    str(exc)
+                    if isinstance(exc, ZipSecurityError)
+                    else f"Oväntat fel under import: {exc}"
+                )
+                job.completed_at = datetime.utcnow()
+                if isinstance(exc, ParserServiceUnavailableError):
+                    incomplete_documents = (
+                        db.query(Document)
+                        .filter(
+                            Document.import_job_id == job.id,
+                            Document.status == IndexStatus.extracting,
+                        )
+                        .all()
+                    )
+                    for document in incomplete_documents:
+                        document.status = IndexStatus.extraction_failed
+                        document.error_message = "Isolerad parser var otillgänglig efter max antal försök."
+                        db.add(document)
                 db.add(job)
                 db.commit()
-                delay = compute_backoff_seconds(job.attempt_count)
-                logger.warning(
-                    "Import %s: tillfälligt fel (%s), försök %d/%d om %.1fs.", job_id, exc, job.attempt_count, job.max_attempts, delay
-                )
-                await asyncio.sleep(delay)
-                continue
-            job.status = ImportJobStatus.failed
-            job.failure_reason = str(exc) if isinstance(exc, ZipSecurityError) else f"Oväntat fel under import: {exc}"
-            job.completed_at = datetime.utcnow()
-            db.add(job)
-            db.commit()
-            return
+                return
+    finally:
+        if worker_id is not None:
+            clear_import_lease_fence(db, job_id, worker_id)
 
 
 def _set_mainai_job_rls_owner(db: Session, owner_id: uuid.UUID) -> None:
@@ -574,15 +649,23 @@ class Worker:
             POST /tasks/{id}/recover as a path -- and even that used to fail at
             mark_job_superseded() until that fence accepted the terminal-without-finalize case.
         """
-        now = datetime.utcnow()
         dead_jobs_by_id: dict = {}
+        # DB-side clock_timestamp(), not Python's datetime.utcnow(): app/jobs/mainai_job_lease.py
+        # (the canonical writer of this exact column) always sets and compares lease_expires_at
+        # using Postgres's own now()/clock_timestamp(), never Python's. Comparing a
+        # Postgres-set deadline against a Python-read timestamp reintroduces the same class of
+        # cross-clock mismatch already found and fixed twice elsewhere this round (F3, OpenCode's
+        # independent review of #425) -- here it can cause a genuinely dead task_execution job to
+        # go undetected by this tick for as long as any clock skew/drift between the Python
+        # process and the database server persists, silently stalling auto-recovery rather than
+        # raising an error.
         lease_dead = (
             db.query(MainAIJob)
             .filter(
                 MainAIJob.job_type == "task_execution",
                 MainAIJob.status == MainAIJobStatus.running,
                 MainAIJob.lease_expires_at.isnot(None),
-                MainAIJob.lease_expires_at < now,
+                MainAIJob.lease_expires_at < func.clock_timestamp(),
             )
             .order_by(MainAIJob.lease_expires_at.asc())
             .limit(self._MAX_AUTO_RECOVERY_SCANS_PER_TICK)
@@ -806,6 +889,8 @@ class Worker:
         single-job-at-a-time budget."""
         claim_db = _ClaimSession()
         try:
+            recover_expired_import_uploads(claim_db)
+            cleanup_import_stages(claim_db)
             await self._requeue_blocked_jobs(claim_db)
             self._reconcile_orphaned_documents(claim_db)
             self._retry_storage_deletion_tasks(claim_db)
@@ -824,7 +909,12 @@ class Worker:
             # second scan covers crash/retry graphs that became terminal without that gate.
             self._finalize_mainai_execution_goals(claim_db)
             self._advance_mainai_execution_tasks(claim_db)
-            claimed = claim_next_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
+            import_claim_id = _import_claim_id(self.worker_id)
+            claimed = claim_next_job(
+                claim_db,
+                import_claim_id,
+                self.settings.worker_lease_seconds,
+            )
             mainai_claimed = None if claimed is not None else claim_next_mainai_job(claim_db, self.worker_id, self.settings.worker_lease_seconds)
         finally:
             claim_db.close()
@@ -834,7 +924,7 @@ class Worker:
             logger.info("Worker %s: hämtade jobb %s.", self.worker_id, job_id)
             db = SessionLocal()
             try:
-                await process_claimed_job(db, job_id, owner_id)
+                await process_claimed_job(db, job_id, owner_id, import_claim_id)
             finally:
                 db.close()
             return True

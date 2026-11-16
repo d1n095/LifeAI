@@ -307,7 +307,12 @@ jobs:
   # ---------------------------------------------------------------------------------------
   e2e-tests:
     name: E2E — Playwright (full stack)
-    runs-on: ubuntu-latest
+    # Pinned to an explicit, supported image: `ubuntu-latest` now resolves to Ubuntu 26.04,
+    # for which Playwright 1.56.1 has no Chromium build ("does not support chromium on
+    # ubuntu26.04-x64"), so `npx playwright install chromium` fails at the download step.
+    # 24.04 is a Playwright-supported LTS; pinning keeps the browser suite reproducible and
+    # preserves full coverage. Revisit once Playwright ships a 26.04 build (microsoft/playwright#40117).
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -403,10 +408,11 @@ jobs:
       - run: npx next build
         working-directory: frontend
 
-      # First pass: functional suites (auth, session-security, account lifecycle) run with
-      # a generous login/register rate limit — they are not what's exercising that control
-      # (rate-limit.spec.ts is, below) and must not be flaky because of it purely as a side
-      # effect of how many /api/auth/login calls the suite happens to make in one window.
+      # First pass: functional suites (auth, session-security, account lifecycle and the
+      # Founder Alpha Blueprint browser boundary) run with a generous login/register rate
+      # limit — they are not what's exercising that control (rate-limit.spec.ts is, below)
+      # and must not be flaky because of it purely as a side effect of how many
+      # /api/auth/login calls the suite happens to make in one window.
       - name: Start backend (functional test mode — generous rate limits)
         working-directory: backend
         env:
@@ -422,7 +428,13 @@ jobs:
             curl -sf -o /dev/null http://127.0.0.1:8010/api/health && break
             sleep 1
           done
-      - run: npx playwright test e2e/auth.spec.ts e2e/security.spec.ts e2e/account.spec.ts --project=chromium
+      - run: >-
+          npx playwright test
+          e2e/auth.spec.ts
+          e2e/security.spec.ts
+          e2e/account.spec.ts
+          e2e/founder-alpha-blueprint.spec.ts
+          --project=chromium
         working-directory: frontend
       - name: Stop backend
         if: always()
@@ -473,7 +485,9 @@ jobs:
   # ---------------------------------------------------------------------------------------
   same-origin-proxy-test:
     name: E2E — same-origin proxy
-    runs-on: ubuntu-latest
+    # Same Playwright/Ubuntu-26.04 pin as e2e-tests above — this job also runs
+    # `npx playwright install chromium`. See that job's comment.
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -608,7 +622,10 @@ jobs:
   # ---------------------------------------------------------------------------------------
   combined-container-verify:
     name: Combined container — build, run, verify
-    runs-on: ubuntu-latest
+    # Same Playwright/Ubuntu-26.04 pin — this job also runs `npx playwright install chromium`.
+    # Branch-gated (see `if` below) so it is not exercised by this PR's matrix, but it carries
+    # the identical defect on the branches where it does run; pinned here for consistency.
+    runs-on: ubuntu-24.04
     if: github.ref == 'refs/heads/claude/verify-combined-container' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm'
     services:
       postgres:
@@ -1442,7 +1459,13 @@ jobs:
     # added temporarily so THIS branch's new round-trip/chat-citations/restart-survival/
     # provider-degradation steps actually run and can be confirmed green before merge — same
     # pattern as every prior branch in this list. Safe to remove once merged.
-    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/mainai-core-loop-v1' || github.ref == 'refs/heads/claude/vps-worker-privilege-race-hotfix'
+    # claude/import-security-integration-on-dev (PR #447) added temporarily for the same
+    # reason: this is the only job that exercises the real, separate parser container (the
+    # "Verify private data-network membership and parser isolation" step) and real lease-
+    # reclaim-on-restart ("Restart survival — kill the worker mid-job") against PR #425's
+    # actual merged code — founder directive "CONTINUE #447 INTEGRATION" Priority 4, "do not
+    # count skipped jobs as passed tests." Safe to remove once merged or no longer needed.
+    if: github.ref == 'refs/heads/claude/strato-vps-prep' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm' || github.ref == 'refs/heads/claude/mainai-core-loop-v1' || github.ref == 'refs/heads/claude/vps-worker-privilege-race-hotfix' || github.ref == 'refs/heads/claude/import-security-integration-on-dev'
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -1474,6 +1497,36 @@ jobs:
       FRONTEND_IMAGE: lifeai-vps-frontend:ci
       DOMAIN: ":80"
       REDIS_PASSWORD: ci-vps-compose-verify-redis-password-1234567890
+      # PR #425's merge (docker-compose.vps.yml) added these two REQUIRED `${VAR:?...}`
+      # compose-level interpolation guards; this job's env block was never updated to supply
+      # them, so `docker compose up` failed to even parse the file (found running this job for
+      # the first time against the merged code — see Priority 4 of "PR #447 VERIFICATION AND
+      # SECURITY CORRECTIONS"). Same model names already used as CI-only test values in
+      # founder-alpha-verification.yml/real-local-ai-verification.yml's own OLLAMA_CHAT_MODEL/
+      # OLLAMA_EMBED_MODEL — these two settings fields default harmlessly in app/config.py
+      # (default_llm_model/default_embedding_model) and are never read until a provider is
+      # independently verified/configured, so this does not affect this job's own "embedding
+      # is genuinely unconfigured at container start" check above.
+      DEFAULT_LLM_MODEL: "qwen2.5:0.5b"
+      DEFAULT_EMBEDDING_MODEL: "all-minilm"
+      # Same PR #425 merge also changed docker-compose.vps.yml's DEFAULT_LLM_PROVIDER/
+      # DEFAULT_EMBEDDING_PROVIDER from no-default to a SOFT default of `ollama`
+      # (${VAR:-ollama}), confirmed via a real run of this job: the worker successfully
+      # called http://ollama:11434/api/embeddings and /api/chat on a fresh container, with
+      # no explicit PUT /api/admin/providers/config call having happened yet — Ollama is now
+      # always on by default on the real VPS, a deliberate and reasonable production choice.
+      # That silently broke an EARLIER, unrelated step's own test precondition ("Verify a
+      # real upload now succeeds ... and the worker reads the SAME file", from the
+      # uploads-init permission fix): it explicitly relies on the embedding provider being
+      # genuinely unconfigured until it activates the CI Ollama stub itself, later in this
+      # same job, via that same admin endpoint — and its own assertion checks for the
+      # OpenAI-style "no API key configured" ("API-nyckel") pause reason, matching
+      # app/config.py's own Python-level default (default_llm_provider: str = "openai"),
+      # not Ollama's. Overriding back to "openai" here (with no OPENAI_API_KEY set, so it
+      # genuinely cannot verify) restores that step's original, correct precondition without
+      # changing its own test code or #425's deliberate compose default for a real VPS.
+      DEFAULT_LLM_PROVIDER: "openai"
+      DEFAULT_EMBEDDING_PROVIDER: "openai"
       LIFEAI_ENV_FILE: ${{ github.workspace }}/ci-secrets.env
     steps:
       - uses: actions/checkout@v4
@@ -1549,9 +1602,9 @@ jobs:
           # (the file actually deployed to the real VPS) still defines exactly these five:
           # caddy, backend, frontend, redis, worker.
           got=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -a --services | sort | tr '\n' ' ')
-          expected="backend caddy frontend ollama redis uploads-init worker "
+          expected="backend caddy frontend ollama parser redis uploads-init worker "
           [ "$got" = "$expected" ] || (echo "::error::expected services '$expected', got '$got'" && exit 1)
-          echo "Confirmed: exactly caddy, backend, frontend, redis, uploads-init, worker (production topology) plus the CI-only ollama stub — no more, no fewer."
+          echo "Confirmed: exactly caddy, backend, frontend, parser, redis, uploads-init, worker (production topology) plus the CI-only ollama stub — no more, no fewer."
 
       - name: Verify uploads-init exited successfully, did not restart, and ran as root only for the chown
         run: |
@@ -1701,7 +1754,7 @@ jobs:
 
       - name: Verify Caddy is the only container publishing anything to the host
         run: |
-          for name in backend frontend redis worker; do
+          for name in backend frontend ollama parser redis worker; do
             cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
             ports=$(docker port "$cid" || true)
             if [ -n "$ports" ]; then
@@ -1709,8 +1762,11 @@ jobs:
             fi
             echo "Confirmed: $name publishes nothing to the host."
           done
+          caddy_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q caddy)
+          docker inspect "$caddy_cid" | jq -e '.[0].HostConfig.PortBindings | length == 2 and has("80/tcp") and has("443/tcp") and (."80/tcp"[0].HostPort == "80") and (."443/tcp"[0].HostPort == "443")' >/dev/null
+          echo "Confirmed: Caddy is the only service with host bindings, and they are exactly TCP 80/443."
 
-      - name: Verify Redis network isolation — only backend can reach it, over lifeai_data only
+      - name: Verify private data-network membership and parser isolation
         run: |
           redis_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q redis)
           redis_nets=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$redis_cid")
@@ -1721,7 +1777,18 @@ jobs:
             *lifeai_data*) ;;
             *) echo "::error::redis is not on lifeai_data at all: $redis_nets" && exit 1 ;;
           esac
-          echo "Confirmed: redis is only on lifeai_data ($redis_nets)."
+          echo "Confirmed: redis is only on lifeai_data ($redis_nets); backend and worker are the authorized runtime peers."
+
+          ollama_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q ollama)
+          ollama_nets=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$ollama_cid")
+          case "$ollama_nets" in
+            *lifeai_internal*) echo "::error::ollama is on lifeai_internal — frontend/Caddy must not reach the model provider: $ollama_nets" && exit 1 ;;
+          esac
+          case "$ollama_nets" in
+            *lifeai_data*) ;;
+            *) echo "::error::ollama is not on lifeai_data: $ollama_nets" && exit 1 ;;
+          esac
+          echo "Confirmed: Ollama (including the CI stub) is only on lifeai_data ($ollama_nets)."
 
           for svc in backend worker; do
             svc_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$svc")
@@ -1739,7 +1806,7 @@ jobs:
             cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q "$name")
             nets=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$cid")
             case "$nets" in
-              *lifeai_data*) echo "::error::$name is on lifeai_data — it must never be able to reach redis: $nets" && exit 1 ;;
+              *lifeai_data*) echo "::error::$name is on lifeai_data — it must not reach private data services: $nets" && exit 1 ;;
             esac
             # Not on the network at all -> no route to redis's IP and no Docker-DNS entry for
             # it either, by construction (same reasoning docker-compose.vps.yml's own comments
@@ -1747,12 +1814,27 @@ jobs:
             # resolution from inside each container, which would just re-test the same fact
             # through a less reliable, image-dependent tool (getent/nslookup availability
             # differs between caddy's Alpine base and frontend's Debian-slim base).
-            echo "Confirmed: $name is not on lifeai_data ($nets) — no route to redis exists."
+            echo "Confirmed: $name is not on lifeai_data ($nets) — no route to Redis/Ollama exists."
           done
+
+          parser_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q parser)
+          parser_network=$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$parser_cid")
+          [ "$parser_network" = "none" ] || (echo "::error::parser has network '$parser_network', expected network_mode=none" && exit 1)
+          echo "Confirmed: parser has no network namespace attachment; its Unix socket is the only app communication channel."
 
           internal_flag=$(docker network inspect "$(docker network ls --filter "label=com.docker.compose.project=lifeai_vps_ci" --filter "name=lifeai_data" --format '{{.ID}}' | head -n1)" -f '{{.Internal}}')
           [ "$internal_flag" = "true" ] || (echo "::error::lifeai_data network is not internal:true (got: $internal_flag)" && exit 1)
           echo "Confirmed: lifeai_data has no route out at all (internal: true)."
+
+          frontend_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q frontend)
+          backend_cid=$(docker compose -f docker-compose.vps.yml -f docker-compose.vps.ci.yml -p lifeai_vps_ci ps -q backend)
+          expected_backend_ip=$(docker inspect "$backend_cid" | jq -r '.[0].NetworkSettings.Networks | to_entries[] | select(.value.Aliases | index("backend-internal")) | .value.IPAddress')
+          actual_backend_ip=$(docker exec "$frontend_cid" node -e "require('dns').lookup('backend-internal',(e,a)=>{if(e){console.error(e);process.exit(1)}console.log(a)})")
+          [ "$actual_backend_ip" = "$expected_backend_ip" ] || (echo "::error::backend-internal resolved to $actual_backend_ip, expected lifeai_internal address $expected_backend_ip" && exit 1)
+          echo "Confirmed: frontend's backend-internal alias resolves to backend's lifeai_internal address ($actual_backend_ip)."
+
+          docker exec "$frontend_cid" node -e "const dns=require('dns').promises;(async()=>{for(const name of ['redis','ollama']){try{await dns.lookup(name);throw new Error(name+' unexpectedly resolves from frontend')}catch(e){if(e.code!=='ENOTFOUND')throw e}}})().catch(e=>{console.error(e);process.exit(1)})"
+          echo "Confirmed: frontend cannot resolve Redis or Ollama service names."
 
       - name: Verify the backend has no listener reachable from the host's own network interfaces
         # NOT a check against the container's bridge-network IP: backend/Dockerfile's uvicorn

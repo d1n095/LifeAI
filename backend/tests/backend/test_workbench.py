@@ -15,6 +15,7 @@ from app.models.user import User
 FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
 DIM = get_settings().embedding_dim
+EMBEDDING_MODEL = get_settings().default_embedding_model
 MATCHING_VECTOR = [0.5] * DIM
 
 FAKE_ANSWER = "SLUTSATS: Detta ar den grundade slutsatsen.\nKRITIK/ALTERNATIV: Men det finns en alternativ tolkning att overvaga."
@@ -56,8 +57,22 @@ def _make_source(superuser_db, owner_id, title, *, project_id=None, status=Activ
     )
     superuser_db.add(document)
     superuser_db.commit()
+    # Stamp the active embedding space (PR #333): the workbench analyze endpoint retrieves via
+    # active-space-scoped retrieve_context, which excludes unstamped (legacy NULL-identity)
+    # chunks — the real ingest path always stamps, so these fixtures must too.
+    from app.providers.registry import resolve_active
+
+    _p, _embed_model = resolve_active(superuser_db, role="embedding")
     superuser_db.add(
-        DocumentChunk(document_id=document.id, owner_id=owner_id, chunk_index=0, text=f"Innehall i {title}.", embedding=MATCHING_VECTOR)
+        DocumentChunk(
+            document_id=document.id,
+            owner_id=owner_id,
+            chunk_index=0,
+            text=f"Innehall i {title}.",
+            embedding=MATCHING_VECTOR,
+            embedding_model=_embed_model,
+            embedding_native_dim=len(MATCHING_VECTOR),
+        )
     )
     superuser_db.commit()
     return document

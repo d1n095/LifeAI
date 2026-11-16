@@ -52,8 +52,10 @@ reference commit, not just rely on this filesystem lock."""
 
 import fcntl
 import hashlib
+import json
 import os
 import re
+import shutil
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -65,10 +67,15 @@ from app.storage.base import (
     StorageError,
     StorageIntegrityError,
     StorageSizeLimitExceeded,
+    StagedBlob,
     StoredBlob,
 )
 
 _KEY_PATTERN = re.compile(r"^[0-9a-f]{2}/[0-9a-f]{64}$")
+_STAGING_KEY_PATTERN = re.compile(
+    r"^staging/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/"
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
+)
 
 
 def _hash_file(path: Path) -> str:
@@ -167,6 +174,55 @@ class LocalFilesystemStorage(StorageBackend):
             raise InvalidStorageKey("Storage-nyckeln pekar på en symbolisk länk, vilket inte är tillåtet.")
         return candidate
 
+    def _resolve_staging(self, staging_key: str) -> Path:
+        match = _STAGING_KEY_PATTERN.fullmatch(staging_key)
+        if match is None:
+            raise InvalidStorageKey("Ogiltig staging-nyckel.")
+        owner_id, job_id = match.groups()
+        root_resolved = self.root.resolve()
+        candidate = self.root / "staging" / owner_id / job_id
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(root_resolved)
+        except ValueError:
+            raise InvalidStorageKey("Staging-nyckeln pekar utanför lagringsroten.") from None
+        if candidate.is_symlink() or candidate.parent.is_symlink():
+            raise InvalidStorageKey("Staging-nyckeln pekar på en symbolisk länk.")
+        return candidate
+
+    @contextmanager
+    def _staging_lock(self, staging_key: str) -> Iterator[tuple[str, Path]]:
+        match = _STAGING_KEY_PATTERN.fullmatch(staging_key)
+        if match is None:
+            raise InvalidStorageKey("Ogiltig staging-nyckel.")
+        owner_id, job_id = match.groups()
+        lock_dir = self.root / "locks"
+        lock_path = lock_dir / f"staging-{owner_id[:2]}.lock"
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                yield job_id, self._resolve_staging(staging_key)
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+    def trusted_sha256_for_key(self, storage_key: str) -> str | None:
+        """Extract the integrity anchor only from this backend's exact canonical key shape.
+
+        ``write_stream`` is the only producer of storage keys and always uses
+        ``{digest[:2]}/{digest}``.  Requiring the shard to agree with the digest is important:
+        a merely regex-shaped database value is not evidence that the backend produced it.
+        No filesystem path is resolved and no user-controlled filename participates.
+        """
+        if not _KEY_PATTERN.fullmatch(storage_key):
+            return None
+        shard, digest = storage_key.split("/", 1)
+        if shard != digest[:2]:
+            return None
+        return digest
+
     def write_stream(self, read_chunk: Callable[[], bytes], *, max_bytes: int, chunk_size: int = 1 << 20) -> StoredBlob:
         tmp_dir = self.root / "tmp"
         fd, tmp_name = tempfile.mkstemp(dir=tmp_dir, prefix="upload-")
@@ -206,6 +262,109 @@ class LocalFilesystemStorage(StorageBackend):
             # whether _publish() ended up using it as the final blob or discarding it in
             # favor of an already-present, verified-identical one.
             tmp_path.unlink(missing_ok=True)
+
+    def write_staged_stream(
+        self, staging_key: str, read_chunk: Callable[[], bytes], *, max_bytes: int, chunk_size: int = 1 << 20
+    ) -> StagedBlob:
+        with self._staging_lock(staging_key) as (job_id, final_path):
+            existing = self._inspect_staged_unlocked(staging_key)
+            if existing is not None:
+                return existing
+
+            tmp_path = self.root / "tmp" / f"staging-{job_id}.tmp"
+            hasher = hashlib.sha256()
+            size = 0
+            try:
+                shutil.rmtree(tmp_path, ignore_errors=True)
+                tmp_path.mkdir(mode=0o700)
+                content_path = tmp_path / "content"
+                with open(content_path, "wb") as stream:
+                    while True:
+                        chunk = read_chunk()
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if size > max_bytes:
+                            raise StorageSizeLimitExceeded(
+                                f"Uppladdningen överskrider maxstorleken ({max_bytes} bytes) — avbruten."
+                            )
+                        hasher.update(chunk)
+                        stream.write(chunk)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+
+                digest = hasher.hexdigest()
+                metadata_path = tmp_path / "manifest.json"
+                metadata_path.write_text(json.dumps({"sha256": digest, "size_bytes": size}, separators=(",", ":")))
+                os.chmod(metadata_path, 0o600)
+                with open(metadata_path, "rb") as metadata:
+                    os.fsync(metadata.fileno())
+                _fsync_dir(tmp_path)
+                final_path.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(tmp_path, final_path)
+                _fsync_dir(final_path.parent)
+                return StagedBlob(staging_key, digest, size)
+            finally:
+                try:
+                    shutil.rmtree(tmp_path)
+                except FileNotFoundError:
+                    pass
+
+    def _inspect_staged_unlocked(self, staging_key: str) -> StagedBlob | None:
+        path = self._resolve_staging(staging_key)
+        if not path.exists():
+            return None
+        manifest_path = path / "manifest.json"
+        content_path = path / "content"
+        try:
+            if manifest_path.is_symlink() or content_path.is_symlink():
+                raise StorageIntegrityError("Staged original contains an unexpected symbolic link.")
+            metadata = json.loads(manifest_path.read_text())
+            expected_sha256 = metadata["sha256"]
+            expected_size = metadata["size_bytes"]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise StorageIntegrityError("Staging metadata is missing or invalid.") from exc
+        if (
+            not isinstance(expected_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
+            or not isinstance(expected_size, int)
+            or expected_size < 0
+            or content_path.stat().st_size != expected_size
+            or _hash_file(content_path) != expected_sha256
+        ):
+            raise StorageIntegrityError("Staged original failed hash/size verification.")
+        return StagedBlob(staging_key, expected_sha256, expected_size)
+
+    def inspect_staged(self, staging_key: str) -> StagedBlob | None:
+        with self._staging_lock(staging_key):
+            return self._inspect_staged_unlocked(staging_key)
+
+    def verify_staged(self, staging_key: str, *, expected_sha256: str, expected_size: int | None = None) -> bool:
+        try:
+            staged = self.inspect_staged(staging_key)
+        except (InvalidStorageKey, StorageIntegrityError):
+            return False
+        if staged is None:
+            return False
+        return staged.sha256 == expected_sha256 and (expected_size is None or staged.size_bytes == expected_size)
+
+    def open_staged_read(self, staging_key: str) -> BinaryIO:
+        if self.inspect_staged(staging_key) is None:
+            raise FileNotFoundError(staging_key)
+        path = self._resolve_staging(staging_key)
+        if (path / "content").is_symlink():
+            raise InvalidStorageKey("Staged content cannot be a symbolic link.")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path / "content", flags)
+        return os.fdopen(fd, "rb")
+
+    def delete_staged(self, staging_key: str) -> None:
+        with self._staging_lock(staging_key) as (job_id, path):
+            for candidate in (path, self.root / "tmp" / f"staging-{job_id}.tmp"):
+                try:
+                    shutil.rmtree(candidate)
+                except FileNotFoundError:
+                    pass
 
     def _publish(self, tmp_path: Path, final_path: Path, size: int, sha256_hex: str) -> None:
         """Makes `final_path` durably, verifiably contain `tmp_path`'s bytes -- either by
@@ -295,6 +454,11 @@ class LocalFilesystemStorage(StorageBackend):
         return os.fdopen(fd, "rb")
 
     def exists(self, storage_key: str) -> bool:
+        if storage_key.startswith("staging/"):
+            try:
+                return self._resolve_staging(storage_key).is_dir()
+            except InvalidStorageKey:
+                return False
         try:
             path = self._resolve(storage_key)
         except InvalidStorageKey:
@@ -302,6 +466,9 @@ class LocalFilesystemStorage(StorageBackend):
         return path.is_file()
 
     def delete(self, storage_key: str) -> None:
+        if storage_key.startswith("staging/"):
+            self.delete_staged(storage_key)
+            return
         path = self._resolve(storage_key)
         with self._key_lock(storage_key[:2]):
             path.unlink(missing_ok=True)

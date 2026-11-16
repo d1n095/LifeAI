@@ -13,22 +13,29 @@ POST /api/library/import would have already done, so every test still just calls
 import importlib.util
 import io
 import threading
+import time
 import uuid
 import zipfile
+from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.orm import sessionmaker
 
 from app.config import get_settings
-from app.db import SessionLocal
+from app.db import SessionLocal, migration_engine
+from app.jobs.lease import ImportJobLeaseLostError, claim_next_job
 from app.models.document import ActiveTruthStatus, Document, IndexStatus, KnowledgeClassification
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_version import KnowledgeVersion
 from app.rag.library_import import _store_bytes_with_reference_lock, run_import_job
+from app.rag.extract_isolated import ParserServiceUnavailableError
 from app.storage import StorageError, get_storage
 from app.storage.references import acquire_storage_key_lock, delete_if_unreferenced
 
 EMBEDDING_DIM = get_settings().embedding_dim
+_ClaimSession = sessionmaker(bind=migration_engine)
 
 _APPLY_RUNTIME_PRIVILEGES_PATH = Path(__file__).resolve().parent.parent.parent.parent / "scripts" / "security" / "apply_runtime_privileges.py"
 
@@ -129,6 +136,230 @@ def _make_job(db_session, owner_id, raw: bytes = b"", filename: str = "test.txt"
     db_session.add(job)
     db_session.commit()
     return job
+
+
+def _claim_import_job(job_id, worker_id: str, lease_seconds: int):
+    claim_db = _ClaimSession()
+    try:
+        return claim_next_job(claim_db, worker_id, lease_seconds)
+    finally:
+        claim_db.close()
+
+
+@pytest.mark.asyncio
+async def test_import_refuses_stale_claim_before_reading_or_indexing(
+    db_session, make_verified_user
+):
+    user, _ = make_verified_user()
+    job = _make_job(db_session, user.id, b"must never be processed by stale worker", "stale.txt")
+    job.status = ImportJobStatus.running
+    job.locked_by = "current-worker"
+    job.lease_expires_at = datetime.utcnow() + timedelta(seconds=120)
+    db_session.commit()
+
+    with pytest.raises(ImportJobLeaseLostError):
+        await run_import_job(
+            db_session,
+            job.id,
+            user.id,
+            claim_worker_id="stale-worker",
+        )
+    db_session.rollback()
+
+    db_session.expire_all()
+    refreshed = db_session.get(ImportJob, job.id)
+    assert refreshed.status == ImportJobStatus.running
+    assert refreshed.locked_by == "current-worker"
+    assert db_session.query(Document).filter_by(import_job_id=job.id).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_import_stops_at_first_file_boundary_when_live_lease_is_lost(
+    db_session, make_verified_user, monkeypatch
+):
+    from app.rag.library_import import FileOutcome
+
+    user, _ = make_verified_user()
+    raw = _make_zip({"first.txt": b"first", "second.txt": b"second"})
+    job = _make_job(db_session, user.id, raw, "two-files.zip")
+    job.status = ImportJobStatus.running
+    job.locked_by = "worker-a"
+    job.lease_expires_at = datetime.utcnow() + timedelta(seconds=120)
+    db_session.commit()
+
+    renewal_calls = 0
+
+    def _lease_then_takeover(*args, **kwargs):
+        nonlocal renewal_calls
+        renewal_calls += 1
+        return renewal_calls < 5
+
+    processed: list[str] = []
+
+    async def _record_one(*args, **kwargs):
+        filename = args[4]
+        processed.append(filename)
+        return FileOutcome(filename=filename, status="indexed")
+
+    monkeypatch.setattr("app.rag.library_import.renew_lease", _lease_then_takeover)
+    monkeypatch.setattr("app.rag.library_import._import_one_file", _record_one)
+
+    with pytest.raises(ImportJobLeaseLostError):
+        await run_import_job(
+            db_session,
+            job.id,
+            user.id,
+            claim_worker_id="worker-a",
+        )
+    db_session.rollback()
+
+    assert processed == ["first.txt"]
+    db_session.expire_all()
+    refreshed = db_session.get(ImportJob, job.id)
+    assert refreshed.status == ImportJobStatus.running
+    assert refreshed.completed_at is None
+
+
+def _start_import_thread(job_id, owner_id, worker_id):
+    from app.worker import process_claimed_job
+
+    errors: list[BaseException] = []
+
+    def _run():
+        db = SessionLocal()
+        try:
+            import asyncio
+
+            asyncio.run(process_claimed_job(db, job_id, owner_id, worker_id))
+        except BaseException as exc:  # surfaced to the parent test thread
+            errors.append(exc)
+        finally:
+            db.close()
+
+    thread = threading.Thread(target=_run)
+    thread.start()
+    return thread, errors
+
+
+@pytest.mark.asyncio
+async def test_delayed_single_file_cannot_finish_after_worker_reclaim(
+    db_session, make_verified_user, monkeypatch
+):
+    from app.rag import library_import as li
+    import app.worker as worker_module
+
+    user, _ = make_verified_user()
+    job = _make_job(db_session, user.id, b"single file takes too long", "slow.txt")
+    assert _claim_import_job(job.id, "slow-worker", 1) == (job.id, user.id)
+    monkeypatch.setattr(li, "WORKER_LEASE_SECONDS", 1)
+    monkeypatch.setattr(
+        worker_module,
+        "get_settings",
+        lambda: SimpleNamespace(worker_lease_seconds=1),
+    )
+
+    parser_entered = threading.Event()
+    finish_parser = threading.Event()
+
+    def _delayed_extract(_filename, content):
+        parser_entered.set()
+        if not finish_parser.wait(timeout=10):
+            raise TimeoutError("test parser was not released")
+        return content.decode()
+
+    monkeypatch.setattr(li, "extract_text", _delayed_extract)
+    thread, errors = _start_import_thread(job.id, user.id, "slow-worker")
+    try:
+        assert parser_entered.wait(timeout=10)
+        time.sleep(1.2)
+        assert _claim_import_job(job.id, "replacement-worker", 120) == (job.id, user.id)
+    finally:
+        finish_parser.set()
+        thread.join(timeout=15)
+
+    assert not thread.is_alive()
+    assert errors == []
+    db_session.expire_all()
+    refreshed_job = db_session.get(ImportJob, job.id)
+    document = db_session.query(Document).filter_by(import_job_id=job.id).one()
+    assert refreshed_job.locked_by == "replacement-worker"
+    assert refreshed_job.status == ImportJobStatus.running
+    assert document.status == IndexStatus.extracting
+    assert db_session.query(KnowledgeVersion).filter_by(source_id=document.id).count() == 1
+
+
+@pytest.mark.asyncio
+async def test_archive_progress_is_fenced_and_restart_finishes_remaining_files(
+    db_session, make_verified_user, monkeypatch
+):
+    from app.rag import library_import as li
+    import app.worker as worker_module
+
+    user, _ = make_verified_user()
+    raw = _make_zip({"first.txt": b"first file", "second.txt": b"second file"})
+    job = _make_job(db_session, user.id, raw, "two-file-import.zip")
+    assert _claim_import_job(job.id, "archive-worker", 1) == (job.id, user.id)
+    monkeypatch.setattr(li, "WORKER_LEASE_SECONDS", 1)
+    monkeypatch.setattr(
+        worker_module,
+        "get_settings",
+        lambda: SimpleNamespace(worker_lease_seconds=1),
+    )
+
+    real_import_one = li._import_one_file
+    first_file_finished = threading.Event()
+    release_first_file = threading.Event()
+
+    async def _pause_after_first_file(*args, **kwargs):
+        outcome = await real_import_one(*args, **kwargs)
+        if args[4] == "first.txt":
+            first_file_finished.set()
+            if not release_first_file.wait(timeout=10):
+                raise TimeoutError("test import was not released")
+        return outcome
+
+    monkeypatch.setattr(li, "_import_one_file", _pause_after_first_file)
+    thread, errors = _start_import_thread(job.id, user.id, "archive-worker")
+    try:
+        assert first_file_finished.wait(timeout=15)
+        time.sleep(1.2)
+        assert _claim_import_job(job.id, "archive-restart", 120) == (job.id, user.id)
+    finally:
+        release_first_file.set()
+        thread.join(timeout=15)
+
+    assert not thread.is_alive()
+    assert errors == []
+    db_session.expire_all()
+    assert {
+        row.original_filename
+        for row in db_session.query(Document).filter_by(import_job_id=job.id).all()
+    } == {"first.txt"}
+    interrupted = db_session.get(ImportJob, job.id)
+    assert interrupted.locked_by == "archive-restart"
+    assert interrupted.status == ImportJobStatus.running
+    assert interrupted.progress_current == 0
+    assert not interrupted.file_results
+
+    monkeypatch.setattr(li, "_import_one_file", real_import_one)
+    from app.worker import process_claimed_job
+
+    await process_claimed_job(db_session, job.id, user.id, "archive-restart")
+
+    db_session.expire_all()
+    completed = db_session.get(ImportJob, job.id)
+    assert completed.status == ImportJobStatus.completed
+    assert completed.succeeded_count == 1
+    assert completed.skipped_count == 1
+    assert completed.progress_current == 2
+    assert {result["filename"]: result["status"] for result in completed.file_results} == {
+        "first.txt": "duplicate",
+        "second.txt": "indexed",
+    }
+    assert {
+        row.original_filename
+        for row in db_session.query(Document).filter_by(import_job_id=job.id).all()
+    } == {"first.txt", "second.txt"}
 
 
 @pytest.mark.asyncio
@@ -317,9 +548,9 @@ def _fast_backoff(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_transient_failure_is_retried_and_eventually_succeeds(db_session, make_verified_user, monkeypatch):
-    """A per-file extraction error (extract_text raising) is caught INSIDE
-    _import_one_file and turned into a FileOutcome — it never reaches the job-level retry
-    loop (see the test below, which documents that explicitly). A genuinely job-level
+    """A content-level per-file extraction error is caught INSIDE _import_one_file and
+    turned into a FileOutcome. The explicitly typed parser transport outage is retried
+    separately. A genuinely job-level
     transient failure — the orchestration itself failing between files, e.g. a dropped DB
     connection — is what app/worker.py's process_claimed_job retry loop actually reacts to,
     so this test injects the failure at that level (patching _import_one_file itself) rather
@@ -353,6 +584,84 @@ async def test_transient_failure_is_retried_and_eventually_succeeds(db_session, 
 
 
 @pytest.mark.asyncio
+async def test_parser_service_outage_retries_archive_without_duplicate_documents(
+    db_session, make_verified_user, monkeypatch
+):
+    from app.rag import library_import as li
+    from app.worker import process_claimed_job
+
+    user, _ = make_verified_user()
+    job = _make_job(
+        db_session,
+        user.id,
+        _make_zip({"first.txt": b"First recovery file", "second.txt": b"Second recovery file"}),
+        "parser-recovery.zip",
+    )
+    calls = 0
+    outage_raised = False
+    real_extract = li.extract_text
+
+    def fail_once_then_extract(filename, content):
+        nonlocal calls, outage_raised
+        calls += 1
+        if filename == "second.txt" and not outage_raised:
+            outage_raised = True
+            raise ParserServiceUnavailableError("synthetic parser restart")
+        return real_extract(filename, content)
+
+    monkeypatch.setattr(li, "extract_text", fail_once_then_extract)
+
+    await process_claimed_job(db_session, job.id, user.id)
+
+    db_session.refresh(job)
+    documents = db_session.query(Document).filter_by(import_job_id=job.id).all()
+    assert job.status == ImportJobStatus.completed
+    assert job.attempt_count == 1
+    assert job.last_failure_transient is True
+    assert calls == 3
+    assert {document.original_filename for document in documents} == {"first.txt", "second.txt"}
+    assert len(documents) == 2
+    assert all(document.status == IndexStatus.indexed for document in documents)
+
+
+@pytest.mark.asyncio
+async def test_exhausted_parser_outage_is_terminal_and_not_reconciled_forever(
+    db_session, make_verified_user, monkeypatch
+):
+    from app.rag import library_import as li
+    from app.worker import Worker, process_claimed_job
+
+    user, _ = make_verified_user()
+    job = _make_job(db_session, user.id, b"Persistent parser outage", "parser-outage.txt")
+    job.max_attempts = 2
+    db_session.add(job)
+    db_session.commit()
+    calls = 0
+
+    def parser_stays_unavailable(*_args):
+        nonlocal calls
+        calls += 1
+        raise ParserServiceUnavailableError("synthetic persistent outage")
+
+    monkeypatch.setattr(li, "extract_text", parser_stays_unavailable)
+
+    await process_claimed_job(db_session, job.id, user.id)
+
+    db_session.refresh(job)
+    documents = db_session.query(Document).filter_by(import_job_id=job.id).all()
+    assert calls == job.max_attempts
+    assert job.status == ImportJobStatus.failed
+    assert job.attempt_count == job.max_attempts - 1
+    assert job.last_failure_transient is True
+    assert len(documents) == 1
+    assert documents[0].status == IndexStatus.extraction_failed
+
+    Worker()._reconcile_orphaned_documents(db_session)
+    db_session.refresh(job)
+    assert job.status == ImportJobStatus.failed
+
+
+@pytest.mark.asyncio
 async def test_permanent_failure_is_not_retried(db_session, make_verified_user):
     """A malformed ZIP (ZipSecurityError, classified permanent — see app/jobs/retry.py)
     must fail immediately, not burn through retry attempts on something retrying can never
@@ -373,7 +682,7 @@ async def test_permanent_failure_is_not_retried(db_session, make_verified_user):
 
 @pytest.mark.asyncio
 async def test_a_persistently_flaky_extractor_degrades_to_a_failed_file_not_a_job_level_retry(db_session, make_verified_user, monkeypatch):
-    """A per-file extraction error never reaches the job-level retry loop at all — it's
+    """An ordinary per-file extraction error never reaches the job-level retry loop — it's
     caught inside _import_one_file and turned into a FileOutcome(status="failed"), matching
     this codebase's established "one file's error must not corrupt the whole batch"
     principle. attempt_count staying at 0 here is the actual proof that retry/backoff is

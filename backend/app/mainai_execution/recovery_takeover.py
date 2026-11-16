@@ -66,7 +66,7 @@ NO_ACTIVE => STOP invariant PR #154 already established for ordinary V0.1 auto-d
 
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.execution_envelopes.service import goal_has_ever_been_envelope_governed
@@ -145,7 +145,30 @@ async def execute_takeover(
     try:
         mark_job_superseded(db, job_id=dead_job_id, superseded_by_job_id=new_job.id)
     except JobNotSupersedableError as exc:
-        raise TakeoverError(f"could not fence the dead job {dead_job_id}: {exc}") from exc
+        # Diagnostic finding (founder directive, Priority 3): this fence has failed
+        # intermittently on real CI, identically across independent runs, for reasons this
+        # round's investigation could not reproduce locally despite ruling out several
+        # concrete hypotheses (Python/Postgres clock skew, now()-staleness across a slow
+        # transaction, stale-job-backlog from table truncation, privilege-narrowing
+        # test-order leakage -- each tested empirically, not just reasoned about, and each
+        # disproven). Capturing the job's ACTUAL row state at the exact moment of failure,
+        # folded into the exception message itself, so the next real CI occurrence is
+        # self-diagnosing evidence rather than another blind reproduction attempt. A second
+        # failure here (reading this row) is deliberately swallowed -- the ORIGINAL
+        # JobNotSupersedableError must never be masked by a diagnostic read failing.
+        diagnostic = "diagnostic read failed"
+        try:
+            row = db.execute(
+                text(
+                    "SELECT status, lease_expires_at, now(), clock_timestamp() "
+                    "FROM mainai_jobs WHERE id = :id"
+                ),
+                {"id": str(dead_job_id)},
+            ).one_or_none()
+            diagnostic = f"row_state={dict(row._mapping) if row is not None else 'NO ROW FOUND'}"
+        except Exception:  # noqa: BLE001 -- see comment above
+            pass
+        raise TakeoverError(f"could not fence the dead job {dead_job_id}: {exc} [{diagnostic}]") from exc
 
     record.status = MainAIRecoveryStatus.taken_over
     record.takeover_executor = dispatched_by

@@ -112,6 +112,10 @@ async def embed_with_policy(
             task_id=task_id,
             goal_id=goal_id,
             job_id=job_id,
+            # On-host local runner (e.g. Ollama on loopback) -> ledgered `local`, not an
+            # external `allowed` disclosure. getattr keeps a hypothetical non-LLMProvider
+            # duck-typed object safe, defaulting to external (fail-safe).
+            provider_is_local=not getattr(provider, "is_external_egress", True),
         )
     return await provider.embed(outbound_texts, model=model)
 
@@ -150,6 +154,7 @@ async def chat_with_fallback(
     task_id: uuid.UUID | None = None,
     goal_id: uuid.UUID | None = None,
     job_id: uuid.UUID | None = None,
+    durable_disclosure_receipts: bool = False,
     **kwargs,
 ) -> tuple[ChatResult, list[str]]:
     """Try the primary chat provider, then fall back through CHAT_FALLBACK_ORDER on failure.
@@ -205,6 +210,10 @@ async def chat_with_fallback(
                     task_id=task_id,
                     goal_id=goal_id,
                     job_id=job_id,
+                    # Per-attempt: each provider in the fallback chain is classified on its own
+                    # (a local runner -> `local`, an external provider -> `allowed`).
+                    provider_is_local=not getattr(provider, "is_external_egress", True),
+                    durable_receipt=durable_disclosure_receipts,
                 )
                 outbound_messages = [Message(role=m["role"], content=m["content"]) for m in redacted]
             result = await provider.chat(outbound_messages, model=model, **kwargs)

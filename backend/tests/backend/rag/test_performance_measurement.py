@@ -111,11 +111,22 @@ async def test_measure_import_and_search_performance(db_session, make_verified_u
     from app.models.document_chunk import DocumentChunk
 
     db_session.execute(sqltext("SET LOCAL app.current_user_id = :uid"), {"uid": str(user.id)})
-    total_chunks = db_session.query(DocumentChunk).filter_by(owner_id=user.id).count()
+    owner_chunks = db_session.query(DocumentChunk).filter_by(owner_id=user.id)
+    total_chunks = owner_chunks.count()
+    embedding_space = owner_chunks.first()
+    assert embedding_space is not None
 
     search_vector = [0.01] * EMBEDDING_DIM
     search_start = time.monotonic()
-    hits = hybrid_search(db_session, user.id, search_vector, "matningsterm3", top_k=10)
+    hits = hybrid_search(
+        db_session,
+        user.id,
+        search_vector,
+        "matningsterm3",
+        top_k=10,
+        embedding_model=embedding_space.embedding_model,
+        embedding_native_dim=embedding_space.embedding_native_dim,
+    )
     search_seconds = time.monotonic() - search_start
 
     retrieve_start = time.monotonic()

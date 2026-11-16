@@ -9,6 +9,7 @@ from app.models.provider_verification import VerificationResult
 from app.providers.registry import embed_with_policy, resolve_active
 from app.providers.verification import classify_provider_exception, ensure_verified
 from app.rag.chunking import chunk_text
+from app.rag.embedding_space import fit_vectors
 from app.rag.vector_store import upsert_chunks
 
 
@@ -126,7 +127,19 @@ async def index_document(db: Session, document: Document, text_content: str) -> 
             db.commit()
             return
 
-        count = upsert_chunks(db, document.id, document.uploaded_by, chunks, vectors)
+        # Fit the model's native vectors into the fixed storage column (zero-pad, cosine-
+        # preserving) and stamp every chunk with the active embedding space so retrieval never
+        # mixes them with vectors from a different model/dim (app/rag/embedding_space.py).
+        padded, native_dim = fit_vectors(vectors)
+        count = upsert_chunks(
+            db,
+            document.id,
+            document.uploaded_by,
+            chunks,
+            padded,
+            embedding_model=model,
+            embedding_native_dim=native_dim,
+        )
 
         document.status = IndexStatus.indexed
         document.chunk_count = count

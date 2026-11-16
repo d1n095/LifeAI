@@ -10,11 +10,21 @@ family of invariant this codebase already established for execution authority
 (PROPOSED_SCOPE != AUTHORIZED_SCOPE, migration 0057; MODEL REQUEST != AUTHORIZATION,
 app.mainai_execution.recovery_takeover), extended here to information disclosure.
 
-Wired first into the `provider_planning`/Safe Planner boundary only (the narrowest,
-best-understood, already-partially-redacted call path -- see `safe_provider_prompt()`,
-`app/safe_planner/service.py`). Deliberately NOT wired into `app/routers/chat.py` or the RAG
-embedding call sites yet -- those are real, larger, separately-tracked gaps (V1/V2 in the
-blocker map), out of scope for this foundation."""
+Wired first into the `provider_planning`/Safe Planner boundary, and since then into the RAG
+embedding call sites (`app/providers/registry.py::embed_with_policy`, reached by
+`app/rag/ingest.py`, `app/rag/retrieve.py`, `app/rag/media_import.py`,
+`app/routers/library.py`) and chat (`chat_with_fallback`), each passing `owner_id` to turn
+the gate on for that path. Every covered call records exactly one disclosure-ledger row.
+
+LOCAL vs EXTERNAL: a call to an on-host local model runner (e.g. an Ollama endpoint on
+loopback / in the same deployment -- see `app/providers/ollama_provider.py`'s
+`is_external_egress`) is NOT an external-AI disclosure. The caller reports this via
+`provider_is_local`; such a call is recorded with decision `local` instead of `allowed`, so
+the ledger is truthful and the no-egress invariant is checkable (a local-first ingestion
+produces zero external `allowed` rows). Crucially, `provider_is_local` NEVER relaxes a deny:
+the incomplete-request deny and the NEVER_EGRESS/private-key hard-deny apply identically to
+local calls (fail-safe -- locality is best-effort, and a NEVER_EGRESS marker means the
+content must not cross its trust boundary at all), and secret-pattern redaction still runs."""
 
 from __future__ import annotations
 
@@ -23,8 +33,10 @@ import json
 import uuid
 from typing import Any
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.db import SessionLocal
 from app.development_operator import service as operator
 from app.models.provider_disclosure import ProviderDisclosureEvent
 
@@ -41,13 +53,23 @@ class EgressDeniedError(RuntimeError):
     """Raised when the egress gate denies a call outright -- severe content, or a malformed/
     incomplete request. The caller must treat this exactly like any other hard authority
     boundary: never retry with the same content, never silently continue without the provider
-    call, never catch-and-ignore. A ProviderDisclosureEvent row recording the denial is
-    already durably committed to the session (flushed, not yet committed by this function --
-    see enforce_egress_policy()'s own docstring) before this is ever raised."""
+    call, never catch-and-ignore. A ProviderDisclosureEvent row recording the denial has
+    already been flushed to the caller transaction, or independently committed when the
+    durable-receipt boundary is requested, before this is ever raised. See
+    enforce_egress_policy()'s docstring."""
 
     def __init__(self, reason: str):
         self.reason = reason
         super().__init__(f"egress denied: {reason}")
+
+
+def _durable_session_factory() -> Session:
+    """Return an independent restricted-runtime session for durable disclosure receipts.
+
+    Kept behind a tiny factory so the fail-closed commit boundary can be attacked directly
+    in tests without replacing the request session or using the migration superuser.
+    """
+    return SessionLocal()
 
 
 def _hash_payload(payload: Any) -> str:
@@ -102,6 +124,40 @@ def _record(
     return event
 
 
+def _record_durable(**record_kwargs: Any) -> ProviderDisclosureEvent:
+    """Commit a content-free decision before an authorized provider dispatch.
+
+    The independent transaction is deliberate: a provider failure, empty response, or later
+    business-transaction rollback must not erase the evidence that the outbound dispatch was
+    authorized/attempted. This session uses the restricted runtime role and the same owner RLS
+    identity as the request. If the receipt cannot be committed, the caller fails closed and
+    no provider may be invoked.
+    """
+    receipt_db = _durable_session_factory()
+    try:
+        owner_id = record_kwargs["owner_id"]
+        receipt_db.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_id)})
+        event = _record(receipt_db, **record_kwargs)
+        receipt_db.commit()
+        return event
+    except Exception:
+        receipt_db.rollback()
+        raise
+    finally:
+        receipt_db.close()
+
+
+def _record_policy_event(
+    db: Session, *, durable_receipt: bool, **record_kwargs: Any
+) -> ProviderDisclosureEvent:
+    if not durable_receipt:
+        return _record(db, **record_kwargs)
+    try:
+        return _record_durable(**record_kwargs)
+    except Exception as exc:
+        raise EgressDeniedError("durable disclosure receipt unavailable") from exc
+
+
 def enforce_egress_policy(
     db: Session,
     *,
@@ -114,29 +170,38 @@ def enforce_egress_policy(
     task_id: uuid.UUID | None = None,
     goal_id: uuid.UUID | None = None,
     job_id: uuid.UUID | None = None,
+    provider_is_local: bool = False,
+    durable_receipt: bool = False,
 ) -> Any:
     """THE enforcement point: every outbound provider call this gate covers must pass its
     content through this function before the provider is ever invoked. Returns the sanitized
     payload actually safe to send. Raises EgressDeniedError (never returns a value in that
     case) if the call is denied outright.
 
-    Records exactly one ProviderDisclosureEvent for every call -- allowed or denied -- via
-    `db.flush()` (not `db.commit()` -- the caller's own transaction boundary decides when
-    that becomes durable, same convention as every other write function in this codebase)
-    before returning or raising, so a denied call is just as durably auditable as an allowed
-    one.
+    Records exactly one ProviderDisclosureEvent for every call. With `durable_receipt=True`,
+    the content-free receipt is committed in an independent restricted-runtime transaction
+    before this function returns or raises. That mode is required at the Blueprint provider
+    boundary so no network dispatch can precede durable audit evidence. Receipt persistence
+    failure raises EgressDeniedError and therefore fails closed before provider invocation.
+    Legacy callers retain their request-transaction `flush()` boundary until explicitly
+    migrated.
 
     STRUCTURALLY stateless / never memoized: every call re-evaluates the CURRENT payload from
     scratch. A retry, an idempotent replay, or a provider switch (A -> B) can never inherit an
     earlier call's decision -- there is no cache, no lookup-by-prior-hash, nothing here to
     bypass. This is deliberate, not an oversight: the adversarial test suite proves exactly
-    this (retry/idempotency and provider-switch cannot skip re-evaluation)."""
+    this (retry/idempotency and provider-switch cannot skip re-evaluation).
+
+    `provider_is_local` (default False) records an on-host local-provider call with decision
+    `local` instead of `allowed` -- see this module's docstring. It only ever affects the
+    allowed-path label; it NEVER skips or relaxes the two deny paths below."""
     attempted_hash = _hash_payload(payload)
 
     if not provider or not model or not purpose or not requested_by:
         reason = "incomplete egress request: provider/model/purpose/requested_by are all required"
-        _record(
+        _record_policy_event(
             db,
+            durable_receipt=durable_receipt,
             owner_id=owner_id,
             provider=provider or "unknown",
             model=model or "unknown",
@@ -155,8 +220,9 @@ def enforce_egress_policy(
 
     if _contains_never_egress_marker(payload):
         reason = "payload contains a NEVER_EGRESS-marked field or a private-key-shaped block -- refusing the whole call"
-        _record(
+        _record_policy_event(
             db,
+            durable_receipt=durable_receipt,
             owner_id=owner_id,
             provider=provider,
             model=model,
@@ -177,8 +243,18 @@ def enforce_egress_policy(
     redaction_categories = ["secret_pattern"] if redacted != payload else []
     sent_hash = _hash_payload(redacted)
 
-    _record(
+    # On-host local provider: the content was fully gated (both denies above still ran, and
+    # secrets are still redacted below), but it never left the host, so it is NOT an external-
+    # AI disclosure -- recorded as `local`, not `allowed`. External providers are unchanged.
+    decision = "local" if provider_is_local else "allowed"
+    scope = "on-host local provider -- no external-AI egress" if provider_is_local else "egress policy"
+    reason = f"passed {scope}" if not redaction_categories else f"passed {scope} after secret-pattern redaction"
+    if durable_receipt:
+        reason = f"{reason}; authorized for provider dispatch; provider completion not asserted"
+
+    _record_policy_event(
         db,
+        durable_receipt=durable_receipt,
         owner_id=owner_id,
         provider=provider,
         model=model,
@@ -187,8 +263,8 @@ def enforce_egress_policy(
         task_id=task_id,
         goal_id=goal_id,
         job_id=job_id,
-        decision="allowed",
-        reason="passed egress policy" if not redaction_categories else "passed egress policy after secret-pattern redaction",
+        decision=decision,
+        reason=reason,
         redaction_categories=redaction_categories,
         attempted_hash=attempted_hash,
         sent_hash=sent_hash,
