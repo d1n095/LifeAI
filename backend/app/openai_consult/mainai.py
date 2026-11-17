@@ -39,11 +39,16 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import time
 import uuid
 
 from app.config import Settings, get_settings
 from app.openai_consult.schemas import ConsultIn
-from app.openai_consult.service import ConsultationConfigError, consult_openai
+from app.openai_consult.service import (
+    ConsultationConfigError,
+    ConsultationServiceError,
+    consult_openai,
+)
 
 # True for the entire duration of one consult_for_mainai pipeline. Any consult_for_mainai
 # entered while this is set is BY DEFINITION a consultation triggered from inside
@@ -102,43 +107,53 @@ async def consult_for_mainai(
 
     settings = settings or get_settings()
 
-    # Gate 2: MainAI-specific authorization — independent of the founder HTTP path.
-    if not settings.openai_consult_mainai_enabled:
-        raise ConsultationConfigError(
-            "MainAI-konsultation är avstängd (OPENAI_CONSULT_MAINAI_ENABLED=false) — "
-            "lokal in-process worker förblir primär exekveringsväg."
-        )
+    from app.openai_consult.metrics import consultation_metrics, monotonic_ms
 
-    # Gate 2b: emergency shutdown. The workforce kill switch blocks ANY new consultation
-    # immediately — defense in depth: the workforce harness checks it before reaching this
-    # path, but consult_for_mainai is also callable directly by orchestration.
-    from app.workforce.kill_switch import assert_not_killed
+    # Gates 2 → 4 (authorization ladder). Every refusal is counted in the bounded metrics
+    # — the counters carry NO owner ids or content, only fixed-key integers.
+    try:
+        # Gate 2: MainAI-specific authorization — independent of the founder HTTP path.
+        if not settings.openai_consult_mainai_enabled:
+            raise ConsultationConfigError(
+                "MainAI-konsultation är avstängd (OPENAI_CONSULT_MAINAI_ENABLED=false) — "
+                "lokal in-process worker förblir primär exekveringsväg."
+            )
 
-    assert_not_killed()
+        # Gate 2b: emergency shutdown. The workforce kill switch blocks ANY new consultation
+        # immediately — defense in depth: the workforce harness checks it before reaching this
+        # path, but consult_for_mainai is also callable directly by orchestration.
+        from app.workforce.kill_switch import assert_not_killed
 
-    # Budget store: same per-owner daily ceilings as the founder path (built from the same
-    # settings when the caller doesn't supply one).
-    if budget_store is None:
-        from app.openai_consult.budgets import build_budget_store_from_settings
+        assert_not_killed()
 
-        budget_store = build_budget_store_from_settings(settings)
+        # Budget store: same per-owner daily ceilings as the founder path (built from the same
+        # settings when the caller doesn't supply one).
+        if budget_store is None:
+            from app.openai_consult.budgets import build_budget_store_from_settings
 
-    # Gate 3: reuse MainAI's existing provider-activation authorization primitive.
-    # UNKNOWN != VERIFIED → fail-closed; never auto-promoted.
-    from app.workforce.activation_gates import require_activation_allowed
+            budget_store = build_budget_store_from_settings(settings)
 
-    require_activation_allowed()
+        # Gate 3: reuse MainAI's existing provider-activation authorization primitive.
+        # UNKNOWN != VERIFIED → fail-closed; never auto-promoted.
+        from app.workforce.activation_gates import require_activation_allowed
 
-    # Gate 3b: bounded consultation-selection policy — per-owner daily admission cap
-    # (app/openai_consult/policy.py, Redis-backed, fail-closed in production without it).
-    # Consultation is a bounded exception to the local-AI-primary rule, not a reflex.
-    from app.openai_consult.policy import build_policy_from_settings
+        require_activation_allowed()
 
-    build_policy_from_settings(settings).check_and_increment(str(owner_id))
+        # Gate 3b: bounded consultation-selection policy — per-owner daily admission cap
+        # (app/openai_consult/policy.py, Redis-backed, fail-closed in production without it).
+        # Consultation is a bounded exception to the local-AI-primary rule, not a reflex.
+        from app.openai_consult.policy import build_policy_from_settings
 
-    # Gate 4: the explicit inputs are the ONLY egress surface — credential-scrubbed.
-    _assert_no_credentials_in_strings(goal_text, instructions)
+        build_policy_from_settings(settings).check_and_increment(str(owner_id))
 
+        # Gate 4: the explicit inputs are the ONLY egress surface — credential-scrubbed.
+        _assert_no_credentials_in_strings(goal_text, instructions)
+    except Exception:
+        consultation_metrics.record_refused()
+        raise
+
+    started = time.monotonic()
+    provider_error_counted = False
     token = _INSIDE_CONSULTATION.set(True)
     try:
         # Gate 5-7 (egress, budget, HTTP, settle): the SAME core the founder path uses.
@@ -159,19 +174,32 @@ async def consult_for_mainai(
             goal_id=goal_id,
             job_id=job_id,
         )
+
+        # Output contract validation (fail-closed): an empty/whitespace answer is a malformed
+        # provider response — never returned to orchestration as a valid consultation result.
+        if not (result.output_text or "").strip():
+            provider_error_counted = True
+            consultation_metrics.record_provider_error()
+            raise ConsultationServiceError(
+                "Konsultatsvaret var tomt — vägrar returnera det till orkestreringen "
+                "(contract-validering, fail-closed)."
+            )
+
+        consultation_metrics.record_admitted(monotonic_ms(started))
+        return result, stats
+    except ConsultationServiceError:
+        # Provider-infrastructure failure (timeout/unreachable/5xx/contract-invalid).
+        # The contract check above already counted itself; avoid double counting.
+        if not provider_error_counted:
+            consultation_metrics.record_provider_error()
+        raise
+    except Exception:
+        # Any other failure inside the gated section (egress denial, unexpected runtime
+        # error) counts as a refusal — the consultation did not happen.
+        consultation_metrics.record_refused()
+        raise
     finally:
         _INSIDE_CONSULTATION.reset(token)
-
-    # Output contract validation (fail-closed): an empty/whitespace answer is a malformed
-    # provider response — never returned to orchestration as a valid consultation result.
-    if not (result.output_text or "").strip():
-        from app.openai_consult.service import ConsultationServiceError
-
-        raise ConsultationServiceError(
-            "Konsultatsvaret var tomt — vägrar returnera det till orkestreringen "
-            "(contract-validering, fail-closed)."
-        )
-    return result, stats
 
 
 def consult_for_mainai_sync(
