@@ -72,6 +72,22 @@ python -m app.founder_recovery initiate \
 #    afterwards by replacing FOUNDER_RECOVERY_CODE_SHA256.
 ```
 
+## Delivery-truth semantics (verified by tests)
+
+`send_email` never raises and now reports whether the message actually went out. The CLI
+prints an honest result: `OK: ... skickats` on delivery, or a WARNING that no link is on
+its way (fix SMTP, run initiate again — the old request is invalidated automatically). A
+delivery outage is audited as `founder_email_recovery_delivery_failed`; the confirmation
+mail after a completed recovery is audited as `founder_email_recovery_confirmation_mail`
+and can never roll the change back. If the delivery layer crashed despite its contract,
+initiate leaves NO outstanding request behind (clean refusal, no zombie state).
+
+## Code vs token semantics
+
+The RECOVERY CODE is a static provisioning secret and deliberately does NOT expire — it
+is rotated by replacing `FOUNDER_RECOVERY_CODE_SHA256` in the deployment environment.
+What expires is the single-use TOKEN (1 h TTL), enforced at confirm time.
+
 ## Rollback / abort
 
 Before confirmation: do nothing — the request expires (1 h TTL) or is superseded by the

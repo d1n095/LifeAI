@@ -133,7 +133,7 @@ CONFIG_MATRIX: dict[str, dict] = {
     "deepseek_api_key": {"required_in_production": False, "secret": True, "default": None, "validates": "none — see openai_api_key"},
     "openrouter_api_key": {"required_in_production": False, "secret": True, "default": None, "validates": "none — see openai_api_key"},
     "ollama_base_url": {"required_in_production": False, "secret": False, "default": "http://ollama:11434", "validates": "none"},
-    "chat_fallback_order": {"required_in_production": False, "secret": False, "default": "openai,anthropic,gemini", "validates": "none"},
+    "chat_fallback_order": {"required_in_production": False, "secret": False, "default": "openai,anthropic,gemini,ollama", "validates": "resolve_chat_chain (app/providers/registry.py) demotes unconfigured providers; ollama is the zero-key local last resort"},
     "frontend_origins": {"required_in_production": True, "secret": False, "default": "http://localhost:3000", "validates": "none — CORSMiddleware simply rejects any origin not in the list"},
     "storage_root": {"required_in_production": True, "secret": False, "default": "/var/lib/lifeai/uploads", "validates": "none — LocalFilesystemStorage fails at write time if the directory isn't writable, not at startup"},
     "project_root": {"required_in_production": False, "secret": False, "default": "", "validates": "none — app/project_memory.py raises a clear ValueError at call time when unset, never at startup"},
@@ -147,6 +147,22 @@ CONFIG_MATRIX: dict[str, dict] = {
     "github_repo": {"required_in_production": False, "secret": False, "default": None, "validates": "none — 'owner/repo' format, checked at call time by app/integrations/github_client.py, not at startup"},
     "github_write_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "none — a plain bool gate; off by default so MainAI only proposes PRs until explicitly turned on"},
     "github_auto_merge_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "none — gates a merge capability that has no implementation yet (see app/integrations/github_client.py's docstring); always off in this slice"},
+    # --- Z.AI OpenAI consultation lane (fail-closed by default; see docs/OPENAI_CONSULT_INTEGRATION.md)
+    "openai_consult_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "gate 1 — every consultation path refuses unless explicitly enabled; see app/openai_consult/policy.py"},
+    "openai_consult_allowed_models": {"required_in_production": False, "secret": False, "default": "gpt-5.1", "validates": "gate 3 — model allowlist enforced in app/openai_consult/policy.py"},
+    "openai_consult_requests_per_minute": {"required_in_production": False, "secret": False, "default": 10, "validates": "policy rate ceiling"},
+    "openai_consult_daily_token_budget": {"required_in_production": False, "secret": False, "default": 200000, "validates": "reserve/settle budget gate (Redis-backed, fail-closed in production)"},
+    "openai_consult_daily_cost_budget_usd": {"required_in_production": False, "secret": False, "default": 5.0, "validates": "reserve/settle budget gate"},
+    "openai_consult_timeout_seconds": {"required_in_production": False, "secret": False, "default": 60, "validates": "provider timeout; reservation released on cancellation"},
+    "openai_consult_max_output_tokens": {"required_in_production": False, "secret": False, "default": 2048, "validates": "bounded output contract"},
+    "openai_consult_store_responses": {"required_in_production": False, "secret": False, "default": False, "validates": "provider-side storage off unless enabled (data-minimization default)"},
+    "openai_consult_web_search_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "egress control — web_search tool disabled unless explicitly enabled"},
+    "openai_consult_mainai_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "independent switch for the MainAI-invoked path (workforce harness)"},
+    "openai_consult_mainai_daily_call_cap": {"required_in_production": False, "secret": False, "default": 20, "validates": "MainAI admission cap per owner per UTC day, Redis-backed counter"},
+    # --- Secure founder account recovery (app/founder_recovery.py, CLI-only initiation)
+    "founder_recovery_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "fail-closed arming switch, re-checked at initiate AND confirm"},
+    "founder_recovery_code_sha256": {"required_in_production": False, "secret": True, "default": "***", "validates": "only the SHA-256 of the recovery code is stored (real default is the empty string — recovery refuses when unset)"},
+    "founder_recovery_token_expire_hours": {"required_in_production": False, "secret": False, "default": 1, "validates": "single-use confirmation link TTL"},
 }
 
 

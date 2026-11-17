@@ -55,6 +55,7 @@ from sqlalchemy.orm import Session
 from app.audit import record_audit
 from app.config import Settings, get_settings
 from app.email import send_email
+from app.models.email_verification_token import EmailVerificationToken
 from app.models.founder_email_change import FounderEmailChangeRequest
 from app.models.password_reset_token import PasswordResetToken
 from app.models.user import User, UserRole
@@ -104,10 +105,12 @@ def _validate_new_email(new_email: str, current_email: str) -> str:
 
 def initiate_founder_email_change(
     db: Session, *, new_email: str, presented_code: str, settings: Settings | None = None
-) -> None:
+) -> bool:
     """CLI entry point. Requires shell access + recovery code; emails the verification
-    link to the NEW address. Returns nothing on success; raises FounderRecoveryError on
-    any refusal. NEVER returns or logs the token — it travels by email only."""
+    link to the NEW address. Returns whether delivery actually succeeded (the request is
+    valid either way; a failed delivery is audited and the CLI prints an honest warning —
+    re-initiating invalidates the old request). Raises FounderRecoveryError on any
+    refusal. NEVER returns or logs the token — it travels by email only."""
     settings = settings or get_settings()
     _assert_recovery_armed(settings)
     user = _recoverable_user(db, settings)
@@ -131,21 +134,36 @@ def initiate_founder_email_change(
     db.commit()
 
     link = f"{settings.public_app_url}/founder-recovery/confirm?token={token_plain}"
-    send_email(
-        candidate,
-        "Bekräfta grundarkonto-återställning – MainAI",
-        "Någon med serveråtkomst och återställningskoden har begärt att flytta detta "
-        "grundarkonto till den här adressen.\n\n"
-        "Om det är du: klicka på länken nedan för att bekräfta. Ändringen sker först då.\n\n"
-        f"{link}\n\n"
-        f"Länken är giltig i {settings.founder_recovery_token_expire_hours} timme(-ar) och kan bara användas en gång.\n\n"
-        "Om det INTE är du: gör inget. Ditt konto ändras inte utan denna bekräftelse — "
-        "och kontot kan bara nås av den som har serveråtkomst och återställningskoden, "
-        "så överväg att byta återställningskod på servern.",
+    try:
+        delivered = send_email(
+            candidate,
+            "Bekräfta grundarkonto-återställning – MainAI",
+            "Någon med serveråtkomst och återställningskoden har begärt att flytta detta "
+            "grundarkonto till den här adressen.\n\n"
+            "Om det är du: klicka på länken nedan för att bekräfta. Ändringen sker först då.\n\n"
+            f"{link}\n\n"
+            f"Länken är giltig i {settings.founder_recovery_token_expire_hours} timme(-ar) och kan bara användas en gång.\n\n"
+            "Om det INTE är du: gör inget. Ditt konto ändras inte utan denna bekräftelse — "
+            "och kontot kan bara nås av den som har serveråtkomst och återställningskoden, "
+            "så överväg att byta återställningskod på servern.",
+        )
+    except Exception:
+        # send_email never raises by contract; this is defense in depth. A delivery-layer
+        # crash must NOT leave a zombie outstanding request the operator believes was
+        # delivered — invalidate it and surface a clean refusal.
+        db.query(FounderEmailChangeRequest).filter_by(user_id=user.id, used_at=None).update(
+            {"used_at": datetime.utcnow()}
+        )
+        db.commit()
+        record_audit(db, user_id=user.id, action="founder_email_recovery_delivery_failed", detail="email_change")
+        raise FounderRecoveryError("leverans av bekräftelsemejlet misslyckades — kontrollera SMTP och försök igen") from None
+    record_audit(
+        db,
+        user_id=user.id,
+        action="founder_email_recovery_initiated",
+        detail="email_change delivery_ok" if delivered else "email_change delivery_failed",
     )
-    record_audit(db, user_id=user.id, action="founder_email_recovery_initiated", detail="email_change")
-    # Intentionally return nothing: the CLI prints a neutral confirmation and the token
-    # never touches stdout, argv echoes, or logs — only the emailed link carries it.
+    return delivered
 
 
 def confirm_founder_email_change(db: Session, *, token_plain: str, settings: Settings | None = None) -> str:
@@ -187,11 +205,16 @@ def confirm_founder_email_change(db: Session, *, token_plain: str, settings: Set
     user.email_verified = True
     user.email_verified_at = datetime.utcnow()
 
-    # Stale credentials for the old identity must all die with it.
+    # Stale credentials for the old identity must all die with it — including any
+    # outstanding email-verification tokens (they are recovery-adjacent credentials and
+    # a live one after a completed recovery would be an invalidation gap).
     db.query(FounderEmailChangeRequest).filter_by(user_id=user.id, used_at=None).update(
         {"used_at": datetime.utcnow()}
     )
     db.query(PasswordResetToken).filter_by(user_id=user.id, used_at=None).update(
+        {"used_at": datetime.utcnow()}
+    )
+    db.query(EmailVerificationToken).filter_by(user_id=user.id, used_at=None).update(
         {"used_at": datetime.utcnow()}
     )
     db.add(user)
@@ -201,13 +224,24 @@ def confirm_founder_email_change(db: Session, *, token_plain: str, settings: Set
     revoke_all_sessions_for_user(db, user.id)
 
     record_audit(db, user_id=user.id, action="founder_email_recovery_completed", detail="email_change")
-    send_email(
-        user.email,
-        "Grundarkonto återställt – MainAI",
-        "E-postadressen för grundarkontot har nu ändrats till den här adressen och alla "
-        "tidigare sessioner har avslutats. Logga in på nytt med ditt lösenord.\n\n"
-        "Om du INTE gjorde detta: kontakta din serveradministratör omedelbart — kontot "
-        "kan bara ha ändrats av någon med serveråtkomst och återställningskoden.",
+    try:
+        delivered = send_email(
+            user.email,
+            "Grundarkonto återställt – MainAI",
+            "E-postadressen för grundarkontot har nu ändrats till den här adressen och alla "
+            "tidigare sessioner har avslutats. Logga in på nytt med ditt lösenord.\n\n"
+            "Om du INTE gjorde detta: kontakta din serveradministratör omedelbart — kontot "
+            "kan bara ha ändrats av någon med serveråtkomst och återställningskoden.",
+        )
+    except Exception:  # defense in depth — the change is already committed; never roll it back
+        delivered = False
+    # The identity change and revocations are committed regardless of whether the
+    # confirmation mail went out; a delivery outage is audited, not fatal.
+    record_audit(
+        db,
+        user_id=user.id,
+        action="founder_email_recovery_confirmation_mail",
+        detail="delivery_ok" if delivered else "delivery_failed",
     )
     return user.email
 
@@ -230,14 +264,18 @@ def _cli() -> int:
 
     db = SessionLocal()
     try:
-        initiate_founder_email_change(db, new_email=args.new_email, presented_code=args.code)
+        delivered = initiate_founder_email_change(db, new_email=args.new_email, presented_code=args.code)
     except FounderRecoveryError as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 1
     finally:
         db.close()
-    print("OK: en bekräftelselänk har skickats till den nya adressen.")
-    print("Ändringen sker först när länken används. Alla sessioner avslutas vid bekräftelse.")
+    if delivered:
+        print("OK: en bekräftelselänk har skickats till den nya adressen.")
+        print("Ändringen sker först när länken används. Alla sessioner avslutas vid bekräftelse.")
+    else:
+        print("VARNING: begäran skapades men mejlet skickades INTE (SMTP-utgång misslyckades — se serverloggen).")
+        print("Ingen länk är på väg. Åtgärda SMTP och kör initiate igen (den gamla begäran blir då ogiltig).")
     return 0
 
 

@@ -135,8 +135,12 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://ollama:11434"
 
     # Fallback order per role: comma-separated provider names, tried in order after the
-    # active provider fails. MainAI 0.1 focuses this on OpenAI/Anthropic/Gemini.
-    chat_fallback_order: str = "openai,anthropic,gemini"
+    # active provider fails. MainAI 0.1 focuses this on OpenAI/Anthropic/Gemini; local
+    # ollama is the LAST-RESORT fallback so a deployment with zero remote API keys still
+    # has a usable local model (local-AI-primary rule — OpenAI consultation is the bounded
+    # exception, never the default). resolve_chat_chain demotes unconfigured providers,
+    # so a keyless deployment's chain head becomes the local model.
+    chat_fallback_order: str = "openai,anthropic,gemini,ollama"
 
     # CORS — comma-separated explicit allow-list, never a wildcard (incompatible with
     # allow_credentials=True anyway, which cookie-based auth requires).

@@ -122,11 +122,22 @@ def resolve_chat_chain(db: Session) -> list[tuple[LLMProvider, str]]:
     key) and aren't already the primary. Embedding has no fallback in MainAI 0.1 — an
     inconsistent embedding provider mid-conversation would silently corrupt retrieval
     quality, so a failed embedding call should surface as an error, not swap providers.
+
+    A primary that is NOT configured (e.g. the settings default is openai but no API key
+    is present) is demoted: the first CONFIGURED fallback becomes the chain head. Without
+    this, every single chat call would burn a guaranteed-failing attempt on the keyless
+    provider — and, for owner-scoped calls, an egress disclosure-ledger row for a request
+    that could never succeed — before local AI served it. resolve_active() is deliberately
+    left untouched so admin/status surfaces still report the configured default.
     """
     settings = get_settings()
     primary_provider, primary_model = resolve_active(db, role="chat")
-    chain = [(primary_provider, primary_model)]
-    seen_names = {primary_provider.name}
+    chain: list[tuple[LLMProvider, str]] = []
+    seen_names: set[str] = set()
+
+    if primary_provider.is_configured():
+        chain.append((primary_provider, primary_model))
+        seen_names.add(primary_provider.name)
 
     for name in [p.strip() for p in settings.chat_fallback_order.split(",") if p.strip()]:
         if name in seen_names or name not in _PROVIDERS:
@@ -137,6 +148,11 @@ def resolve_chat_chain(db: Session) -> list[tuple[LLMProvider, str]]:
         chain.append((provider, DEFAULT_CHAT_MODELS.get(name, primary_model)))
         seen_names.add(name)
 
+    if not chain:
+        # Nothing configured at all — keep the configured default as the head so callers
+        # get the familiar "provider X is not configured" ProviderError instead of an
+        # empty-chain error, and status surfaces keep reporting it.
+        chain.append((primary_provider, primary_model))
     return chain
 
 
