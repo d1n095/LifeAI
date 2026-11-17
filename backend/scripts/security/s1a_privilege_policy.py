@@ -120,6 +120,11 @@ _PROTECTED_TABLES = [
     ("message_source_units", ["SELECT", "INSERT"]),
     ("source_import_batches", ["SELECT", "INSERT", "UPDATE"]),
     ("source_import_batch_failures", ["SELECT", "INSERT"]),
+    # S1D (migration 0069) — repository_file_source_units is the exact same exclusive-arc
+    # pattern as document_source_units/message_source_units above (every field guarded
+    # immutable by trg_rfsu_guard_update, so UPDATE would always fail via the trigger anyway;
+    # narrowed at the grant level too for the same defense-in-depth reasoning).
+    ("repository_file_source_units", ["SELECT", "INSERT"]),
 ]
 
 _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]
