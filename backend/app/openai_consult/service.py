@@ -226,11 +226,19 @@ async def consult_openai(
     settings: Settings | None = None,
     budget_store=None,
     requested_by: str = "app.openai_consult.service.consult_openai",
+    purpose: str = "openai_consult",
+    task_id: uuid.UUID | None = None,
+    goal_id: uuid.UUID | None = None,
+    job_id: uuid.UUID | None = None,
 ) -> tuple[Any, dict[str, int]]:
     """Run one gated consultation. Returns (ConsultOut, {"reserved_tokens", "settled_in",
     "settled_out"}) for the router's logging. Raises ConsultationConfigError,
     ConsultationServiceError, BudgetExceededError or EgressDeniedError — the router maps
     each to a safe HTTP response.
+
+    `purpose`/`task_id`/`goal_id`/`job_id` flow into the egress disclosure ledger so
+    agent-initiated consultations (app/openai_consult/mainai.py) are auditable against
+    their goal/task/job context; the founder HTTP path keeps the defaults.
 
     `db` is the request's SQLAlchemy session (egress gate needs it for the disclosure
     ledger). The module writes NOTHING else to the database."""
@@ -255,8 +263,11 @@ async def consult_openai(
         owner_id=owner_id,
         provider="openai",
         model=model,
-        purpose="openai_consult",
+        purpose=purpose,
         requested_by=requested_by,
+        task_id=task_id,
+        goal_id=goal_id,
+        job_id=job_id,
         payload={
             "prompt": payload_in.prompt,
             "instructions": payload_in.instructions,

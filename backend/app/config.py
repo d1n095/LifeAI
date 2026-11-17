@@ -240,6 +240,13 @@ class Settings(BaseSettings):
     openai_consult_daily_cost_budget_usd: str = "5.00"
     openai_consult_web_search_enabled: bool = False
     openai_consult_store_responses: bool = False
+    # Independent switch for the MainAI-invoked path (app/openai_consult/mainai.py +
+    # workforce/provider_worker.py's consultation_mode): MainAI orchestration may consult
+    # OpenAI ONLY when BOTH openai_consult_enabled AND this flag are true AND the workforce
+    # activation gates are verified. Deliberately separate from the founder HTTP path so
+    # either capability can be disabled without touching the other. Local/in-process workers
+    # stay the primary execution path — this flag never changes any default routing.
+    openai_consult_mainai_enabled: bool = False
 
     @property
     def frontend_origin_list(self) -> list[str]:
