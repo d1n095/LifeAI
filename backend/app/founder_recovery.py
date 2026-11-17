@@ -170,10 +170,22 @@ def confirm_founder_email_change(db: Session, *, token_plain: str, settings: Set
 
     # THE change: same row, same primary key, same role, same password hash. Only the
     # email identity and its verification stamp move.
+    #
+    # ATOMIC single-use claim (same fix as refresh rotation): a SELECT-then-UPDATE window
+    # would let two concurrent confirmations both pass the used_at check. The conditional
+    # UPDATE grants the commit to exactly one caller; the loser sees the neutral refusal.
+    claimed = (
+        db.query(FounderEmailChangeRequest)
+        .filter(FounderEmailChangeRequest.id == request.id, FounderEmailChangeRequest.used_at.is_(None))
+        .update({"used_at": datetime.utcnow()}, synchronize_session=False)
+    )
+    db.commit()
+    if claimed != 1:
+        raise FounderRecoveryError("bekräftelselänken är ogiltig eller har gått ut — begär en ny via servern")
+
     user.email = request.new_email
     user.email_verified = True
     user.email_verified_at = datetime.utcnow()
-    request.used_at = datetime.utcnow()
 
     # Stale credentials for the old identity must all die with it.
     db.query(FounderEmailChangeRequest).filter_by(user_id=user.id, used_at=None).update(
@@ -182,7 +194,7 @@ def confirm_founder_email_change(db: Session, *, token_plain: str, settings: Set
     db.query(PasswordResetToken).filter_by(user_id=user.id, used_at=None).update(
         {"used_at": datetime.utcnow()}
     )
-    db.add_all([user, request])
+    db.add(user)
     db.commit()
 
     # A recovery is exactly a moment when old sessions must not survive.
