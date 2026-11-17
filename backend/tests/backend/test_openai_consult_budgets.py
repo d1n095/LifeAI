@@ -301,6 +301,63 @@ async def test_failed_provider_call_releases_reservation_timeout(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cancelled_call_releases_reservation(monkeypatch):
+    """P4/P8 cancellation race: a call cancelled mid-flight (client disconnect, harness
+    shutdown) must release its worst-case reservation — CancelledError inherits from
+    BaseException and would otherwise bypass every except-Exception handler."""
+    import asyncio
+
+    store = DailyBudgetStore(token_budget=100_000, cost_budget_usd="5.00", redis_url=None)
+
+    class FakeSlowClient:
+        def __init__(self, timeout: float):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, *args, **kwargs):
+            await asyncio.sleep(10)  # cancelled here
+            raise AssertionError("must not complete")
+
+    monkeypatch.setattr(consult_service_module, "_create_client", lambda timeout: FakeSlowClient(timeout))
+
+    task = asyncio.create_task(
+        consult_openai(
+            RecordingDB(), owner_id=OWNER_A, payload_in=ConsultIn(prompt="x"),
+            settings=make_settings(), budget_store=store,
+        )
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    tokens_left, _ = store.remaining(OWNER_A)
+    assert tokens_left == 100_000  # released, not leaked
+
+
+@pytest.mark.asyncio
+async def test_malformed_provider_body_fails_closed_and_releases(monkeypatch):
+    """A 200 with a non-JSON body is a malformed provider response: fail closed with a
+    safe error, release the reservation, never leak raw body content to the caller."""
+    store = DailyBudgetStore(token_budget=100_000, cost_budget_usd="5.00", redis_url=None)
+    calls = patch_transport(
+        monkeypatch, lambda request: httpx.Response(200, content=b"<<<not-json{{{>>>")
+    )
+    with pytest.raises(ConsultationServiceError, match="unreachable"):
+        await consult_openai(
+            RecordingDB(), owner_id=OWNER_A, payload_in=ConsultIn(prompt="x"),
+            settings=make_settings(), budget_store=store,
+        )
+    assert len(calls) == 1
+    tokens_left, _ = store.remaining(OWNER_A)
+    assert tokens_left == 100_000
+
+
+@pytest.mark.asyncio
 async def test_release_then_retry_charges_exactly_once(monkeypatch):
     """Fail → release → successful retry: the day ends with EXACTLY the real usage, not
     reservation + usage."""

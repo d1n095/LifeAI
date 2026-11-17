@@ -25,6 +25,7 @@ and never credential material.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -326,6 +327,12 @@ async def consult_openai(
             )
             resp.raise_for_status()
             data = resp.json()
+    except asyncio.CancelledError:
+        # Cancellation (client disconnect, harness timeout, shutdown) inherits from
+        # BaseException, not Exception — without this handler a cancelled call would
+        # leak its worst-case reservation until UTC midnight. Release, then propagate.
+        _release_reservation()
+        raise
     except httpx.TimeoutException as exc:
         _release_reservation()
         # Nothing about the URL/key is surfaced.
