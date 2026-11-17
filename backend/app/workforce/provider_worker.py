@@ -157,6 +157,7 @@ def _execute_consultation_assignment(
     owner_id: uuid.UUID,
     assignment: WorkforceAssignment,
     profile: WorkforceAgentProfile,
+    envelope: WorkerRequestEnvelope,
     goal_text: str,
     instructions: str | None,
     goal_id: uuid.UUID | None,
@@ -168,33 +169,54 @@ def _execute_consultation_assignment(
     app/openai_consult/mainai.consult_for_mainai_sync. NO second invocation stack: the
     answer comes back through the same scrub → broker-ingestion → checkpoint pipeline as
     any other worker output, and the egress disclosure ledger (with this assignment's
-    goal/task/job ids) is written by the consultation core itself."""
+    goal/task/job ids) is written by the consultation core itself.
+
+    Controlled error recovery: a PROVIDER-infrastructure failure (timeout, unreachable,
+    provider 5xx, contract-invalid answer → ConsultationServiceError) falls back to the
+    LOCAL in-process worker so the assignment still completes on the primary execution
+    path. Policy and authorization refusals (disabled, unauthorized, activation gates,
+    kill switch, recursion, budget, egress) are NOT caught — they fail closed."""
     from app.openai_consult.mainai import consult_for_mainai_sync
+    from app.openai_consult.service import ConsultationServiceError
 
-    result, _stats = consult_for_mainai_sync(
-        db,
-        owner_id=owner_id,
-        goal_text=goal_text,
-        instructions=instructions,
-        goal_id=goal_id,
-        task_id=task_id,
-        job_id=job_id,
-        agent_key=profile.agent_key if profile is not None else None,
-    )
+    provider_invoked = False
+    provider_name = None
+    model_id = None
+    spend_reserved = False
+    spend_settled = False
+    try:
+        result, _stats = consult_for_mainai_sync(
+            db,
+            owner_id=owner_id,
+            goal_text=goal_text,
+            instructions=instructions,
+            goal_id=goal_id,
+            task_id=task_id,
+            job_id=job_id,
+            agent_key=profile.agent_key if profile is not None else None,
+        )
+        provider_invoked = True
+        provider_name = "openai"
+        model_id = result.model
+        spend_reserved = True
+        spend_settled = True
+        raw: dict[str, Any] = {
+            "answer": result.output_text,
+            "model": result.model,
+            "cost_usd": result.cost_usd,
+            "usage": {
+                "input_tokens": result.usage.input_tokens,
+                "output_tokens": result.usage.output_tokens,
+                "total_tokens": result.usage.total_tokens,
+            },
+        }
+        notes.append("consultation_completed")
+    except ConsultationServiceError:
+        notes.append("consultation_unavailable_local_fallback")
 
-    # The consultation answer is UNTRUSTED DATA (model-requested context != authority):
-    # scrub authority mutations, ingest through the broker, checkpoint for verification —
-    # identical to the in-process worker's post-processing.
-    raw: dict[str, Any] = {
-        "answer": result.output_text,
-        "model": result.model,
-        "cost_usd": result.cost_usd,
-        "usage": {
-            "input_tokens": result.usage.input_tokens,
-            "output_tokens": result.usage.output_tokens,
-            "total_tokens": result.usage.total_tokens,
-        },
-    }
+        # The answer (or the absence of one) is UNTRUSTED DATA either way — same pipeline.
+        raw = _in_process_worker(envelope)
+
     cleaned, stripped = scrub_authority_mutations(raw)
     if stripped:
         notes.append(f"scrubbed:{','.join(stripped)}")
@@ -207,14 +229,15 @@ def _execute_consultation_assignment(
         checkpoint_kind="progress",
         partial_result=cleaned,
         external_effect_state="none_proven",
-        provenance={"provider_invoked": True, "consultation": True},
+        provenance={"provider_invoked": provider_invoked, "consultation": provider_invoked},
     )
 
+    receipt_notes = notes + ["consultation_egress_ledger_recorded"] if provider_invoked else notes
     return WorkerExecutionReceipt(
         assignment_id=assignment.id,
-        provider_invoked=True,
-        provider_name="openai",
-        model_id=result.model,
+        provider_invoked=provider_invoked,
+        provider_name=provider_name,
+        model_id=model_id,
         timeout=False,
         cancelled=False,
         raw_output_scrubbed=cleaned,
@@ -222,10 +245,10 @@ def _execute_consultation_assignment(
         # Budget reserve/settle happened inside the consultation core against the owner's
         # shared daily consultation budget (not the goal-bound spend-authorization kernel,
         # which stays reserved for goal-bound agent execution).
-        spend_reserved=True,
-        spend_settled=True,
+        spend_reserved=spend_reserved,
+        spend_settled=spend_settled,
         external_effect_state="none_proven",
-        notes=notes + ["consultation_completed", "consultation_egress_ledger_recorded"],
+        notes=receipt_notes,
     )
 
 
@@ -332,6 +355,7 @@ def execute_workforce_assignment(
             owner_id=owner_id,
             assignment=assignment,
             profile=profile,
+            envelope=envelope,
             goal_text=goal_text,
             instructions=consultation_instructions,
             goal_id=consultation_goal_id,

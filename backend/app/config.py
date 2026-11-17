@@ -240,6 +240,12 @@ class Settings(BaseSettings):
     openai_consult_daily_cost_budget_usd: str = "5.00"
     openai_consult_web_search_enabled: bool = False
     openai_consult_store_responses: bool = False
+    # Bounded consultation-selection policy (app/openai_consult/policy.py): how many
+    # MainAI-initiated consultations one owner may ADMIT per UTC day. Consultation is a
+    # bounded exception to the local-AI-primary rule, not an unbounded reflex; 20 is a
+    # deliberately modest ceiling and the counter is Redis-backed (fail-closed in
+    # production without it) so replicas cannot each spend the cap.
+    openai_consult_mainai_daily_call_cap: int = 20
     # Independent switch for the MainAI-invoked path (app/openai_consult/mainai.py +
     # workforce/provider_worker.py's consultation_mode): MainAI orchestration may consult
     # OpenAI ONLY when BOTH openai_consult_enabled AND this flag are true AND the workforce

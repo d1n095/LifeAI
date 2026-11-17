@@ -172,8 +172,12 @@ class DailyBudgetStore:
 
 
 def build_budget_store_from_settings(settings=None) -> DailyBudgetStore:
-    """One store per construction; routers build it per request from get_settings() — cheap
-    (a Redis connection pool is shared inside redis-py via from_url's connection pooling).
+    """One store PER PROCESS, cached by (budget params, redis_url). Routers build it per
+    request from get_settings() — the cache makes that construction share ONE counter
+    instance, which is what makes the IN-MEMORY fallback correct for a single-process
+    deployment: per-request construction would silently reset the daily counters on every
+    request (a real defect the policy test suite caught). With Redis the cache is still
+    correct (and keeps one connection pool per parameter set).
 
     FAIL CLOSED in production: without REDIS_URL the counters would be process-local, so
     every backend replica would enforce the ceiling independently (N workers → N× the
@@ -186,8 +190,24 @@ def build_budget_store_from_settings(settings=None) -> DailyBudgetStore:
             "OPENAI_CONSULT requires REDIS_URL in production — distributed budget "
             "enforcement is mandatory and its absence is fail-closed, not per-process"
         )
-    return DailyBudgetStore(
-        token_budget=settings.openai_consult_daily_token_budget,
-        cost_budget_usd=settings.openai_consult_daily_cost_budget_usd,
-        redis_url=settings.redis_url,
+    cache_key = (
+        int(settings.openai_consult_daily_token_budget),
+        str(settings.openai_consult_daily_cost_budget_usd),
+        settings.redis_url,
     )
+    with _STORE_CACHE_LOCK:
+        store = _STORE_CACHE.get(cache_key)
+        if store is None:
+            store = DailyBudgetStore(
+                token_budget=settings.openai_consult_daily_token_budget,
+                cost_budget_usd=settings.openai_consult_daily_cost_budget_usd,
+                redis_url=settings.redis_url,
+            )
+            _STORE_CACHE[cache_key] = store
+    return store
+
+
+# Process-lifetime store cache — see build_budget_store_from_settings. Keyed by budget
+# parameters so different settings configurations never share counters.
+_STORE_CACHE: dict[tuple[int, str, str | None], "DailyBudgetStore"] = {}
+_STORE_CACHE_LOCK = threading.Lock()

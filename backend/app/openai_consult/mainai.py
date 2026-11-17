@@ -129,6 +129,13 @@ async def consult_for_mainai(
 
     require_activation_allowed()
 
+    # Gate 3b: bounded consultation-selection policy — per-owner daily admission cap
+    # (app/openai_consult/policy.py, Redis-backed, fail-closed in production without it).
+    # Consultation is a bounded exception to the local-AI-primary rule, not a reflex.
+    from app.openai_consult.policy import build_policy_from_settings
+
+    build_policy_from_settings(settings).check_and_increment(str(owner_id))
+
     # Gate 4: the explicit inputs are the ONLY egress surface — credential-scrubbed.
     _assert_no_credentials_in_strings(goal_text, instructions)
 
@@ -137,7 +144,7 @@ async def consult_for_mainai(
         # Gate 5-7 (egress, budget, HTTP, settle): the SAME core the founder path uses.
         # allow_web_search/response_schema are structurally absent from this call — the
         # ConsultIn is built here, not accepted from the caller.
-        return await consult_openai(
+        result, stats = await consult_openai(
             db,
             owner_id=owner_id,
             payload_in=ConsultIn(
@@ -154,6 +161,17 @@ async def consult_for_mainai(
         )
     finally:
         _INSIDE_CONSULTATION.reset(token)
+
+    # Output contract validation (fail-closed): an empty/whitespace answer is a malformed
+    # provider response — never returned to orchestration as a valid consultation result.
+    if not (result.output_text or "").strip():
+        from app.openai_consult.service import ConsultationServiceError
+
+        raise ConsultationServiceError(
+            "Konsultatsvaret var tomt — vägrar returnera det till orkestreringen "
+            "(contract-validering, fail-closed)."
+        )
+    return result, stats
 
 
 def consult_for_mainai_sync(
