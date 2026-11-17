@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.providers.registry import embed_with_policy, resolve_active
 from app.rag.embedding_space import native_dim_of
+from app.rag.query_embedding import prepare_embedding_query
 from app.rag.vector_store import search
 
 
@@ -28,7 +29,9 @@ async def retrieve_context(
     vectors = await embed_with_policy(
         db,
         provider,
-        [query],
+        # Instruction-aware models need the prefix on the QUERY only; documents stay bare
+        # (app/rag/query_embedding.py). A no-op for symmetric models and the empty default.
+        [prepare_embedding_query(query)],
         model=model,
         owner_id=owner_id,
         purpose="rag_retrieval",

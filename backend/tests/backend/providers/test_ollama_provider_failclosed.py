@@ -117,7 +117,9 @@ async def test_chat_server_error_500_is_unreachable(mock_ollama):
 
 @pytest.mark.asyncio
 async def test_embed_happy_path_returns_vectors(mock_ollama):
-    mock_ollama(_json(200, {"embedding": [0.1, 0.2, 0.3]}))
+    # embed() uses the batch /api/embed endpoint (see test_ollama_embed_batch.py); the
+    # fail-closed contract is what this file pins.
+    mock_ollama(_json(200, {"embeddings": [[0.1, 0.2, 0.3]]}))
     vectors = await OllamaProvider().embed(["hello"], model="all-minilm")
     assert vectors == [[0.1, 0.2, 0.3]]
 
@@ -143,6 +145,13 @@ async def test_embed_200_missing_embedding_fails_closed(mock_ollama):
     mock_ollama(_json(200, {"done": True}))
     with pytest.raises(ProviderError):
         await OllamaProvider().embed(["hello"], model="all-minilm")
+
+
+@pytest.mark.asyncio
+async def test_embed_200_nonlist_embeddings_fails_closed(mock_ollama):
+    mock_ollama(_json(200, {"embeddings": [[0.1], "nope"]}))
+    with pytest.raises(ProviderError):
+        await OllamaProvider().embed(["a", "b"], model="all-minilm")
 
 
 @pytest.mark.asyncio

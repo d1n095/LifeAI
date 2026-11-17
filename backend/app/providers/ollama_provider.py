@@ -27,6 +27,64 @@ def _ollama_error_text(data: object) -> str | None:
     return None
 
 
+def _is_numeric_vector(value: object) -> bool:
+    """A non-empty list of real numbers — the only shape acceptable as an embedding."""
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value)
+    )
+
+
+def _is_missing_embed_route(resp: httpx.Response) -> bool:
+    """True only for a 404 that means "this server has no /api/embed" — a plain-text 404.
+
+    A model-not-found 404 is JSON with an `error` field and must NOT be mistaken for an old
+    server: silently retrying that against the legacy endpoint would turn a provisioning gap
+    ("pull the model") into a confusing double failure."""
+    if resp.status_code != 404:
+        return False
+    try:
+        data = resp.json()
+    except ValueError:
+        return True
+    return not (isinstance(data, dict) and data.get("error"))
+
+
+def _validated_batch_embeddings(data: object, *, expected_count: int) -> list[list[float]]:
+    """Validate an /api/embed body, failing closed on every malformed shape.
+
+    All vectors in a batch must share one width: app/rag/embedding_space.py's fit_vectors()
+    fails closed on a mixed batch anyway, and catching it here names the actual cause
+    (a misbehaving runtime) instead of surfacing as a storage-layer error."""
+    error_text = _ollama_error_text(data)
+    if error_text is not None:
+        raise ProviderError(
+            f"Lokal modell (Ollama) svarade med fel: {error_text}", category="unsupported"
+        )
+    if not isinstance(data, dict) or "embeddings" not in data:
+        raise ProviderError(
+            "Lokal modell (Ollama) gav ett svar utan 'embeddings'.", category="unsupported"
+        )
+    raw = data["embeddings"]
+    if not isinstance(raw, list) or not all(_is_numeric_vector(vector) for vector in raw):
+        raise ProviderError(
+            "Lokal modell (Ollama) gav 'embeddings' som inte är en lista av talvektorer.",
+            category="unsupported",
+        )
+    if len(raw) != expected_count:
+        raise ProviderError(
+            f"Lokal modell (Ollama) gav {len(raw)} vektorer för {expected_count} texter.",
+            category="unsupported",
+        )
+    if len({len(vector) for vector in raw}) > 1:
+        raise ProviderError(
+            "Lokal modell (Ollama) gav vektorer med olika dimension i samma batch.",
+            category="unsupported",
+        )
+    return [[float(v) for v in vector] for vector in raw]
+
+
 class OllamaProvider(LLMProvider):
     """Local model runner (Llama / Qwen / Mistral) — no API key, no external cost."""
 
@@ -83,39 +141,70 @@ class OllamaProvider(LLMProvider):
         )
 
     async def embed(self, texts: list[str], model: str, *, timeout: float | None = None) -> list[list[float]]:
-        vectors: list[list[float]] = []
+        """Embed a whole batch in ONE `/api/embed` call, at the model's NATIVE width.
+
+        Deliberately does not truncate or pad to settings.embedding_dim. Fitting a native
+        vector into the fixed pgvector column is app/rag/embedding_space.py's job, which
+        zero-pads (cosine-preserving, so rankings are identical) and stamps each chunk with
+        the model + native dimension so retrieval never mixes embedding spaces. Truncating
+        here instead would have to discard signal and would break that contract for exactly
+        the local models the padding path exists to support.
+
+        Batching matters on CPU-local runtimes: one request per document batch instead of one
+        per chunk is the difference between a usable ingestion and a ~13 s-per-chunk crawl.
+        """
+        if not texts:
+            return []
         try:
             async with httpx.AsyncClient(timeout=timeout or 120) as client:
-                for text in texts:
-                    resp = await client.post(
-                        f"{self.settings.ollama_base_url}/api/embeddings",
-                        json={"model": model, "prompt": text},
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    # Same trust boundary as chat(): a 200-OK error object or a missing/invalid
-                    # "embedding" must fail closed, never escape as a raw KeyError/TypeError.
-                    error_text = _ollama_error_text(data)
-                    if error_text is not None:
-                        raise ProviderError(
-                            f"Lokal modell (Ollama) svarade med fel: {error_text}", category="unsupported"
-                        )
-                    try:
-                        vector = data["embedding"]
-                    except (KeyError, TypeError) as exc:
-                        raise ProviderError(
-                            "Lokal modell (Ollama) gav ett svar utan 'embedding'.", category="unsupported"
-                        ) from exc
-                    if not isinstance(vector, list) or not vector or not all(
-                        isinstance(v, (int, float)) for v in vector
-                    ):
-                        raise ProviderError(
-                            "Lokal modell (Ollama) gav en 'embedding' som inte är en talvektor.",
-                            category="unsupported",
-                        )
-                    vectors.append(vector)
+                resp = await client.post(
+                    f"{self.settings.ollama_base_url}/api/embed",
+                    json={"model": model, "input": texts},
+                )
+                if _is_missing_embed_route(resp):
+                    # An Ollama older than 0.1.36 has no /api/embed; its 404 is a plain-text
+                    # "404 page not found", which is NOT the same failure as a JSON
+                    # model-not-found (that one stays a real `unsupported`, below). Falling back
+                    # to the per-text endpoint keeps an older-but-working local runtime usable
+                    # instead of rejecting it outright.
+                    return await self._embed_legacy(client, texts, model)
+                resp.raise_for_status()
+                data = resp.json()
         except httpx.HTTPError as exc:
             raise ProviderError(
                 f"Lokal modell (Ollama) inte nåbar: {exc}", category=_http_error_category(exc)
             ) from exc
+        return _validated_batch_embeddings(data, expected_count=len(texts))
+
+    async def _embed_legacy(
+        self, client: httpx.AsyncClient, texts: list[str], model: str
+    ) -> list[list[float]]:
+        """Pre-`/api/embed` Ollama: the same fail-closed contract, one text per request."""
+        vectors: list[list[float]] = []
+        for text in texts:
+            resp = await client.post(
+                f"{self.settings.ollama_base_url}/api/embeddings",
+                json={"model": model, "prompt": text},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            # Same trust boundary as chat(): a 200-OK error object or a missing/invalid
+            # "embedding" must fail closed, never escape as a raw KeyError/TypeError.
+            error_text = _ollama_error_text(data)
+            if error_text is not None:
+                raise ProviderError(
+                    f"Lokal modell (Ollama) svarade med fel: {error_text}", category="unsupported"
+                )
+            try:
+                vector = data["embedding"]
+            except (KeyError, TypeError) as exc:
+                raise ProviderError(
+                    "Lokal modell (Ollama) gav ett svar utan 'embedding'.", category="unsupported"
+                ) from exc
+            if not _is_numeric_vector(vector):
+                raise ProviderError(
+                    "Lokal modell (Ollama) gav en 'embedding' som inte är en talvektor.",
+                    category="unsupported",
+                )
+            vectors.append([float(v) for v in vector])
         return vectors

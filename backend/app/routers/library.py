@@ -26,6 +26,7 @@ from app.egress_policy import EgressDeniedError
 from app.providers.registry import embed_with_policy, resolve_active
 from app.providers.verification import classify_provider_exception
 from app.rag.embedding_space import native_dim_of
+from app.rag.query_embedding import prepare_embedding_query
 from app.rag.library_import import maybe_purge_blob
 from app.rag.trust import assess_claim_confidence
 from app.rag.vector_store import hybrid_search
@@ -619,7 +620,10 @@ async def search_library(
         vectors = await embed_with_policy(
             db,
             provider,
-            [query.query],
+            # Query channel only: the prefix makes instruction-aware local embedding models
+            # rank correctly (app/rag/query_embedding.py). hybrid_search() below still gets the
+            # RAW query for its independent text-match channel.
+            [prepare_embedding_query(query.query)],
             model=model,
             owner_id=user.id,
             purpose="rag_query",
