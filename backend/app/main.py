@@ -18,6 +18,7 @@ from app.providers.base import looks_like_placeholder_secret
 from app.rls import apply_mainai_execution_privileges, apply_mainai_job_runtime_privileges, apply_rls
 from app.routers import (
     account,
+    ads,
     admin,
     agents,
     auth,
@@ -88,6 +89,7 @@ app.include_router(inspectable_memory.router)
 app.include_router(execution_envelopes.router)
 app.include_router(provider_spend.router)
 app.include_router(openai_consult)
+app.include_router(ads.router)
 
 
 @app.on_event("startup")

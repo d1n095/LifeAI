@@ -266,6 +266,46 @@ class Settings(BaseSettings):
     founder_recovery_code_sha256: str = ""
     founder_recovery_token_expire_hours: int = 1
 
+    # --- Revenue & Compute Engine (app/billing/, migration 0070) ----------------------
+    # Enforcement OFF by default: turning it on makes budget refusals user-visible, which
+    # is a founder decision (see docs/REVENUE_COMPUTE_ENGINE.md). When ON and the counter
+    # store (Redis) is unavailable in production, spending FAILS CLOSED — never admitted
+    # uncounted. Caps are USD/day and USD/month per tier (None = unlimited; only
+    # enterprise may be configured unlimited, deliberately).
+    billing_enforcement_enabled: bool = False
+    billing_default_tier: str = "paid"
+    billing_free_daily_cost_usd: float = 0.10
+    billing_free_monthly_cost_usd: float = 1.50
+    billing_free_daily_token_cap: int = 30000
+    billing_free_monthly_token_cap: int = 300000
+    billing_paid_daily_cost_usd: float = 2.00
+    billing_paid_monthly_cost_usd: float = 25.00
+    billing_paid_daily_token_cap: int = 300000
+    billing_paid_monthly_token_cap: int = 3000000
+    billing_enterprise_daily_cost_usd: float = 20.00
+    billing_enterprise_monthly_cost_usd: float = 250.00
+    billing_enterprise_daily_token_cap: int = 3000000
+    billing_enterprise_monthly_token_cap: int = 30000000
+    # A provider/model with no price entry still counts AGAINST cost budgets at this
+    # conservative fallback rate (per 1k tokens) instead of passing unpriced.
+    billing_unknown_cost_fallback_usd_per_1k: float = 0.01
+    # Local compute infrastructure model (platform cost — users' local inference is free).
+    billing_local_gpu_hour_usd: float = 0.75
+    billing_local_gpu_tokens_per_second: float = 30.0
+    billing_local_energy_overhead_pct: float = 20.0
+    # Allocation margin: fraction of SETTLED revenue withheld from spending ceilings.
+    billing_safety_margin_pct: int = 25
+
+    # --- Advertising subsystem (app/ads/, migration 0071) -----------------------------
+    # DISABLED BY DEFAULT, provider-agnostic, and structurally firewalled from private
+    # context (see app/ads/__init__.py). Enabling in production additionally requires an
+    # explicit ad source; there is no live ad-network integration in this slice.
+    ads_enabled: bool = False
+    ads_house_ads_json: str | None = None  # operator-supplied house-ad pool, JSON
+    ads_max_impressions_per_user_per_day: int = 20
+    ads_max_clicks_per_user_per_day: int = 5
+    ads_click_min_interval_seconds: int = 3  # impression→click plausibility floor
+
     @property
     def frontend_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.frontend_origins.split(",") if origin.strip()]

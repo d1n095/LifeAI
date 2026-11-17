@@ -163,6 +163,32 @@ CONFIG_MATRIX: dict[str, dict] = {
     "founder_recovery_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "fail-closed arming switch, re-checked at initiate AND confirm"},
     "founder_recovery_code_sha256": {"required_in_production": False, "secret": True, "default": "***", "validates": "only the SHA-256 of the recovery code is stored (real default is the empty string — recovery refuses when unset)"},
     "founder_recovery_token_expire_hours": {"required_in_production": False, "secret": False, "default": 1, "validates": "single-use confirmation link TTL"},
+    # --- Revenue & Compute Engine (app/billing/, migration 0070; docs/REVENUE_COMPUTE_ENGINE.md)
+    "billing_enforcement_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "OFF by default; when ON, spending fails CLOSED if the counter store (Redis) is unavailable in production"},
+    "billing_default_tier": {"required_in_production": False, "secret": False, "default": "paid", "validates": "tier resolution for personal accounts (no tenant membership)"},
+    "billing_free_daily_cost_usd": {"required_in_production": False, "secret": False, "default": 0.1, "validates": "tier policy cap (ad-funded free tier)"},
+    "billing_free_monthly_cost_usd": {"required_in_production": False, "secret": False, "default": 1.5, "validates": "tier policy cap"},
+    "billing_free_daily_token_cap": {"required_in_production": False, "secret": False, "default": 30000, "validates": "tier policy cap"},
+    "billing_free_monthly_token_cap": {"required_in_production": False, "secret": False, "default": 300000, "validates": "tier policy cap"},
+    "billing_paid_daily_cost_usd": {"required_in_production": False, "secret": False, "default": 2.0, "validates": "tier policy cap"},
+    "billing_paid_monthly_cost_usd": {"required_in_production": False, "secret": False, "default": 25.0, "validates": "tier policy cap"},
+    "billing_paid_daily_token_cap": {"required_in_production": False, "secret": False, "default": 300000, "validates": "tier policy cap"},
+    "billing_paid_monthly_token_cap": {"required_in_production": False, "secret": False, "default": 3000000, "validates": "tier policy cap"},
+    "billing_enterprise_daily_cost_usd": {"required_in_production": False, "secret": False, "default": 20.0, "validates": "tier policy cap"},
+    "billing_enterprise_monthly_cost_usd": {"required_in_production": False, "secret": False, "default": 250.0, "validates": "tier policy cap"},
+    "billing_enterprise_daily_token_cap": {"required_in_production": False, "secret": False, "default": 3000000, "validates": "tier policy cap"},
+    "billing_enterprise_monthly_token_cap": {"required_in_production": False, "secret": False, "default": 30000000, "validates": "tier policy cap"},
+    "billing_unknown_cost_fallback_usd_per_1k": {"required_in_production": False, "secret": False, "default": 0.01, "validates": "unpriced provider/model calls still count against cost budgets at this conservative rate — never silently free"},
+    "billing_local_gpu_hour_usd": {"required_in_production": False, "secret": False, "default": 0.75, "validates": "platform-side local-infrastructure cost model (users' local inference is free)"},
+    "billing_local_gpu_tokens_per_second": {"required_in_production": False, "secret": False, "default": 30.0, "validates": "local cost model throughput knob"},
+    "billing_local_energy_overhead_pct": {"required_in_production": False, "secret": False, "default": 20.0, "validates": "local cost model overhead knob"},
+    "billing_safety_margin_pct": {"required_in_production": False, "secret": False, "default": 25, "validates": "allocation withholds this share of SETTLED revenue from spending ceilings (DB CHECK bounds 0..90)"},
+    # --- Advertising subsystem (app/ads/, migration 0071; docs/ADS_COMPLIANCE.md) — DISABLED BY DEFAULT
+    "ads_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "OFF by default; the HTTP surface 404s and the service serves nothing while disabled"},
+    "ads_house_ads_json": {"required_in_production": False, "secret": False, "default": None, "validates": "operator-supplied house-ad pool (JSON array); provider-agnostic — no ad-network SDK exists"},
+    "ads_max_impressions_per_user_per_day": {"required_in_production": False, "secret": False, "default": 20, "validates": "fraud/abuse ceiling, Redis-backed counter, fail-closed when enabled"},
+    "ads_max_clicks_per_user_per_day": {"required_in_production": False, "secret": False, "default": 5, "validates": "fraud/abuse ceiling"},
+    "ads_click_min_interval_seconds": {"required_in_production": False, "secret": False, "default": 3, "validates": "impression-to-click plausibility floor"},
 }
 
 

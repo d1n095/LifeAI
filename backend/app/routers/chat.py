@@ -31,7 +31,10 @@ from app.founder_memory_signals import record_candidate_signal
 from app.limiter import limiter
 from app.mainai_runtime_contract import build_answer_response, sanitize_unverified_execution_claims
 from app.models.conversation import Conversation, Message as MessageModel, MessageRole, MessageStatus
-from app.models.usage import UsageLog
+from app.billing import record_usage
+from app.billing.enforcement import BillingBudgetExceededError, BillingEnforcementUnavailableError
+from app.billing.limits import effective_limits
+from app.billing.reservation import estimate_reservation_cost, release_reservation, reserve_compute, settle_reservation
 from app.models.user import User
 from app.providers.base import Message, ProviderError
 from app.providers.pricing import estimate_cost
@@ -217,6 +220,26 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
 
     assistant_row = _get_or_create_reply_slot(db, user_message.id)
 
+    # Revenue & Compute Engine (app/billing/): reserve a worst-case estimate BEFORE the
+    # call, settle with real usage after, release on failure. When enforcement is off
+    # (default until the founder turns it on) reservation is None and nothing changes.
+    reservation = None
+    limits = effective_limits(db, user)
+    settings_chat = get_settings()
+    if settings_chat.billing_enforcement_enabled:
+        est_tokens = sum(len(m.content) for m in messages) // 4 + 1024
+        try:
+            reservation = reserve_compute(
+                db, user=user, limits=limits, estimated_tokens=est_tokens,
+                estimated_cost_usd=estimate_reservation_cost(settings_chat, est_tokens),
+            )
+        except BillingBudgetExceededError as exc:
+            raise HTTPException(status_code=402, detail=str(exc))
+        except BillingEnforcementUnavailableError as exc:
+            # Fail-closed: enforcement ON but the counter store is unavailable. Refuse
+            # cleanly (503) rather than admit an uncounted call.
+            raise HTTPException(status_code=503, detail=str(exc))
+
     try:
         result, attempted = await chat_with_fallback(
             db,
@@ -226,6 +249,8 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
             requested_by="routers.chat._attempt_assistant_reply",
         )
     except (ProviderError, EgressDeniedError) as exc:
+        if reservation is not None:
+            release_reservation(reservation)  # failed call: no phantom spend
         # Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V1): an
         # EgressDeniedError means the gate refused the WHOLE call before any provider was ever
         # reached (never a provider outage) -- always non-retryable, since the content that
@@ -262,18 +287,27 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     usage = result.raw_usage or {}
     prompt_tokens = usage.get("prompt_tokens", 0)
     completion_tokens = usage.get("completion_tokens", 0)
-    cost = estimate_cost(result.provider, result.model, prompt_tokens, completion_tokens)
-    db.add(
-        UsageLog(
-            user_id=user.id,
-            conversation_id=conversation.id,
-            role="chat",
-            provider=result.provider,
-            model=result.model,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            cost_usd=cost,
-        )
+    if reservation is not None:
+        settle_reservation(reservation, actual_tokens=prompt_tokens + completion_tokens,
+                           actual_cost_usd=estimate_reservation_cost(
+                               settings_chat, prompt_tokens + completion_tokens,
+                               provider=result.provider, model=result.model))
+    # Revenue & Compute Engine: the SINGLE accounting writer (per-call audit row +
+    # enforcement rollups in one pipeline). Tenant/agent/task dimensions are platform
+    # plumbing; tier is snapshotted for audit. See app/billing/__init__.py.
+    record_usage(
+        db,
+        user_id=user.id,
+        tenant_id=getattr(user, "tenant_id", None),
+        role="chat",
+        provider=result.provider,
+        model=result.model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        agent="chat",
+        task="conversation_reply",
+        conversation_id=conversation.id,
+        tier=effective_limits(db, user).tier,
     )
 
     # Founder re-review round (PR #36): the runtime truthfulness contract (app/

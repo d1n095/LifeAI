@@ -199,6 +199,8 @@ from app.models.source_relationship import SourceRelationship
 from app.models.storage_deletion_task import StorageDeletionReason, StorageDeletionStatus, StorageDeletionTask
 from app.models.supervisor_lease import SupervisorGoalLease
 from app.models.usage import UsageLog
+from app.models.billing import BillingTenant, UsageRollup, RevenueLedger
+from app.models.ads import AdConsentEvent, AdEvent
 from app.models.user import User
 from app.models.work_candidate import WorkCandidate
 from app.models.workforce import (
@@ -419,6 +421,11 @@ __all__ = [
     "StorageDeletionTask",
     "SupervisorGoalLease",
     "UsageLog",
+    "BillingTenant",
+    "UsageRollup",
+    "RevenueLedger",
+    "AdConsentEvent",
+    "AdEvent",
     "User",
     "WorkEfficiencyObservation",
     "WorkSpecialistContribution",
