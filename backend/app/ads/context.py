@@ -15,13 +15,23 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class AdContext:
     """Coarse, non-private targeting surface. Deliberately tiny; extending it requires
-    touching this file (and the firewall tests), not any ad source."""
+    touching this file (and the firewall tests), not any ad source.
+
+    Validation lives in __post_init__ — i.e. ON the dataclass itself, not only in
+    build_ad_context — so direct construction (the bypass a future contributor would
+    reach for first) is firewalled exactly as hard as the factory."""
 
     placement: str            # e.g. "sidebar", "footer" — where, not what
     day_part: str             # "morning" | "afternoon" | "evening" | "night" (UTC)
     locale: str               # BCP-47-ish tag from request settings, e.g. "sv-SE"
     tier: str                 # "free" | "paid" | "enterprise"
     personalized_allowed: bool  # consent decision, resolved by the service
+
+    def __post_init__(self) -> None:
+        for name in ("placement", "day_part", "locale", "tier"):
+            object.__setattr__(self, name, _require_scalar(getattr(self, name), name))
+        if not isinstance(self.personalized_allowed, bool):
+            raise TypeError("AdContext.personalized_allowed must be a bool")
 
 
 def _require_scalar(value, name: str) -> str:

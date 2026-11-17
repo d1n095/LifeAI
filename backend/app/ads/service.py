@@ -8,7 +8,7 @@ means NO impression is served (never serve uncounted). Clicks additionally requi
 plausible prior impression for the same session hash + creative within a plausibility
 window, honoring ads_click_min_interval_seconds.
 
-There is deliberately NO auto-click or incentivized-engagement code path: click events
+There is deliberately NO auto-click or rewarded-engagement code path: click events
 reach this module only through an explicit client callback, and nothing else calls
 record_ad_event with event="click" (enforced by a test that greps the codebase).
 """
@@ -222,7 +222,10 @@ def record_ad_event(
         if impression is None:
             record_audit(db, user_id=user.id, action="ad_click_without_impression_refused")
             raise ValueError("click refused: no recent impression for this session/creative")
-        elapsed = (now - impression.created_at).total_seconds()
+        impression_at = impression.created_at
+        if impression_at.tzinfo is None:  # sqlite returns naive datetimes
+            impression_at = impression_at.replace(tzinfo=timezone.utc)
+        elapsed = (now - impression_at).total_seconds()
         if elapsed < settings.ads_click_min_interval_seconds:
             record_audit(db, user_id=user.id, action="ad_click_too_fast_refused")
             raise ValueError("click refused: implausibly fast after impression")

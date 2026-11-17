@@ -232,4 +232,7 @@ def test_migration_0069_matches_model_and_is_lineage_head():
                 downs.add(d.group(1))
     assert "0069" in revs and "0068" in downs
     heads = set(revs) - downs
-    assert heads == {"0069"}, f"my lineage must have exactly one head (0069), got {heads}"
+    # The lineage must have EXACTLY ONE head — the newest migration. It was 0069 when
+    # this test was written; 0070 (billing) / 0071 (ads) legitimately extend the chain.
+    assert len(heads) == 1, f"lineage must have exactly one head, got {heads}"
+    assert "0069" in revs and "0068" in downs, "recovery migration must stay chained 0068 -> 0069"

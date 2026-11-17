@@ -8,6 +8,7 @@ reservation may never be priced at zero merely because pricing is incomplete.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
@@ -44,6 +45,21 @@ _store_cache = None
 _store_cache_key = None
 
 
+@dataclass(frozen=True)
+class SubjectReservations:
+    """Reservations for BOTH the user subject and (when applicable) the tenant's shared
+    envelope. All-or-nothing: if the second reserve fails, the first is released, so no
+    subject is ever left holding a phantom reservation."""
+
+    user_reservation: object
+    tenant_reservation: object | None = None
+
+    def _each(self):
+        yield self.user_reservation
+        if self.tenant_reservation is not None:
+            yield self.tenant_reservation
+
+
 def reserve_compute(
     db: Session, *, user, limits, estimated_tokens: int, estimated_cost_usd: Decimal,
     settings: Settings | None = None,
@@ -65,7 +81,7 @@ def reserve_compute(
                 estimated_tokens=estimated_tokens, estimated_cost_usd=estimated_cost_usd,
             )
     try:
-        reservation = store.reserve(
+        user_reservation = store.reserve(
             subject_type="user", subject_id=str(user.id),
             estimated_tokens=estimated_tokens, estimated_cost_usd=estimated_cost_usd,
             token_caps=limits.token_caps(), cost_caps_micros=limits.cost_caps_micros(),
@@ -74,28 +90,18 @@ def reserve_compute(
         if tenant_reservation is not None:
             store.release(tenant_reservation)
         raise
-    if tenant_reservation is not None:
-        # Both subjects reserved; return the user's reservation — settle/release mirror
-        # the same double-subject structure.
-        reservation.tenant_reservation = tenant_reservation  # type: ignore[attr-defined]
-    return reservation
+    return SubjectReservations(user_reservation=user_reservation, tenant_reservation=tenant_reservation)
 
 
-def settle_reservation(reservation, *, actual_tokens: int, actual_cost_usd: Decimal) -> None:
-    from app.billing.enforcement import ComputeBudgetStore
-
+def settle_reservation(reservations, *, actual_tokens: int, actual_cost_usd: Decimal) -> None:
     settings = get_settings()
     store = _store(settings)
-    store.settle(reservation, actual_tokens=actual_tokens, actual_cost_usd=actual_cost_usd)
-    tenant_reservation = getattr(reservation, "tenant_reservation", None)
-    if tenant_reservation is not None:
-        store.settle(tenant_reservation, actual_tokens=actual_tokens, actual_cost_usd=actual_cost_usd)
+    for res in reservations._each():
+        store.settle(res, actual_tokens=actual_tokens, actual_cost_usd=actual_cost_usd)
 
 
-def release_reservation(reservation) -> None:
+def release_reservation(reservations) -> None:
     settings = get_settings()
     store = _store(settings)
-    store.release(reservation)
-    tenant_reservation = getattr(reservation, "tenant_reservation", None)
-    if tenant_reservation is not None:
-        store.release(tenant_reservation)
+    for res in reservations._each():
+        store.release(res)
