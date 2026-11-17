@@ -48,7 +48,7 @@ STRONG_PASSWORD = "Correct-Horse-Battery-1!"
 
 
 @pytest.fixture
-def auth_env(monkeypatch):
+def auth_env(monkeypatch, tmp_path):
     from app.db import Base
     import app.models.audit  # noqa: F401
     import app.models.email_verification_token  # noqa: F401
@@ -57,14 +57,15 @@ def auth_env(monkeypatch):
     import app.models.refresh_token  # noqa: F401
     import app.models.revoked_access_token  # noqa: F401
 
-    # Shared-cache in-memory SQLite with a REAL connection per session — StaticPool's
-    # single shared connection corrupts concurrent transactions (sessions interleave on
-    # one connection) and cannot demonstrate the race. With per-request connections the
-    # race behaves like production: the loser's conditional UPDATE evaluates after the
-    # winner's commit and cleanly loses.
+    # A REAL on-disk SQLite database with a connection per session — StaticPool's single
+    # shared connection corrupts concurrent transactions (sessions interleave on one
+    # connection) and cannot demonstrate the race; a plain in-memory DB cannot be shared
+    # across connections at all. With per-request connections to one real file the race
+    # behaves like production: the loser's conditional UPDATE evaluates after the winner's
+    # commit and cleanly loses.
     engine = create_engine(
-        f"sqlite:///file:lifeai_conc_{uuid.uuid4().hex}?mode=memory&cache=shared",
-        connect_args={"check_same_thread": False, "uri": True, "timeout": 30},
+        f"sqlite:///{tmp_path / 'auth_conc.db'}",
+        connect_args={"check_same_thread": False, "timeout": 30},
         poolclass=NullPool,
     )
     Base.metadata.create_all(engine)

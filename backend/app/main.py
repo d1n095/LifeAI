@@ -25,6 +25,7 @@ from app.routers import (
     conversations,
     documents,
     execution_envelopes,
+    founder_recovery,
     health,
     inspectable_memory,
     knowledge,
@@ -68,6 +69,7 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(auth.router)
+app.include_router(founder_recovery.router)
 app.include_router(account.router)
 app.include_router(chat.router)
 app.include_router(conversations.router)

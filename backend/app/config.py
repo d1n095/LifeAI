@@ -254,6 +254,14 @@ class Settings(BaseSettings):
     # stay the primary execution path — this flag never changes any default routing.
     openai_consult_mainai_enabled: bool = False
 
+    # Secure founder account recovery (app/founder_recovery.py) — fail-closed by default:
+    # disabled and no code configured. The recovery CODE itself is never stored; only its
+    # SHA-256 lives here, so even a leaked configuration does not yield a usable code.
+    # Initiation is CLI-only (server shell access) — there is no HTTP initiation surface.
+    founder_recovery_enabled: bool = False
+    founder_recovery_code_sha256: str = ""
+    founder_recovery_token_expire_hours: int = 1
+
     @property
     def frontend_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.frontend_origins.split(",") if origin.strip()]
