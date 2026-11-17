@@ -30,6 +30,18 @@ from app.config import get_settings
 _MICROS = 1_000_000
 
 
+class BudgetEnforcementUnavailableError(RuntimeError):
+    """Raised when distributed budget enforcement cannot be performed. Two cases:
+
+    * PRODUCTION without REDIS_URL — process-local counters would silently let N workers
+      each spend the full daily ceiling (N× overspend). Production must FAIL CLOSED: the
+      consultation surface refuses until Redis-backed enforcement is available.
+    * A Redis connection failure/timeout at reserve/settle time — the counter state is
+      unknown, so admission cannot be proven safe. Fail closed with a clean, safe error
+      (never a raw driver traceback) instead of admitting an uncounted call.
+    """
+
+
 class BudgetExceededError(RuntimeError):
     """Raised BEFORE any outbound call when the estimated reservation would push the
     caller past their daily token or cost ceiling. `which` is "tokens" or "cost"."""
@@ -80,15 +92,35 @@ class DailyBudgetStore:
         return _seconds_until_utc_midnight(now)
 
     # -- raw counter primitives ---------------------------------------------------
+    def _guard_redis_failure(self, exc: Exception) -> None:
+        """Map Redis connectivity failures to a fail-closed safe error. Admission without
+        a working counter is never allowed — the reservation state is unknown."""
+        import redis as redis_module
+
+        if isinstance(exc, (redis_module.ConnectionError, redis_module.TimeoutError)):
+            raise BudgetEnforcementUnavailableError(
+                "Redis budget enforcement unavailable — consultation refused (fail-closed)"
+            ) from exc
+
     def _increment(self, key: str, delta_tokens: int, delta_cost_micros: int, now: datetime | None) -> tuple[int, int]:
         """Returns the (tokens, cost_micros) AFTER this increment. One primitive for both
-        reserve and settle so redis and in-memory stay behaviorally identical."""
+        reserve and settle so redis and in-memory stay behaviorally identical.
+
+        Redis path: a MULTI/EXEC pipeline (redis-py pipelines are transactional by
+        default) so both counters and the TTL bump commit atomically — two workers racing
+        on the same key serialize at Redis, never double-count or lose an increment."""
         if self._redis is not None:
-            pipe = self._redis.pipeline()
-            pipe.hincrby(key, "tokens", delta_tokens)
-            pipe.hincrby(key, "cost_micros", delta_cost_micros)
-            pipe.expire(key, self._ttl(now))
-            tokens, cost = pipe.execute()[:2]
+            try:
+                pipe = self._redis.pipeline()
+                pipe.hincrby(key, "tokens", delta_tokens)
+                pipe.hincrby(key, "cost_micros", delta_cost_micros)
+                pipe.expire(key, self._ttl(now))
+                tokens, cost = pipe.execute()[:2]
+            except BudgetEnforcementUnavailableError:
+                raise
+            except Exception as exc:
+                self._guard_redis_failure(exc)
+                raise
             return int(tokens), int(cost)
         with self._lock:
             tokens, cost = self._local.get(key, (0, 0))
@@ -99,7 +131,11 @@ class DailyBudgetStore:
 
     def _current(self, key: str) -> tuple[int, int]:
         if self._redis is not None:
-            raw = self._redis.hgetall(key) or {}
+            try:
+                raw = self._redis.hgetall(key) or {}
+            except Exception as exc:
+                self._guard_redis_failure(exc)
+                raise
             return int(raw.get("tokens", 0)), int(raw.get("cost_micros", 0))
         with self._lock:
             return self._local.get(key, (0, 0))
@@ -137,8 +173,19 @@ class DailyBudgetStore:
 
 def build_budget_store_from_settings(settings=None) -> DailyBudgetStore:
     """One store per construction; routers build it per request from get_settings() — cheap
-    (a Redis connection pool is shared inside redis-py via from_url's connection pooling)."""
+    (a Redis connection pool is shared inside redis-py via from_url's connection pooling).
+
+    FAIL CLOSED in production: without REDIS_URL the counters would be process-local, so
+    every backend replica would enforce the ceiling independently (N workers → N× the
+    daily budget). Production deployments therefore refuse the consultation surface until
+    distributed enforcement is configured. Non-production keeps the in-memory fallback for
+    local dev / the E2E harness, as documented in the module docstring."""
     settings = settings or get_settings()
+    if settings.environment == "production" and not settings.redis_url:
+        raise BudgetEnforcementUnavailableError(
+            "OPENAI_CONSULT requires REDIS_URL in production — distributed budget "
+            "enforcement is mandatory and its absence is fail-closed, not per-process"
+        )
     return DailyBudgetStore(
         token_budget=settings.openai_consult_daily_token_budget,
         cost_budget_usd=settings.openai_consult_daily_cost_budget_usd,

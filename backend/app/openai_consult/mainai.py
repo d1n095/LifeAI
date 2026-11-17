@@ -109,6 +109,13 @@ async def consult_for_mainai(
             "lokal in-process worker förblir primär exekveringsväg."
         )
 
+    # Gate 2b: emergency shutdown. The workforce kill switch blocks ANY new consultation
+    # immediately — defense in depth: the workforce harness checks it before reaching this
+    # path, but consult_for_mainai is also callable directly by orchestration.
+    from app.workforce.kill_switch import assert_not_killed
+
+    assert_not_killed()
+
     # Budget store: same per-owner daily ceilings as the founder path (built from the same
     # settings when the caller doesn't supply one).
     if budget_store is None:

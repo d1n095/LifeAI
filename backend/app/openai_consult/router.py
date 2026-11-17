@@ -22,7 +22,11 @@ from app.deps import require_founder
 from app.egress_policy import EgressDeniedError
 from app.limiter import limiter
 from app.models.user import User
-from app.openai_consult.budgets import BudgetExceededError, build_budget_store_from_settings
+from app.openai_consult.budgets import (
+    BudgetEnforcementUnavailableError,
+    BudgetExceededError,
+    build_budget_store_from_settings,
+)
 from app.openai_consult.schemas import ConsultIn, ConsultOut, ConsultStatusOut
 from app.openai_consult.service import (
     ConsultationConfigError,
@@ -45,7 +49,11 @@ async def consult_status(
 ):
     """Configuration + remaining budget for the calling user. Carries no secret material
     (see ConsultStatusOut — there is no field that could hold the API key or a URL)."""
-    return status_snapshot(settings, build_budget_store_from_settings(settings), user.id)
+    try:
+        store = build_budget_store_from_settings(settings)
+    except BudgetEnforcementUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return status_snapshot(settings, store, user.id)
 
 
 @router.post("", response_model=ConsultOut)
@@ -60,7 +68,12 @@ async def consult(
 
     Disabled by default end to end: while OPENAI_CONSULT_ENABLED=false this endpoint always
     answers 503 without touching Redis, the budget store or the network."""
-    budget_store = build_budget_store_from_settings(settings)
+    try:
+        budget_store = build_budget_store_from_settings(settings)
+    except BudgetEnforcementUnavailableError as exc:
+        # Production without Redis-backed distributed enforcement — or any environment
+        # where the budget surface cannot be built: refuse before ANY admission decision.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     try:
         result, _stats = await consult_openai(
             db,
@@ -70,6 +83,10 @@ async def consult(
             budget_store=budget_store,
             requested_by="routers.openai_consult.consult",
         )
+    except BudgetEnforcementUnavailableError as exc:
+        # Redis died at reserve/settle time: counter state unknown → fail closed (never
+        # admit an uncounted call), clean 503 instead of a raw driver traceback.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ConsultationConfigError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except BudgetExceededError as exc:

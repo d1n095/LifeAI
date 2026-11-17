@@ -299,6 +299,24 @@ async def consult_openai(
         response_schema=response_schema,
         response_schema_name=payload_in.response_schema_name,
     )
+    def _release_reservation() -> None:
+        """Release the reservation after a call that consumed nothing (provider unreachable,
+        timeout, HTTP error). Zero tokens were spent — keeping the worst-case reservation
+        would let a provider outage silently consume the owner's whole day (an availability
+        loss with no security gain: the conservative leak only makes sense for calls that
+        actually consumed budget). Best-effort: if the budget store itself is unreachable,
+        the reservation leaks (conservative direction) and the provider error still wins."""
+        try:
+            store.settle(
+                owner_id,
+                reserved_tokens=reserved_tokens,
+                actual_tokens=0,
+                reserved_cost_usd=estimated_cost,
+                actual_cost_usd="0",
+            )
+        except Exception:  # noqa: BLE001 — never mask the original provider error
+            pass
+
     try:
         async with _create_client(settings.openai_consult_timeout_seconds) as client:
             resp = await client.post(
@@ -309,19 +327,24 @@ async def consult_openai(
             resp.raise_for_status()
             data = resp.json()
     except httpx.TimeoutException as exc:
-        # Reservation stays charged (conservative). Nothing about the URL/key is surfaced.
+        _release_reservation()
+        # Nothing about the URL/key is surfaced.
         raise ConsultationServiceError(
-            "OpenAI svarade inte inom tidsgränsen (kategori: timeout). Reservationen finns "
-            "kvar på dagens budget av säkerhetsskäl."
+            "OpenAI svarade inte inom tidsgränsen (kategori: timeout). Reservationen har "
+            "släppts tillbaka till dagens budget."
         ) from exc
     except httpx.HTTPStatusError as exc:
+        _release_reservation()
         raise _map_http_error(exc.response.status_code) from exc
     except ConsultationServiceError:
+        _release_reservation()
         raise
     except Exception as exc:  # noqa: BLE001 — never leak a raw exception (may embed the URL)
+        _release_reservation()
         logger.warning("openai_consult: provider call failed: %s", type(exc).__name__)
         raise ConsultationServiceError(
-            "OpenAI-anropet misslyckades (kategori: unreachable) — inget svar applicerat."
+            "OpenAI-anropet misslyckades (kategori: unreachable) — inget svar applicerat. "
+            "Reservationen har släppts tillbaka till dagens budget."
         ) from exc
 
     # 6. PARSE + SETTLE
