@@ -350,7 +350,7 @@ def _ddl_blocks(sql: str):
     return dict(re.findall(r"CREATE TABLE (\w+) \((.*?)\n        \)", sql, re.S))
 
 
-def test_migrations_0070_0071_match_models_and_single_head():
+def test_migrations_0070_plus_match_models_and_single_head():
     import re
     from pathlib import Path
 
@@ -382,7 +382,11 @@ def test_migrations_0070_0071_match_models_and_single_head():
             if d:
                 downs.add(d.group(1))
     heads = set(revs) - downs
-    assert heads == {"0071"}, f"lineage must have exactly one head (0071), got {heads}"
+    # Invariant, not a pinned hash: exactly ONE head — the newest migration of this
+    # lineage (0071 ads at first write; 0072 usage-idempotency extends it).
+    assert len(heads) == 1, f"lineage must have exactly one head, got {heads}"
+    for required in ("0069", "0070", "0071"):
+        assert required in revs, f"migration {required} missing from the lineage"
 
 
 def test_single_writer_invariant():

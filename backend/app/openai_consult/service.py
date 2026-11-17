@@ -366,6 +366,23 @@ async def consult_openai(
         reserved_cost_usd=estimated_cost,
         actual_cost_usd=actual_cost,
     )
+    # Revenue & Compute Engine (P1 review fix): the consultation surface's own budgets
+    # (openai_consult/budgets.py) stay authoritative for THAT surface, but every provider
+    # call must ALSO land in the platform ledger — one accounting pipeline, no dark spend.
+    from app.billing import record_usage as _record_usage
+
+    _record_usage(
+        db,
+        user_id=owner_id,
+        tenant_id=None,
+        role="consult",
+        provider="openai",
+        model=model,
+        prompt_tokens=input_tokens,
+        completion_tokens=output_tokens,
+        agent="openai-consult",
+        task="consultation",
+    )
 
     structured = response_schema is not None
     structured_json = None

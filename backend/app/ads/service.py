@@ -27,9 +27,6 @@ from app.config import Settings, get_settings
 from app.models.ads import AdConsentEvent, AdDecision, AdEvent, AdEventType
 from app.models.user import User
 
-_PLACEMENT_MAX_PER_USER_PER_DAY = 0  # replaced by settings at call time
-
-
 class AdsEnforcementUnavailableError(RuntimeError):
     """The ad-limit counter store is unavailable while ads are enabled. Fail-closed: no
     impression or click is recorded/served until the counter proves headroom."""
@@ -207,6 +204,21 @@ def record_ad_event(
         if daily_clicks >= settings.ads_max_clicks_per_user_per_day:
             record_audit(db, user_id=user.id, action="ad_click_ceiling_reached")
             raise ValueError("daily click ceiling reached")
+        # Replay guard: a click for a given (session, creative) is countable ONCE.
+        # Replaying the same callback must contribute no further engagement events.
+        prior_click = db.execute(
+            select(AdEvent)
+            .where(
+                AdEvent.user_id == user.id,
+                AdEvent.session_hash == session_hash,
+                AdEvent.creative_id == creative_id,
+                AdEvent.event == AdEventType.click.value,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if prior_click is not None:
+            record_audit(db, user_id=user.id, action="ad_click_replay_refused")
+            raise ValueError("click refused: replay of an already-counted engagement")
         impression = db.execute(
             select(AdEvent)
             .where(

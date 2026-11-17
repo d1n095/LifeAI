@@ -40,4 +40,8 @@ class UsageLog(Base):
     task: Mapped[str | None] = mapped_column(String(128), nullable=True)
     tier: Mapped[str] = mapped_column(String(16), default="free")  # policy snapshot at call time
     kind: Mapped[str] = mapped_column(String(16), default="consumption")  # consumption | refund
+    # Migration 0072: optional de-dup key. NULL = ordinary event (each retry of a FAILED
+    # call is a distinct billable event); non-NULL = at most ONE audit row + ONE rollup
+    # increment per key, race-safe via the unique index (accounting.record_usage).
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

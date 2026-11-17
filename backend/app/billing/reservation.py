@@ -66,8 +66,14 @@ def reserve_compute(
 ):
     """Reserve against the user subject AND (when the user belongs to a tenant) the
     tenant's shared envelope — both must admit, or nothing is charged. Fail-closed and
-    reject-with-zero-writes semantics come from the store; see enforcement.reserve."""
-    from app.billing.enforcement import BillingEnforcementUnavailableError
+    reject-with-zero-writes semantics come from the store; see enforcement.reserve.
+
+    Tenant caps ARE enforced here (P1 review fix): the tenant's own overrides + tier
+    policy are computed and passed to the tenant-side reserve. Previously the tenant
+    reservation ran with unlimited caps, so a tenant's configured daily/monthly ceiling
+    never bound during admission — only the user's did."""
+    from app.billing.enforcement import to_micros
+    from app.billing.tiers import policy_for_tier
     from app.models.billing import BillingTenant
 
     settings = settings or get_settings()
@@ -76,9 +82,22 @@ def reserve_compute(
     if user is not None and getattr(user, "tenant_id", None):
         tenant = db.query(BillingTenant).filter_by(id=user.tenant_id).one_or_none()
         if tenant is not None and tenant.is_active:
+            # Tenant-side caps: the tenant row's overrides REPLACE the tier policy
+            # defaults when set (same composition rule as app/billing/limits.py).
+            tier_value = tenant.tier.value if hasattr(tenant.tier, "value") else tenant.tier
+            policy = policy_for_tier(tier_value, settings)
+            daily_cost = (tenant.daily_cost_cap_micros / 1_000_000
+                          if tenant.daily_cost_cap_micros is not None else policy.daily_cost_usd)
+            monthly_cost = (tenant.monthly_cost_cap_micros / 1_000_000
+                            if tenant.monthly_cost_cap_micros is not None else policy.monthly_cost_usd)
             tenant_reservation = store.reserve(
                 subject_type="tenant", subject_id=str(tenant.id),
                 estimated_tokens=estimated_tokens, estimated_cost_usd=estimated_cost_usd,
+                token_caps=(policy.daily_token_cap, policy.monthly_token_cap),
+                cost_caps_micros=(
+                    to_micros(daily_cost) if daily_cost is not None else None,
+                    to_micros(monthly_cost) if monthly_cost is not None else None,
+                ),
             )
     try:
         user_reservation = store.reserve(

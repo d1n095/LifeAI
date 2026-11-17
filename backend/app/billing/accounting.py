@@ -40,6 +40,23 @@ def _effective_cost_usd(cost: Decimal | None, settings) -> Decimal:
     return fallback  # caller multiplies by (total_tokens / 1000)
 
 
+def _derive_tenant_id(db: Session, user_id: uuid.UUID | None) -> tuple[uuid.UUID | None, uuid.UUID | None]:
+    """Tenant membership comes from the USER ROW, never from the caller's word.
+
+    Financial-invariant reason: if callers could pass an arbitrary tenant_id, a buggy or
+    hostile path could attribute spend to (or steal budget from) another tenant. The
+    user row is the single source of truth for membership."""
+    if user_id is None:
+        return None, None
+    from sqlalchemy import select as _select
+
+    from app.models.user import User as _User
+
+    row = db.execute(_select(_User.tenant_id).where(_User.id == user_id)).first()
+    db_tenant = row[0] if row else None
+    return user_id, db_tenant
+
+
 def record_usage(
     db: Session,
     *,
@@ -57,13 +74,21 @@ def record_usage(
     cost_usd: Decimal | None = None,
     kind: str = "consumption",
     created_at: datetime | None = None,
+    idempotency_key: str | None = None,
 ) -> UsageLog:
     """Write one usage event: per-call audit row + atomic rollup increments.
 
-    For kind="refund", tokens/cost must be the POSITIVE magnitude being returned; the
-    caller is expected to have validated the refund ceiling (see refund_usage for the
-    validated wrapper). Rollup increments flip sign for refunds; DB CHECK constraints
-    keep rollups non-negative, and refund_usage refuses over-refunds before writing.
+    Financial invariants enforced here:
+    * TENANT DERIVATION — tenant_id is read from the user row; a caller-supplied value
+      that DISAGREES with membership raises ValueError (unauthorized budget attribution
+      is refused, never recorded). Pass tenant_id=None and let it derive.
+    * IDEMPOTENCY — with idempotency_key set, a duplicate event (same key, any number of
+      concurrent writers) yields exactly ONE audit row and ONE rollup increment. Ordinary
+      calls (key=None) never dedupe: each retry of a FAILED call is a distinct billable
+      event and must count.
+    * REFUNDS — for kind="refund", tokens/cost are the POSITIVE magnitude returned; the
+      validated wrapper refund_usage enforces the ceiling. DB CHECKs keep rollups
+      non-negative.
     """
     settings = get_settings()
     now = created_at or datetime.now(timezone.utc)
@@ -72,6 +97,23 @@ def record_usage(
     total_tokens = prompt_tokens + completion_tokens
     if cost_usd is None:
         cost_usd = estimate_cost(provider, model, prompt_tokens, completion_tokens)
+
+    # Tenant membership from the user row (see _derive_tenant_id).
+    user_id, membership = _derive_tenant_id(db, user_id)
+    if tenant_id is not None and membership is not None and tenant_id != membership:
+        raise ValueError(
+            "tenant_id disagrees with the user's membership — refusing to record "
+            "(unauthorized budget attribution)"
+        )
+    tenant_id = membership
+
+    if idempotency_key is not None:
+        existing = db.execute(
+            text("SELECT id FROM usage_log WHERE idempotency_key = :k"),
+            {"k": idempotency_key},
+        ).first()
+        if existing is not None:
+            return db.get(UsageLog, existing[0])
 
     row = UsageLog(
         user_id=user_id,
@@ -87,9 +129,27 @@ def record_usage(
         task=task,
         tier=tier,
         kind=kind,
+        idempotency_key=idempotency_key,
         created_at=now,
     )
     db.add(row)
+    if idempotency_key is not None:
+        # Race-safe dedup: a SAVEPOINT flush surfaces the unique-index violation without
+        # touching the caller's outer transaction; the loser reads the winner's row and
+        # contributes NOTHING (no audit row, no rollup increment).
+        try:
+            with db.begin_nested():
+                db.flush()
+        except Exception:
+            existing = db.execute(
+                text("SELECT id FROM usage_log WHERE idempotency_key = :k"),
+                {"k": idempotency_key},
+            ).first()
+            if existing is None:
+                raise
+            return db.get(UsageLog, existing[0])
+    else:
+        db.flush()
 
     # Rollup increments — atomic, sign-flipped for refunds. Micros are integer (ceiling
     # rounding for the fractional part, mirroring to_micros' conservative bias).

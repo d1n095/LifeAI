@@ -113,7 +113,29 @@ async def embed_with_policy(
             goal_id=goal_id,
             job_id=job_id,
         )
-    return await provider.embed(outbound_texts, model=model)
+    vectors = await provider.embed(outbound_texts, model=model)
+
+    # Revenue & Compute Engine (P1 review fix): embeddings are billable provider calls
+    # (text-embedding-3-small et al.) and were previously invisible to accounting. The
+    # embedding APIs return no usage object, so tokens are estimated at ~4 chars/token —
+    # an honest, slightly conservative approximation recorded in the audit row. Tenant
+    # membership is derived from the user row inside record_usage. System calls
+    # (owner_id=None) get an audit row with no subject rollups.
+    from app.billing import record_usage as _record_usage
+
+    _record_usage(
+        db,
+        user_id=owner_id,
+        tenant_id=None,
+        role="embedding",
+        provider=provider.name,
+        model=model,
+        prompt_tokens=sum(len(t) for t in outbound_texts) // 4,
+        completion_tokens=0,
+        agent="embedding",
+        task=purpose or "embedding",
+    )
+    return vectors
 
 
 def resolve_chat_chain(db: Session) -> list[tuple[LLMProvider, str]]:

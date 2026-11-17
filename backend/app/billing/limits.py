@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.billing.enforcement import to_micros
+from app.config import get_settings
 from app.billing.tiers import UsagePolicy, policy_for_tier
 from app.models.billing import BillingTenant, BillingTier
 from app.models.user import User
@@ -43,7 +44,7 @@ def effective_limits(db: Session, user: User | None, settings=None) -> Effective
     """Resolve the limits that apply to ONE user (and, via tenant membership, their
     tenant's shared envelope — enforced against the tenant subject by the caller when
     the user has a tenant; personal accounts enforce against themselves only)."""
-    settings = settings or __import__("app.config", fromlist=["get_settings"]).get_settings()
+    settings = settings or get_settings()
     tier_value = settings.billing_default_tier
     tenant_id: uuid.UUID | None = None
     daily_override = monthly_override = None

@@ -67,11 +67,11 @@ def _seconds_until_utc_month_end(now: datetime) -> int:
     import calendar
 
     year, month = now.year, now.month
-    last_day = calendar.monthrange(year, month)[1]
-    # First instant of the next month: December wraps to the next year.
+    # First instant of the next month: December wraps to the next year. monthrange is
+    # kept as a cheap validity assertion for the (already valid) month component.
+    calendar.monthrange(year, month)
     end = datetime(year + 1, 1, 1, tzinfo=timezone.utc) if month == 12 else \
         datetime(year, month + 1, 1, tzinfo=timezone.utc)
-    del last_day  # calendar.monthrange used only to validate the month exists
     return max(int((end - now).total_seconds()) + 60, 60)
 
 
