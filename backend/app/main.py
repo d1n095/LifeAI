@@ -10,6 +10,10 @@ from app.bootstrap import bootstrap_founder_user
 from app.config import get_settings
 from app.db import SessionLocal, call_with_db_retry, migration_engine
 from app.limiter import limiter
+# Direct OpenAI consultation (official Responses API) — standalone, fail-closed-until-configured
+# module; see app/openai_consult/__init__.py for the full gate list before any code path here
+# can reach the network.
+from app.openai_consult.router import router as openai_consult
 from app.providers.base import looks_like_placeholder_secret
 from app.rls import apply_mainai_execution_privileges, apply_mainai_job_runtime_privileges, apply_rls
 from app.routers import (
@@ -81,6 +85,7 @@ app.include_router(project_entities.router)
 app.include_router(inspectable_memory.router)
 app.include_router(execution_envelopes.router)
 app.include_router(provider_spend.router)
+app.include_router(openai_consult)
 
 
 @app.on_event("startup")

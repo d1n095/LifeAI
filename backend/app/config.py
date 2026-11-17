@@ -200,6 +200,47 @@ class Settings(BaseSettings):
     github_write_enabled: bool = False
     github_auto_merge_enabled: bool = False
 
+    # Direct OpenAI consultation (app/openai_consult/) — lets MainAI/the founder call an
+    # OpenAI model through the official Responses API without anyone manually forwarding
+    # messages. Same optional-until-configured + off-by-default pattern as github_write_enabled
+    # above: EVERY gate below fails closed, so the integration is inert until an operator
+    # explicitly turns it on, allowlists at least one model, and provides a real API key.
+    #   openai_consult_enabled           master switch — False means no code path in this
+    #                                    module ever reaches the network, full stop.
+    #   openai_consult_allowed_models    comma-separated exact model ids; EMPTY deny-lists
+    #                                    everything even when enabled=True.
+    #   openai_consult_max_output_tokens hard per-request ceiling; a request may lower it,
+    #                                    never raise it.
+    #   openai_consult_timeout_seconds   httpx connect/read timeout for the outbound call.
+    #   openai_consult_requests_per_minute  slowapi per-user HTTP rate limit on the endpoint.
+    #   openai_consult_daily_token_budget   per-user rolling UTC-day token ceiling
+    #                                    (reserved before the call, settled with real usage
+    #                                    after — see app/openai_consult/budgets.py).
+    #   openai_consult_daily_cost_budget_usd  per-user rolling UTC-day cost ceiling in USD,
+    #                                    computed from app/providers/pricing.py's table; a
+    #                                    model without a pricing entry is refused outright
+    #                                    (fail-closed — an unpriceable model is an unbudgetable
+    #                                    one). Deliberately a string, parsed as Decimal, so
+    #                                    env-provided values keep exact decimal semantics.
+    #   openai_consult_web_search_enabled  the ONLY tool this integration can ever attach:
+    #                                    OpenAI's hosted read-only web_search. False (the
+    #                                    default) means the request body never contains a
+    #                                    tools field at all. Client-supplied tools are
+    #                                    structurally refused — there is no code path to
+    #                                    shell, filesystem, GitHub or code-execution tools.
+    #   openai_consult_store_responses   passed as the Responses API `store` flag; False
+    #                                    (default) keeps prompt/response content out of
+    #                                    OpenAI's stored-response surface.
+    openai_consult_enabled: bool = False
+    openai_consult_allowed_models: str = ""
+    openai_consult_max_output_tokens: int = 1024
+    openai_consult_timeout_seconds: float = 45.0
+    openai_consult_requests_per_minute: int = 10
+    openai_consult_daily_token_budget: int = 200000
+    openai_consult_daily_cost_budget_usd: str = "5.00"
+    openai_consult_web_search_enabled: bool = False
+    openai_consult_store_responses: bool = False
+
     @property
     def frontend_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.frontend_origins.split(",") if origin.strip()]
