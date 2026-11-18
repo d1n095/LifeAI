@@ -164,10 +164,10 @@ def test_migration_graph_is_a_single_rooted_single_headed_chain():
     `revision`/`down_revision` literals, never from the files' numeric names."""
     graph = recovery.migration_graph()
     assert graph["roots"] == ["0001"]
-    assert graph["heads"] == ["0078"]
+    assert graph["heads"] == ["0079"]
     assert graph["dangling_down_revisions"] == []
     assert graph["revision_count"] >= 78
-    assert "0078" in graph["revisions"]
+    assert "0079" in graph["revisions"]
 
 
 def test_backup_records_the_state_a_restore_must_reproduce(tmp_path):
@@ -179,8 +179,8 @@ def test_backup_records_the_state_a_restore_must_reproduce(tmp_path):
         "the inventory must describe the same snapshot the dump contains; sequential fallback is "
         "only legitimate for a role that cannot export a snapshot"
     )
-    assert manifest["alembic"]["current_revision"] == "0078"
-    assert manifest["alembic"]["heads"] == ["0078"]
+    assert manifest["alembic"]["current_revision"] == "0079"
+    assert manifest["alembic"]["heads"] == ["0079"]
 
     # The recorded checksum is the file's actual checksum, and the sidecar agrees with both.
     assert manifest["dump"]["sha256"] == recovery._sha256_file(probe_and_backup)
@@ -353,7 +353,7 @@ def test_restore_reproduces_state_and_reestablishes_sfa1(tmp_path, restore_targe
             assert cur.fetchone() == ("survives restore",)
 
             cur.execute("SELECT version_num FROM alembic_version")
-            assert cur.fetchone() == ("0078",)
+            assert cur.fetchone() == ("0079",)
 
             # SFA-1: measured on the restored database, not inferred from the policy's source.
             cur.execute(
@@ -424,7 +424,7 @@ def test_schema_rollback_after_restore_preserves_restored_data(tmp_path, restore
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT version_num FROM alembic_version")
-            assert cur.fetchone() == ("0078",)
+            assert cur.fetchone() == ("0079",)
             cur.execute("SELECT note FROM recovery_probe WHERE id = %s", (str(probe_table),))
             assert cur.fetchone() == ("survives restore",)
     finally:

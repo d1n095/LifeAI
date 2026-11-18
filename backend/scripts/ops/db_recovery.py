@@ -528,15 +528,26 @@ def verify(backup_path: Path) -> list[str]:
     else:
         failures.append(f"missing checksum file: {checksum_file}")
 
-    toc = _run(["pg_restore", "--list", str(backup_path)], what="pg_restore --list")
-    if toc.returncode == 0 and "alembic_version" not in toc.stdout:
-        failures.append("pg_restore TOC does not mention alembic_version — archive does not look like this schema")
-    table_entries = sum(1 for line in toc.stdout.splitlines() if " TABLE DATA " in line)
-    if table_entries < len(manifest.get("tables", {})):
-        failures.append(
-            f"pg_restore TOC lists {table_entries} TABLE DATA entries but the manifest records "
-            f"{len(manifest.get('tables', {}))} tables — the dump is incomplete"
-        )
+    # A verifier that fails or crashes on the archive is itself a verification failure — the
+    # structure could not be read, so nothing downstream may trust it. It is recorded as a failure
+    # rather than raised so the report names every problem it can, and so the outcome does not
+    # depend on how a particular pg_restore build reacts to corruption: on some platforms it exits
+    # 1 with a message, on others (observed locally) it dies with SIGSEGV (exit -11). Both mean the
+    # same thing to a restore decision.
+    try:
+        toc = _run(["pg_restore", "--list", str(backup_path)], what="pg_restore --list")
+    except RecoveryError as exc:
+        failures.append(f"pg_restore could not read the archive: {exc}")
+        toc = None
+    if toc is not None:
+        if "alembic_version" not in toc.stdout:
+            failures.append("pg_restore TOC does not mention alembic_version — archive does not look like this schema")
+        table_entries = sum(1 for line in toc.stdout.splitlines() if " TABLE DATA " in line)
+        if table_entries < len(manifest.get("tables", {})):
+            failures.append(
+                f"pg_restore TOC lists {table_entries} TABLE DATA entries but the manifest records "
+                f"{len(manifest.get('tables', {}))} tables — the dump is incomplete"
+            )
 
     graph = migration_graph()
     if len(graph["heads"]) != 1:

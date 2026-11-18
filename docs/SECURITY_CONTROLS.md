@@ -78,3 +78,17 @@ workflow only ever runs the verifying mode.
   `backend/scripts/security/*` and `backend/scripts/ops/db_recovery.py`: those build DDL from fixed
   identifier lists over an admin connection, reviewed when the rule was added. Runtime query code
   (`app/**`) stays covered. A new DDL builder needs its own reviewed exclusion.
+
+## Enforcement added after the first control set (2026-11-19)
+
+| Control | Where | What it actually refuses |
+|---|---|---|
+| Audit trail is append-only | `backend/alembic/versions/0079_audit_log_append_only.py` | `UPDATE`/`DELETE` on `audit_log` raise `restrict_violation`; tested through the superuser connection, so the guarantee does not depend on the application role's grants |
+| Retrieved text is data | `backend/app/rag/prompt_fencing.py` | retrieved excerpts are fenced, forged fence markers are defused, and the rule is stated to the model beside the excerpts; one marker definition shared by chat and Blueprint |
+| Proposal isolation boundary | `backend/app/mainai_execution/proposal_worktree.py` | attempt ids that are really paths are refused before any directory exists; a credentialed or SSH remote is refused; the isolated tree carries no remote at all |
+
+**Still requiring an administrator (not enforced, not claimed):** CodeQL (needs GHAS; the gate
+prints `NOT ENFORCED`), CODEOWNERS review requirement, and the Security gate as a required status
+check. Exact steps: Settings → Branches → `main` (require `Security` + `All required checks passed`
+and a `CODEOWNERS` review); Settings → Actions → Variables (`CODEQL_ENABLED=true` after enabling
+GitHub Advanced Security).
