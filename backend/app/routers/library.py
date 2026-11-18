@@ -704,6 +704,42 @@ def create_claim_relationship(
                 detail=shifts_to_audit_detail(shifts),
             )
         )
+        # Round 9 M6 ("remember important findings"): a conclusion that actually CHANGED is
+        # worth remembering — recorded as a CANDIDATE learning signal (SIGNAL != TRUTH
+        # WRITER: a candidate the founder later promotes or dismisses, never an auto-written
+        # memory note). Idempotent on the edge id, so replays never duplicate the memory.
+        if any(sh.changed for sh in shifts):
+            from app.founder_memory_signals.service import record_candidate_signal
+
+            # Migration 0053's closed vocabulary is REUSED, not extended: a conclusion
+            # correction IS a correction_candidate (source_type stays 'message' — the
+            # provenance dict carries the claim-graph specifics). Extending the enum for a
+            # new producer kind is a schema-policy decision, not this endpoint's to make.
+            record_candidate_signal(
+                db,
+                owner_id=user.id,
+                signal_kind="correction_candidate",
+                idempotency_key=f"epistemic-shift:{edge.id}",
+                source_type="message",
+                classifier_strategy="epistemic_shift_detection",
+                classifier_confidence="high",
+                classifier_reasoning=(
+                    "a founder-declared contradicts edge changed a claim's ladder verdict; "
+                    "prior and current statuses are on the audit trail"
+                ),
+                provenance={
+                    "relationship_id": str(edge.id),
+                    "shifts": [
+                        {
+                            "claim_id": str(sh.claim_id),
+                            "prior": sh.prior_status,
+                            "current": sh.current_status,
+                        }
+                        for sh in shifts
+                        if sh.changed
+                    ],
+                },
+            )
     db.commit()
     return ClaimGraphEdgeOut(
         id=edge.id,
