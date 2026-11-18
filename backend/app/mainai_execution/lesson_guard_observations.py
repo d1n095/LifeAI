@@ -439,3 +439,51 @@ def format_lesson_standing_for_advisory(standing: list[LessonEffectiveness]) -> 
         else:
             parts.append(f"{s.lesson_id}: no guard verdicts yet")
     return " Lesson standing: " + "; ".join(parts) + "."
+
+
+def recurring_failure_clusters(db: Session, *, owner_id: uuid.UUID) -> list[dict]:
+    """DETECTION ONLY: shared-root-cause clusters across DIFFERENT tasks — lessons whose
+    guard FAILED on >= 2 DISTINCT tasks and which share an affected_component (the same
+    broken subsystem producing repeated guard failures no matter which rule was applied to
+    guard it). This is the "identify shared root causes" signal the self-correction loop
+    was missing: per-lesson effectiveness already says the rule failed; this says the
+    COMPONENT keeps failing under every rule pointed at it, which is evidence about the
+    component, not any one lesson.
+
+    Conservative by construction: detection surfaces clusters in the audit trail (and in
+    selection summaries for excluded/flagged lessons); it never auto-disputes lessons,
+    never mutates anything, and never auto-resolves — resolution is founder/async-tick
+    territory (the same boundary lesson_conflicts.py draws). Owner-scoped end to end:
+    both observations and the lesson join run under the caller's RLS GUC and explicit
+    owner filters.
+
+    A cluster needs >= 2 DISTINCT failed tasks. A lesson that failed twice on the SAME
+    task's repeated attempts is a retry pattern, not a cross-task recurrence — exactly the
+    single-failure-must-not-suppress discipline, applied at cluster granularity."""
+    rows = db.execute(
+        text("""
+            SELECT l.affected_component,
+                   array_agg(DISTINCT l.id::text)                AS lesson_ids,
+                   array_agg(DISTINCT o.task_id::text)           AS distinct_failed_tasks,
+                   count(DISTINCT o.task_id)                     AS task_count,
+                   array_agg(DISTINCT l.general_rule)            AS general_rules
+            FROM engineering_lesson_guard_observations o
+            JOIN engineering_lessons l ON l.id = o.lesson_id
+            WHERE o.owner_id = :owner AND o.outcome = 'guard_failed'
+            GROUP BY l.affected_component
+            HAVING count(DISTINCT o.task_id) >= 2
+            ORDER BY task_count DESC, l.affected_component
+        """),
+        {"owner": str(owner_id)},
+    ).all()
+
+    return [
+        {
+            "affected_component": component,
+            "lesson_ids": [str(lid) for lid in lesson_ids],
+            "distinct_failed_tasks": [str(tid) for tid in failed_tasks],
+            "task_count": int(task_count),
+            "general_rules": list(general_rules),
+        }
+        for component, lesson_ids, failed_tasks, task_count, general_rules in rows
+    ]

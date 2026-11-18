@@ -23,7 +23,12 @@ import logging
 
 from sqlalchemy.orm import Session
 
+from typing import TYPE_CHECKING
+
 from app.models.mainai_execution import EngineeringLesson, EngineeringLessonConfidence, EngineeringLessonStatus
+
+if TYPE_CHECKING:
+    from app.mainai_execution.lesson_selection import LessonSelection
 
 
 logger = logging.getLogger("mainai.lessons")
@@ -154,7 +159,13 @@ def lookup_lessons(db: Session, *, applies_to_any: list[str]) -> list[Engineerin
     )
 
 
-def apply_lessons_to_verification_plan(db: Session, *, task_type: str, verification_plan: list[dict]) -> tuple[list[dict], list[uuid.UUID]]:
+def apply_lessons_to_verification_plan(
+    db: Session,
+    *,
+    task_type: str,
+    verification_plan: list[dict],
+    selection: "LessonSelection | None" = None,
+) -> tuple[list[dict], list[uuid.UUID]]:
     """Returns (possibly-augmented verification_plan, ids of lessons that actually changed
     it) -- called once per planned task from planner.py's create_plan(), never from the
     executor (a lesson influences what gets PLANNED, not what an already-dispatched task does
@@ -175,7 +186,16 @@ def apply_lessons_to_verification_plan(db: Session, *, task_type: str, verificat
     from app.mainai_execution.lesson_conflicts import find_conflict_candidate_pairs
     from app.mainai_execution.verify import VerificationStepError, validate_targeted_tests_target
 
-    lessons = lookup_lessons(db, applies_to_any=[task_type])
+    if selection is not None:
+        # M1 (Round 8): the caller ran select_lessons_for_planning() ONCE and hands in the
+        # ranked decision record — application order follows MEASURED standing (proven
+        # first, flagged after), and the two evidence-backed exclusion classes
+        # (failed_majority, unusable_guard) are simply not in `ordered`, so they are never
+        # blindly reinforced. Every exclusion lives in the selection's audit block with
+        # its raw counts; nothing is deleted or demoted permanently.
+        lessons = selection.ordered
+    else:
+        lessons = lookup_lessons(db, applies_to_any=[task_type])
     conflicted_ids: set[uuid.UUID] = set()
     for a, b in find_conflict_candidate_pairs(db, lessons=lessons):
         conflicted_ids.add(a.id)
