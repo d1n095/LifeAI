@@ -46,6 +46,11 @@ from app.rag.evidence_quality import EvidenceQualityAssessment, QualityGrade, St
 from app.rag.epistemics import EpistemicStatus
 
 DECLARED_VIA_MAX = 60
+# M4 hardening: declared values are CONTENT (free text describing a study), but structure
+# is bounded — a 100MB "dose" string or a 10^50 sample size is an attack, not a study.
+# The key whitelist already bounds the key count; these bound each VALUE.
+VALUE_MAX_CHARS = 4096
+SAMPLE_SIZE_MAX = 10**9
 
 
 @dataclass
@@ -72,6 +77,9 @@ def _str_key(key: str):
         if not isinstance(value, str):
             rejected[key] = f"expected a string, got {type(value).__name__}"
             return None
+        if len(value) > VALUE_MAX_CHARS:
+            rejected[key] = f"value exceeds the {VALUE_MAX_CHARS}-character per-field limit"
+            return None
         text = value.strip()
         if not text:
             rejected[key] = "empty string is treated as absent, not recorded"
@@ -93,9 +101,15 @@ def _bool_key(key: str):
 
 def _str_list_key(key: str):
     def _norm(value, rejected: dict[str, str]):
+        if isinstance(value, list) and len(value) > 64:
+            rejected[key] = "list exceeds the 64-item per-field limit"
+            return None
         items = _as_str_list(value)
         if items is None:
             rejected[key] = "expected a string or a list of strings"
+            return None
+        if any(len(v) > VALUE_MAX_CHARS for v in items):
+            rejected[key] = f"an item exceeds the {VALUE_MAX_CHARS}-character per-field limit"
             return None
         cleaned = [v.strip() for v in items if v.strip()]
         if not cleaned:
@@ -110,6 +124,9 @@ def _study_design_key(key: str):
     def _norm(value, rejected: dict[str, str]):
         if not isinstance(value, str):
             rejected[key] = f"expected a string, got {type(value).__name__}"
+            return None
+        if len(value) > 256:
+            rejected[key] = "value exceeds the 256-character limit for a vocabulary field"
             return None
         try:
             return StudyDesign(value.strip()).value
@@ -130,6 +147,9 @@ def _vocabulary_key(key: str, valid_values: tuple[str, ...], label: str):
         if not isinstance(value, str):
             rejected[key] = f"expected a string, got {type(value).__name__}"
             return None
+        if len(value) > 256:
+            rejected[key] = "value exceeds the 256-character limit for a vocabulary field"
+            return None
         stripped = value.strip()
         if stripped not in valid_values:
             rejected[key] = f"'{value}' is not a known {label}; valid: {', '.join(valid_values)}"
@@ -147,6 +167,9 @@ def _int_key(key: str):
         if isinstance(value, int):
             if value < 0:
                 rejected[key] = "sample size cannot be negative"
+                return None
+            if value > SAMPLE_SIZE_MAX:
+                rejected[key] = "sample size exceeds any plausible study size (cap 10^9)"
                 return None
             return value
         rejected[key] = f"expected an integer, got {type(value).__name__}"

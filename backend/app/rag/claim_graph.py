@@ -188,12 +188,16 @@ def trace_evidence_chain(db: Session, owner_id: uuid.UUID, claim_id: uuid.UUID) 
     verdict = classify_claim(db, owner_id, claim)
     source = db.query(Document).filter(Document.id == claim.source_id, Document.uploaded_by == owner_id).first()
 
+    # M4 hardening: bounded even for adversarial data — a claim with an absurd number of
+    # incident edges degrades to a bounded trace, never an unbounded response. 200 is far
+    # above any real claim's edge count and matches the graph surfaces' LIMIT discipline.
     incident = (
         db.query(ClaimRelationship)
         .filter(
             ClaimRelationship.owner_id == owner_id,
             (ClaimRelationship.from_claim_id == claim.id) | (ClaimRelationship.to_claim_id == claim.id),
         )
+        .limit(200)
         .all()
     )
     other_ids = {e.from_claim_id if e.to_claim_id == claim.id else e.to_claim_id for e in incident}
