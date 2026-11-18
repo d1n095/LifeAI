@@ -314,7 +314,11 @@ jobs:
   # ---------------------------------------------------------------------------------------
   e2e-tests:
     name: E2E — Playwright (full stack)
-    runs-on: ubuntu-latest
+    # Pinned deliberately: `ubuntu-latest` now resolves to ubuntu-26.04, and Playwright 1.56.1
+    # publishes no Chromium build for it ("Playwright does not support chromium on
+    # ubuntu26.04-x64"), so `npx playwright install` failed before any test ran. Revert to
+    # `ubuntu-latest` only once a Playwright release covers the newer image.
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -480,7 +484,8 @@ jobs:
   # ---------------------------------------------------------------------------------------
   same-origin-proxy-test:
     name: E2E — same-origin proxy
-    runs-on: ubuntu-latest
+    # Pinned for the same Playwright/ubuntu-26.04 reason as e2e-tests above.
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -615,7 +620,8 @@ jobs:
   # ---------------------------------------------------------------------------------------
   combined-container-verify:
     name: Combined container — build, run, verify
-    runs-on: ubuntu-latest
+    # Pinned for the same Playwright/ubuntu-26.04 reason as e2e-tests above.
+    runs-on: ubuntu-24.04
     if: github.ref == 'refs/heads/claude/verify-combined-container' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm'
     services:
       postgres:
