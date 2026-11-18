@@ -2604,6 +2604,67 @@ jobs:
   # Single required status check for branch protection — see docs/OPERATIONS.md for how to
   # wire "Require status checks to pass before merging" to this job.
   # ---------------------------------------------------------------------------------------
+  requirements-registry:
+    name: Requirements — registry, seam scan, verifiers
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_test
+      APP_DATABASE_URL: postgresql://mainai_app:mainai_app_test_pw@localhost:5432/lifeos_test
+      REDIS_URL: redis://localhost:6379/1
+      SECRET_KEY: ci-test-secret-key
+      FOUNDER_EMAIL: founder@lifeos.local
+      FOUNDER_PASSWORD: TestFounderPassword123!
+      FRONTEND_ORIGINS: http://127.0.0.1:3020
+      PUBLIC_APP_URL: http://127.0.0.1:3020
+      ENABLE_SCHEDULED_CLEANUP: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+        working-directory: backend
+      # Every claim in requirements/registry.json must resolve to a real module and a real test.
+      - name: Registry verifies against the tree
+        run: python backend/scripts/requirements/verify_registry.py --repo-root .
+      # The one seam rule strong enough to enforce: a settings field nothing reads documents a
+      # behavior that does not exist. The broader seam report is an advisory artifact below.
+      - name: No configuration flag that nothing reads
+        run: python backend/scripts/requirements/dead_seams.py --repo-root . --enforce-unread-settings
+      - name: Seam report (advisory)
+        if: always()
+        run: python backend/scripts/requirements/dead_seams.py --repo-root . --json > dead-seams.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dead-seams
+          path: dead-seams.json
+          if-no-files-found: warn
+      # The verifiers must be able to FAIL, or a green run means nothing.
+      - name: Verifier regression tests
+        run: python -m pytest tests/requirements -q
+        working-directory: backend
+
   all-checks-passed:
     name: All required checks passed
     runs-on: ubuntu-latest
@@ -2622,6 +2683,7 @@ jobs:
       - vps-compose-verify
       - vps-deploy-rollback-test
       - vps-backup-restore-test
+      - requirements-registry
     if: always()
     steps:
       - name: Fail if any required job failed

@@ -1,0 +1,469 @@
+{
+  "version": 1,
+  "description": "Machine-readable requirements registry for the Founder Alpha. Every entry names its original source, the module that implements it, the executable evidence that verifies it, and any known gap. Verified by backend/scripts/requirements/verify_registry.py, which fails closed on a dangling dependency, a missing module, or a 'verified' claim with no existing test behind it. Classes: mandatory_before_private_start = the private start must not happen without it; necessary_for_safe_autonomy = required before MainAI runs unattended for long; required_for_production = needed for a real multi-user deployment; future_optional = deliberately deferred.",
+  "requirements": [
+    {
+      "id": "REQ-RUNTIME-001",
+      "title": "A response may only claim execution that a real, persisted job row backs",
+      "class": "mandatory_before_private_start",
+      "source": "backend/app/mainai_runtime_contract.py module docstring; founder requirement quoted there",
+      "responsible_module": "backend/app/mainai_runtime_contract.py",
+      "depends_on": [],
+      "implementation_evidence": [
+        "backend/app/mainai_runtime_contract.py:MainAIExecutionResponse",
+        "backend/app/mainai_runtime_contract.py:build_answer_response",
+        "backend/app/routers/chat.py"
+      ],
+      "integration_evidence": [
+        "backend/tests/backend/jobs/test_mainai_jobs.py"
+      ],
+      "security_implications": "Prevents the model from reporting work it did not do; a claim is only as trustworthy as the row it cites.",
+      "test_coverage": [
+        "backend/tests/backend/jobs/test_mainai_jobs.py"
+      ],
+      "status": "verified",
+      "gaps": []
+    },
+    {
+      "id": "REQ-EXEC-001",
+      "title": "At most one worker executes a given job; every write proves it still holds the lease",
+      "class": "mandatory_before_private_start",
+      "source": "backend/app/jobs/mainai_job_lease.py module docstring (migration 0028 rationale)",
+      "responsible_module": "backend/app/jobs/mainai_job_lease.py",
+      "depends_on": [],
+      "implementation_evidence": [
+        "backend/app/jobs/mainai_job_lease.py:claim_next_mainai_job",
+        "backend/app/jobs/mainai_job_lease.py:renew_mainai_job_lease",
+        "backend/app/jobs/service.py:_guarded_job_write"
+      ],
+      "integration_evidence": [
+        "backend/tests/backend/test_mainai_execution_checkpoint_fencing.py::test_stale_worker_cannot_land_a_work_result_checkpoint_after_being_reclaimed",
+        "backend/tests/backend/test_runtime_failure_recovery.py::test_a_worker_that_lost_its_lease_never_reaches_the_push"
+      ],
+      "security_implications": "Lease generation is the fencing token; without it a stale worker can duplicate privileged side effects.",
+      "test_coverage": [
+        "backend/tests/backend/test_mainai_execution_checkpoint_fencing.py"
+      ],
+      "status": "verified",
+      "gaps": []
+    },
+    {
+      "id": "REQ-EXEC-002",
+      "title": "An expired task_execution lease is never silently handed to a second worker",
+      "class": "mandatory_before_private_start",
+      "source": "backend/app/jobs/mainai_job_lease.py:_CLAIM_SQL comment (migration 0034)",
+      "responsible_module": "backend/app/jobs/mainai_job_lease.py",
+      "depends_on": [
+        "REQ-EXEC-001"
+      ],
+      "implementation_evidence": [
+        "backend/app/jobs/mainai_job_lease.py:_CLAIM_SQL"
+      ],
+      "integration_evidence": [
+        "backend/tests/backend/test_runtime_failure_recovery.py::test_an_expired_task_execution_lease_is_never_handed_to_a_second_worker",
+        "backend/tests/backend/test_mainai_execution_checkpoint_fencing.py::test_claim_next_mainai_job_never_blind_reclaims_a_dead_task_execution_job"
+      ],
+      "security_implications": "Blind reclaim of a job with real external side effects is duplicate privileged execution.",
+      "test_coverage": [
+        "backend/tests/backend/test_runtime_failure_recovery.py"
+      ],
+      "status": "verified",
+      "gaps": []
+    },
+    {
+      "id": "REQ-EXEC-003",
+      "title": "A dead attempt is recovered through inspect -> classify -> founder-approved takeover, never auto-approved",
+      "class": "mandatory_before_private_start",
+      "source": "backend/app/worker.py:_advance_mainai_execution_auto_recovery docstring",
+      "responsible_module": "backend/app/mainai_execution/recovery_approval.py",
+      "depends_on": [
+        "REQ-EXEC-002"
+      ],
+      "implementation_evidence": [
+        "backend/app/mainai_execution/recovery_inspector.py",
+        "backend/app/mainai_execution/recovery_classifier.py",
+        "backend/app/mainai_execution/recovery_takeover.py",
+        "backend/app/mainai_execution/recovery_approval.py"
+      ],
+      "integration_evidence": [
+        "backend/tests/backend/test_mainai_execution_auto_recovery.py::test_auto_recovery_tick_classifies_but_never_auto_approves_pushed_no_pr"
+      ],
+      "security_implications": "Recovery must not repeat or silently approve privileged actions that already left the machine.",
+      "test_coverage": [
+        "backend/tests/backend/test_mainai_execution_auto_recovery.py"
+      ],
+      "status": "verified",
+      "gaps": []
+    },
+    {
+      "id": "REQ-EXEC-004",
+      "title": "Lease expiry is judged by the database's own clock, in the columns' own type domain",
+      "class": "mandatory_before_private_start",
+      "source": "backend/app/db_clock.py module docstring",
+      "responsible_module": "backend/app/db_clock.py",
+      "depends_on": [
+        "REQ-EXEC-003"
+      ],
+      "implementation_evidence": [
+        "backend/app/db_clock.py:db_now",
+        "backend/app/db_clock.py:db_now_expr",
+        "backend/app/worker.py:_advance_mainai_execution_auto_recovery"
+      ],
+      "integration_evidence": [
+        "backend/tests/backend/test_lease_clock_domain.py::test_a_live_lease_is_never_declared_dead_when_the_app_clock_runs_ahead",
+        "backend/tests/backend/test_lease_clock_domain.py::test_db_now_is_naive_utc_in_the_columns_own_type_domain"
+      ],
+      "security_implications": "A skewed app clock either takes over a live privileged attempt (duplicate execution) or never recovers a dead one.",
+      "test_coverage": [
+        "backend/tests/backend/test_lease_clock_domain.py"
+      ],
+      "status": "verified",
+      "gaps": []
+    },
+    {
+      "id": "REQ-EXEC-005",
+      "title": "Untrusted AI edits never modify the live checkout; verification runs against the isolated attempt",
+      "class": "mandatory_before_private_start",
+      "source": "backend/app/mainai_execution/proposal_worktree.py module docstring; backend/app/mainai_execution/worktree.py",
+      "responsible_module": "backend/app/mainai_execution/proposal_worktree.py",
+      "depends_on": [
+        "REQ-EXEC-001"
+      ],
+      "implementation_evidence": [
+        "backend/app/mainai_execution/proposal_worktree.py:create_isolated_proposal_checkout",
+        "backend/app/mainai_execution/proposal_worktree.py:assert_no_credentialed_remote",
+        "backend/app/mainai_execution/execution_job.py:_propose_repo_edit",
+        "backend/app/mainai_execution/execution_job.py:_rollback_proposal_writes"
+      ],
+      "integration_evidence": [
+        "backend/tests/backend/test_proposal_worktree_isolation.py::test_a_failing_proposal_never_touches_the_shared_checkout",
+        "backend/tests/backend/test_proposal_mode_checkout_restoration.py::test_a_failed_proposal_restores_the_shared_checkout_exactly"
+      ],
+      "security_implications": "An unaccepted proposal must never reach the code the next startup executes; the isolated base must not inherit a credential-bearing Git remote.",
+      "test_coverage": [
+        "backend/tests/backend/test_proposal_worktree_isolation.py",
+        "backend/tests/backend/test_proposal_mode_checkout_restoration.py"
+      ],
+      "status": "verified",
+      "gaps": []
+    },
+    {
+      "id": "REQ-SEC-001",
+      "title": "Every row is isolated per owner by PostgreSQL row-level security",
+      "class": "mandatory_before_private_start",
+      "source": "backend/app/rls.py module docstring; docs/SECURITY_BLOCKERS.md",
+      "responsible_module": "backend/app/rls.py",
+      "depends_on": [],
+      "implementation_evidence": [
+        "backend/app/rls.py:apply_rls",
+        "backend/db-init/01-app-role.sh",
+        "backend/scripts/security/s1a_privilege_policy.py"
+      ],
+      "integration_evidence": [
+        "backend/tests/security/test_rls_isolation.py"
+      ],
+      "security_implications": "The single-user Founder Alpha still runs multi-tenant code paths; RLS is what makes a cross-owner leak impossible rather than unlikely.",
+      "test_coverage": [
+        "backend/tests/security/test_rls_isolation.py"
+      ],
+      "status": "verified",
+      "gaps": []
+    },
+    {
+      "id": "REQ-SEC-002",
+      "title": "Sessions live in HttpOnly cookies with rotation, revocation and CSRF protection",
+      "class": "mandatory_before_private_start",
+      "source": "docs/AUTH_THREAT_MODEL.md",
+      "responsible_module": "backend/app/deps.py",
+      "depends_on": [
+        "REQ-SEC-001"
+      ],
+      "implementation_evidence": [
+        "backend/app/deps.py",
+        "backend/app/cookies.py",
+        "backend/app/cookies.py",
+        "backend/app/routers/auth.py"
+      ],
+      "integration_evidence": [
+        "backend/tests/security/test_session_auth.py"
+      ],
+      "security_implications": "No token is reachable from JavaScript; a stolen refresh token is single-use and revocable.",
+      "test_coverage": [
+        "backend/tests/security/test_session_auth.py"
+      ],
+      "status": "verified",
+      "gaps": []
+    },
+    {
+      "id": "REQ-SEC-003",
+      "title": "The runtime database role cannot truncate, reference or trigger, and cannot touch migration state",
+      "class": "mandatory_before_private_start",
+      "source": "backend/scripts/security/s1a_privilege_policy.py module docstring",
+      "responsible_module": "backend/scripts/security/s1a_privilege_policy.py",
+      "depends_on": [
+        "REQ-SEC-001"
+      ],
+      "implementation_evidence": [
+        "backend/scripts/security/s1a_privilege_policy.py:_NEVER_GRANTED_TABLE_PRIVS",
+        "backend/scripts/security/s1a_privilege_policy.py:_MIGRATION_STATE_TABLES"
+      ],
+      "integration_evidence": [
+        "backend/tests/backend/test_migration_state_privileges.py"
+      ],
+      "security_implications": "A compromised application connection must not be able to erase data wholesale or rewrite the schema revision.",
+      "test_coverage": [
+        "backend/tests/backend/test_migration_state_privileges.py"
+      ],
+      "status": "verified",
+      "gaps": []
+    },
+    {
+      "id": "REQ-SEC-004",
+      "title": "Mandatory, fail-closed security CI with tamper-resistant controls",
+      "class": "mandatory_before_private_start",
+      "source": "docs/SECURITY_CONTROLS.md",
+      "responsible_module": ".github/workflows/security.yml",
+      "depends_on": [],
+      "implementation_evidence": [
+        ".github/workflows/security.yml",
+        ".semgrep/rules.yaml",
+        ".gitleaks.toml",
+        "security/POLICY_LOCK.json",
+        "backend/scripts/security/verify_policy_lock.py",
+        "backend/scripts/security/verify_agent_capabilities.py",
+        "backend/scripts/security/build_provenance.py"
+      ],
+      "integration_evidence": [
+        "backend/tests/security/test_security_controls.py"
+      ],
+      "security_implications": "A check that cannot fail is decoration; the gate must fail on failure, cancellation and silent suppression.",
+      "test_coverage": [
+        "backend/tests/security/test_security_controls.py"
+      ],
+      "status": "verified",
+      "gaps": [
+        "CodeQL requires GitHub Advanced Security on a private repository; prepared but NOT enforced until an administrator enables it and sets CODEQL_ENABLED=true.",
+        "CODEOWNERS review requirement needs branch protection, which requires repository administration."
+      ]
+    },
+    {
+      "id": "REQ-SEC-005",
+      "title": "Capabilities are explicit, least-privilege, and drift between code and declaration fails closed",
+      "class": "mandatory_before_private_start",
+      "source": "backend/app/mainai_runtime_contract.py:CAPABILITY_MANIFEST; security/agent_capabilities.json",
+      "responsible_module": "security/agent_capabilities.json",
+      "depends_on": [
+        "REQ-SEC-004"
+      ],
+      "implementation_evidence": [
+        "security/agent_capabilities.json",
+        "backend/scripts/security/verify_agent_capabilities.py",
+        "backend/app/worker.py:process_claimed_mainai_job"
+      ],
+      "integration_evidence": [
+        "backend/tests/security/test_security_controls.py::test_a_capability_present_in_code_but_undeclared_is_a_failure",
+        "backend/tests/security/test_security_controls.py::test_an_actor_cannot_be_granted_merge_deploy_or_self_approval"
+      ],
+      "security_implications": "No actor may merge, deploy, approve its own change or disable a check.",
+      "test_coverage": [
+        "backend/tests/security/test_security_controls.py"
+      ],
+      "status": "verified",
+      "gaps": [
+        "Runtime enforcement of the denials is by code inspection plus absence of code paths (no merge method exists); there is no separate runtime policy engine."
+      ]
+    },
+    {
+      "id": "REQ-OPS-001",
+      "title": "The database can be backed up, verified and restored with executable proof",
+      "class": "mandatory_before_private_start",
+      "source": "backend/scripts/ops/db_recovery.py module docstring",
+      "responsible_module": "backend/scripts/ops/db_recovery.py",
+      "depends_on": [],
+      "implementation_evidence": [
+        "backend/scripts/ops/db_recovery.py",
+        "scripts/vps/backup.sh",
+        "scripts/vps/restore.sh"
+      ],
+      "integration_evidence": [
+        "backend/tests/backend/test_database_recovery.py"
+      ],
+      "security_implications": "A restore path that was never executed is not a recovery plan.",
+      "test_coverage": [
+        "backend/tests/backend/test_database_recovery.py"
+      ],
+      "status": "verified",
+      "gaps": [
+        "The scheduled off-host backup destination and its retention policy are founder/deployment decisions, not implemented here."
+      ]
+    },
+    {
+      "id": "REQ-OPS-002",
+      "title": "A crashed attempt is restart-recoverable and never fabricates an outcome",
+      "class": "necessary_for_safe_autonomy",
+      "source": "backend/app/mainai_execution/checkpoint.py module docstring",
+      "responsible_module": "backend/app/mainai_execution/checkpoint.py",
+      "depends_on": [
+        "REQ-EXEC-001",
+        "REQ-EXEC-003"
+      ],
+      "implementation_evidence": [
+        "backend/app/mainai_execution/checkpoint.py",
+        "backend/app/mainai_execution/execution_job.py:run_task_execution_job"
+      ],
+      "integration_evidence": [
+        "backend/tests/backend/test_runtime_failure_recovery.py::test_a_lost_database_connection_leaves_a_recoverable_attempt_not_a_false_outcome"
+      ],
+      "security_implications": "Checkpointing avoids repeating a non-idempotent provider call or push after a crash.",
+      "test_coverage": [
+        "backend/tests/backend/test_runtime_failure_recovery.py"
+      ],
+      "status": "verified",
+      "gaps": []
+    },
+    {
+      "id": "REQ-OPS-003",
+      "title": "A hung test fails with a named stack instead of hanging the suite",
+      "class": "necessary_for_safe_autonomy",
+      "source": "backend/pytest.ini timeout configuration; backend/tests/conftest.py:_clean_tables",
+      "responsible_module": "backend/pytest.ini",
+      "depends_on": [],
+      "implementation_evidence": [
+        "backend/pytest.ini",
+        "backend/tests/conftest.py:_clean_tables",
+        ".github/workflows/ci.yml"
+      ],
+      "integration_evidence": [
+        "backend/tests/backend/test_lease_clock_domain.py"
+      ],
+      "security_implications": "An unbounded hang is an availability failure that also hides the defect that caused it.",
+      "test_coverage": [
+        "backend/tests/backend/test_lease_clock_domain.py"
+      ],
+      "status": "verified",
+      "gaps": []
+    },
+    {
+      "id": "REQ-AI-001",
+      "title": "Knowledge ingestion, retrieval and grounded answers with citations",
+      "class": "mandatory_before_private_start",
+      "source": "docs/KNOWLEDGE_IMPORT_SECURITY.md; app/rag module docstrings",
+      "responsible_module": "backend/app/rag",
+      "depends_on": [
+        "REQ-SEC-001"
+      ],
+      "implementation_evidence": [
+        "backend/app/rag/library_import.py",
+        "backend/app/routers/library.py",
+        "backend/app/routers/knowledge.py"
+      ],
+      "integration_evidence": [
+        "backend/tests/backend/rag"
+      ],
+      "security_implications": "Uploaded content is untrusted input; storage blobs are referenced by DB row and never executed.",
+      "test_coverage": [
+        "backend/tests/backend/rag"
+      ],
+      "status": "verified",
+      "gaps": [
+        "End-to-end retrieval quality with the founder's real corpus is not measured here; correctness of the pipeline is, quality of the answers is a product decision."
+      ]
+    },
+    {
+      "id": "REQ-AI-002",
+      "title": "Persistent memory survives a new session and a restart",
+      "class": "mandatory_before_private_start",
+      "source": "backend/tests/backend/test_founder_alpha_runtime_flow.py durable-memory leg",
+      "responsible_module": "backend/app/founder_memory",
+      "depends_on": [
+        "REQ-SEC-001",
+        "REQ-AI-001"
+      ],
+      "implementation_evidence": [
+        "backend/app/founder_memory",
+        "backend/app/models"
+      ],
+      "integration_evidence": [
+        "backend/tests/backend/test_founder_alpha_runtime_flow.py"
+      ],
+      "security_implications": "Memory is owner-scoped by RLS; a re-authenticated session is a distinct trust boundary.",
+      "test_coverage": [
+        "backend/tests/backend/test_founder_alpha_runtime_flow.py"
+      ],
+      "status": "verified",
+      "gaps": []
+    },
+    {
+      "id": "REQ-AI-003",
+      "title": "Local model communication, verified with a real protocol against a real server",
+      "class": "mandatory_before_private_start",
+      "source": "backend/app/providers/local_provider.py; .github/workflows/real-local-ai-verification.yml",
+      "responsible_module": "backend/app/providers/ollama_provider.py",
+      "depends_on": [
+        "REQ-AI-001"
+      ],
+      "implementation_evidence": [
+        "backend/app/providers/ollama_provider.py",
+        "backend/app/providers/verification.py"
+      ],
+      "integration_evidence": [
+        ".github/workflows/real-local-ai-verification.yml"
+      ],
+      "security_implications": "The local model must be reachable without any paid egress path being configured.",
+      "test_coverage": [
+        "backend/tests/backend/providers/test_ollama_provider_failclosed.py"
+      ],
+      "status": "partial",
+      "gaps": [
+        "Hardware/model deployment for the founder's inference gas is NOT verified by this branch. Only the protocol integration (real HTTP to a local server) is exercised, in the dedicated real-local-AI workflow. Do not read this as 'the model is deployed'."
+      ]
+    },
+    {
+      "id": "REQ-PROD-001",
+      "title": "Multi-user registration, quotas and per-tenant rate limits",
+      "class": "required_for_production",
+      "source": "docs/SECURITY_BLOCKERS.md; backend/tests/account",
+      "responsible_module": "backend/app/limiter.py",
+      "depends_on": [
+        "REQ-SEC-001",
+        "REQ-SEC-002"
+      ],
+      "implementation_evidence": [
+        "backend/app/limiter.py",
+        "backend/app/routers/auth.py"
+      ],
+      "integration_evidence": [
+        "backend/tests/account/test_rate_limiting.py"
+      ],
+      "security_implications": "Public registration is deliberately disabled for the Founder Alpha; enabling it is a founder decision.",
+      "test_coverage": [
+        "backend/tests/account/test_rate_limiting.py"
+      ],
+      "status": "partial",
+      "gaps": [
+        "Public registration is disabled by design for a single-founder deployment; the multi-tenant onboarding flow is out of scope for the private start."
+      ]
+    },
+    {
+      "id": "REQ-FUTURE-001",
+      "title": "Automatic merge and deployment by MainAI",
+      "class": "future_optional",
+      "source": "backend/app/config.py:github_auto_merge_enabled comment",
+      "responsible_module": "backend/app/integrations/github_client.py",
+      "depends_on": [
+        "REQ-EXEC-001",
+        "REQ-SEC-005"
+      ],
+      "implementation_evidence": [
+        "backend/app/config.py:github_auto_merge_enabled"
+      ],
+      "integration_evidence": [],
+      "security_implications": "Deliberately unimplemented: github_client.py has no merge method, so there is no code path this flag could enable.",
+      "test_coverage": [],
+      "status": "deferred",
+      "gaps": [
+        "No implementation exists and none is planned before the private start. The flag exists so a future implementation has an explicit off-by-default switch."
+      ]
+    }
+  ]
+}

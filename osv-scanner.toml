@@ -18,3 +18,8 @@ reason = "glob is a dev-only transitive dependency of the lint/build toolchain a
 id = "GHSA-g3hv-75wg-m249"
 ignoreUntil = 2027-02-01
 reason = "minimatch is a dev-only transitive dependency of the same lint/build toolchain, not in the runtime bundle. The patched release is minimatch 11, a major bump of a transitive dependency; it moves together with glob/eslint's own dependency range, so it is handled as part of that toolchain migration rather than by an override that would break the tools."
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-1845"
+ignoreUntil = 2027-02-01
+reason = "pytest is test-only and never installed in the production image (backend/Dockerfile installs requirements.txt, not requirements-dev.txt). The patched release is pytest 9, a major version that also requires the async/fixture plugin line to move (pytest-asyncio 1.x); that toolchain migration is scheduled work with its own verification, not a runtime fix."

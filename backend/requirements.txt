@@ -10,12 +10,15 @@ httpx==0.27.2
 # 0.0.31 is the first release with none of them. FastAPI only requires >=0.0.9.
 python-multipart==0.0.31
 tiktoken==0.7.0
-pypdf==4.3.1
+# pypdf 4.3.1 carries 115 advisories in OSV (several at 8.7). Only PdfReader/extract_text is
+# used (app/rag/extract.py), which is unchanged across the major line.
+pypdf==7.1.1
 python-docx==1.1.2
 beautifulsoup4==4.12.3
 tenacity==9.0.0
 argon2-cffi==23.1.0
-PyJWT==2.9.0
+# PyJWT 2.9.0 carries 32 advisories; 2.12.0 is the first release with none.
+PyJWT==2.15.0
 slowapi==0.1.9
 redis==5.2.1
 alembic==1.13.3

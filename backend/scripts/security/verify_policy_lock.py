@@ -48,6 +48,10 @@ PROTECTED_GLOBS: tuple[str, ...] = (
     "security/agent_capabilities.json",
     "backend/scripts/security/*.py",
     "backend/tests/security/test_security_controls.py",
+    # These decide what the project may CLAIM about itself; weakening them is a control change.
+    "backend/scripts/requirements/*.py",
+    "backend/tests/requirements/test_requirements_registry.py",
+    "backend/scripts/acceptance/*.py",
 )
 
 _SKIP_DIR_NAMES = {"__pycache__", ".pytest_cache", ".mypy_cache"}
