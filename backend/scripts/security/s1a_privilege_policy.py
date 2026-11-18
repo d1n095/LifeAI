@@ -130,6 +130,12 @@ _PROTECTED_TABLES = [
     # as defense-in-depth (and is what the test suite's app-role sessions — which still hold the
     # uniform DML floor — actually trip on).
     ("blueprint_drafts", ["SELECT", "INSERT"]),
+    # S1D (migration 0072 on the 0069-composition integration branch; 0069 on its own PR
+    # branch) — repository_file_source_units is the exact same exclusive-arc
+    # pattern as document_source_units/message_source_units above (every field guarded
+    # immutable by trg_rfsu_guard_update, so UPDATE would always fail via the trigger anyway;
+    # narrowed at the grant level too for the same defense-in-depth reasoning).
+    ("repository_file_source_units", ["SELECT", "INSERT"]),
 ]
 
 _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]

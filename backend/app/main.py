@@ -18,6 +18,7 @@ from app.routers import (
     agents,
     auth,
     blueprint,
+    calendar,
     chat,
     conversations,
     documents,
@@ -67,6 +68,7 @@ app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(account.router)
 app.include_router(blueprint.router)
+app.include_router(calendar.router)
 app.include_router(chat.router)
 app.include_router(conversations.router)
 app.include_router(documents.router)
