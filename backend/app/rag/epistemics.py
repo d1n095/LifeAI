@@ -112,10 +112,22 @@ def _visible_source(db: Session, owner_id: uuid.UUID, source_id: uuid.UUID) -> D
     return db.query(Document).filter(Document.id == source_id, Document.uploaded_by == owner_id).first()
 
 
-def classify_claim(db: Session, owner_id: uuid.UUID, claim: KnowledgeClaim) -> EpistemicVerdict:
+def classify_claim(
+    db: Session,
+    owner_id: uuid.UUID,
+    claim: KnowledgeClaim,
+    *,
+    quality_cap: "EpistemicStatus | None" = None,
+) -> EpistemicVerdict:
     """The deterministic evidence ladder for one claim (mapping order documented in the
     module docstring). Owner-scoped: the source is loaded through the owner's visibility
-    filter, and the claim_relationships lookup filters owner_id explicitly."""
+    filter, and the claim_relationships lookup filters owner_id explicitly.
+
+    `quality_cap` (optional) comes from app/rag/evidence_quality.grade_evidence(): the
+    highest EpistemicStatus the claim's study metadata can support. When the ladder's
+    verdict EXCEEDS the cap it is downgraded to the cap with a named reason — a dispute
+    (conflicting_evidence) is never affected (a contradiction is a contradiction whatever
+    the metadata quality), and a cap can only ever lower a verdict, never raise one."""
     reasons: list[str] = []
 
     contradicted = (
@@ -166,10 +178,15 @@ def classify_claim(db: Session, owner_id: uuid.UUID, claim: KnowledgeClaim) -> E
         status = EpistemicStatus.assumption
         reasons.append("nothing in the source chunk grounds this statement (no_basis)")
 
+    verdict_status = status
+    if quality_cap is not None and status == EpistemicStatus.verified_fact and quality_cap != EpistemicStatus.verified_fact:
+        verdict_status = quality_cap
+        reasons.append(f"evidence-quality cap: study metadata supports at most {quality_cap.value}")
+
     return EpistemicVerdict(
         claim_id=claim.id,
         claim_text=claim.claim_text,
-        status=status,
+        status=verdict_status,
         confidence=live_confidence,
         claim_status=claim.status,
         reasons=reasons,
