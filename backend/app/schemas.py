@@ -130,6 +130,9 @@ class ContextStatusOut(BaseModel):
     indexed_count: int = 0
     total_document_count: int = 0
     worker_reachable: bool | None = None
+    # Chunks that exist but are not in the active embedding space (another model, or a
+    # pre-migration NULL identity) — see app/rag/context_status.py's reindex_required.
+    out_of_space_chunk_count: int = 0
 
 
 class ChatMessageOut(BaseModel):
