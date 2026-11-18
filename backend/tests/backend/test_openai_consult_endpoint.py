@@ -78,7 +78,25 @@ def client(monkeypatch):
         connect_args={"check_same_thread": False},  # TestClient worker thread
         poolclass=StaticPool,  # one shared in-memory DB across connections
     )
-    Base.metadata.create_all(engine, tables=[__import__("app.models.provider_disclosure", fromlist=["ProviderDisclosureEvent"]).ProviderDisclosureEvent.__table__])
+    # The settle path unconditionally routes through the platform ledger
+    # (app/billing/accounting.record_usage: "one accounting pipeline, no dark spend") —
+    # it reads the user row for tenant derivation and writes usage_log + usage_rollups,
+    # so those tables must exist in this in-memory DB too. (The fixture predates the
+    # Revenue Engine wiring and failed with a 500 on the missing `users` table.)
+    from app.models.billing import UsageRollup
+    from app.models.provider_disclosure import ProviderDisclosureEvent
+    from app.models.usage import UsageLog
+    from app.models.user import User
+
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            ProviderDisclosureEvent.__table__,
+            User.__table__,
+            UsageLog.__table__,
+            UsageRollup.__table__,
+        ],
+    )
     Session = sessionmaker(bind=engine)
     db = Session()
 

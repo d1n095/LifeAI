@@ -23,6 +23,7 @@ Test-integration rules (checked against the existing suites):
     unaffected — reading back through a second client is still valid against one server.
 """
 
+import atexit
 import logging
 import threading
 
@@ -86,3 +87,11 @@ def reset_shared_redis_clients_for_tests() -> None:
     per-test isolation must never be closed out from under another fixture)."""
     with _lock:
         _clients.clear()
+
+
+# Register the shutdown BEFORE any client is built: closing the shared pools at atexit
+# time (while every module is still alive) keeps Redis.__del__ from running during late
+# interpreter teardown, where the os module's globals are already gone and the
+# close→disconnect→_checkpid chain raises AttributeError noise ("Exception ignored in
+# Redis.__del__") — reproduced by the financial suites, 2026-11-18.
+atexit.register(close_shared_redis_clients)

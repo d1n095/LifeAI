@@ -28,6 +28,40 @@ from decimal import Decimal
 
 from app.openai_consult.budgets import _seconds_until_utc_midnight, to_micros  # noqa: F401
 
+# ALL-OR-NOTHING reserve across BOTH windows, atomically inside Redis (the same pattern
+# app/jobs/lock.py's compare-and-swap uses). The previous implementation checked caps with
+# a separate _read() and then charged with a separate _increment(): two threads could BOTH
+# pass the check against the same pre-charge state and BOTH increment — an admitted-spend
+# overshoot of the founder's cap (reproduced by test_concurrent_double_reserve..., 2026-11-
+# 18: 6 admissions against a cap that fits 4). One script call now reads both keys, checks
+# all four caps, and only on ALL-pass writes both counters and refreshes both TTLs.
+# Returns (on success) [1, day_tokens, day_cost, month_tokens, month_cost]; on reject
+# [0, window_index, dim_index, used_tokens, used_cost] with NO writes done.
+_RESERVE_SCRIPT = """
+local dt = tonumber(ARGV[1])
+local dc = tonumber(ARGV[2])
+local day_tokens = tonumber(redis.call('HGET', KEYS[1], 'tokens') or '0')
+local day_cost = tonumber(redis.call('HGET', KEYS[1], 'cost_micros') or '0')
+local month_tokens = tonumber(redis.call('HGET', KEYS[2], 'tokens') or '0')
+local month_cost = tonumber(redis.call('HGET', KEYS[2], 'cost_micros') or '0')
+for i, used in ipairs({day_tokens, month_tokens}) do
+    local cap_t = ARGV[3 + (i - 1) * 2]
+    local cap_c = ARGV[4 + (i - 1) * 2]
+    if cap_t ~= '' and used + dt > tonumber(cap_t) then
+        return {0, i - 1, 0, used, (i == 1) and day_cost or month_cost}
+    end
+    local cost = (i == 1) and day_cost or month_cost
+    if cap_c ~= '' and cost + dc > tonumber(cap_c) then
+        return {0, i - 1, 1, used, cost}
+    end
+end
+redis.call('HSET', KEYS[1], 'tokens', day_tokens + dt, 'cost_micros', day_cost + dc)
+redis.call('HSET', KEYS[2], 'tokens', month_tokens + dt, 'cost_micros', month_cost + dc)
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[7]))
+redis.call('EXPIRE', KEYS[2], tonumber(ARGV[8]))
+return {1, day_tokens + dt, day_cost + dc, month_tokens + dt, month_cost + dc}
+"""
+
 
 class BillingEnforcementUnavailableError(RuntimeError):
     """Budget enforcement could not be performed and the reservation state is UNKNOWN.
@@ -154,32 +188,76 @@ class ComputeBudgetStore:
     ) -> Reservation:
         """Charge a worst-case estimate against BOTH windows, checking caps first.
         `token_caps`/`cost_caps_micros` are (daily, monthly) effective caps; None = no cap.
-        All increments commit or none does (per-window atomicity via pipeline; the
-        two windows are checked-then-charged, with the check reading the same atomic
-        counter state the charge mutates — a rejected reserve leaves NO partial state
-        because it never increments)."""
+        ALL-OR-NOTHING and ATOMIC: one Redis script reads both counters, checks all four
+        caps and writes both counters (the old check-then-charge split let two concurrent
+        reserves both admit against the same pre-charge state — an admitted-spend overshoot,
+        reproduced 2026-11-18); the in-memory path takes the same all-or-nothing path under
+        one lock. A rejected reserve leaves NO state behind."""
         now = now or datetime.now(timezone.utc)
         day_key, month_key, day_ttl, month_ttl = self._keys(subject_type, subject_id, now)
         cost_micros = to_micros(estimated_cost_usd)
         tokens = max(int(estimated_tokens), 0)
 
-        # Check both windows BEFORE charging either (reject => zero writes).
-        for key, window, token_cap, cost_cap in (
-            (day_key, "day", token_caps[0], cost_caps_micros[0]),
-            (month_key, "month", token_caps[1], cost_caps_micros[1]),
-        ):
-            used_tokens, used_cost = self._read(key)
-            if token_cap is not None and used_tokens + tokens > token_cap:
-                raise BillingBudgetExceededError(window, "tokens", subject_type=subject_type,
-                                                 subject_id=subject_id, budgeted=token_cap,
-                                                 requested=used_tokens + tokens)
-            if cost_cap is not None and used_cost + cost_micros > cost_cap:
-                raise BillingBudgetExceededError(window, "cost", subject_type=subject_type,
-                                                 subject_id=subject_id, budgeted=cost_cap,
-                                                 requested=used_cost + cost_micros)
+        def _exceeded(window: str, which: str, window_index: int, dim_index: int, used_t: int, used_c: int):
+            if which == "tokens":
+                cap = (token_caps[0], token_caps[1])[window_index]
+                return BillingBudgetExceededError(window, "tokens", subject_type=subject_type,
+                                                  subject_id=subject_id, budgeted=cap,
+                                                  requested=used_t + tokens)
+            cap = (cost_caps_micros[0], cost_caps_micros[1])[window_index]
+            return BillingBudgetExceededError(window, "cost", subject_type=subject_type,
+                                              subject_id=subject_id, budgeted=cap,
+                                              requested=used_c + cost_micros)
 
-        self._increment(day_key, tokens, cost_micros, day_ttl)
-        self._increment(month_key, tokens, cost_micros, month_ttl)
+        if self._redis is not None:
+            # One atomic script call: read BOTH counters, check ALL FOUR caps, and only on
+            # all-pass write both counters + TTLs. A reject performs NO writes at all, so
+            # a failed reserve never leaves partial state — and two concurrent reserves
+            # can never both admit against the same pre-charge state (the race that let
+            # six reservations through a cap fitting four, reproduced 2026-11-18).
+            try:
+                result = self._redis.eval(
+                    _RESERVE_SCRIPT, 2, day_key, month_key,
+                    tokens, cost_micros,
+                    "" if token_caps[0] is None else int(token_caps[0]),
+                    "" if cost_caps_micros[0] is None else int(cost_caps_micros[0]),
+                    "" if token_caps[1] is None else int(token_caps[1]),
+                    "" if cost_caps_micros[1] is None else int(cost_caps_micros[1]),
+                    day_ttl, month_ttl,
+                )
+            except Exception as exc:
+                import redis as redis_module
+
+                if isinstance(exc, (redis_module.ConnectionError, redis_module.TimeoutError)):
+                    raise BillingEnforcementUnavailableError(
+                        "Redis budget enforcement unavailable — spending refused (fail-closed)"
+                    ) from exc
+                raise
+            if int(result[0]) == 0:
+                window = ("day", "month")[int(result[1])]
+                which = ("tokens", "cost")[int(result[2])]
+                raise _exceeded(window, which, int(result[1]), int(result[2]), int(result[3]), int(result[4]))
+            return Reservation(subject_type=subject_type, subject_id=subject_id,
+                               tokens=tokens, cost_micros=cost_micros,
+                               period_keys=(day_key, month_key))
+
+        # In-memory path: the whole check-then-charge runs under ONE lock acquisition —
+        # same all-or-nothing guarantee, same contract (the old code released the lock
+        # between _read and _increment and was racy in exactly the same way).
+        with self._lock:
+            for window_index, (key, window, token_cap, cost_cap) in enumerate(
+                ((day_key, "day", token_caps[0], cost_caps_micros[0]),
+                 (month_key, "month", token_caps[1], cost_caps_micros[1]))
+            ):
+                used_tokens, used_cost = self._local.get(key, (0, 0))
+                if token_cap is not None and used_tokens + tokens > token_cap:
+                    raise _exceeded(window, "tokens", window_index, 0, used_tokens, used_cost)
+                if cost_cap is not None and used_cost + cost_micros > cost_cap:
+                    raise _exceeded(window, "cost", window_index, 1, used_tokens, used_cost)
+            self._local[day_key] = (self._local.get(day_key, (0, 0))[0] + tokens,
+                                    self._local.get(day_key, (0, 0))[1] + cost_micros)
+            self._local[month_key] = (self._local.get(month_key, (0, 0))[0] + tokens,
+                                      self._local.get(month_key, (0, 0))[1] + cost_micros)
         return Reservation(subject_type=subject_type, subject_id=subject_id,
                            tokens=tokens, cost_micros=cost_micros,
                            period_keys=(day_key, month_key))

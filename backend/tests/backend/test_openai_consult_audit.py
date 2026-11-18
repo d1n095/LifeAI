@@ -45,6 +45,24 @@ def make_settings(**over) -> Settings:
     return Settings(**base)
 
 
+class _StubResult:
+    """Minimal SQLAlchemy Result stand-in for the platform-ledger writes the consultation
+    settle path now performs (service.py's `_record_usage` → app/billing/accounting.py:
+    tenant derivation SELECT + UPDATE-first rollup). first()/scalar() → None reads as "no
+    membership row / no existing rollup", rowcount 0 sends the rollup to its INSERT-on-miss
+    branch — the accounting layer then db.add()s the UsageLog, which LedgerDB captures."""
+
+    def first(self):
+        return None
+
+    def scalar(self):
+        return None
+
+    @property
+    def rowcount(self):
+        return 0
+
+
 class LedgerDB:
     """Captures exactly what the egress gate would persist, without a database."""
 
@@ -59,6 +77,12 @@ class LedgerDB:
         if self.fail_flush:
             raise RuntimeError("simulated ledger write failure")
 
+    # The settle path unconditionally routes through app/billing/accounting.record_usage
+    # ("one accounting pipeline, no dark spend") — that layer runs plain SQL via
+    # db.execute; the fake reports an empty ledger instead of a database.
+    def execute(self, statement, params=None):
+        return _StubResult()
+
 
 def responses_api_body(text="Consultation answer") -> dict:
     return {
@@ -67,6 +91,14 @@ def responses_api_body(text="Consultation answer") -> dict:
         "output": [{"type": "message", "content": [{"type": "output_text", "text": text}]}],
         "usage": {"input_tokens": 10, "output_tokens": 20},
     }
+
+
+def disclosure_events(db):
+    """The egress-disclosure rows. Since the Revenue Engine wiring, a successful
+    consultation also writes a UsageLog into the same ledger — filter it out here."""
+    from app.models.provider_disclosure import ProviderDisclosureEvent
+
+    return [e for e in db.events if isinstance(e, ProviderDisclosureEvent)]
 
 
 def patch_transport(monkeypatch, handler) -> list[int]:
@@ -119,8 +151,11 @@ async def test_allowed_consultation_writes_one_correlated_event(monkeypatch):
     result, _stats = await mainai_consult(db)
     assert result.output_text == "Consultation answer"
 
-    assert len(db.events) == 1
-    event = db.events[0]
+    disclosures = disclosure_events(db)
+    assert len(disclosures) == 1
+    # The Revenue Engine also records the platform usage row for the same call.
+    assert any(type(e).__name__ == "UsageLog" for e in db.events)
+    event = disclosures[0]
     assert event.provider == "openai"
     assert event.model == "gpt-4o-mini"
     assert event.purpose == "mainai_consult"
@@ -166,7 +201,7 @@ async def test_hash_is_tamper_evident(monkeypatch):
     await mainai_consult(db, prompt="prompt A")
     await mainai_consult(db, prompt="prompt B")
 
-    hashes = [e.sent_content_hash for e in db.events]
+    hashes = [e.sent_content_hash for e in disclosure_events(db)]
     assert hashes[0] == hashes[1]  # identical payload → identical hash
     assert hashes[0] != hashes[2]  # different payload → different hash
 
@@ -180,8 +215,8 @@ async def test_denied_call_audited_with_denied_decision(monkeypatch):
     with pytest.raises(EgressDeniedError):
         await mainai_consult(db, prompt="summarize NEVER_EGRESS: the recovery manifest")
     assert calls == []
-    assert len(db.events) == 1 and db.events[0].decision == "denied"
-    assert db.events[0].goal_id == GOAL_ID  # correlation preserved even on denial
+    assert len(disclosure_events(db)) == 1 and disclosure_events(db)[0].decision == "denied"
+    assert disclosure_events(db)[0].goal_id == GOAL_ID  # correlation preserved even on denial
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +232,7 @@ async def test_provider_failure_still_leaves_audit_evidence(monkeypatch):
     with pytest.raises(ConsultationServiceError):
         await mainai_consult(db)
 
-    assert len(db.events) == 1 and db.events[0].decision == "allowed"
+    assert len(disclosure_events(db)) == 1 and disclosure_events(db)[0].decision == "allowed"
     snap = consultation_metrics.snapshot()
     assert snap["provider_errors"] == 1 and snap["admitted"] == 0
 
