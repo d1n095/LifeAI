@@ -16,7 +16,7 @@ import enum
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -56,6 +56,11 @@ class UsageRollup(Base):
     __table_args__ = (
         UniqueConstraint("subject_type", "subject_id", "period_type", "period_start",
                          name="uq_usage_rollups_subject_period"),
+        # Parity with migration 0070: balances can NEVER go negative, even if a future
+        # code path bypasses the application-level refund ceilings.
+        CheckConstraint("tokens_in >= 0", name="ck_usage_rollups_tokens_in_nonneg"),
+        CheckConstraint("tokens_out >= 0", name="ck_usage_rollups_tokens_out_nonneg"),
+        CheckConstraint("cost_micros >= 0", name="ck_usage_rollups_cost_nonneg"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -91,6 +96,14 @@ class RevenueLedger(Base):
     fund ONLY that tenant (see allocation.py)."""
 
     __tablename__ = "revenue_ledger"
+    __table_args__ = (
+        # Parity with migration 0070: settled revenue REQUIRES a verified reference —
+        # settlement cannot happen by fiat (financial invariant, P3 adversarial-tested).
+        CheckConstraint("status = 'estimated' OR verified_ref IS NOT NULL",
+                        name="ck_revenue_settled_requires_ref"),
+        CheckConstraint("subject_type = 'platform' OR subject_id IS NOT NULL",
+                        name="ck_revenue_platform_rows_have_no_subject"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     subject_type: Mapped[str] = mapped_column(String(8))  # "tenant" | "platform"

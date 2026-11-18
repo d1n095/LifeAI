@@ -43,6 +43,10 @@ def _require_scalar(value, name: str) -> str:
         raise ValueError(f"AdContext.{name} must be non-empty")
     if len(value) > 128:
         raise ValueError(f"AdContext.{name} too long (max 128 chars)")
+    if any(ch < " " or ch == "\x7f" for ch in value):
+        # Control characters (NUL, newlines, escapes) have no legitimate meaning in a
+        # targeting scalar and are a classic injection/obfuscation tool — reject.
+        raise ValueError(f"AdContext.{name} must not contain control characters")
     return value
 
 

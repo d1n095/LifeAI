@@ -70,6 +70,29 @@ class RecordingDB:
 
     def flush(self):
         pass
+    # Session contract beyond add/flush: the Revenue & Compute Engine's accounting
+    # writer reads tenant membership (execute -> no row here) and uses SAVEPOINTs only
+    # on its dedup path. This double has no real rows, so those are no-ops.
+    def execute(self, *_a, **_k):
+        class _R:
+            rowcount = 0
+
+            def first(self):
+                return None
+
+            def scalars(self):
+                return []
+
+        return _R()
+
+    def begin_nested(self):
+        import contextlib
+
+        return contextlib.nullcontext()
+
+    def rollback(self):
+        pass
+
 
 
 def responses_api_body(text="Hello!", in_tok=10, out_tok=20, resp_id="resp_test_1") -> dict:
@@ -211,7 +234,10 @@ async def test_secrets_redacted_before_send(monkeypatch):
     assert "[REDACTED]" in sent_prompt
     assert result.output_text == "Hello!"
     # exactly one disclosure-ledger row per gated call
-    assert len(db.events) == 1
+    # The RecordingDB now also collects the platform-ledger UsageLog rows (Revenue &
+    # Compute Engine); the disclosure contract counts ProviderDisclosureEvents only.
+    disclosure_events = [e for e in db.events if type(e).__name__ == "ProviderDisclosureEvent"]
+    assert len(disclosure_events) == 1
 
 
 # ---------------------------------------------------------------------------

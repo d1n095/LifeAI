@@ -40,6 +40,72 @@ def _effective_cost_usd(cost: Decimal | None, settings) -> Decimal:
     return fallback  # caller multiplies by (total_tokens / 1000)
 
 
+def _usage_row_by_pk(db: Session, pk) -> UsageLog:
+    """Fetch a usage row by primary key through the typed column. Raw sqlite rows come
+    back as strings and the postgresql UUID bind processor wants real UUIDs — coerce
+    explicitly so both dialects work."""
+    from sqlalchemy import select as _select
+
+    typed_pk = uuid.UUID(pk) if isinstance(pk, str) else pk
+    return db.execute(_select(UsageLog).where(UsageLog.id == typed_pk)).scalar_one()
+
+
+
+def _apply_rollup_delta(db: Session, *, subject_type: str, subject_id, period_type: str,
+                        period_start: str, d_tokens_in: int, d_tokens_out: int,
+                        d_cost_micros: int, updated_at: datetime) -> None:
+    """Atomic rollup increment. UPDATE-first, INSERT-on-miss — deliberately NOT an
+    upsert: SQLite validates CHECK constraints on the PROPOSED insert row, so a refund
+    delta (negative) would fail the non-negative CHECKs even when the resolved row
+    stays non-negative; PostgreSQL only checks the final row. UPDATE-first is correct
+    and atomic on BOTH dialects, and the unique constraint backs the rare INSERT race
+    (loser retries as an UPDATE)."""
+    bind = getattr(db, "bind", None)
+    is_sqlite = bind is not None and bind.dialect.name == "sqlite"
+    params = {"st": subject_type, "sid": subject_id, "pt": period_type, "ps": period_start,
+              "tin": d_tokens_in, "tout": d_tokens_out, "cost": d_cost_micros, "upd": updated_at}
+    updated = db.execute(
+        text("""
+            UPDATE usage_rollups
+               SET tokens_in = tokens_in + :tin,
+                   tokens_out = tokens_out + :tout,
+                   cost_micros = cost_micros + :cost,
+                   updated_at = :upd
+             WHERE subject_type = :st AND subject_id = :sid
+               AND period_type = :pt AND period_start = :ps
+        """),
+        params,
+    ).rowcount
+    if updated:
+        return
+    try:
+        with db.begin_nested():
+            db.execute(
+                text("""
+                    INSERT INTO usage_rollups
+                        (id, subject_type, subject_id, period_type, period_start,
+                         tokens_in, tokens_out, cost_micros, updated_at)
+                    VALUES (:rid, :st, :sid, :pt, :ps, :tin, :tout, :cost, :upd)
+                """),
+                {**params,
+                 "rid": str(uuid.uuid4()) if is_sqlite else uuid.uuid4()},
+            )
+    except Exception:
+        # Lost an INSERT race: the row now exists — reapply as a plain UPDATE.
+        db.execute(
+            text("""
+                UPDATE usage_rollups
+                   SET tokens_in = tokens_in + :tin,
+                       tokens_out = tokens_out + :tout,
+                       cost_micros = cost_micros + :cost,
+                       updated_at = :upd
+                 WHERE subject_type = :st AND subject_id = :sid
+                   AND period_type = :pt AND period_start = :ps
+            """),
+            params,
+        )
+
+
 def _derive_tenant_id(db: Session, user_id: uuid.UUID | None) -> tuple[uuid.UUID | None, uuid.UUID | None]:
     """Tenant membership comes from the USER ROW, never from the caller's word.
 
@@ -100,7 +166,9 @@ def record_usage(
 
     # Tenant membership from the user row (see _derive_tenant_id).
     user_id, membership = _derive_tenant_id(db, user_id)
-    if tenant_id is not None and membership is not None and tenant_id != membership:
+    if tenant_id is not None and tenant_id != membership:
+        # Fires in BOTH directions: a user WITH membership claiming another tenant, and a
+        # membership-less user claiming ANY tenant. No forged attribution is ever recorded.
         raise ValueError(
             "tenant_id disagrees with the user's membership — refusing to record "
             "(unauthorized budget attribution)"
@@ -113,7 +181,7 @@ def record_usage(
             {"k": idempotency_key},
         ).first()
         if existing is not None:
-            return db.get(UsageLog, existing[0])
+            return _usage_row_by_pk(db, existing[0])
 
     row = UsageLog(
         user_id=user_id,
@@ -147,7 +215,7 @@ def record_usage(
             ).first()
             if existing is None:
                 raise
-            return db.get(UsageLog, existing[0])
+            return _usage_row_by_pk(db, existing[0])
     else:
         db.flush()
 
@@ -166,34 +234,15 @@ def record_usage(
         if subject_id is None:
             continue
         # Raw-SQL binds are dialect-dependent: PG wants real UUIDs, sqlite wants strings.
-        bind_uuid = str(subject_id) if db.bind.dialect.name == "sqlite" else subject_id
+        # getattr keeps session-like doubles (which never run the raw SQL) working.
+        bind = getattr(db, "bind", None)
+        is_sqlite = bind is not None and bind.dialect.name == "sqlite"
+        bind_uuid = str(subject_id) if is_sqlite else subject_id
         for period_type, period_start in (("day", day_start), ("month", month_start)):
-            db.execute(
-                text("""
-                    INSERT INTO usage_rollups
-                        (id, subject_type, subject_id, period_type, period_start,
-                         tokens_in, tokens_out, cost_micros, updated_at)
-                    VALUES (:rid, :st, :sid, :pt, :ps,
-                            :tokens_in, :tokens_out, :cost_micros, :updated_at)
-                    ON CONFLICT (subject_type, subject_id, period_type, period_start)
-                    DO UPDATE SET
-                        tokens_in  = usage_rollups.tokens_in  + :tokens_in,
-                        tokens_out = usage_rollups.tokens_out + :tokens_out,
-                        cost_micros = usage_rollups.cost_micros + :cost_micros,
-                        updated_at = :updated_at
-                """),
-                {
-                    "rid": uuid.uuid4() if db.bind.dialect.name != "sqlite" else str(uuid.uuid4()),
-                    "st": subject_type,
-                    "sid": bind_uuid,
-                    "pt": period_type,
-                    "ps": period_start,
-                    "tokens_in": sign * prompt_tokens,
-                    "tokens_out": sign * completion_tokens,
-                    "cost_micros": cost_micros,
-                    "updated_at": now,
-                },
-            )
+            _apply_rollup_delta(db, subject_type=subject_type, subject_id=bind_uuid,
+                                period_type=period_type, period_start=period_start,
+                                d_tokens_in=sign * prompt_tokens, d_tokens_out=sign * completion_tokens,
+                                d_cost_micros=cost_micros, updated_at=now)
     return row
 
 
@@ -219,6 +268,8 @@ def refund_usage(
     leave NO rows behind."""
     settings = get_settings()
     now = created_at or datetime.now(timezone.utc)
+    bind = getattr(db, "bind", None)
+    is_sqlite = bind is not None and bind.dialect.name == "sqlite"
     day_start, _ = _period_stamps(now)
     p_tokens = max(int(prompt_tokens), 0)
     c_tokens = max(int(completion_tokens), 0)
@@ -229,7 +280,7 @@ def refund_usage(
              WHERE subject_type = 'user' AND subject_id = :sid
                AND period_type = 'day' AND period_start = :ps
         """),
-        {"sid": str(user_id) if db.bind.dialect.name == "sqlite" else user_id, "ps": day_start},
+        {"sid": str(user_id) if is_sqlite else user_id, "ps": day_start},
     ).first()
     recorded_in = int(row[0]) if row else 0
     recorded_out = int(row[1]) if row else 0

@@ -84,8 +84,11 @@ def _settled_and_estimated(
 
 
 def _apply_margin(micros: int, margin_pct: int) -> int:
+    """Margin applied to SETTLED revenue; the result is clamped at zero — over-reversed
+    (chargeback-exceeded) revenue must never fund negative/extra spend, and a negative
+    ceiling must never leak into min() compositions downstream."""
     margin_pct = max(0, min(int(margin_pct), 90))
-    return int(micros * (100 - margin_pct) // 100)
+    return max(0, int(micros * (100 - margin_pct) // 100))
 
 
 def platform_envelope(db: Session, *, now: datetime | None = None, settings=None) -> AllocationEnvelope:

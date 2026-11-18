@@ -59,6 +59,29 @@ class RecordingDB:
 
     def flush(self):
         pass
+    # Session contract beyond add/flush: the Revenue & Compute Engine's accounting
+    # writer reads tenant membership (execute -> no row here) and uses SAVEPOINTs only
+    # on its dedup path. This double has no real rows, so those are no-ops.
+    def execute(self, *_a, **_k):
+        class _R:
+            rowcount = 0
+
+            def first(self):
+                return None
+
+            def scalars(self):
+                return []
+
+        return _R()
+
+    def begin_nested(self):
+        import contextlib
+
+        return contextlib.nullcontext()
+
+    def rollback(self):
+        pass
+
 
 
 def responses_api_body(text="Consultation answer") -> dict:
