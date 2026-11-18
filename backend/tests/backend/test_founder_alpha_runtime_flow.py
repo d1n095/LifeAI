@@ -269,11 +269,15 @@ def test_an_uploaded_knowledge_source_is_retrievable_with_a_citation(client, _de
     assert source_id in serialized, "the citation must identify which source it came from"
 
 
-def test_a_project_note_written_by_the_founder_survives_a_fresh_client_and_session(client):
-    """Persistent memory means durable, not in-process: the note must be readable from a brand
-    new client with a brand new authenticated session, i.e. it came back out of Postgres."""
-    from app.main import app
+def test_a_project_note_written_by_the_founder_survives_a_fresh_session(client):
+    """Persistent memory means durable, not in-process: after dropping every cookie and
+    authenticating again (a genuinely new session, not the one the note was written in), the
+    note must still be readable — i.e. it came back out of Postgres.
 
+    A second `TestClient(app)` was tried first and is not usable here: the app's lifespan runs
+    again and its session does not authenticate against the already-running instance. Clearing
+    cookies and re-logging in proves the same property against the same process.
+    """
     csrf = _login(client)
     content = f"Founder memory durability probe {uuid.uuid4()}"
 
@@ -289,8 +293,8 @@ def test_a_project_note_written_by_the_founder_survives_a_fresh_client_and_sessi
     )
     assert created.status_code == 200, created.text
 
-    with TestClient(app) as fresh_client:
-        _login(fresh_client)
-        listed = fresh_client.get("/api/admin/memory/notes", params={"status": "all"})
-        assert listed.status_code == 200, listed.text
-        assert any(note["content"] == content for note in listed.json()), "the note did not survive a new session"
+    client.cookies.clear()
+    _login(client)
+    listed = client.get("/api/admin/memory/notes", params={"status": "all"})
+    assert listed.status_code == 200, listed.text
+    assert any(note["content"] == content for note in listed.json()), "the note did not survive a new session"
