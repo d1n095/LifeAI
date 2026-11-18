@@ -46,6 +46,11 @@ BASE_REF = "refs/mainai/base"
 _ATTEMPT_FILENAME = "attempt.json"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _GIT_TIMEOUT_SECONDS = 120
+# An attempt id names a directory. Today it is always a job/task UUID, but the value is passed
+# through as a path component, so it is validated as one here rather than trusted because every
+# current caller happens to be internal: "../../" in an id would place a proposal's write root
+# outside PROPOSAL_ROOT, which is exactly the boundary this module exists to hold.
+_ATTEMPT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 class ProposalWorktreeError(RuntimeError):
@@ -153,10 +158,31 @@ def bootstrap_local_base(shared_checkout: Path, *, dest: Path) -> str:
     return base_sha
 
 
+def _attempt_root(attempt_id) -> Path:
+    """Resolve the per-attempt directory, refusing anything that is not a plain safe name.
+
+    Two independent checks, because either alone is one mistake away from useless: the token must
+    match `_ATTEMPT_ID_RE` (no separators, no `..`, no leading dot, bounded length), and the
+    resolved path must still be a direct child of PROPOSAL_ROOT — which also catches a symlinked
+    PROPOSAL_ROOT or a platform where the join behaves unexpectedly.
+    """
+    token = str(attempt_id)
+    if not _ATTEMPT_ID_RE.match(token) or ".." in token:
+        raise ProposalWorktreeError(
+            f"refusing attempt id {token[:80]!r}: an attempt id must be a plain directory name"
+        )
+    root = (PROPOSAL_ROOT / token).resolve()
+    if root.parent != PROPOSAL_ROOT.resolve():
+        raise ProposalWorktreeError(
+            f"refusing attempt id {token[:80]!r}: it resolves outside {PROPOSAL_ROOT}"
+        )
+    return root
+
+
 def create_isolated_proposal_checkout(*, shared_checkout: Path, attempt_id) -> "IsolatedProposalCheckout":
     """Build the per-attempt checkout. `attempt_id` (a job id, or the task id when no job exists)
     scopes the directory so two attempts never share a tree."""
-    root = PROPOSAL_ROOT / str(attempt_id)
+    root = _attempt_root(attempt_id)
     if root.exists():
         shutil.rmtree(root, ignore_errors=True)
     root.mkdir(parents=True)
