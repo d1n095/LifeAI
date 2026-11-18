@@ -120,6 +120,22 @@ _PROTECTED_TABLES = [
     ("message_source_units", ["SELECT", "INSERT"]),
     ("source_import_batches", ["SELECT", "INSERT", "UPDATE"]),
     ("source_import_batch_failures", ["SELECT", "INSERT"]),
+    # Founder Alpha Blueprint (migration 0070/0071). mainai_app may CREATE (INSERT) and read
+    # (SELECT) drafts, but holds NO direct UPDATE or DELETE: approval is the only legitimate
+    # write and it runs exclusively through the owner-scoped, transaction-safe SECURITY DEFINER
+    # function blueprint_approve_draft (migration 0071, in _FUNCTIONS below). Removing UPDATE is
+    # what makes it impossible for a compromised request path / SQL bug to forge an approval or
+    # tamper approved content; removing DELETE makes an approved draft an undeletable protected
+    # record. A BEFORE UPDATE/DELETE guard trigger enforces the same invariants for any writer
+    # as defense-in-depth (and is what the test suite's app-role sessions — which still hold the
+    # uniform DML floor — actually trip on).
+    ("blueprint_drafts", ["SELECT", "INSERT"]),
+    # S1D (migration 0072 on the 0069-composition integration branch; 0069 on its own PR
+    # branch) — repository_file_source_units is the exact same exclusive-arc
+    # pattern as document_source_units/message_source_units above (every field guarded
+    # immutable by trg_rfsu_guard_update, so UPDATE would always fail via the trigger anyway;
+    # narrowed at the grant level too for the same defense-in-depth reasoning).
+    ("repository_file_source_units", ["SELECT", "INSERT"]),
 ]
 
 _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]
@@ -232,6 +248,11 @@ _FUNCTIONS = [
     ("erase_owner_memory_admin", False, True, "void", ("uuid",)),
     ("storage_key_still_referenced_global", True, True, "boolean", ("text",)),
     ("enqueue_account_erasure_storage_task", True, False, "void", ("uuid", "text")),
+    # blueprint_approve_draft (migration 0071): owner-scoped (derives the owner from
+    # app.current_user_id and re-asserts it, same as RLS — so no BYPASSRLS needed), the single
+    # controlled path that may set a Blueprint draft to 'approved'. mainai_app needs EXECUTE
+    # because approval runs from an ordinary owner-scoped request; it returns only the draft id.
+    ("blueprint_approve_draft", True, False, "uuid", ("uuid", "text")),
 ]
 
 

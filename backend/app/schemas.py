@@ -130,6 +130,9 @@ class ContextStatusOut(BaseModel):
     indexed_count: int = 0
     total_document_count: int = 0
     worker_reachable: bool | None = None
+    # Chunks that exist but are not in the active embedding space (another model, or a
+    # pre-migration NULL identity) — see app/rag/context_status.py's reindex_required.
+    out_of_space_chunk_count: int = 0
 
 
 class ChatMessageOut(BaseModel):
@@ -1197,3 +1200,31 @@ class ExecutionAuthorizationEnvelopeOut(BaseModel):
     status: str
     supersedes_envelope_id: uuid.UUID | None = None
     created_at: datetime
+
+
+class CreateCalendarEventIn(BaseModel):
+    title: str
+    starts_at: datetime
+    ends_at: datetime | None = None
+    description: str | None = None
+    location: str | None = None
+
+
+class CancelCalendarEventIn(BaseModel):
+    reason: str | None = None
+
+
+class CalendarEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    title: str
+    description: str | None = None
+    location: str | None = None
+    starts_at: datetime
+    ends_at: datetime | None = None
+    status: str
+    source: str
+    cancelled_at: datetime | None = None
+    cancellation_reason: str | None = None
+    created_at: datetime
+    updated_at: datetime

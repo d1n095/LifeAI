@@ -74,6 +74,23 @@ async def test_create_blob_returns_sha(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_create_pull_request_always_requests_draft_status(monkeypatch):
+    """Draft-PR security contract (founder directive, independent review finding): every PR
+    this client creates must be a draft -- never a caller-controlled option, since this is
+    the only place in the codebase that creates a PR at all
+    (app/mainai_execution/execution_job.py's `_handle_open_pr()`, the sole caller). Asserts
+    the real request body, not just the return value."""
+    calls = _fake_github(
+        monkeypatch, {("POST", "/repos/d1n095/LifeAI/pulls"): {"number": 1, "draft": True, "head": {"sha": "abc"}}}
+    )
+    client = _configured_client(monkeypatch)
+
+    await client.create_pull_request(title="t", body="b", head="claude/x", base="main")
+
+    assert calls[0]["json"]["draft"] is True
+
+
+@pytest.mark.asyncio
 async def test_commit_multiple_files_makes_exactly_the_expected_sequence_of_calls(monkeypatch):
     calls = _fake_github(
         monkeypatch,
@@ -159,6 +176,97 @@ async def test_commit_multiple_files_with_several_files_creates_one_blob_per_fil
 
     assert blob_call_count == 3
     assert set(result["blob_shas"].keys()) == {"a.py", "b.py", "c.py"}
+
+
+@pytest.mark.asyncio
+async def test_list_pull_requests_hits_the_repo_wide_endpoint_with_state_and_paging(monkeypatch):
+    """Section B (Continuous Build Directive) — the repo-wide counterpart to
+    list_pull_requests_for_head()'s narrow head/base lookup."""
+    calls = _fake_github(
+        monkeypatch,
+        {("GET", "/repos/d1n095/LifeAI/pulls?state=open&per_page=30&page=1"): [{"number": 393}, {"number": 394}]},
+    )
+    client = _configured_client(monkeypatch)
+
+    prs = await client.list_pull_requests()
+
+    assert [pr["number"] for pr in prs] == [393, 394]
+    assert calls[0]["path"] == "/repos/d1n095/LifeAI/pulls?state=open&per_page=30&page=1"
+
+
+@pytest.mark.asyncio
+async def test_list_pull_requests_includes_base_filter_when_given(monkeypatch):
+    calls = _fake_github(
+        monkeypatch,
+        {("GET", "/repos/d1n095/LifeAI/pulls?state=all&per_page=10&page=2&base=main"): []},
+    )
+    client = _configured_client(monkeypatch)
+
+    await client.list_pull_requests(state="all", base="main", per_page=10, page=2)
+
+    assert calls[0]["path"] == "/repos/d1n095/LifeAI/pulls?state=all&per_page=10&page=2&base=main"
+
+
+@pytest.mark.asyncio
+async def test_list_issues_filters_out_pull_requests(monkeypatch):
+    """GitHub's /issues endpoint mixes real issues and PRs (a PR IS an issue in GitHub's data
+    model) -- a caller building a work-queue proposal from "open issues" must never see a PR
+    double-counted as an issue."""
+    _fake_github(
+        monkeypatch,
+        {
+            ("GET", "/repos/d1n095/LifeAI/issues?state=open&per_page=30&page=1"): [
+                {"number": 1, "title": "a real issue"},
+                {"number": 393, "title": "a PR, mixed in by GitHub's own API", "pull_request": {"url": "..."}},
+                {"number": 2, "title": "another real issue"},
+            ]
+        },
+    )
+    client = _configured_client(monkeypatch)
+
+    issues = await client.list_issues()
+
+    assert [i["number"] for i in issues] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_list_issues_includes_labels_filter_when_given(monkeypatch):
+    calls = _fake_github(
+        monkeypatch,
+        {("GET", "/repos/d1n095/LifeAI/issues?state=open&per_page=30&page=1&labels=bug,founder-review"): []},
+    )
+    client = _configured_client(monkeypatch)
+
+    await client.list_issues(labels="bug,founder-review")
+
+    assert calls[0]["path"] == "/repos/d1n095/LifeAI/issues?state=open&per_page=30&page=1&labels=bug,founder-review"
+
+
+@pytest.mark.asyncio
+async def test_list_commits_defaults_to_the_repo_default_branch(monkeypatch):
+    calls = _fake_github(
+        monkeypatch,
+        {("GET", "/repos/d1n095/LifeAI/commits?per_page=30&page=1"): [{"sha": "abc123"}]},
+    )
+    client = _configured_client(monkeypatch)
+
+    commits = await client.list_commits()
+
+    assert [c["sha"] for c in commits] == ["abc123"]
+    assert calls[0]["path"] == "/repos/d1n095/LifeAI/commits?per_page=30&page=1"
+
+
+@pytest.mark.asyncio
+async def test_list_commits_includes_sha_filter_when_given(monkeypatch):
+    calls = _fake_github(
+        monkeypatch,
+        {("GET", "/repos/d1n095/LifeAI/commits?per_page=30&page=1&sha=claude/blueprint-evaluation-harness"): []},
+    )
+    client = _configured_client(monkeypatch)
+
+    await client.list_commits(sha="claude/blueprint-evaluation-harness")
+
+    assert calls[0]["path"] == "/repos/d1n095/LifeAI/commits?per_page=30&page=1&sha=claude/blueprint-evaluation-harness"
 
 
 @pytest.mark.asyncio

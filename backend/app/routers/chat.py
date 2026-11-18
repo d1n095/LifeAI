@@ -173,6 +173,7 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
             indexed_count=context_status.indexed_count,
             total_document_count=context_status.total_document_count,
             worker_reachable=context_status.worker_reachable,
+            out_of_space_chunk_count=context_status.out_of_space_chunk_count,
         )
         if context_status is not None
         else None
