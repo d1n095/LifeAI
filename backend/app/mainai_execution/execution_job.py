@@ -203,6 +203,63 @@ def _reject_git_metadata_target(resolved: Path, root: Path, *, proposed: str, wh
         )
 
 
+def _rollback_proposal_writes(work_result: dict | None) -> list[str]:
+    """PI-1d: put the shared checkout back exactly as it was before a proposal-mode write.
+
+    Proposal mode (`github_write_enabled` off) writes the code agent's content straight into the
+    single checkout this backend process itself runs from, so `verify_task()` can run against
+    real content. That write used to be permanent: `previous_contents` was captured and then
+    discarded (`not durable evidence -- was only needed transiently for a future
+    diff/rollback view`), so a proposal that failed verification — or raised, or lost its lease —
+    left the running deployment's own source tree modified, with no path back. A failed
+    PROPOSAL is not supposed to change anything; that is the entire difference between it and a
+    real edit.
+
+    Restoration is exact and per file: content is rewritten verbatim, a file the proposal newly
+    created is deleted, and any directory the proposal created for it is removed again if (and
+    only if) it is now empty and inside the repo root. Every target is re-resolved and
+    re-confined here rather than trusting the stored path — this runs on a failure path, which
+    is precisely when the rest of the code path is least trustworthy.
+
+    Returns the proposed paths that were restored, for the caller's log/evidence. Never raises:
+    a rollback failure must not replace the original error with a second one, but it is logged
+    loudly because the checkout is then in an unknown state and needs a human.
+    """
+    previous_contents = (work_result or {}).get("previous_contents") or {}
+    if not previous_contents:
+        return []
+
+    root = _repo_root().resolve()
+    git_dir = (root / ".git").resolve()
+    restored: list[str] = []
+    for path_value, content in previous_contents.items():
+        try:
+            target = (root / path_value).resolve()
+            if target != root and root not in target.parents:
+                logger.error("proposal rollback: refusing to touch %r — resolved outside the repo root", path_value)
+                continue
+            if target == git_dir or git_dir in target.parents:
+                logger.error("proposal rollback: refusing to touch %r — resolved into git metadata", path_value)
+                continue
+            if content is None:
+                if target.exists():
+                    target.unlink()
+                    restored.append(path_value)
+                # A brand-new file may have brought directories with it (`docs/new/thing.md`);
+                # leave the tree as it was, not with empty scaffolding behind.
+                parent = target.parent
+                while parent != root and root in parent.parents and parent.is_dir() and not any(parent.iterdir()):
+                    parent.rmdir()
+                    parent = parent.parent
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content)
+                restored.append(path_value)
+        except OSError as exc:  # pragma: no cover - defensive
+            logger.error("proposal rollback: could not restore %r: %s", path_value, exc)
+    return restored
+
+
 def _parse_code_agent_response(raw: str) -> dict:
     import json
 
@@ -714,6 +771,19 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             verify_cwd = str(Path(worktree_path) / "backend") if worktree_path else str(_backend_root())
             verification = verify_task(task, cwd=verify_cwd)
 
+        # PI-1d: a proposal-mode write is provisional by definition. If verification failed,
+        # put the shared checkout back before anything durable records the attempt — otherwise
+        # the failed proposal's content stays in the tree the running deployment executes from.
+        if not verification.passed and task.task_type == "repo_edit":
+            rolled_back = _rollback_proposal_writes(work_result)
+            if rolled_back:
+                logger.warning(
+                    "task_execution job %s: proposal-mode edits rolled back from the shared checkout: %s",
+                    job_id,
+                    ", ".join(rolled_back),
+                )
+                work_result = {**work_result, "proposal_rollback": rolled_back}
+
         if verification_checkpoint is None and verification.passed:
             try:
                 renew_mainai_job_lease(db, job_id, worker_id, lease_generation, lease_seconds)
@@ -806,6 +876,21 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
         db.rollback()
         job = db.get(MainAIJob, job_id)
         task = db.get(MainAITask, task.id)
+        # PI-1d, second hook: an exception after a proposal-mode write (provider error during a
+        # later step, verification raising instead of returning, lease loss) must roll the
+        # shared checkout back too, not only the explicit verification-failed path above.
+        # `work_result` may be unbound if the failure happened before the work step.
+        try:
+            proposal_result = work_result
+        except NameError:
+            proposal_result = None
+        rolled_back_after_error = _rollback_proposal_writes(proposal_result)
+        if rolled_back_after_error:
+            logger.warning(
+                "task_execution job %s: proposal-mode edits rolled back after failure: %s",
+                job_id,
+                ", ".join(rolled_back_after_error),
+            )
         # Crash-matrix finding (P1, found by testing a REAL crash point rather than reasoning
         # about it): mark_failed()/mark_completed() (app/jobs/service.py) each end with their
         # OWN real db.commit() -- the same "shared helper commits internally" shape that
