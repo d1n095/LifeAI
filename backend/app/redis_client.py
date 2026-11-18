@@ -55,7 +55,11 @@ def get_redis_client(*, decode_responses: bool = False) -> redis.Redis:
         # Re-check inside the lock: two threads can pass the dict-miss together.
         client = _clients.get(decode_responses)
         if client is None:
-            client = redis.Redis.from_url(
+            # Module-level redis.from_url, NOT redis.Redis.from_url: tests/backend/
+            # test_startup_checks.py patches the module-level function (the contract
+            # main.py's local `import redis` resolves to), so the shared client must
+            # route through the same call surface to stay patchable.
+            client = redis.from_url(
                 settings.redis_url,
                 socket_connect_timeout=3,
                 socket_timeout=3,
