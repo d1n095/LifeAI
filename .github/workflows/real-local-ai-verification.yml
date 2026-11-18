@@ -1,0 +1,661 @@
+name: Real local-AI verification (manual)
+
+# Acceptance that the MainAI path works end to end against a REAL local runtime:
+#   authentication -> chat -> local model -> embeddings -> retrieval -> persistent memory
+#   -> source-grounded answer,
+# plus embedding-space identity, restart persistence and cross-owner isolation on real pgvector.
+#
+# ADAPTED (not reimplemented) from codex/founder-alpha-ollama-ci-pin's
+# `real-local-ai-verification.yml` (commit 4b27c67) and its SHA-256-verified
+# `backend/scripts/ci/install_pinned_ollama.sh`. The one structural difference: that workflow
+# replays a reconstructible local composition of PR heads and asserts the resulting tree,
+# whereas this one verifies a PINNED, already-pushed candidate SHA (PR #457 head) and asserts
+# that exact commit, so the evidence names a reviewable commit instead of a local tree.
+#
+# Nothing here touches production, the founder's machine, a shared database or a paid provider:
+#   * Postgres/pgvector and Redis are throwaway service containers.
+#   * Ollama is installed on the runner from a release archive authenticated against its
+#     published SHA-256 digest, then removed with the runner.
+#   * Test models (TEMPORARY test configuration, NOT a production model decision):
+#       embeddings `all-minilm`  (native 384-dim, zero-padded to the 1536 storage width by
+#                                app/rag/embedding_space.py)
+#       chat       `qwen2.5:0.5b` (small instruct model that runs on a CPU runner)
+#   * CHAT_FALLBACK_ORDER is empty and no paid key exists, so a failed local call surfaces as
+#     an error and can never silently become a paid API call.
+#   * Only outbound EMAIL is faked (captured to a JSONL file).
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_ref:
+        description: "Branch containing the candidate to verify"
+        required: false
+        default: "freebuff/local-ai-integration-20261118"
+      candidate_sha:
+        description: "Exact candidate commit SHA (must be reachable from candidate_ref)"
+        required: false
+        default: "89140ba8ddf8953c34a1187d480e75364fffdcf1"
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  # Temporary TEST models. Not a production model decision.
+  OLLAMA_EMBED_MODEL: "all-minilm"
+  OLLAMA_CHAT_MODEL: "qwen2.5:0.5b"
+  OLLAMA_NATIVE_DIM: "384"
+
+jobs:
+  real-local-ai:
+    name: Real local-AI acceptance (Ollama + pgvector, pinned candidate)
+    # Pinned: ubuntu-latest now resolves to 26.04, which the pinned Playwright/Ollama tooling
+    # does not cover. Same reason as the CI E2E jobs.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # Throwaway, synthetic everything. No production values, no shared database.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_reallocal
+      APP_DATABASE_URL: postgresql://mainai_app:mainai_app_reallocal_pw@localhost:5432/lifeos_reallocal
+      REDIS_URL: redis://localhost:6379/0
+      SECRET_KEY: ci-real-local-secret-key
+      FOUNDER_EMAIL: founder@lifeos.local
+      FOUNDER_PASSWORD: TestFounderPassword123!
+      FRONTEND_ORIGINS: http://127.0.0.1:3020
+      PUBLIC_APP_URL: http://127.0.0.1:3020
+      ENABLE_SCHEDULED_CLEANUP: "false"
+      # --- Point the app's REAL provider abstraction at the local Ollama runtime ---
+      DEFAULT_EMBEDDING_PROVIDER: "ollama"
+      DEFAULT_EMBEDDING_MODEL: "all-minilm"
+      DEFAULT_LLM_PROVIDER: "ollama"
+      DEFAULT_LLM_MODEL: "qwen2.5:0.5b"
+      OLLAMA_BASE_URL: "http://127.0.0.1:11434"
+      # A cold CPU weight load must not be misreported as "unreachable".
+      LOCAL_VERIFICATION_TIMEOUT_SECONDS: "180"
+      # Empty fallback chain: there is NO paid provider to fall back to.
+      CHAT_FALLBACK_ORDER: ""
+      # Non-browser http client over http://127.0.0.1 — Secure cookies must be off for this
+      # synthetic local test (allowed because ENVIRONMENT is not production).
+      COOKIE_SECURE: "false"
+      STORAGE_ROOT: ${{ github.workspace }}/.reallocal-uploads
+      E2E_EMAIL_LOG_PATH: ${{ github.workspace }}/candidate/backend/real_local_emails.jsonl
+      RL_BASE_URL: http://127.0.0.1:8010
+      RL_STATE_FILE: ${{ github.workspace }}/real_local_state.json
+      RL_EMBED_MODEL: all-minilm
+      RL_CHAT_MODEL: qwen2.5:0.5b
+    steps:
+      - name: Check out this workflow's own commit (CI policy)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: ci-policy
+          fetch-depth: 1
+
+      - name: Check out the pinned candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          path: candidate
+          fetch-depth: 1
+
+      - name: Assert the candidate is the exact pinned commit
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          ACTUAL="$(git rev-parse HEAD)"
+          test "$ACTUAL" = "${{ inputs.candidate_sha }}" \
+            || { echo "::error::checked out $ACTUAL but the pinned candidate is ${{ inputs.candidate_sha }}"; exit 1; }
+          test "$(git -C ../ci-policy rev-parse HEAD)" = "$GITHUB_SHA" \
+            || { echo "::error::CI policy checkout does not match the event SHA"; exit 1; }
+          echo "resolved=$ACTUAL" >> "$GITHUB_OUTPUT"
+          echo "### Candidate under test: \`$ACTUAL\` (${{ inputs.candidate_ref }})" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: candidate/backend/requirements.txt
+
+      - name: Install backend dependencies
+        working-directory: candidate/backend
+        run: |
+          set -euo pipefail
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Install and start Ollama; pull the test models
+        run: |
+          set -euo pipefail
+          bash ci-policy/backend/scripts/ci/install_pinned_ollama.sh
+          nohup ollama serve > "$GITHUB_WORKSPACE/ollama.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            curl -sf -o /dev/null "${{ env.OLLAMA_BASE_URL }}/api/tags" && { echo "ollama up"; break; }
+            sleep 1
+          done
+          curl -sf -o /dev/null "${{ env.OLLAMA_BASE_URL }}/api/tags" \
+            || { echo "::error::Ollama did not come up"; tail -50 "$GITHUB_WORKSPACE/ollama.log"; exit 1; }
+          ollama pull "${{ env.OLLAMA_EMBED_MODEL }}"
+          ollama pull "${{ env.OLLAMA_CHAT_MODEL }}"
+          {
+            echo "### Ollama runtime"
+            echo '```'
+            ollama --version
+            ollama list
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Provision throwaway database + restricted runtime role
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          psql -h localhost -U postgres -d postgres -c "
+            DO \$\$
+            BEGIN
+              IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'mainai_app') THEN
+                CREATE ROLE mainai_app LOGIN PASSWORD 'mainai_app_reallocal_pw';
+              END IF;
+            END
+            \$\$;"
+          psql -h localhost -U postgres -d postgres -c "DROP DATABASE IF EXISTS lifeos_reallocal;"
+          psql -h localhost -U postgres -d postgres -c "CREATE DATABASE lifeos_reallocal;"
+          psql -h localhost -U postgres -d lifeos_reallocal -c "
+            GRANT USAGE ON SCHEMA public TO mainai_app;
+            GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO mainai_app;
+            GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO mainai_app;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO mainai_app;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO mainai_app;"
+
+      - name: Apply migrations (alembic upgrade head) and assert a single head
+        working-directory: candidate/backend
+        run: |
+          set -euo pipefail
+          # A second revision sharing down_revision 0068 would make `upgrade head` ambiguous —
+          # the exact integration hazard this mission had to check for.
+          HEADS="$(alembic heads | grep -c '(head)')"
+          test "$HEADS" = "1" || { echo "::error::expected exactly one alembic head, found $HEADS"; alembic heads; exit 1; }
+          alembic heads | tee -a "$GITHUB_STEP_SUMMARY"
+          alembic upgrade head
+          alembic current
+
+      - name: Apply S1A runtime privilege policy
+        working-directory: candidate/backend
+        run: python scripts/security/apply_runtime_privileges.py
+
+      - name: Embedding-space identity + cross-owner isolation (real pgvector)
+        working-directory: candidate/backend
+        env:
+          # Dedicated database: tests/conftest.py force-DROPs the DB it derives from
+          # DATABASE_URL, so it must never point at lifeos_reallocal.
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_reallocal_pytest
+          APP_DATABASE_URL: postgresql://mainai_app:mainai_app_reallocal_pw@localhost:5432/lifeos_reallocal_pytest
+        run: |
+          set -eo pipefail
+          python -m pytest tests/backend/rag/test_embedding_space.py -q \
+            | tee "$GITHUB_WORKSPACE/pytest_embedding_space.log"
+
+      - name: Write the real-app bootstrap (real providers; only email faked)
+        run: |
+          cat > "$GITHUB_WORKSPACE/candidate/backend/_real_local_boot.py" <<'PY'
+          """Runs the REAL backend with the REAL provider abstraction (Ollama via env).
+          Unlike scripts/ci/run_e2e_backend.py this installs NO AI fakes: embedding and chat
+          execute against the local Ollama runtime for real. The only thing replaced is
+          outbound EMAIL, captured to a JSONL file so a synthetic run never sends mail."""
+          import json
+          import os
+          import sys
+
+          BACKEND_ROOT = os.path.dirname(os.path.abspath(__file__))
+          sys.path.insert(0, BACKEND_ROOT)
+          EMAIL_LOG_PATH = os.environ.get(
+              "E2E_EMAIL_LOG_PATH", os.path.join(BACKEND_ROOT, "real_local_emails.jsonl")
+          )
+          open(EMAIL_LOG_PATH, "w").close()
+
+          import app.routers.auth as auth_router
+
+          def _fake_send_email(to: str, subject: str, body_text: str) -> None:
+              with open(EMAIL_LOG_PATH, "a") as f:
+                  f.write(json.dumps({"to": to, "subject": subject, "body": body_text}) + "\n")
+
+          auth_router.send_email = _fake_send_email
+
+          HOST = os.environ.get("E2E_BACKEND_HOST", "127.0.0.1")
+          PORT = int(os.environ.get("E2E_BACKEND_PORT", "8010"))
+
+          if __name__ == "__main__":
+              import uvicorn
+              uvicorn.run("app.main:app", host=HOST, port=PORT, log_level="warning")
+          PY
+          echo "bootstrap written"
+
+      - name: Write the real-local acceptance driver
+        run: |
+          cat > "$GITHUB_WORKSPACE/real_local_acceptance.py" <<'PY'
+          """Real-local acceptance driver (stdlib only).
+
+          Phase 'pre' proves: authentication, local-model health, real local embedding +
+          indexing of an uploaded document, authorized retrieval that cites that document, a
+          real local chat completion grounded in it, and that the conversation is persisted.
+          Phase 'post' (after a real backend+worker restart) proves the conversation, the
+          indexed source and live retrieval survived. Every step is reported PASS/FAIL/BLOCKED;
+          the process exits non-zero only on FAIL.
+          """
+          import hashlib
+          import http.cookiejar
+          import json
+          import os
+          import sys
+          import time
+          import urllib.error
+          import urllib.request
+          import uuid
+
+          BASE = os.environ["RL_BASE_URL"]
+          EMAIL = os.environ["FOUNDER_EMAIL"]
+          PASSWORD = os.environ["FOUNDER_PASSWORD"]
+          STATE = os.environ["RL_STATE_FILE"]
+          EMBED_MODEL = os.environ.get("RL_EMBED_MODEL", "all-minilm")
+          PHASE = sys.argv[1] if len(sys.argv) > 1 else "pre"
+
+          MARKER = "Zephyrine Qualtrough bor pa Vindgatan 4213 i Norrskensstaden."
+          CONTENT = (
+              "Syntetiskt original for real-local verifiering.\n" + MARKER + "\n"
+              "Dessa bytes maste bevaras oforandrade genom hela pipelinen.\n"
+          ).encode()
+          FILENAME = "real-local-original.txt"
+          EXPECTED_SHA = hashlib.sha256(CONTENT).hexdigest()
+          QUESTION = "Var bor Zephyrine Qualtrough? Svara kortfattat."
+
+          jar = http.cookiejar.CookieJar()
+          opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+          csrf = {"t": None}
+          results = []
+
+          def record(name, status, detail=""):
+              results.append((name, status, detail))
+              print(f"[{status}] {name}: {detail}", flush=True)
+
+          def call(method, path, *, json_body=None, raw=None, ctype=None, timeout=240):
+              headers = {"Accept": "application/json"}
+              body = None
+              if json_body is not None:
+                  body = json.dumps(json_body).encode()
+                  headers["Content-Type"] = "application/json"
+              elif raw is not None:
+                  body = raw
+                  if ctype:
+                      headers["Content-Type"] = ctype
+              if method in ("POST", "PUT", "PATCH", "DELETE") and csrf["t"]:
+                  headers["X-CSRF-Token"] = csrf["t"]
+              req = urllib.request.Request(BASE + path, data=body, method=method, headers=headers)
+              try:
+                  resp = opener.open(req, timeout=timeout)
+                  return resp.status, resp.read(), dict(resp.headers)
+              except urllib.error.HTTPError as exc:
+                  return exc.code, exc.read(), dict(exc.headers)
+
+          def finalize():
+              fails = [r for r in results if r[1] == "FAIL"]
+              blocked = [r for r in results if r[1] == "BLOCKED"]
+              summary = os.environ.get("GITHUB_STEP_SUMMARY")
+              if summary:
+                  with open(summary, "a") as fh:
+                      fh.write(f"\n### Real-local acceptance — phase `{PHASE}`\n\n")
+                      fh.write("| Step | Result | Detail |\n|---|---|---|\n")
+                      for name, status, detail in results:
+                          fh.write(f"| {name} | **{status}** | {detail} |\n")
+              print(
+                  f"\n== phase {PHASE}: {len(results)} checks, {len(fails)} FAIL, "
+                  f"{len(blocked)} BLOCKED ==",
+                  flush=True,
+              )
+              sys.exit(1 if fails else 0)
+
+          def login():
+              status, body, _ = call(
+                  "POST", "/api/auth/login", json_body={"email": EMAIL, "password": PASSWORD}
+              )
+              if status == 200:
+                  try:
+                      csrf["t"] = json.loads(body).get("csrf_token")
+                  except Exception:
+                      pass
+              return status, body
+
+          def health():
+              status, body, _ = call("GET", "/api/health")
+              if status != 200:
+                  return status, {}
+              try:
+                  return status, json.loads(body)
+              except Exception:
+                  return status, {}
+
+          status, body = login()
+          if status == 200 and csrf["t"]:
+              record("authentication", "PASS", "founder login 200, session + csrf established")
+          else:
+              record("authentication", "FAIL", f"login {status}: {body[:150]!r}")
+              finalize()
+
+          status, payload = health()
+          local = payload.get("local_model")
+          if status != 200:
+              record("local_model_health", "FAIL", f"/api/health returned {status}")
+          elif not local:
+              record(
+                  "local_model_health",
+                  "FAIL",
+                  "no local_model block although both roles resolve to the ollama provider",
+              )
+          elif local.get("reachable") is True and not local.get("missing_models"):
+              record(
+                  "local_model_health",
+                  "PASS",
+                  f"reachable=true, no missing models (provider={local.get('provider')})",
+              )
+          else:
+              record(
+                  "local_model_health",
+                  "FAIL",
+                  f"reachable={local.get('reachable')}, missing={local.get('missing_models')}",
+              )
+
+          if PHASE != "pre":
+              state = {}
+              if os.path.exists(STATE):
+                  with open(STATE) as fh:
+                      state = json.load(fh)
+              conv_id = state.get("conv_id")
+              source_id = state.get("source_id")
+
+              if conv_id:
+                  status, body, _ = call("GET", f"/api/conversations/{conv_id}")
+                  persisted = status == 200
+                  record(
+                      "conversation_persistence_after_restart",
+                      "PASS" if persisted else "FAIL",
+                      f"GET /api/conversations/{conv_id} -> {status}",
+                  )
+              else:
+                  record("conversation_persistence_after_restart", "BLOCKED", "no conversation id in state")
+
+              if source_id:
+                  status, body, _ = call("GET", f"/api/library/{source_id}")
+                  detail = json.loads(body) if status == 200 else {}
+                  ok = status == 200 and detail.get("status") == "indexed"
+                  record(
+                      "memory_source_persistence_after_restart",
+                      "PASS" if ok else "FAIL",
+                      f"status={detail.get('status')}, chunk_count={detail.get('chunk_count')}",
+                  )
+
+                  ok = False
+                  last = ""
+                  for attempt in range(3):
+                      status, body, _ = call(
+                          "POST", "/api/chat", json_body={"message": QUESTION}, timeout=300
+                      )
+                      if status == 200:
+                          payload = json.loads(body)
+                          sources = payload.get("sources") or []
+                          matched = any(
+                              str(s.get("document_id")) == str(source_id) for s in sources
+                          )
+                          last = (
+                              f"attempt {attempt + 1}: status={payload.get('assistant_status')}, "
+                              f"provider={payload.get('provider')}, sources={len(sources)}, "
+                              f"matched={matched}"
+                          )
+                          if payload.get("assistant_status") == "succeeded" and matched:
+                              ok = True
+                              break
+                      else:
+                          last = f"attempt {attempt + 1}: chat HTTP {status}: {body[:120]!r}"
+                      time.sleep(5)
+                  record(
+                      "live_retrieval_after_restart",
+                      "PASS" if ok else "FAIL",
+                      f"post-restart chat cited the uploaded source={ok}; {last}",
+                  )
+              else:
+                  record("memory_source_persistence_after_restart", "BLOCKED", "no source id in state")
+                  record("live_retrieval_after_restart", "BLOCKED", "no source id in state")
+              finalize()
+
+          # --- Upload a synthetic document through the real import pipeline ---
+          boundary = "----reallocal" + uuid.uuid4().hex
+          multipart = (
+              f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{FILENAME}"\r\n'
+              f"Content-Type: text/plain\r\n\r\n"
+          ).encode() + CONTENT + f"\r\n--{boundary}--\r\n".encode()
+          status, body, _ = call(
+              "POST",
+              "/api/library/import",
+              raw=multipart,
+              ctype=f"multipart/form-data; boundary={boundary}",
+          )
+          job_id = None
+          if status == 200:
+              try:
+                  job_id = json.loads(body).get("id")
+              except Exception:
+                  job_id = None
+          if job_id:
+              record("document_upload", "PASS", f"import job {job_id} accepted")
+          else:
+              record("document_upload", "FAIL", f"import {status}: {body[:150]!r}")
+              finalize()
+
+          # --- Real local embedding + indexing (the worker does the work) ---
+          source_id = None
+          final_status = None
+          detail = {}
+          for _ in range(180):
+              status, body, _ = call("GET", f"/api/library/jobs/{job_id}")
+              if status != 200:
+                  time.sleep(2)
+                  continue
+              payload = json.loads(body)
+              final_status = payload.get("status")
+              file_results = payload.get("file_results") or []
+              if file_results and file_results[0].get("source_id"):
+                  source_id = file_results[0]["source_id"]
+              if final_status in ("completed", "failed", "partial"):
+                  break
+              time.sleep(2)
+
+          if source_id:
+              status, body, _ = call("GET", f"/api/library/{source_id}")
+              detail = json.loads(body) if status == 200 else {}
+              indexed = detail.get("status") == "indexed" and (detail.get("chunk_count") or 0) > 0
+              if indexed:
+                  record(
+                      "real_local_embedding_and_indexing",
+                      "PASS",
+                      f"status=indexed, chunk_count={detail.get('chunk_count')} "
+                      f"(real {EMBED_MODEL} embeddings)",
+                  )
+              elif detail.get("status") in ("awaiting_provider", "blocked_provider"):
+                  record(
+                      "real_local_embedding_and_indexing",
+                      "FAIL",
+                      f"embedding paused ({detail.get('status')}) — the real Ollama embed did not run",
+                  )
+              else:
+                  record(
+                      "real_local_embedding_and_indexing",
+                      "FAIL",
+                      f"index status {detail.get('status')}, chunks={detail.get('chunk_count')}, "
+                      f"job={final_status}",
+                  )
+          else:
+              record(
+                  "real_local_embedding_and_indexing",
+                  "FAIL",
+                  f"no source_id within timeout (job={final_status})",
+              )
+              finalize()
+
+          # --- Authorized retrieval + real local chat grounded in the document ---
+          status, body, _ = call("POST", "/api/chat", json_body={"message": QUESTION}, timeout=300)
+          conv_id = None
+          if status == 200:
+              payload = json.loads(body)
+              conv_id = payload.get("conversation_id")
+              assistant_status = payload.get("assistant_status")
+              provider = payload.get("provider")
+              reply = payload.get("reply") or ""
+              sources = payload.get("sources") or []
+              cited = any(str(s.get("document_id")) == str(source_id) for s in sources)
+              if assistant_status == "succeeded" and cited:
+                  record(
+                      "authorized_retrieval",
+                      "PASS",
+                      f"chat cited the uploaded document; {len(sources)} source(s)",
+                  )
+              else:
+                  record(
+                      "authorized_retrieval",
+                      "FAIL",
+                      f"assistant_status={assistant_status}, sources={len(sources)}, cited={cited}",
+                  )
+              grounded = (
+                  assistant_status == "succeeded" and provider == "ollama" and len(reply) > 0
+              )
+              record(
+                  "real_local_chat_and_grounded_answer",
+                  "PASS" if grounded else "FAIL",
+                  f"assistant_status={assistant_status}, provider={provider}, reply_len={len(reply)} "
+                f"({os.environ.get('RL_CHAT_MODEL')}), cites_source={cited}",
+              )
+          else:
+              record("authorized_retrieval", "FAIL", f"chat {status}: {body[:150]!r}")
+              record("real_local_chat_and_grounded_answer", "FAIL", f"chat {status}")
+              assistant_status = None
+
+          if conv_id:
+              record(
+                  "conversation_persisted",
+                  "PASS",
+                  f"conversation {conv_id} created and addressable",
+              )
+          else:
+              record("conversation_persisted", "FAIL", "no conversation_id returned by chat")
+
+          with open(STATE, "w") as fh:
+              json.dump(
+                  {
+                      "conv_id": conv_id,
+                      "source_id": source_id,
+                      "expected_sha": EXPECTED_SHA,
+                  },
+                  fh,
+              )
+          finalize()
+          PY
+          echo "driver written"
+
+      - name: Start real backend + worker (real Ollama providers)
+        working-directory: candidate/backend
+        run: |
+          set -euo pipefail
+          mkdir -p "$STORAGE_ROOT"
+          nohup python _real_local_boot.py > "$GITHUB_WORKSPACE/backend.pre.log" 2>&1 &
+          echo $! > "$GITHUB_WORKSPACE/backend.pid"
+          nohup python -m app.worker > "$GITHUB_WORKSPACE/worker.pre.log" 2>&1 &
+          echo $! > "$GITHUB_WORKSPACE/worker.pid"
+          for _ in $(seq 1 60); do
+            if curl -sf -o /dev/null "$RL_BASE_URL/api/health"; then echo "backend healthy"; exit 0; fi
+            sleep 1
+          done
+          echo "::error::backend did not become healthy — see backend.pre.log below"
+          tail -80 "$GITHUB_WORKSPACE/backend.pre.log" || true
+          exit 1
+
+      - name: Acceptance — pre-restart (real embed, retrieval, chat)
+        run: python "$GITHUB_WORKSPACE/real_local_acceptance.py" pre
+
+      - name: Assert embedding-space identity on the real Ollama-indexed chunk
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          read -r MODEL NATIVE DIM < <(psql -h localhost -U postgres -d lifeos_reallocal -tA -F' ' -c \
+            "SELECT embedding_model, embedding_native_dim, vector_dims(embedding)
+               FROM document_chunks
+              WHERE embedding_model IS NOT NULL
+              ORDER BY created_at DESC NULLS LAST LIMIT 1;")
+          echo "stamped model=$MODEL native_dim=$NATIVE stored_dim=$DIM"
+          {
+            echo "### Embedding-space identity (real Ollama-indexed chunk)"
+            echo ""
+            echo "| Property | Value | Expected |"
+            echo "|---|---|---|"
+            echo "| embedding_model | $MODEL | ${{ env.OLLAMA_EMBED_MODEL }} |"
+            echo "| embedding_native_dim | $NATIVE | ${{ env.OLLAMA_NATIVE_DIM }} |"
+            echo "| vector_dims(embedding) | $DIM | 1536 |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$MODEL" = "${{ env.OLLAMA_EMBED_MODEL }}" || { echo "::error::embedding_model stamp=$MODEL != ${{ env.OLLAMA_EMBED_MODEL }}"; exit 1; }
+          test "$NATIVE" = "${{ env.OLLAMA_NATIVE_DIM }}" || { echo "::error::embedding_native_dim=$NATIVE != ${{ env.OLLAMA_NATIVE_DIM }}"; exit 1; }
+          test "$DIM" = "1536" || { echo "::error::stored vector_dims=$DIM != 1536 (padding failed)"; exit 1; }
+
+      - name: Restart real backend + worker (prove persistence and memory)
+        working-directory: candidate/backend
+        run: |
+          set -euo pipefail
+          kill "$(cat "$GITHUB_WORKSPACE/backend.pid")" 2>/dev/null || true
+          kill "$(cat "$GITHUB_WORKSPACE/worker.pid")" 2>/dev/null || true
+          sleep 3
+          nohup python _real_local_boot.py > "$GITHUB_WORKSPACE/backend.post.log" 2>&1 &
+          echo $! > "$GITHUB_WORKSPACE/backend.pid"
+          nohup python -m app.worker > "$GITHUB_WORKSPACE/worker.post.log" 2>&1 &
+          echo $! > "$GITHUB_WORKSPACE/worker.pid"
+          for _ in $(seq 1 60); do
+            if curl -sf -o /dev/null "$RL_BASE_URL/api/health"; then echo "backend healthy after restart"; exit 0; fi
+            sleep 1
+          done
+          echo "::error::backend did not become healthy after restart — see backend.post.log below"
+          tail -80 "$GITHUB_WORKSPACE/backend.post.log" || true
+          exit 1
+
+      - name: Acceptance — post-restart (persistent memory + live retrieval)
+        run: python "$GITHUB_WORKSPACE/real_local_acceptance.py" post
+
+      - name: Stop background processes
+        if: always()
+        run: |
+          kill "$(cat "$GITHUB_WORKSPACE/backend.pid")" 2>/dev/null || true
+          kill "$(cat "$GITHUB_WORKSPACE/worker.pid")" 2>/dev/null || true
+
+      - name: Upload logs artifact (no secrets)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-local-logs
+          path: |
+            ${{ github.workspace }}/backend.pre.log
+            ${{ github.workspace }}/backend.post.log
+            ${{ github.workspace }}/worker.pre.log
+            ${{ github.workspace }}/worker.post.log
+            ${{ github.workspace }}/ollama.log
+            ${{ github.workspace }}/pytest_embedding_space.log
+          if-no-files-found: ignore
