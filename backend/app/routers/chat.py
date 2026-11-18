@@ -41,6 +41,7 @@ from app.providers.pricing import estimate_cost
 from app.providers.registry import chat_with_fallback
 from app.providers.verification import classify_provider_exception
 from app.rag.context_status import build_context_status
+from app.rag.message_source import MessageSourceLocator, get_or_create_message_source_unit
 from app.rag.retrieve import retrieve_context
 from app.rag.trust import assess_confidence, build_trust_instructions, detect_claim_conflicts, detect_conflicts
 from app.schemas import ChatMessageIn, ChatMessageOut, ContextStatusOut, SourceRef
@@ -273,6 +274,9 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
             assistant_row.content = ""
         db.commit()
         db.refresh(assistant_row)
+        # The failed reply row is still an honest part of the founder's history — capture
+        # its provenance too (fail-open, same helper as the success path).
+        _capture_message_source(db, message=assistant_row, conversation=conversation)
         return ChatMessageOut(
             conversation_id=conversation.id,
             user_message_id=user_message.id,
@@ -337,6 +341,7 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     db.add(conversation)
     db.commit()
     db.refresh(assistant_row)
+    _capture_message_source(db, message=assistant_row, conversation=conversation)
 
     sources = [
         SourceRef(
@@ -367,6 +372,38 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
         context_confidence=context_resolution.confidence,
         context_status=context_status_out,
     )
+
+
+
+def _capture_message_source(db: Session, *, message, conversation) -> None:
+    """Capture the S1C immutable provenance unit (memory_source_units/message_source_units)
+    for a message AT WRITE TIME (Founder Alpha audit gap A1-a: previously these existed
+    only after a founder-triggered backfill job, so the provenance layer lagged the chat).
+
+    Deliberately FAIL-OPEN for chat delivery: provenance must never break or delay the
+    founder's conversation — the backfill job remains the safety net for anything this
+    misses, and it is idempotent (same identity key returns the same unit). Reuses the
+    existing race-safe find-or-create service and the DB-level immutability triggers;
+    no new storage is introduced."""
+    try:
+        get_or_create_message_source_unit(
+            db,
+            MessageSourceLocator(
+                owner_id=conversation.user_id,
+                message_id=message.id,
+                conversation_id=conversation.id,
+                role=message.role,
+                observed_at=message.created_at,
+                content_text=message.content,
+            ),
+        )
+        db.commit()
+    except Exception:
+        logger.exception(
+            "chat: message_source_unit capture failed for message %s — backfill will cover it",
+            message.id,
+        )
+        db.rollback()
 
 
 @router.post("", response_model=ChatMessageOut)
@@ -400,6 +437,7 @@ async def chat(
     db.add(user_message)
     db.commit()
     db.refresh(user_message)
+    _capture_message_source(db, message=user_message, conversation=conversation)
 
     return await _attempt_assistant_reply(db, conversation=conversation, user_message=user_message, user=user)
 

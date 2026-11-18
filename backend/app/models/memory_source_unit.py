@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Text, func
+from sqlalchemy import DateTime, Enum, ForeignKey, Text, func, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -97,6 +97,12 @@ class MemorySourceUnit(Base):
     """
 
     __tablename__ = "memory_source_units"
+    __table_args__ = (
+        # Model parity with migration 0037: identity dedup is enforced by the DB via
+        # uq_msu_owner_identity — declared here too so create_all-based test databases
+        # carry the SAME invariant (same pattern as the billing CHECK parity).
+        UniqueConstraint("owner_id", "source_identity_key", name="uq_msu_owner_identity"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)

@@ -15,6 +15,7 @@ from app.providers.base import Message, ProviderError
 from app.providers.registry import chat_with_fallback
 from app.rag.ingest import index_document
 from app.rag.retrieve import retrieve_context
+from app.blueprint_readiness import collect_blueprint_readiness
 from app.rag.trust import assess_confidence, build_trust_instructions, detect_conflicts
 from app.schemas import KnowledgeSourceOut, SourceRef, WorkbenchAnalyzeIn, WorkbenchAnalyzeOut, WorkbenchSaveIn
 
@@ -115,6 +116,16 @@ async def analyze(
         provider=result.provider,
         model=result.model,
     )
+
+
+@router.get("/blueprint-readiness")
+def blueprint_readiness(db: Session = Depends(get_db), _user: User = Depends(require_founder)):
+    """Founder Alpha gap audit (Area 3): the cross-reference view connecting knowledge
+    documents, GitHub code/PR snapshots, engineering lessons (tests + verification
+    status) and open agent tasks — a read-only aggregation over EXISTING tables, not a
+    second blueprint engine. The upstream blueprint_drafts stack (when composed) joins
+    to the document entries via source_document_ids."""
+    return collect_blueprint_readiness(db)
 
 
 @router.post("/save", response_model=KnowledgeSourceOut)
