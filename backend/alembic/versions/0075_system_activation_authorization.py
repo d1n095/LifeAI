@@ -27,8 +27,8 @@ table (that function is where this table's own REVOKE statement lives, not here)
 
 from alembic import op
 
-revision = "0069"
-down_revision = "0068"
+revision = "0075"
+down_revision = "0074_blueprint_lifecycle_guard"
 branch_labels = None
 depends_on = None
 

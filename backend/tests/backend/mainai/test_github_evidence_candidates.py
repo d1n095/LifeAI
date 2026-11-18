@@ -2,7 +2,7 @@
 rule app.work_candidates already proves one level up: a GitHub PR/issue existing (or looking
 urgent -- ci_red, stale) never implies authorization. record_github_evidence_candidates()
 never touches mainai_goals; only authorize_github_evidence_candidate() can, and only with the
-caller's own explicit authorized_by. See migration 0070_github_evidence_staging's own module
+caller's own explicit authorized_by. See migration 0076_github_evidence_staging's own module
 docstring (0069 on its own PR branch, renumbered on the 0069-composition integration branch),
 and app.models.github_evidence.GithubEvidenceCandidate's docstring, for why this is
 a separate table from app.work_candidates rather than a reuse of it."""

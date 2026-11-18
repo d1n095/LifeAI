@@ -689,7 +689,7 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
         db.execute(sa_text("SELECT erase_own_work_candidates_children()"))
 
         # --- Life MainAI Intelligence program: GitHub evidence staging (migration
-        # 0070_github_evidence_staging on the 0069-composition integration branch; originally
+        # 0076_github_evidence_staging on the integrated branch; originally
         # 0069_github_evidence_staging on its own PR branch, see
         # app/models/github_evidence.py): github_evidence_
         # candidates has DELETE revoked from mainai_app the same way, deletion only through

@@ -174,7 +174,7 @@ def test_current_system_activation_is_global_regardless_of_app_current_user_id(s
 # upgrade/downgrade, targeted at this one revision within the composed chain.
 
 
-def test_migration_0069_system_activation_authorization_downgrade_and_upgrade_round_trip():
+def test_migration_0075_system_activation_authorization_downgrade_and_upgrade_round_trip():
     """A targeted, single-step version of test_migration_roundtrip.py's own whole-chain
     property, specifically for this migration within the 0069-composition chain: downgrading
     past it must actually drop the table (and its privilege grants with it, since REVOKE

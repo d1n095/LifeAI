@@ -1,6 +1,6 @@
 """Row-Level Security, exercised directly at the database layer through the restricted
 runtime role (mainai_app), for `github_evidence_candidates` (migration
-0070_github_evidence_staging; 0069 on its own PR branch, renumbered on the 0069-composition
+0076_github_evidence_staging (0069 on its own PR branch, renumbered on the 0069-composition
 integration branch). Mirrors tests/security/test_rls_isolation_work_candidates.py's
 own established pattern exactly -- every new owner-scoped table gets a real behavioral proof,
 not just a structural one, from the moment it is added.
