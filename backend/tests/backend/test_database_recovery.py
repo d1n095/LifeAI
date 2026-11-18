@@ -232,6 +232,29 @@ def test_verify_rejects_a_corrupted_archive(tmp_path):
     assert any("checksum mismatch" in failure for failure in failures), failures
 
 
+def test_sanitize_drops_only_unknown_session_settings_and_never_rewrites_copy_rows():
+    """Client/server version skew: a newer `pg_dump` writes `SET transaction_timeout = 0;`, which
+    an older server rejects outright. Dropping that line is safe because it is a session setting.
+    Rewriting a data row that merely *looks* like that statement would corrupt restored content,
+    so the function must not touch anything inside a COPY block — that is the whole reason it is
+    a state machine rather than a regex over the whole file."""
+    sql = (
+        "SET transaction_timeout = 0;\n"
+        "SET search_path = public, pg_catalog;\n"
+        "COPY public.recovery_probe (id, note) FROM stdin;\n"
+        "SET transaction_timeout = 0;\n"
+        "\\.\n"
+        "SET client_min_messages = warning;\n"
+    )
+    sanitized, dropped = recovery.sanitize_dump_sql(sql, {"search_path", "client_min_messages"})
+
+    assert dropped == ["transaction_timeout"]
+    assert sanitized.count("transaction_timeout") == 1, "the COPY payload row must survive untouched"
+    assert "SET transaction_timeout = 0;\n\\.\n" in sanitized
+    assert "SET search_path = public, pg_catalog;" in sanitized
+    assert "SET client_min_messages = warning;" in sanitized
+
+
 def test_verify_rejects_an_edited_manifest(tmp_path):
     """Row counts are the artifact a restore is judged against, so editing them in the JSON must
     be detectable on its own — otherwise a doctored manifest could 'prove' a broken restore was

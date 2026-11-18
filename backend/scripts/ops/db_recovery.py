@@ -83,6 +83,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
@@ -139,7 +140,11 @@ def _require_bins(*names: str) -> None:
 
 
 def _run(cmd: list[str], *, what: str) -> subprocess.CompletedProcess:
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # errors="replace": `pg_restore --list` on a corrupted archive emits raw archive bytes into
+    # its output, which is not valid UTF-8. Found by this tool's own corruption test — strict
+    # decoding turned an intended, explicit "this archive is corrupt" refusal into an uncaught
+    # UnicodeDecodeError from subprocess itself.
+    result = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
     if result.returncode != 0:
         raise RecoveryError(
             f"{what} failed (exit {result.returncode}):\n{(result.stderr or result.stdout or '').strip()[-2000:]}"
@@ -620,6 +625,88 @@ def _provision_runtime_role(target_url: str) -> None:
         conn.close()
 
 
+_SAFE_SET_LINE = re.compile(r"^SET ([A-Za-z0-9_.]+) = .*;$")
+
+
+def sanitize_dump_sql(sql: str, known_settings: set[str]) -> tuple[str, list[str]]:
+    """Drop session `SET <guc> = ...;` lines whose parameter the TARGET server does not know.
+
+    A newer `pg_dump` writes settings the older server has never heard of — `SET
+    transaction_timeout = 0;` from client 17 restoring into server 16 is the concrete case that
+    broke the first green run of these tests. The right long-term answer is a version-matched
+    client; this makes the tool survive the mismatch rather than refuse to restore a perfectly
+    good archive, which is the property that matters during a real recovery.
+
+    Deliberately only touches `SET` lines that appear OUTSIDE a COPY block: a data row is not
+    SQL, and rewriting it would silently corrupt restored content. The COPY state machine is the
+    reason this is a function with its own tests rather than a `sed`.
+    """
+    kept: list[str] = []
+    dropped: list[str] = []
+    in_copy = False
+    for line in sql.splitlines(keepends=True):
+        stripped = line.rstrip("\r\n")
+        if in_copy:
+            kept.append(line)
+            if stripped == "\\.":
+                in_copy = False
+            continue
+        if stripped.startswith("COPY ") and stripped.endswith("FROM stdin;"):
+            in_copy = True
+            kept.append(line)
+            continue
+        match = _SAFE_SET_LINE.match(stripped)
+        if match and match.group(1) not in known_settings:
+            dropped.append(match.group(1))
+            continue
+        kept.append(line)
+    return "".join(kept), dropped
+
+
+def _restore_via_sql(dump_path: Path, target_url: str) -> list[str]:
+    """Client/server version-skew fallback: render the archive to SQL, drop the settings this
+    server does not define, and apply the result atomically with psql. Returns the dropped
+    parameter names (never silently — the caller prints them)."""
+    import psycopg2
+
+    _require_bins("psql")
+    sql = _run(
+        ["pg_restore", "--no-owner", "--no-privileges", "--file=-", str(dump_path)],
+        what="pg_restore --file=-",
+    ).stdout
+
+    conn = psycopg2.connect(target_url)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT name FROM pg_settings")
+            known = {row[0] for row in cur.fetchall()}
+    finally:
+        conn.close()
+
+    sanitized, dropped = sanitize_dump_sql(sql, known)
+    handle = tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False, encoding="utf-8")
+    try:
+        handle.write(sanitized)
+        handle.close()
+        _run(
+            [
+                "psql",
+                "--quiet",
+                "--single-transaction",
+                "-v",
+                "ON_ERROR_STOP=1",
+                f"--dbname={target_url}",
+                "--file",
+                handle.name,
+            ],
+            what="psql restore (version-skew fallback)",
+        )
+    finally:
+        handle.close()
+        Path(handle.name).unlink(missing_ok=True)
+    return dropped
+
+
 def _apply_boot_privilege_policy(target_url: str) -> None:
     """Boot sequence's step 3: the same module production runs, in its mutating mode, so the
     restored database is left with narrowed S1A grants and no runtime privileges at all on
@@ -694,18 +781,32 @@ def restore(backup_path: Path, target_url: str, *, confirmed: bool) -> list[str]
     content_digests = any("digest" in entry for entry in manifest.get("tables", {}).values())
     target_database = _ensure_target_database(target_url, source_database)
 
-    _run(
-        [
-            "pg_restore",
-            "--no-owner",
-            "--no-privileges",
-            "--single-transaction",
-            "--exit-on-error",
-            f"--dbname={target_url}",
-            str(backup_path),
-        ],
-        what=f"pg_restore into {target_database}",
-    )
+    try:
+        _run(
+            [
+                "pg_restore",
+                "--no-owner",
+                "--no-privileges",
+                "--single-transaction",
+                "--exit-on-error",
+                f"--dbname={target_url}",
+                str(backup_path),
+            ],
+            what=f"pg_restore into {target_database}",
+        )
+    except RecoveryError as error:
+        # A client newer than the server writes GUCs the server does not know (`SET
+        # transaction_timeout = 0;`, client 17 -> server 16). The direct attempt is atomic
+        # (--single-transaction), so nothing was applied and the fallback starts from an empty
+        # database. Any other failure is a real failure and propagates unchanged.
+        if "unrecognized configuration parameter" not in str(error):
+            raise
+        dropped = _restore_via_sql(Path(backup_path), target_url)
+        print(
+            f"restore: client/server version skew — restored via SQL, dropped unknown session "
+            f"setting(s): {', '.join(dropped) or 'none'}",
+            file=sys.stderr,
+        )
 
     _provision_runtime_role(target_url)
     _apply_boot_privilege_policy(target_url)
