@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import uuid
@@ -33,6 +34,7 @@ from app.rag.claim_graph import (
     shifts_to_audit_detail,
     trace_evidence_chain,
 )
+from app.rag.intellectual_adversary import review_conclusion
 from app.rag.epistemics import cross_domain_claim_overlaps, second_order_consequences
 from app.rag.library_import import maybe_purge_blob
 from app.rag.epistemics import classify_claim
@@ -73,6 +75,8 @@ from app.schemas import (
     SourceRelationshipIn,
     SourceRelationshipOut,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/library", tags=["library"], dependencies=[Depends(require_founder)])
 settings = get_settings()
@@ -775,6 +779,14 @@ def get_claim_evidence_chain(
         chain = trace_evidence_chain(db, user.id, claim_id)
     except LookupError:
         raise HTTPException(status_code=404, detail="Påståendet hittades inte.")
+    # Round 10 M4: the bounded intellectual adversary rides the SAME production response
+    # (fail-open: a review failure degrades the field to {reviewed: False}, never the call).
+    try:
+        review = review_conclusion(db, user.id, claim_id)
+        review_dict = review.to_dict()
+    except Exception:
+        logger.warning("adversarial review failed; field degrades honestly", exc_info=True)
+        review_dict = {"claim_id": str(claim_id), "reviewed": False, "verdict_status": None, "objections": [], "error": "review_unavailable"}
     return ClaimEvidenceChainOut(
         claim_id=chain.claim_id,
         claim_text=chain.claim_text,
@@ -790,6 +802,7 @@ def get_claim_evidence_chain(
         contradicting_edges=chain.contradicting_edges,
         other_edges=chain.other_edges,
         second_order_consequences=chain.second_order_consequences,
+        adversarial_review=review_dict,
     )
 
 

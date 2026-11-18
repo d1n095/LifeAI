@@ -425,7 +425,10 @@ class ClaimEvidenceChainOut(BaseModel):
     """The full traceability record for one claim (Round 8 M3): verdict + reasons + the
     source/chunk grounding + BOTH sides of every contradicting edge (a conflict is
     presented, never adjudicated here) + the stamped study-metadata verdict + the
-    bounded second-order consequences of the claim's source."""
+    bounded second-order consequences of the claim's source. Round 10 M4 adds the
+    bounded INTELLECTUAL ADVERSARY review: evidence-backed objections when justified,
+    each with its epistemic category and provenance pointers; reviewed=False means no
+    justified objection — never silent approval."""
 
     claim_id: uuid.UUID
     claim_text: str
@@ -436,6 +439,7 @@ class ClaimEvidenceChainOut(BaseModel):
     verdict_reasons: list[str]
     source: dict
     chunk_grounded: bool
+    adversarial_review: dict
     quality_metadata: dict | None = None
     supporting_edges: list[dict] = []
     contradicting_edges: list[dict] = []
