@@ -53,6 +53,16 @@ def no_openai_env(monkeypatch):
         openai_consult_mainai_enabled=False,
     )
     monkeypatch.setattr(registry, "get_settings", lambda: settings)
+    # The provider instances read settings through THEIR OWN module binding (get_provider
+    # constructs cls() whose __init__ calls the openai provider module's get_settings) —
+    # patching only registry.get_settings left the conftest's fake OPENAI_API_KEY visible
+    # to is_configured(), so the keyless fixture actually resolved a configured OpenAI and
+    # test_chat_chain_head_is_local_without_openai_key failed spuriously. Test 2 already
+    # re-patches this binding for the keyed case; the fixture must do the same for the
+    # keyless case.
+    import app.providers.openai_provider as op_mod
+
+    monkeypatch.setattr(op_mod, "get_settings", lambda: settings)
     yield db, settings
     db.close()
     engine.dispose()
