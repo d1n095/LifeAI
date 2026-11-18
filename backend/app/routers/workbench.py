@@ -19,6 +19,7 @@ from app.blueprint_readiness import collect_blueprint_readiness
 import logging
 
 from app.mainai_execution.lesson_selection import format_lesson_feedback_instructions
+from app.rag.graph_instructions import format_graph_context_instructions
 from app.rag.epistemics import epistemic_status_counts_sql, format_epistemic_instructions
 from app.rag.evidence_metadata import summarize_owner_evidence_landscape
 from app.rag.evidence_quality import format_landscape_instructions
@@ -115,6 +116,18 @@ async def analyze(
             system_content += "\n\n" + lesson_feedback
     except Exception:
         logger.warning("lesson feedback failed; system prompt degrades without it", exc_info=True)
+    # Round 9 M3: the claim graph IN the answer path — consequences, question-relevant
+    # cross-domain overlaps, and the retrieved claims' topic landscape are computed for the
+    # retrieved sources and appended (fail-open). The graph now influences what the model
+    # sees, not just what an endpoint would return.
+    try:
+        graph_context = format_graph_context_instructions(
+            db, user.id, [h.get("document_id") for h in hits], payload.question
+        )
+        if graph_context:
+            system_content += "\n\n" + graph_context
+    except Exception:
+        logger.warning("graph context failed; system prompt degrades without it", exc_info=True)
     messages = [Message(role="system", content=system_content), Message(role="user", content=payload.question)]
 
     try:

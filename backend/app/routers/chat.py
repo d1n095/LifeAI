@@ -44,6 +44,7 @@ from app.rag.context_status import build_context_status
 from app.rag.message_source import MessageSourceLocator, get_or_create_message_source_unit
 from app.rag.retrieve import retrieve_context
 from app.mainai_execution.lesson_selection import format_lesson_feedback_instructions
+from app.rag.graph_instructions import format_graph_context_instructions
 from app.rag.epistemics import epistemic_status_counts_sql, format_epistemic_instructions
 from app.rag.evidence_metadata import summarize_owner_evidence_landscape
 from app.rag.evidence_quality import format_landscape_instructions
@@ -241,6 +242,18 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
             system_content += "\n\n" + lesson_feedback
     except Exception:
         logger.warning("lesson feedback failed; system prompt degrades without it", exc_info=True)
+    # Round 9 M3: the claim graph IN the answer path — consequences, question-relevant
+    # cross-domain overlaps, and the retrieved claims' topic landscape are computed for the
+    # retrieved sources and appended (fail-open). The graph now influences what the model
+    # sees, not just what an endpoint would return.
+    try:
+        graph_context = format_graph_context_instructions(
+            db, user.id, [h.get("document_id") for h in hits], user_message.content if hasattr(user_message, "content") else payload.question
+        )
+        if graph_context:
+            system_content += "\n\n" + graph_context
+    except Exception:
+        logger.warning("graph context failed; system prompt degrades without it", exc_info=True)
     messages = [Message(role="system", content=system_content)]
     messages += [Message(role=m.role.value, content=m.content) for m in history]
     messages.append(Message(role="user", content=user_message.content))
