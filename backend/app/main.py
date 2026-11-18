@@ -143,6 +143,12 @@ def on_startup():
 @app.on_event("shutdown")
 def on_shutdown():
     stop_scheduler()
+    # Release the shared Redis pools explicitly (app/redis_client.py) — a clean shutdown
+    # closes every pooled socket instead of stranding them for the process-exit GC sweep,
+    # which is what made long-running sessions accumulate sockets and made teardown noisy.
+    from app.redis_client import close_shared_redis_clients
+
+    close_shared_redis_clients()
 
 
 def _check_smtp_mode() -> None:
