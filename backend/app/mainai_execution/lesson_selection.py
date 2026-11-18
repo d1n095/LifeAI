@@ -254,3 +254,130 @@ def recurring_cluster_component_ids(selection: LessonSelection) -> set[uuid.UUID
         for lid in cluster["lesson_ids"]:
             out.add(uuid.UUID(lid))
     return out
+
+
+# --------------------------------------------------------------------------------------
+# Round 9 M1: LOOP INTEGRITY. The ranking closed one loop (measured outcomes -> planning
+# order); these additions close the remaining two: a CONTROLLED COMPARISON of the ranked
+# path against the legacy path on the same candidate set (the conservativeness proof), and
+# an aggregate evaluation of whether standing-ranked applications correlate with better
+# guard outcomes — observational by construction, never causal, and structurally incapable
+# of self-reinforcement because the selection layer WRITES NOTHING.
+# --------------------------------------------------------------------------------------
+
+@dataclass
+class SelectionComparison:
+    """The controlled behavioral comparison for ONE planning decision point: the ranked
+    selection path vs the legacy unranked path on the SAME candidate set and the SAME
+    input plan. The invariant the mission demands is mechanical: the ranked path applies a
+    SUBSET of the legacy path — the only difference is the evidence-backed exclusions
+    (failed_majority, unusable_guard) plus reordering. If the ranked path ever applied
+    something legacy would not, that would be rank-based expansion, which is forbidden."""
+
+    task_type: str
+    legacy_applied: list[uuid.UUID]
+    ranked_applied: list[uuid.UUID]
+    excluded_by_ranking: list[uuid.UUID]
+    subset_holds: bool
+    exclusions_explain_delta: bool
+
+
+def evaluate_selection_behavior(
+    db: Session, *, owner_id: uuid.UUID, task_type: str, verification_plan: list[dict]
+) -> SelectionComparison:
+    """Run BOTH application paths against the same inputs and compare, WITHOUT persisting
+    anything (both calls run on the caller's session; apply only COMPUTES the augmented
+    plan — persistence happens in create_plan, which these calls bypass)."""
+    from app.mainai_execution.lessons import apply_lessons_to_verification_plan
+
+    ranked_selection = select_lessons_for_planning(db, owner_id=owner_id, task_type=task_type)
+    ranked_aug, ranked_ids = apply_lessons_to_verification_plan(
+        db, task_type=task_type, verification_plan=list(verification_plan), selection=ranked_selection
+    )
+    legacy_aug, legacy_ids = apply_lessons_to_verification_plan(
+        db, task_type=task_type, verification_plan=list(verification_plan)
+    )
+
+    excluded = [lid for lid in legacy_ids if lid not in set(ranked_ids)]
+    exclusion_reasons = {
+        d.lesson.id: d.standing for d in ranked_selection.decisions if not d.selected
+    }
+    return SelectionComparison(
+        task_type=task_type,
+        legacy_applied=legacy_ids,
+        ranked_applied=ranked_ids,
+        excluded_by_ranking=excluded,
+        subset_holds=set(ranked_ids) <= set(legacy_ids),
+        exclusions_explain_delta=(
+            all(exclusion_reasons.get(lid) in ("failed_majority", "unusable_guard") for lid in excluded)
+        ),
+    )
+
+
+def lesson_standing_effectiveness(db: Session, *, owner_id: uuid.UUID) -> dict:
+    """The honest aggregate of 'do measured-useful lessons correlate with better outcomes':
+    guard verdicts grouped by the standing class the lesson HELD at the time of the latest
+    decision (proven-ranked vs unproven-ranked vs flagged). This is an OBSERVATIONAL
+    comparison — selection reads outcomes, never writes them, so a correlation here is a
+    review signal for the founder, not a feedback signal the system can reinforce itself
+    with. All numbers come from the same two evidence tables the ranking reads."""
+    from sqlalchemy import text as sa_text
+
+    rows = db.execute(
+        sa_text("""
+            WITH verdicts AS (
+                SELECT o.lesson_id, o.outcome, o.task_id
+                FROM engineering_lesson_guard_observations o
+                WHERE o.owner_id = :owner AND o.outcome IN ('guard_held', 'guard_failed')
+            ),
+            standing AS (
+                SELECT v.lesson_id,
+                       sum(CASE WHEN v.outcome = 'guard_held' THEN 1 ELSE 0 END) AS held,
+                       sum(CASE WHEN v.outcome = 'guard_failed' THEN 1 ELSE 0 END) AS failed
+                FROM verdicts v GROUP BY v.lesson_id
+            )
+            SELECT CASE
+                       WHEN s.held > 0 AND s.failed = 0 THEN 'proven_ranked'
+                       WHEN s.failed >= 2 AND (s.held::float / (s.held + s.failed)) < 0.5 THEN 'excluded_ranked'
+                       WHEN s.failed >= 1 THEN 'flagged_ranked'
+                       ELSE 'proven_ranked'
+                   END AS rank_class,
+                   coalesce(sum(s.held), 0) AS held, coalesce(sum(s.failed), 0) AS failed,
+                   count(*) AS lessons
+            FROM standing s GROUP BY 1
+        """),
+        {"owner": str(owner_id)},
+    ).all()
+    out = {}
+    for rank_class, held, failed, lessons in rows:
+        out[rank_class] = {"held": int(held), "failed": int(failed), "lessons": int(lessons)}
+    return out
+
+
+def format_lesson_feedback_instructions(db: Session, *, owner_id: uuid.UUID) -> str:
+    """The planner-feedback text for chat/workbench prompt layers (Swedish): the owner's
+    lesson standings in aggregate, the recurring-failure clusters with their corrective
+    actions, and the RULE that unproven lessons are hypotheses — not established rules.
+    Deterministic, read-only, fail-open at the call site."""
+    from app.mainai_execution.lesson_guard_observations import recurring_failure_clusters
+
+    effectiveness = lesson_standing_effectiveness(db, owner_id=owner_id)
+    clusters = recurring_failure_clusters(db, owner_id=owner_id)
+    parts = ["LÄRANDE-status (mätning, inte sanning):"]
+    proven = effectiveness.get("proven_ranked", {"held": 0, "failed": 0, "lessons": 0})
+    flagged = effectiveness.get("flagged_ranked", {"held": 0, "failed": 0, "lessons": 0})
+    excluded = effectiveness.get("excluded_ranked", {"held": 0, "failed": 0, "lessons": 0})
+    parts.append(
+        f"- beprövade regler: {proven['lessons']} (vakt höll {proven['held']}x, misslyckades {proven['failed']}x); "
+        f"flaggade: {flagged['lessons']}; undantagna: {excluded['lessons']}. "
+        "En otestad eller flaggad regel är en HYPOTES — väga den som sådan, aldrig som etablerad sanning."
+    )
+    if clusters:
+        parts.append(f"- återkommande fel: {len(clusters)} kluster (komponent/rotorsak):")
+        for c in clusters[:5]:
+            parts.append(
+                f"  · {c['affected_component']} — rotorsaker {c['root_causes']}; åtgärd: {c['corrective_action']}"
+            )
+    else:
+        parts.append("- inga återkommande felkluster detekterade.")
+    return "\n".join(parts)

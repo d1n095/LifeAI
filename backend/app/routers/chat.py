@@ -43,6 +43,7 @@ from app.providers.verification import classify_provider_exception
 from app.rag.context_status import build_context_status
 from app.rag.message_source import MessageSourceLocator, get_or_create_message_source_unit
 from app.rag.retrieve import retrieve_context
+from app.mainai_execution.lesson_selection import format_lesson_feedback_instructions
 from app.rag.epistemics import epistemic_status_counts_sql, format_epistemic_instructions
 from app.rag.evidence_metadata import summarize_owner_evidence_landscape
 from app.rag.evidence_quality import format_landscape_instructions
@@ -229,6 +230,17 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
         logger.warning("epistemic rollup failed; system prompt degrades to trust text alone", exc_info=True)
     if _evidence_lines:
         system_content += "\n\nEVIDENSSTATUS:\n" + "\n".join(_evidence_lines)
+    # Round 9 M1: measured lesson standings + recurring-failure clusters ride the same
+    # instruction block (fail-open like everything above). This is planner FEEDBACK in the
+    # cognitive sense: the deterministic create_plan() ordering is unchanged — the prompt
+    # layer now KNOWS which rules are measured-useful, which are hypotheses, and which
+    # components keep failing under every rule pointed at them.
+    try:
+        lesson_feedback = format_lesson_feedback_instructions(db, owner_id=user.id)
+        if lesson_feedback:
+            system_content += "\n\n" + lesson_feedback
+    except Exception:
+        logger.warning("lesson feedback failed; system prompt degrades without it", exc_info=True)
     messages = [Message(role="system", content=system_content)]
     messages += [Message(role=m.role.value, content=m.content) for m in history]
     messages.append(Message(role="user", content=user_message.content))

@@ -460,13 +460,20 @@ def recurring_failure_clusters(db: Session, *, owner_id: uuid.UUID) -> list[dict
     A cluster needs >= 2 DISTINCT failed tasks. A lesson that failed twice on the SAME
     task's repeated attempts is a retry pattern, not a cross-task recurrence — exactly the
     single-failure-must-not-suppress discipline, applied at cluster granularity."""
+    # Round 9 M1: each cluster now also carries the lessons' recorded ROOT CAUSES, the
+    # distinct GUARD TARGETS (the measurable corrective instruments — a guard that runs is
+    # a verifiable action, a wish is not), and a deterministic corrective_action text.
+    # The action is a REVIEW instruction, never an automatic mutation: only a founder or
+    # the async tick resolves a cluster, exactly like lesson_conflicts.py's boundary.
     rows = db.execute(
         text("""
             SELECT l.affected_component,
                    array_agg(DISTINCT l.id::text)                AS lesson_ids,
                    array_agg(DISTINCT o.task_id::text)           AS distinct_failed_tasks,
                    count(DISTINCT o.task_id)                     AS task_count,
-                   array_agg(DISTINCT l.general_rule)            AS general_rules
+                   array_agg(DISTINCT l.general_rule)            AS general_rules,
+                   array_agg(DISTINCT l.root_cause)              AS root_causes,
+                   array_remove(array_agg(DISTINCT l.regression_test), NULL) AS guard_targets
             FROM engineering_lesson_guard_observations o
             JOIN engineering_lessons l ON l.id = o.lesson_id
             WHERE o.owner_id = :owner AND o.outcome = 'guard_failed'
@@ -484,6 +491,14 @@ def recurring_failure_clusters(db: Session, *, owner_id: uuid.UUID) -> list[dict
             "distinct_failed_tasks": [str(tid) for tid in failed_tasks],
             "task_count": int(task_count),
             "general_rules": list(general_rules),
+            "root_causes": list(root_causes),
+            "guard_targets": list(guard_targets),
+            "corrective_action": (
+                f"review component '{component}' across {len(lesson_ids)} rule(s) and "
+                f"{int(task_count)} failed tasks; keep {len(set(guard_targets))} distinct "
+                "guard(s) running on every new task for this component and escalate to "
+                "founder review if the failures continue"
+            ),
         }
-        for component, lesson_ids, failed_tasks, task_count, general_rules in rows
+        for component, lesson_ids, failed_tasks, task_count, general_rules, root_causes, guard_targets in rows
     ]
