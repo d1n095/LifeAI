@@ -92,41 +92,41 @@ def _dispatch(db_session, owner_id, *, task_type: str = "repo_edit"):
 
 @pytest.mark.asyncio
 async def test_a_lost_database_connection_leaves_a_recoverable_attempt_not_a_false_outcome(
-    db_session, superuser_db, owner_id, monkeypatch, tmp_path
+    db_session, superuser_db, owner_id, monkeypatch
 ):
-    """Kill this worker's own backend connection in the middle of the work step — the shape of an
-    OOM-killed container or a database failover, not an exception the code designed for."""
+    """The database goes away at the first durable-write boundary of an attempt — the shape of an
+    OOM-killed container or a failover, not an exception the code designed for.
+
+    The fault is injected at `record_checkpoint` rather than by terminating the session's backend.
+    Terminating it is order-dependent in a full suite: SQLAlchemy reconnects transparently, so
+    whether the failure lands at all depends on which pooled connection the next statement draws —
+    and a flaky test of a crash property is worse than no test, because a green run then proves
+    nothing.
+    """
+    from sqlalchemy.exc import OperationalError
+
     from app.mainai_execution import execution_job
 
-    shared = tmp_path / "shared"
-    shared.mkdir()
-    monkeypatch.setattr(execution_job, "_repo_root", lambda: shared)
-    monkeypatch.setattr(
-        OpenAIProvider,
-        "chat",
-        _fake_chat(json.dumps({"files": [{"path": "x.md", "content": "y"}], "commit_message": "m"})),
-    )
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat("read-only audit complete"))
+
+    def _connection_lost(*_args, **_kwargs):
+        raise OperationalError("INSERT INTO mainai_checkpoints", {}, Exception("server closed the connection unexpectedly"))
+
+    monkeypatch.setattr(execution_job, "record_checkpoint", _connection_lost)
 
     task, job = _dispatch(db_session, owner_id, task_type="read_only_audit")
     _, _, generation = claim_next_mainai_job(superuser_db, "worker-crash", 120)
     superuser_db.commit()
     _set_rls_user(db_session, owner_id)
 
-    worker_pid = db_session.execute(sa_text("SELECT pg_backend_pid()")).scalar_one()
-
-    async def _kill_own_connection_then_do_work(db, task):
-        # Separate connection: terminate the worker's backend, then let the next statement fail
-        # exactly as it would after a real failover.
-        superuser_db.execute(sa_text("SELECT pg_terminate_backend(:pid)"), {"pid": worker_pid})
-        superuser_db.commit()
-        return {"summary": "unreachable"}
-
-    monkeypatch.setattr(execution_job, "_handle_read_only_audit", _kill_own_connection_then_do_work)
-
     with pytest.raises(DBAPIError):
         await run_task_execution_job(
             db_session, job.id, owner_id, worker_id="worker-crash", lease_generation=generation, lease_seconds=120
         )
+    # A process that loses its connection does not keep its transaction: the server aborts it. The
+    # test has to do the same, or the attempt's row locks stay held and the next statement blocks
+    # forever -- the exact failure this file's suite-level fix exists to make visible.
+    db_session.rollback()
 
     # The durable, restart-visible truth: nothing claims an outcome it never reached.
     superuser_db.commit()
@@ -136,15 +136,25 @@ async def test_a_lost_database_connection_leaves_a_recoverable_attempt_not_a_fal
     assert job_row.status == MainAIJobStatus.running, "a crashed attempt must stay reclaimable, never terminal"
     assert task_row.status == MainAITaskStatus.running
 
-    # And once its lease expires it is exactly the dead-attempt shape recovery acts on -- not a
+    # And once its lease expires it is exactly the dead-attempt shape recovery acts on — not a
     # task that silently looks finished.
     superuser_db.execute(
-        sa_text("UPDATE mainai_jobs SET lease_expires_at = clock_timestamp() AT TIME ZONE 'UTC' - interval '1 minute' WHERE id = :id"),
+        sa_text(
+            "UPDATE mainai_jobs SET lease_expires_at = (clock_timestamp() AT TIME ZONE 'UTC') - interval '1 minute' "
+            "WHERE id = :id"
+        ),
         {"id": str(job.id)},
     )
     superuser_db.commit()
     superuser_db.expire_all()
-    assert task_liveness(superuser_db.get(MainAITask, task.id), superuser_db.get(MainAIJob, job.id), now=db_now(superuser_db)) is TaskLiveness.stalled
+    assert (
+        task_liveness(
+            superuser_db.get(MainAITask, task.id),
+            superuser_db.get(MainAIJob, job.id),
+            now=db_now(superuser_db),
+        )
+        is TaskLiveness.stalled
+    )
 
 
 @pytest.mark.asyncio

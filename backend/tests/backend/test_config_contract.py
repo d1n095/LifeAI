@@ -149,6 +149,7 @@ CONFIG_MATRIX: dict[str, dict] = {
     "github_repo": {"required_in_production": False, "secret": False, "default": None, "validates": "none — 'owner/repo' format, checked at call time by app/integrations/github_client.py, not at startup"},
     "github_write_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "none — a plain bool gate; off by default so MainAI only proposes PRs until explicitly turned on"},
     "github_auto_merge_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "none — gates a merge capability that has no implementation yet (see app/integrations/github_client.py's docstring); always off in this slice"},
+    "mainai_proposal_worktree_isolation": {"required_in_production": False, "secret": False, "default": True, "validates": "none — a bool gate; on by default so a proposal is written into its own local-only checkout instead of the live tree. Off (or automatically, if a bootstrap cannot be built) falls back to the shared checkout with PI-1d rollback as the protection"},
 }
 
 
