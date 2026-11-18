@@ -145,7 +145,20 @@ CODE_AGENT_SYSTEM_PROMPT = (
 
 async def _handle_read_only_audit(db: Session, task: MainAITask) -> dict:
     messages = [Message(role="system", content=READ_ONLY_AUDIT_SYSTEM_PROMPT), Message(role="user", content=task.description)]
-    result, _attempted = await chat_with_fallback(db, messages)
+    # Freebuff EGRESS-0/EGRESS-1: chat_with_fallback() only routes a call through the Life
+    # Vault egress policy (default-deny gate, NEVER_EGRESS hard-deny, secret redaction, the
+    # disclosure ledger -- docs/LIFE_VAULT_EGRESS_CONTROL.md) when `owner_id` is passed; it is
+    # OPTIONAL and silently skips the entire gate when omitted (see that function's own
+    # docstring: "gate skipped, unchanged legacy behavior"). This call was sending `task.
+    # description` -- arbitrary, possibly sensitive, founder-authored content -- to a real
+    # external provider with NO egress gate at all. `propose_plan_via_ai()` (planner.py)
+    # already passes owner_id/task identity correctly; this call site had simply never been
+    # migrated. Fixed by passing the real, already-available task/goal identity, never a
+    # resolved FOUNDER_USER_ID or any other weaker stand-in for actual authorization context.
+    result, _attempted = await chat_with_fallback(
+        db, messages, owner_id=task.owner_id, purpose="mainai_read_only_audit",
+        requested_by="mainai_execution.execution_job._handle_read_only_audit", task_id=task.id, goal_id=task.goal_id,
+    )
     return {"summary": result.content, "provider": result.provider, "model": result.model}
 
 
@@ -201,7 +214,12 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
     behavior (test_run_task_execution_job_repo_edit_with_an_absolute_ai_proposed_path_..., et
     al.) keep exercising the identical code, unchanged."""
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=task.description)]
-    result, _attempted = await chat_with_fallback(db, messages)
+    # Freebuff EGRESS-0/EGRESS-1 -- see _handle_read_only_audit()'s matching comment above for
+    # why this owner_id/task_id/goal_id is required, not optional.
+    result, _attempted = await chat_with_fallback(
+        db, messages, owner_id=task.owner_id, purpose="mainai_repo_edit_proposal",
+        requested_by="mainai_execution.execution_job._propose_repo_edit", task_id=task.id, goal_id=task.goal_id,
+    )
     parsed = _parse_code_agent_response(result.content)
 
     repo_root = _repo_root().resolve()
@@ -318,7 +336,13 @@ async def _handle_repo_edit(
         db.commit()
 
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=task.description)]
-    result, _attempted = await chat_with_fallback(db, messages)
+    # Freebuff EGRESS-0/EGRESS-1 -- see _handle_read_only_audit()'s matching comment for why
+    # this owner_id/task_id/goal_id/job_id is required, not optional. job_id is available here
+    # (unlike the two call sites above) since this is the real, worktree-backed edit path.
+    result, _attempted = await chat_with_fallback(
+        db, messages, owner_id=task.owner_id, purpose="mainai_repo_edit",
+        requested_by="mainai_execution.execution_job._handle_repo_edit", task_id=task.id, goal_id=task.goal_id, job_id=job.id,
+    )
     parsed = _parse_code_agent_response(result.content)
 
     worktree_root = Path(worktree.path).resolve()
