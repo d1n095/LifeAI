@@ -45,6 +45,7 @@ from app.rag.message_source import MessageSourceLocator, get_or_create_message_s
 from app.rag.retrieve import retrieve_context
 from app.mainai_execution.lesson_selection import format_lesson_feedback_instructions
 from app.rag.graph_instructions import format_graph_context_instructions
+from app.rag.untrusted_content import UNTRUSTED_CONTENT_POLICY, build_untrusted_context_block
 from app.rag.epistemics import epistemic_status_counts_sql, format_epistemic_instructions
 from app.rag.evidence_metadata import summarize_owner_evidence_landscape
 from app.rag.evidence_quality import format_landscape_instructions
@@ -169,8 +170,15 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     # reply reflects the real reason) and structured API metadata (context_status below) the
     # frontend can render without depending on the model having said it correctly.
     context_status = build_context_status(db, user.id, hit_count=len(hits), retrieval_degraded_reason=retrieval_degraded_reason)
-    context_block = "\n\n".join(f"{_label(h)}\n{h['text']}" for h in hits) or (
-        context_status.message if context_status is not None else "Ingen relevant kunskap hittades."
+    # Round 9 M4: retrieved document content is UNTRUSTED INPUT — every chunk is framed
+    # as DATA (never instructions) so content-level injections cannot pose as platform
+    # directives. The framing is deterministic and applied to every hit, not filtered by
+    # suspicion heuristics.
+    context_block = build_untrusted_context_block(
+        [{"title": _label(h), "text": h["text"]} for h in hits],
+        fallback=(
+            context_status.message if context_status is not None else "Ingen relevant kunskap hittades."
+        ),
     )
     context_status_out = (
         ContextStatusOut(
@@ -216,7 +224,7 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     _record_candidate_signal_if_worth_noticing(db, owner_id=user.id, user_message=user_message, context_resolution=context_resolution)
 
     system_content = (
-        f"{SYSTEM_PROMPT}\n\nKONTEXT:\n{context_block}\n\n"
+        f"{SYSTEM_PROMPT}\n\n{UNTRUSTED_CONTENT_POLICY}\n\nKONTEXT:\n{context_block}\n\n"
         f"TILLFÖRLITLIGHETSINSTRUKTION:\n"
         f"{build_trust_instructions(trust.level, trust.top_source_status, trust.conflicts_detected)}"
     )

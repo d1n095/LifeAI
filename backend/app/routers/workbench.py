@@ -20,6 +20,7 @@ import logging
 
 from app.mainai_execution.lesson_selection import format_lesson_feedback_instructions
 from app.rag.graph_instructions import format_graph_context_instructions
+from app.rag.untrusted_content import UNTRUSTED_CONTENT_POLICY, build_untrusted_context_block
 from app.rag.epistemics import epistemic_status_counts_sql, format_epistemic_instructions
 from app.rag.evidence_metadata import summarize_owner_evidence_landscape
 from app.rag.evidence_quality import format_landscape_instructions
@@ -88,9 +89,13 @@ async def analyze(
     conflicting_pairs = detect_conflicts(db, user.id, [h["document_id"] for h in hits])
     trust = assess_confidence(hits, conflicting_pairs)
 
-    context_block = "\n\n".join(f"[{h['title']}]\n{h['text']}" for h in hits) or "Ingen relevant kunskap hittades."
+    # Round 9 M4: same untrusted-content framing as chat — every retrieved chunk is DATA.
+    context_block = build_untrusted_context_block(
+        [{"title": h.get("title", ""), "text": h["text"]} for h in hits],
+        fallback="Ingen relevant kunskap hittades.",
+    )
     system_content = (
-        f"{SYSTEM_PROMPT}\n\nKONTEXT:\n{context_block}\n\n"
+        f"{SYSTEM_PROMPT}\n\n{UNTRUSTED_CONTENT_POLICY}\n\nKONTEXT:\n{context_block}\n\n"
         f"TILLFÖRLITLIGHETSINSTRUKTION:\n"
         f"{build_trust_instructions(trust.level, trust.top_source_status, trust.conflicts_detected)}"
     )
