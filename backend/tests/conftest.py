@@ -179,6 +179,15 @@ def _clean_tables(_test_database):
     settings = get_settings()
     engine = create_engine(settings.database_url)
     with engine.begin() as conn:
+        # Suffering this twice is why this is here: TRUNCATE needs ACCESS EXCLUSIVE, so a single
+        # session left holding a row lock turns the NEXT test's cleanup into an unbounded wait --
+        # the whole suite stops with no failing test, no traceback, just a job killed after an
+        # hour. Bounding the wait converts that silent hang into a named error on the test that
+        # actually leaked ("canceling statement due to lock timeout"), which is the diagnostic;
+        # the session cleanup below is the fix. Neither hides a deadlock: the truncate still
+        # fails, it just fails in 30 seconds with a reason.
+        conn.execute(text("SET LOCAL lock_timeout = '30s'"))
+        conn.execute(text("SET LOCAL statement_timeout = '120s'"))
         tables = conn.execute(
             text("SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename != 'alembic_version'")
         ).scalars().all()
@@ -251,8 +260,14 @@ def db_session():
     from app.db import SessionLocal
 
     session = SessionLocal()
-    yield session
-    session.close()
+    try:
+        yield session
+    finally:
+        # `finally`, not straight-line code: pytest skips the rest of a fixture's generator only
+        # if the generator itself raises. A test that fails mid-transaction must still release its
+        # row locks here, or the next test's TRUNCATE blocks forever (see _clean_tables).
+        session.rollback()
+        session.close()
 
 
 @pytest.fixture
@@ -270,8 +285,13 @@ def superuser_db():
     from app.db import migration_engine
 
     session = sessionmaker(bind=migration_engine)()
-    yield session
-    session.close()
+    try:
+        yield session
+    finally:
+        # Same reason as db_session's: an uncommitted superuser transaction holds row locks on
+        # every table it touched, and the next test's cleanup would wait on them indefinitely.
+        session.rollback()
+        session.close()
 
 
 @pytest.fixture

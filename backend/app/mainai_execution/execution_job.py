@@ -44,6 +44,11 @@ from app.jobs.mainai_job_lease import JobLeaseLostError, renew_mainai_job_lease
 from app.jobs.retry import compute_backoff_seconds
 from app.jobs.service import mark_cancelled, mark_completed, mark_failed, update_progress
 from app.mainai_execution.checkpoint import latest_checkpoint_for_step, record_checkpoint
+from app.mainai_execution.proposal_worktree import (
+    ProposalWorktreeError,
+    create_isolated_proposal_checkout,
+    remove_isolated_proposal_checkout,
+)
 from app.mainai_execution.ci_wait import poll_ci_wait, start_ci_wait
 from app.mainai_execution.executor import _lock_task, task_for_job
 from app.mainai_execution.final_report import record_final_report
@@ -282,15 +287,24 @@ def _parse_code_agent_response(raw: str) -> dict:
     return parsed
 
 
-async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
-    """github_write_enabled is off (or GitHub isn't configured): the ORIGINAL V0.1 proposal-only
-    model, completely unchanged -- writes to the single shared local checkout this backend
-    process itself runs from, purely so real local verification (verify_task()) can still run
-    against real content, never touching the network or creating any isolated per-attempt
-    state. Kept as a separate function (not a branch inside _handle_repo_edit()) specifically so
-    the extensive existing path-traversal/symlink-escape hardening tests targeting this exact
-    behavior (test_run_task_execution_job_repo_edit_with_an_absolute_ai_proposed_path_..., et
-    al.) keep exercising the identical code, unchanged."""
+async def _propose_repo_edit(db: Session, task: MainAITask, *, attempt_id=None) -> dict:
+    """github_write_enabled is off (or GitHub isn't configured): V0.1's proposal-only model, now
+    with an isolated write target.
+
+    M4 isolation: the code agent's content is written into a per-attempt checkout built by
+    `proposal_worktree.create_isolated_proposal_checkout()` — a local-only bare repository
+    (`git init --bare`) populated by a *filesystem-path* fetch of this checkout's HEAD, with no
+    remote configured at all. The live checkout this backend process executes from is therefore
+    never modified by a proposal, verified or not: the window PI-1d's rollback shrinks to a
+    restore-after-the-fact no longer exists. The path traversal/symlink/git-metadata guards below
+    are applied against the isolated root exactly as they were against the shared one.
+
+    Fallback (explicit or automatic): if isolation is disabled by configuration, or the bootstrap
+    cannot be built (no `git`, no HEAD, a shared checkout that moved mid-bootstrap), this logs the
+    reason and writes to the shared checkout as before — where `_rollback_proposal_writes()` still
+    restores it on every non-accepting path. Isolation is never silently claimed when it is not in
+    effect: `work_result["isolation"]` records which mode actually ran.
+    """
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=task.description)]
     # Freebuff EGRESS-0/EGRESS-1 -- see _handle_read_only_audit()'s matching comment above for
     # why this owner_id/task_id/goal_id is required, not optional.
@@ -300,29 +314,66 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
     )
     parsed = _parse_code_agent_response(result.content)
 
-    repo_root = _repo_root().resolve()
-    previous_contents: dict[str, str | None] = {}
-    for file in parsed["files"]:
-        # Defense in depth beyond _validate_repo_edit_file_path()'s absolute/'..' rejection --
-        # resolves symlinks too, so a pre-existing symlink inside the repo tree pointing outside
-        # it (a separate, lower-likelihood attack surface -- would require a malicious symlink
-        # already merged into the repo, not just a malicious AI response) still can't be used to
-        # escape repo_root via a syntactically clean relative path.
-        abs_path = (repo_root / file["path"]).resolve()
-        if abs_path != repo_root and repo_root not in abs_path.parents:
-            raise TaskExecutionError(f"Refusing to write outside the repo root: {file['path']!r} resolved to {abs_path}.")
-        _reject_git_metadata_target(abs_path, repo_root, proposed=file["path"], where="shared checkout")
-        previous_contents[file["path"]] = abs_path.read_text() if abs_path.exists() else None
-        abs_path.parent.mkdir(parents=True, exist_ok=True)
-        abs_path.write_text(file["content"])
+    shared_root = _repo_root().resolve()
+    checkout = None
+    isolation_failure: str | None = None
+    if get_settings().mainai_proposal_worktree_isolation:
+        try:
+            checkout = create_isolated_proposal_checkout(
+                shared_checkout=shared_root, attempt_id=attempt_id or task.id
+            )
+        except ProposalWorktreeError as exc:
+            isolation_failure = str(exc)
+            logger.warning(
+                "task %s: proposal isolation unavailable (%s) — falling back to the shared checkout; "
+                "PI-1d rollback remains the protection there.",
+                task.id,
+                exc,
+            )
 
-    return {
+    write_root = (checkout.tree if checkout is not None else shared_root).resolve()
+    previous_contents: dict[str, str | None] = {}
+    try:
+        for file in parsed["files"]:
+            # Defense in depth beyond _validate_repo_edit_file_path()'s absolute/'..' rejection --
+            # resolves symlinks too, so a pre-existing symlink inside the tree pointing outside it
+            # (a separate, lower-likelihood attack surface -- would require a malicious symlink
+            # already merged into the repo, not just a malicious AI response) still can't be used
+            # to escape the write root via a syntactically clean relative path.
+            abs_path = (write_root / file["path"]).resolve()
+            if abs_path != write_root and write_root not in abs_path.parents:
+                raise TaskExecutionError(f"Refusing to write outside the repo root: {file['path']!r} resolved to {abs_path}.")
+            _reject_git_metadata_target(
+                abs_path, write_root, proposed=file["path"],
+                where="isolated proposal checkout" if checkout is not None else "shared checkout",
+            )
+            if checkout is None:
+                # Only the shared checkout needs a rollback record: the isolated tree is discarded
+                # wholesale, and capturing contents there would be dead weight.
+                previous_contents[file["path"]] = abs_path.read_text() if abs_path.exists() else None
+            abs_path.parent.mkdir(parents=True, exist_ok=True)
+            abs_path.write_text(file["content"])
+    except Exception:
+        if checkout is not None:
+            remove_isolated_proposal_checkout(checkout)
+        raise
+
+    work_result: dict = {
         "files": parsed["files"],
         "commit_message": parsed.get("commit_message", task.description[:200]),
-        "previous_contents": previous_contents,
         "provider": result.provider,
         "model": result.model,
+        "isolation": "worktree" if checkout is not None else "shared_checkout",
     }
+    if checkout is not None:
+        work_result["proposal_worktree_path"] = str(checkout.tree)
+        work_result["proposal_base_sha"] = checkout.base_sha
+    else:
+        if previous_contents:
+            work_result["previous_contents"] = previous_contents
+        if isolation_failure:
+            work_result["proposal_isolation_failure"] = isolation_failure
+    return work_result
 
 
 async def _handle_repo_edit(
@@ -366,7 +417,7 @@ async def _handle_repo_edit(
     site in run_task_execution_job() can stop exactly like every other fenced-out write here."""
     settings = get_settings()
     if not settings.github_write_enabled:
-        return await _propose_repo_edit(db, task)
+        return await _propose_repo_edit(db, task, attempt_id=job.id)
 
     client = get_github_client()
     if not client.is_configured():
@@ -768,7 +819,12 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             # wired into the live path. Proposal mode (no worktree_path in work_result) keeps
             # verifying against the shared checkout, unchanged from V0.1.
             worktree_path = work_result.get("worktree_path") if task.task_type == "repo_edit" else None
-            verify_cwd = str(Path(worktree_path) / "backend") if worktree_path else str(_backend_root())
+            # Proposal-mode isolation (M4): the proposed files live in their own local checkout,
+            # so their verification must run there. Absent (isolation disabled, or the bootstrap
+            # fell back), the shared checkout is the tree that received them -- unchanged.
+            proposal_path = work_result.get("proposal_worktree_path") if task.task_type == "repo_edit" else None
+            source_root = worktree_path or proposal_path
+            verify_cwd = str(Path(source_root) / "backend") if source_root else str(_backend_root())
             verification = verify_task(task, cwd=verify_cwd)
 
         # PI-1d: a proposal-mode write is provisional by definition. If verification failed,

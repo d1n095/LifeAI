@@ -29,6 +29,16 @@ Two tools, matching the two shapes of comparison:
 Both use `clock_timestamp()`, not `now()`: `now()` is transaction start time, and a recovery
 scan that runs inside a long transaction must still see real elapsed time.
 
+Both also return `timestamp WITHOUT time zone` in UTC — deliberately, and not incidentally.
+`clock_timestamp()` alone is `timestamptz`: compared against a `timestamp` column Postgres has to
+coerce the column using the session `TimeZone` (right only when that happens to be UTC), and
+fetched into Python it is an AWARE datetime. Against `job.lease_expires_at` — a naive
+`timestamp without time zone` column (migration 0026, which `now()` also fills in UTC) — that
+raised `TypeError: can't compare offset-naive and offset-aware datetimes` in
+`task_liveness()` at the one real liveness endpoint. `AT TIME ZONE 'UTC'` puts both helpers in
+exactly the column's own type domain, so "a value authored by Postgres is compared against
+Postgres" is also type-correct, not merely skew-free.
+
 Timestamps this application authors itself (`next_retry_at`, `next_poll_at`, `completed_at`
 written from `datetime.utcnow()`) stay in the Python domain and must keep being compared in the
 Python domain. Mixing is the defect; the fix is consistency within each pair, not converting
@@ -42,10 +52,20 @@ from sqlalchemy.orm import Session
 
 
 def db_now_expr():
-    """The database's current time, as a SQL expression for use inside a query or filter."""
-    return func.clock_timestamp()
+    """The database's current time, as a SQL expression for use inside a query or filter.
+
+    `timestamp without time zone`, UTC — the exact type/domain of every column this is compared
+    against (`mainai_jobs.lease_expires_at`, `import_jobs.lease_expires_at`, ...), so no session
+    `TimeZone` can silently reinterpret either side.
+    """
+    return func.timezone("UTC", func.clock_timestamp())
 
 
 def db_now(db: Session) -> datetime:
-    """The database's current time, fetched once for comparisons made in Python."""
-    return db.execute(text("SELECT clock_timestamp()")).scalar_one()
+    """The database's current time, fetched once for comparisons made in Python.
+
+    Naive-UTC, matching the columns it is compared against: returning an aware datetime here
+    would raise `TypeError` the moment a caller compares it to a fetched lease (see this
+    module's docstring).
+    """
+    return db.execute(text("SELECT (clock_timestamp() AT TIME ZONE 'UTC')")).scalar_one()

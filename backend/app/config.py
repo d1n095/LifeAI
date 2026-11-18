@@ -214,6 +214,15 @@ class Settings(BaseSettings):
     github_write_enabled: bool = False
     github_auto_merge_enabled: bool = False
 
+    # Proposal-mode isolation (app/mainai_execution/proposal_worktree.py): when on (the default),
+    # a `repo_edit` proposal is written into its own local-only git checkout, bootstrapped from
+    # this checkout's HEAD by a filesystem-path fetch — no remote, no token, no write path back to
+    # the live tree. Turning this off restores the pre-isolation behaviour, where PI-1d's rollback
+    # is the only protection; that fallback also engages automatically (with a warning) if a
+    # bootstrap cannot be built at all, so a missing `git` degrades to "as safe as before" rather
+    # than "MainAI cannot propose anything".
+    mainai_proposal_worktree_isolation: bool = True
+
     @property
     def frontend_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.frontend_origins.split(",") if origin.strip()]

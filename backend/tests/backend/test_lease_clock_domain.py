@@ -151,6 +151,27 @@ async def test_an_expired_lease_is_still_detected_when_the_app_clock_runs_behind
     superuser_db.commit()
 
 
+def test_db_now_is_naive_utc_in_the_columns_own_type_domain(db_session):
+    """`clock_timestamp()` is `timestamptz`. The lease columns are `timestamp without time zone`
+    (migration 0026), so a helper that returns an AWARE datetime cannot be compared to a fetched
+    lease at all -- it raises TypeError instead of skewing. Both helpers must land in the
+    columns' own type domain, and in UTC."""
+    from datetime import timezone
+
+    value = db_now(db_session)
+    assert value.tzinfo is None, "db_now() must be naive, like the timestamp columns it judges"
+    assert abs((value - datetime.utcnow()).total_seconds()) < 120, "db_now() must be the database's UTC time"
+
+    # And a real lease read back from Postgres must be comparable with it, both ways.
+    bound = db_session.execute(sa_text("SELECT (clock_timestamp() AT TIME ZONE 'UTC')")).scalar_one()
+    assert bound.tzinfo is None and abs((bound - value).total_seconds()) < 60
+
+    # The transaction-start `now()` trap this module exists for: clock_timestamp() advances
+    # inside an open transaction, transaction_timestamp() does not.
+    db_session.execute(sa_text("SELECT 1"))
+    assert db_now(db_session) >= value
+
+
 def test_liveness_verdicts_follow_the_database_clock(db_session, superuser_db, owner_id):
     """`task_liveness()` is pure, so the caller supplies the clock. Judged with Python's wall
     clock a live job reads `stalled`; judged with `db_now()` it reads `running`, which is what
@@ -182,8 +203,13 @@ def test_liveness_verdicts_follow_the_database_clock(db_session, superuser_db, o
     task = superuser_db.get(MainAITask, task.id)
     job = superuser_db.get(MainAIJob, task.mainai_job_id)
     # Give the job a real future lease, DB-authored, exactly like claim_next_mainai_job() does.
+    # `started_at` is not optional: ck_mainai_jobs_started_at_set_once_claimed requires every
+    # claimed (running) row to have one, so this mirrors what claim_next_mainai_job() does.
     superuser_db.execute(
-        sa_text("UPDATE mainai_jobs SET status = 'running', lease_expires_at = now() + interval '120 seconds' WHERE id = :id"),
+        sa_text(
+            "UPDATE mainai_jobs SET status = 'running', started_at = COALESCE(started_at, now()), "
+            "lease_expires_at = now() + interval '120 seconds' WHERE id = :id"
+        ),
         {"id": str(job.id)},
     )
     superuser_db.commit()

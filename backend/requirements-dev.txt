@@ -2,6 +2,9 @@
 -r requirements.txt
 pytest==8.3.3
 pytest-asyncio==0.24.0
+# Bounds a single test so a deadlock fails the run with a stack dump instead of hanging the
+# job (see pytest.ini). MIT, pytest-dev maintained, no runtime dependency -- test-only.
+pytest-timeout==2.3.1
 # Real binary the Development Operator's run_profile("ruff_check") shells out to
 # (app/development_operator/service.py) — must be on PATH for tests that exercise that
 # governed capability for real, not just import it.
