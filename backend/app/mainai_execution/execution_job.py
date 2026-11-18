@@ -456,9 +456,39 @@ async def _handle_open_pr(db: Session, task: MainAITask, goal: MainAIGoal) -> di
     repo_owner = settings.github_repo.split("/", 1)[0]
     existing = await client.list_pull_requests_for_head(head=f"{repo_owner}:{head_branch}", base=base_branch, state="open")
     if existing:
+        # Security contract (founder directive, independent review finding): an existing
+        # open PR for this exact head/base must NEVER be silently treated as "ours, already
+        # done" just because the branch name matches. GitHub allows only one open PR per
+        # head/base pair, so if a human already has a real, non-draft PR open here, MainAI
+        # cannot create a second one anyway -- the only safe move is to fail closed and let
+        # a human resolve it, never attribute someone else's PR to this task's own work
+        # result. `draft` missing/null (an API shape MainAI has never actually seen, but
+        # must not guess past) is treated identically to "not ours" -- `is not True`, never
+        # a falsy check, so None/missing fails exactly like False.
         pr = existing[0]
+        if pr.get("draft") is not True:
+            raise TaskExecutionError(
+                f"An existing open PR #{pr.get('number')} already occupies {head_branch} -> {base_branch} and is not a "
+                f"MainAI-created draft (draft={pr.get('draft')!r}) -- refusing to silently attribute it to this task."
+            )
+        expected_sha = edit_info.get("commit_sha")
+        actual_sha = (pr.get("head") or {}).get("sha")
+        if expected_sha is None or actual_sha != expected_sha:
+            raise TaskExecutionError(
+                f"Existing draft PR #{pr.get('number')}'s head commit ({actual_sha!r}) does not match this task's own "
+                f"real pushed commit ({expected_sha!r}) -- refusing to treat it as this task's own work result."
+            )
     else:
         pr = await client.create_pull_request(title=title, body=body, head=head_branch, base=base_branch)
+        if pr.get("draft") is not True:
+            # Defense in depth: create_pull_request() always requests draft:true, but a
+            # response that doesn't confirm it (an account/App permission quirk, a future
+            # GitHub API change) must not be silently trusted -- fail closed rather than
+            # assume the request was honored.
+            raise TaskExecutionError(
+                f"GitHub did not confirm PR #{pr.get('number')} as a draft (draft={pr.get('draft')!r}) despite "
+                f"create_pull_request() requesting one -- refusing to treat this as a safe MainAI-owned result."
+            )
     return {
         "proposed": False,
         "pull_request_number": pr.get("number"),
