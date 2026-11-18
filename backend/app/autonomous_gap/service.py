@@ -66,7 +66,6 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -90,6 +89,7 @@ from app.models.mainai_execution import (
 from app.models.mainai_job import MainAIJob, MainAIJobStatus
 from app.models.problem_learning import LifeProblem, LifeProblemEvent
 from app.problem_learning.service import create_problem
+from app.db_clock import db_now
 
 if TYPE_CHECKING:
     from app.development_operator.service import OperatorContext
@@ -611,7 +611,7 @@ def require_live_gap_lease(
         or job.lease_generation != context.lease_generation
     ):
         raise GapLeaseLostError("stale or absent MainAI job lease before gap recording/insertion")
-    if job.lease_expires_at is not None and job.lease_expires_at <= datetime.utcnow():
+    if job.lease_expires_at is not None and job.lease_expires_at <= db_now(db):
         raise GapLeaseLostError("expired MainAI job lease before gap recording/insertion")
     return job
 

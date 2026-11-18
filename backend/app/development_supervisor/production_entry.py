@@ -62,7 +62,6 @@ scope."""
 
 import logging
 import subprocess
-from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -95,6 +94,7 @@ from app.models.mainai_execution import MainAIGoal, MainAIGoalStatus, MainAITask
 from app.models.mainai_job import MainAIJobStatus
 from app.provider_spend import provider_spend_is_live
 from app.work_intelligence import bind_strategy_execution, create_strategy
+from app.db_clock import db_now
 
 logger = logging.getLogger("mainai.development_supervisor.production_entry")
 
@@ -313,7 +313,7 @@ async def run_authorized_goal_supervisor_tick(
                     job.status == MainAIJobStatus.running
                     and job.locked_by == worker_id
                     and job.lease_expires_at is not None
-                    and job.lease_expires_at > datetime.utcnow()
+                    and job.lease_expires_at > db_now(db)
                 )
                 if not still_valid:
                     raise SupervisorError(

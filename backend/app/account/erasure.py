@@ -199,6 +199,7 @@ from app.models.usage import UsageLog
 from app.models.user import User
 from app.storage import StorageError, get_storage
 from app.storage.references import acquire_owner_erasure_lock, acquire_storage_key_lock, storage_key_still_referenced
+from app.db_clock import db_now_expr
 
 logger = logging.getLogger("mainai.account.erasure")
 
@@ -505,7 +506,9 @@ def erase_account_data(db: Session, user: User, *, client_ip: str | None = None)
                 ImportJob.owner_id == owner_id,
                 ImportJob.status == ImportJobStatus.running,
                 ImportJob.lease_expires_at.isnot(None),
-                ImportJob.lease_expires_at > datetime.utcnow(),
+                # Authored by Postgres (app/jobs/lease.py), judged by Postgres. A skewed app
+                # clock here would let erasure proceed while an import is still running.
+                ImportJob.lease_expires_at > db_now_expr(),
             )
             .first()
             is not None

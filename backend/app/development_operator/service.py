@@ -47,6 +47,7 @@ from app.models.mainai_recovery import MainAITaskWorktree, MainAITaskWorktreeSta
 from app.models.supervisor_lease import SupervisorGoalLease
 from app.models.work_intelligence import WorkStrategyExecution, WorkTraceEvent
 from app.work_intelligence import record_trace_event
+from app.db_clock import db_now
 
 
 class OperatorError(RuntimeError):
@@ -445,7 +446,7 @@ def _require_context(
         raise OperatorAuthorityTransitionError("stale or absent MainAI job lease")
     # Effect-time expiry: claim-time ownership is not enough if the lease clock elapsed
     # before takeover rebinds locked_by/generation.
-    if job.lease_expires_at is not None and job.lease_expires_at <= datetime.utcnow():
+    if job.lease_expires_at is not None and job.lease_expires_at <= db_now(db):
         raise OperatorAuthorityTransitionError("stale or absent MainAI job lease")
     # Founder cancel mid-flight: past effects remain historical; future filesystem /
     # remote effects must stop. Progress checkpoints of already-done work stay allowed.
