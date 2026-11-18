@@ -61,6 +61,14 @@ def _hit_dict(chunk: DocumentChunk, score: float) -> dict:
         "active_truth_status": doc.active_truth_status.value if doc else None,
         "media_type": doc.media_type if doc else None,
         "project_id": str(doc.project_id) if doc and doc.project_id else None,
+        # Incremental document understanding (Life MainAI Intelligence program): when this
+        # source's content was last actually changed (Document.updated_at, bumped by SQLAlchemy's
+        # own onupdate on every real column change) — lets a caller recognize "this source is new
+        # or has changed since I last looked at it" without re-deriving it from created_at (which
+        # never changes) or re-querying Document separately. None only if the chunk's document
+        # join failed to resolve (same defensive pattern as classification/active_truth_status
+        # above), never a silently-wrong placeholder timestamp.
+        "document_updated_at": doc.updated_at.isoformat() if doc and doc.updated_at else None,
         # STEG 12: set only for a chunk built from a timed transcript segment
         # (app/rag/media_import.py) — None for ordinary text chunks, exactly mirroring
         # DocumentChunk.start_seconds/end_seconds themselves. Lets a citation (chat.py's
