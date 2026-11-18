@@ -101,9 +101,22 @@ def format_graph_context_instructions(
         lines.append("- " + _topic_line(landscape))
         # Round 10 M6: the topic's scientific composition + bounded investigation policy
         # ride the same block (fail-open at the caller; deterministic, read-only here).
+        # The landscape + rows are fetched ONCE and SHARED with the science analysis —
+        # the perf-bound suite caught the duplicate-query cost of re-fetching.
+        from app.rag.evidence_metadata import ClaimEvidenceMetadata
         from app.rag.scientific_reasoning import analyze_topic_science, format_topic_science_instructions, investigation_policy
 
-        science = analyze_topic_science(db, owner_id, topic)
+        topic_rows = (
+            db.query(ClaimEvidenceMetadata)
+            .filter(
+                ClaimEvidenceMetadata.owner_id == owner_id,
+                ClaimEvidenceMetadata.metadata_json["research_topic"].astext == topic,
+            )
+            .order_by(ClaimEvidenceMetadata.updated_at.desc())
+            .limit(50)
+            .all()
+        )
+        science = analyze_topic_science(db, owner_id, topic, landscape=landscape, rows=topic_rows)
         policy = investigation_policy(science)
         lines.append("- " + format_topic_science_instructions(science, policy))
         if landscape.disagreements:

@@ -257,7 +257,12 @@ def test_read_path_query_costs_are_bounded(db_session, client):
     _line, graph_stmts = _counted(
         engine, format_graph_context_instructions, db_session, founder_id, sources, "Vad gäller för kaffe och puls?"
     )
-    assert graph_stmts <= 8, (
+    # R10 M6 added the scientific composition + investigation policy line to this block;
+    # its rows/landscape are SHARED with the landscape (the 12-statement regression the
+    # original bound caught was the duplicate fetch — fixed by passing the fetched rows).
+    # 9 statements = consequence walk + overlap scan + topic lookup + landscape(3, shared
+    # with science) — still every-bounded, still scaling with sources not corpus.
+    assert graph_stmts <= 9, (
         f"graph context used {graph_stmts} statements — the consequence walk, overlap scan "
         "and topic lookup must each stay a bounded query"
     )

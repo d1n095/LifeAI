@@ -91,24 +91,32 @@ class TopicScience:
         }
 
 
-def analyze_topic_science(db: Session, owner_id: uuid.UUID, topic: str, *, limit: int = 50) -> TopicScience:
+def analyze_topic_science(
+    db: Session, owner_id: uuid.UUID, topic: str, *, limit: int = 50,
+    landscape=None, rows=None,
+) -> TopicScience:
     """The per-topic scientific composition, deterministic and bounded. Reuses the R9
-    landscape's exact row selection (owner-scoped, topic-filtered, LIMIT-capped)."""
+    landscape's exact row selection (owner-scoped, topic-filtered, LIMIT-capped).
+    `landscape` and `rows` let a caller that ALREADY fetched them (e.g. the graph
+    instruction block) pass them in — the R10 perf bounds caught the duplicate-query
+    cost of re-fetching, so sharing is the required shape on the prompt path."""
     from sqlalchemy import text as sa_text
 
     from app.rag.evidence_metadata import ClaimEvidenceMetadata
 
-    landscape = summarize_topic_landscape(db, owner_id, topic, limit=limit)
-    rows = (
-        db.query(ClaimEvidenceMetadata)
-        .filter(
-            ClaimEvidenceMetadata.owner_id == owner_id,
-            ClaimEvidenceMetadata.metadata_json["research_topic"].astext == topic,
+    if landscape is None:
+        landscape = summarize_topic_landscape(db, owner_id, topic, limit=limit)
+    if rows is None:
+        rows = (
+            db.query(ClaimEvidenceMetadata)
+            .filter(
+                ClaimEvidenceMetadata.owner_id == owner_id,
+                ClaimEvidenceMetadata.metadata_json["research_topic"].astext == topic,
+            )
+            .order_by(ClaimEvidenceMetadata.updated_at.desc())
+            .limit(max(1, int(limit)))
+            .all()
         )
-        .order_by(ClaimEvidenceMetadata.updated_at.desc())
-        .limit(max(1, int(limit)))
-        .all()
-    )
 
     long_f = short_f = unspecified_f = cumulative = dose_resp = interactions_n = 0
     causal_total = causal_gap = funding_flagged = 0
