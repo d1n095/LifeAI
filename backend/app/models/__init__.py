@@ -178,6 +178,8 @@ from app.models.problem_learning import (
 )
 from app.models.provider_config import ProviderConfig
 from app.models.provider_disclosure import ProviderDisclosureDecision, ProviderDisclosureEvent
+from app.models.improvement_proposal import ImprovementSource, ImprovementStatus, MainAIImprovementProposal
+from app.models.cognitive_gate import CognitiveGateCaseResult, CognitiveGateRun, GateCaseStatus, GateExecutionMode
 from app.models.provider_verification import ProviderVerificationCheck
 from app.models.refresh_token import RefreshToken
 from app.models.revoked_access_token import RevokedAccessToken
