@@ -53,6 +53,52 @@ def test_an_audit_row_cannot_be_deleted_even_by_superuser(superuser_db):
     assert superuser_db.get(AuditLog, audit_id) is not None, "history must still be there"
 
 
+def test_erasure_may_anonymise_but_change_nothing_else(superuser_db):
+    """The founder's right to erasure must survive an immutable trail.
+
+    `app/account/erasure.py` nulls `user_id` on the account's audit rows. A trigger that refused
+    that would turn a security property into a compliance defect, so anonymity-preserving nulling is
+    permitted — and only that: every recorded fact stays byte-identical.
+    """
+    audit_id = _seed(superuser_db)
+
+    superuser_db.execute(sqltext("UPDATE audit_log SET user_id = NULL WHERE id = :id"), {"id": str(audit_id)})
+    superuser_db.commit()
+    superuser_db.expire_all()
+    row = superuser_db.get(AuditLog, audit_id)
+    assert row is not None and row.user_id is None
+    assert row.action == "security_control_tampered" and row.detail == "original"
+
+
+def test_anonymisation_cannot_be_used_to_rewrite_the_record(superuser_db):
+    """'Null the user' must not become a cover for changing what happened."""
+    audit_id = _seed(superuser_db)
+
+    with pytest.raises(DBAPIError) as raised:
+        superuser_db.execute(
+            sqltext("UPDATE audit_log SET user_id = NULL, detail = 'nothing to see' WHERE id = :id"),
+            {"id": str(audit_id)},
+        )
+        superuser_db.commit()
+    superuser_db.rollback()
+    assert "append-only" in str(raised.value)
+
+
+def test_a_nulled_row_cannot_be_re_identified(superuser_db):
+    """The permitted direction is one-way: identifiers can be removed, never restored."""
+    audit_id = _seed(superuser_db)
+    superuser_db.execute(sqltext("UPDATE audit_log SET user_id = NULL WHERE id = :id"), {"id": str(audit_id)})
+    superuser_db.commit()
+
+    with pytest.raises(DBAPIError):
+        superuser_db.execute(
+            sqltext("UPDATE audit_log SET user_id = :uid WHERE id = :id"),
+            {"uid": str(uuid.uuid4()), "id": str(audit_id)},
+        )
+        superuser_db.commit()
+    superuser_db.rollback()
+
+
 def test_appending_a_new_fact_is_still_allowed(superuser_db):
     """The rule is 'no rewriting', not 'no writing' — a trail you cannot append to is useless."""
     _seed(superuser_db)

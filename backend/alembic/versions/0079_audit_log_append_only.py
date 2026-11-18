@@ -7,9 +7,15 @@ agent that reaches the database through an inherited credential — could rewrit
 of what it did. An audit trail that the audited party can edit is a log, not a trail.
 
 This migration makes the claim true at the storage layer, where it cannot be bypassed by
-application code paths:
+application code paths, while keeping the one legitimate mutation a founder has a *right* to:
 
-  * UPDATE and DELETE on `audit_log` raise `restrict_violation` with an explanatory message;
+  * DELETE on `audit_log` raises `restrict_violation`;
+  * UPDATE raises unless it is pure ANONYMISATION — the row's `user_id` and/or `ip_address` moved
+    from a value to NULL and every security-relevant field (`action`, `entity_type`, `entity_id`,
+    `detail`, `created_at`, `id`) is byte-identical. That is what account erasure performs
+    (`app/account/erasure.py`: `user_id=None`), and a right-to-erasure that cannot run because the
+    audit trail is frozen is not a security property, it is a compliance defect. Re-identification
+    (NULL back to a value) and any rewrite of the recorded facts are refused;
   * TRUNCATE is left alone deliberately — it is a maintenance/test operation that already requires
     table ownership, it is not reachable from application code, and blocking it would break the
     suite's own table cleanup without protecting anything a row trigger protects.
@@ -30,10 +36,24 @@ def upgrade() -> None:
         """
         CREATE OR REPLACE FUNCTION audit_log_reject_mutation() RETURNS trigger AS $$
         BEGIN
+            -- The single permitted mutation: strip personal identifiers, change nothing else.
+            IF TG_OP = 'UPDATE'
+               AND NEW.id = OLD.id
+               AND NEW.action IS NOT DISTINCT FROM OLD.action
+               AND NEW.entity_type IS NOT DISTINCT FROM OLD.entity_type
+               AND NEW.entity_id IS NOT DISTINCT FROM OLD.entity_id
+               AND NEW.detail IS NOT DISTINCT FROM OLD.detail
+               AND NEW.created_at IS NOT DISTINCT FROM OLD.created_at
+               AND (NEW.user_id IS NULL OR NEW.user_id = OLD.user_id)
+               AND (NEW.ip_address IS NULL OR NEW.ip_address = OLD.ip_address)
+            THEN
+                RETURN NEW;
+            END IF;
             RAISE EXCEPTION
-                'audit_log is append-only: % is not permitted (row %)', TG_OP, COALESCE(OLD.id, NEW.id)
+                'audit_log is append-only (anonymisation is the only permitted change): % refused (row %)',
+                TG_OP, COALESCE(OLD.id, NEW.id)
                 USING ERRCODE = 'restrict_violation',
-                      HINT = 'Record a new audit row instead of changing history.';
+                      HINT = 'Append a new audit row instead of changing history; erasure may only null personal identifiers.';
         END;
         $$ LANGUAGE plpgsql;
         """
