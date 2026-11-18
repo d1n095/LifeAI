@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "description": "Explicit capability declaration for every automated actor in LifeAI. The runtime half is cross-checked against app/mainai_runtime_contract.py (CAPABILITY_MANIFEST, _CAPABILITY_PROVIDER_ROLE, _CAPABILITY_WRITE_PROFILE) by backend/scripts/security/verify_agent_capabilities.py, which fails closed on any drift: a capability that exists in code but is not declared here is a configuration error, not an omission.",
+  "actors": {
+    "mainai_execution": {
+      "description": "The worker process executing dispatched mainai_jobs rows. Holds a lease and a fencing token; may only perform what the leased job's own capability allows.",
+      "allowed": [
+        "execute_declared_job_capabilities",
+        "read_owned_rows_under_rls",
+        "write_own_job_checkpoints_and_task_events",
+        "create_local_git_worktree",
+        "commit_in_isolated_worktree",
+        "run_allowlisted_test_targets"
+      ],
+      "denied": {
+        "merge_pull_request": "app/integrations/github_client.py has no merge method at all; github_auto_merge_enabled gates a capability with no implementation.",
+        "deploy": "No deployment code path exists in the backend; deployment is a human action (scripts/deploy.sh).",
+        "approve_own_change": "app/mainai_execution/approval.py requires founder approval for PUSHED_NO_PR/PR_EXISTS; the auto-recovery tick catches RecoveryApprovalRequiredError and leaves the record for a human.",
+        "disable_security_checks": "security/POLICY_LOCK.json covers .github/workflows/*.yml, .semgrep/, .gitleaks.toml and these scripts; a modification fails the Security policy-integrity job.",
+        "rotate_or_read_secrets": "Secrets live only in the deployment environment; no capability reads env secrets into model context or logs.",
+        "write_outside_worktree": "execution_job._validate_repo_edit_file_path + resolved-path confinement; .git metadata is denied explicitly."
+      }
+    },
+    "development_agent": {
+      "description": "The coding agent operating this branch. It may produce reviewed commits and draft pull requests only.",
+      "allowed": [
+        "edit_source_on_agent_branch",
+        "open_draft_pull_request",
+        "run_tests_and_scanners",
+        "read_repository_metadata"
+      ],
+      "denied": {
+        "merge_pull_request": "Merging is reserved to the founder; this mission runs with no merge and no deployment.",
+        "deploy": "No deployment authorization is granted to the agent.",
+        "approve_own_change": "Approval boundaries require an independent human reviewer (CODEOWNERS); an agent-authored PR cannot satisfy its own review requirement.",
+        "disable_security_checks": "Policy-integrity check fails on any un-reviewed edit to the security controls (see security/POLICY_LOCK.json).",
+        "access_production_data": "Production DATABASE_URL/secrets are not available to the agent environment.",
+        "grant_privileges": "Database privileges are applied by reviewed scripts (backend/scripts/security/*) from a policy module, not ad hoc SQL."
+      }
+    }
+  },
+  "approval_boundaries": [
+    {
+      "id": "push-pr-requires-founder",
+      "summary": "MainAI may create a draft PR but may never merge it or push to a protected branch.",
+      "enforced_by": ["backend/app/integrations/github_client.py", "backend/app/mainai_execution/approval.py", "backend/app/models/mainai_recovery.py:PROTECTED_BRANCHES"]
+    },
+    {
+      "id": "recovery-requires-founder",
+      "summary": "A dead attempt in PUSHED_NO_PR / PR_EXISTS state is classified unattended but taken over only after founder approval.",
+      "enforced_by": ["backend/app/mainai_execution/recovery_approval.py", "backend/app/worker.py:_advance_mainai_execution_auto_recovery"]
+    },
+    {
+      "id": "security-controls-require-review",
+      "summary": "The security controls themselves are integrity-locked; changing them is a reviewed, explicit act.",
+      "enforced_by": [".github/workflows/security.yml", "backend/scripts/security/verify_policy_lock.py"]
+    }
+  ],
+  "runtime_capabilities": {
+    "corpus_review": {
+      "provider_role": "chat",
+      "modifies_existing_data": false,
+      "writes_new_records": true,
+      "sandbox_only": false,
+      "production_prohibited": false
+    },
+    "message_sequence_backfill": {
+      "provider_role": null,
+      "modifies_existing_data": true,
+      "writes_new_records": false,
+      "sandbox_only": false,
+      "production_prohibited": false
+    },
+    "message_source_backfill": {
+      "provider_role": null,
+      "modifies_existing_data": false,
+      "writes_new_records": true,
+      "sandbox_only": false,
+      "production_prohibited": false
+    },
+    "task_execution": {
+      "provider_role": "chat",
+      "modifies_existing_data": false,
+      "writes_new_records": true,
+      "sandbox_only": false,
+      "production_prohibited": false
+    }
+  }
+}
