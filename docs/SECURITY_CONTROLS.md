@@ -83,7 +83,7 @@ workflow only ever runs the verifying mode.
 
 | Control | Where | What it actually refuses |
 |---|---|---|
-| Audit trail is append-only | `backend/alembic/versions/0079_audit_log_append_only.py` | `UPDATE`/`DELETE` on `audit_log` raise `restrict_violation`; tested through the superuser connection, so the guarantee does not depend on the application role's grants |
+| Audit trail is append-only | `backend/alembic/versions/0079_audit_log_append_only.py` | `DELETE` always raises; `UPDATE` raises unless it is pure anonymisation (`user_id`/`ip_address` → NULL with every recorded fact unchanged), which is what the founder's right to erasure performs — re-identification is refused. Tested through the superuser connection, so the guarantee does not depend on the application role's grants |
 | Retrieved text is data | `backend/app/rag/prompt_fencing.py` | retrieved excerpts are fenced, forged fence markers are defused, and the rule is stated to the model beside the excerpts; one marker definition shared by chat and Blueprint |
 | Proposal isolation boundary | `backend/app/mainai_execution/proposal_worktree.py` | attempt ids that are really paths are refused before any directory exists; a credentialed or SSH remote is refused; the isolated tree carries no remote at all |
 

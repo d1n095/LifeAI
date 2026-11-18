@@ -106,8 +106,12 @@ file, failing on newly added control files too), provenance, and a fail-closed g
 Added after the first controls landed, each closing a claim that was not true:
 
 * **Audit trail is append-only** — `AuditLog` claimed immutability with nothing enforcing it.
-  Migration 0079 installs a `BEFORE UPDATE OR DELETE` trigger raising `restrict_violation`; tested
-  through the *superuser* connection so the guarantee does not depend on the app role's grants.
+  Migration 0079 installs a trigger that refuses `DELETE` outright and refuses any `UPDATE` except
+  pure anonymisation (`user_id`/`ip_address` → NULL, every recorded fact unchanged) — the one
+  mutation the founder's right to erasure needs. An earlier absolute version passed its own tests
+  and broke account deletion, which CI caught; the rule now says what the requirement actually is.
+  Tested through the *superuser* connection so the guarantee does not depend on the app role's
+  grants.
 * **Retrieved text is data** — the chat path used to splice document text straight into the SYSTEM
   message, and a document could close Blueprint's fence early. `app/rag/prompt_fencing.py` is now
   the single marker definition, defusing any marker a document forges.
