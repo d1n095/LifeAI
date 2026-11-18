@@ -273,7 +273,15 @@ def _project_map(db: Session, owner_id: uuid.UUID, source_ids) -> dict[uuid.UUID
 
 def _trigger_edges(db: Session, owner_id: uuid.UUID, root_ids, types) -> list[tuple[uuid.UUID, uuid.UUID, str]]:
     """Recorded edges of the given types incident on the roots (either direction),
-    owner-scoped, deterministic order."""
+    owner-scoped, deterministic order.
+
+    Round 8 M3/M5: claim-level contradicts edges COUNT as triggers too — a founder-declared
+    contradiction between two CLAIMS lifts to a contradiction between their SOURCES (a
+    document contradicts what its claims say), mapped via each endpoint claim's source_id.
+    Until this existed, a contradiction recorded on the claim graph propagated to NO
+    dependent document: the "new information changes an earlier conclusion" signal died at
+    the claim layer. Self-edges (both endpoints on the same source) are skipped — that is
+    intra-source tension, visible in the claim's own verdict, not an inter-source event."""
     if not root_ids:
         return []
     rows = db.execute(
@@ -286,7 +294,27 @@ def _trigger_edges(db: Session, owner_id: uuid.UUID, root_ids, types) -> list[tu
         ),
         {"owner": str(owner_id), "types": [t.value for t in types], "roots": [str(r) for r in set(root_ids)]},
     ).all()
-    return [(uuid.UUID(r[0]), uuid.UUID(r[1]), r[2]) for r in rows]
+    triggers = [(uuid.UUID(r[0]), uuid.UUID(r[1]), r[2]) for r in rows]
+
+    if any(t is not None and t.value == "contradicts" for t in types):
+        claim_rows = db.execute(
+            text(
+                "SELECT DISTINCT fc.source_id::text AS from_source, tc.source_id::text AS to_source "
+                "FROM claim_relationships r "
+                "JOIN knowledge_claims fc ON fc.id = r.from_claim_id AND fc.owner_id = r.owner_id "
+                "JOIN knowledge_claims tc ON tc.id = r.to_claim_id AND tc.owner_id = r.owner_id "
+                "WHERE r.owner_id = :owner AND r.relationship_type = 'contradicts' "
+                "AND (fc.source_id = ANY(CAST(:roots AS uuid[])) OR tc.source_id = ANY(CAST(:roots AS uuid[]))) "
+                "ORDER BY from_source, to_source"
+            ),
+            {"owner": str(owner_id), "roots": [str(r) for r in set(root_ids)]},
+        ).all()
+        for from_s, to_s in claim_rows:
+            pair = (uuid.UUID(from_s), uuid.UUID(to_s), "contradicts")
+            if pair[0] != pair[1] and pair not in triggers:
+                triggers.append(pair)
+        triggers.sort(key=lambda t: (str(t[0]), str(t[1]), t[2]))
+    return triggers
 
 
 def _dependents(db: Session, owner_id: uuid.UUID, head_ids, max_depth: int) -> list:
