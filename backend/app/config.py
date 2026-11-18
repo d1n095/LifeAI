@@ -120,6 +120,15 @@ class Settings(BaseSettings):
     # value changed. See app/rag/vector_store.py.
     embedding_dim: int = 1536
 
+    # Instruction-aware embedding models (Qwen3-Embedding and friends) expect the RETRIEVAL
+    # QUERY to carry an instruction prefix while DOCUMENTS stay bare — that asymmetry is how
+    # they were trained, and applying it only to the query channel is what makes their local
+    # retrieval correct (a document that stored the prefix would be embedded off-distribution).
+    # Empty by default: symmetric models (nomic-embed-text, all-minilm, text-embedding-3-*) are
+    # used unmodified, and this can never silently change an established embedding space unless
+    # an operator opts in. Applied in app/rag/query_embedding.py.
+    embedding_query_prefix: str = ""
+
     # Active provider (can be overridden at runtime via admin API -> DB config)
     default_llm_provider: str = "openai"
     default_llm_model: str = "gpt-4o-mini"
@@ -182,6 +191,11 @@ class Settings(BaseSettings):
     # never hang an import waiting to find out a provider is unreachable.
     provider_verification_cache_seconds: int = 300
     provider_verification_timeout_seconds: float = 10.0
+    # Local runtimes (Ollama) need a longer pre-flight budget: the FIRST call after an idle
+    # period (or after a restart) loads the model weights into memory, which routinely takes
+    # longer than the 10s a hosted API ever needs. Kept separate so the fast-fail contract for
+    # cloud providers is untouched (app/providers/verification.py:verification_timeout_seconds).
+    local_verification_timeout_seconds: float = 120.0
 
     # MainAI Core agent orchestration (app/agent_orchestration.py, app/integrations/
     # github_client.py): a GitHub Personal Access Token or App installation token scoped to

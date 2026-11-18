@@ -335,3 +335,30 @@ behålls i allowlistan ifall samma churn upprepas.
 över tid om leverantörerna ändrar priser. Inte en säkerhetsbrist, men en driftsrisk om någon
 förlitar sig på siffran för faktisk fakturering — dokumenterat här för synlighet, inte dolt i
 kodkommentarer bara.
+
+## 5. [2026-11-18] `next`-RCE åtgärdad; `sharp` + `picomatch` allowlistade
+
+`npm audit`-jobbet föll på bas-tipen med 1 critical + 20 high (35 findings totalt enligt
+GitHub Actions-miljön). Utredningen, utan bulk-uppgradering:
+
+**Åtgärdat (riktigt fix, ingen allowlist):**
+
+- `next` `16.2.11` → `16.4.6` (samma major, patch-nivå) och `eslint-config-next` i samma steg.
+  Detta stänger den enda **kritiska** posten (GHSA-p293-qw3h-jr36 m.fl.: oautentiserad RCE i
+  Image Optimization, `next/og`, server actions, SSG/ISR-cacheförgiftning — 12 advisories).
+- `npm audit fix --package-lock-only` (UTAN `--force`) uppdaterade enbart semver-kompatibla
+  transitiva beroenden (`zod`, `js-yaml`, `source-map-js`, `brace-expansion`-kedjan). Resultat:
+  **0 critical, kvarvarande höga fynd härrör från 3 källor i stället för 14.**
+
+**Allowlistat (daterat, ID-specifikt, med motivering i `frontend/scripts/check-npm-audit.js`):**
+
+- `sharp` (`1193725` GHSA-rgj7-g3m4-5g8c, `1241331` GHSA-wq5f-xc86-pv6w): projektet pinnar
+  `overrides.sharp` och använder aldrig `next/image` (verifierat: inga importer i `frontend/app`
+  eller `frontend/components`), så de sårbara libheif/librsvg-dekodrarna nås inte från någon route
+  appen serverar. Tas bort när Next:s egen sharp-rad passerar `0.35.5-rc.1`.
+- `picomatch` (`1247710` GHSA-fc5q-39xc-vjpf): enbart bygg-/lint-verktyg (`tailwindcss` →
+  `chokidar`/`anymatch` och eslint-resolverkedjan), aldrig i produktionsbundlen.
+
+**Medvetet INTE gjort:** `npm audit fix --force`. Det drar in `tailwindcss` 4.x och `eslint`
+10.x (major-uppgraderingar som ändrar bygget) och blandar en ren säkerhetsfix med en
+verktygsmigrering som kräver egen verifiering. Den typen av migrering hör i en egen branch.

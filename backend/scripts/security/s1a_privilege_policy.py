@@ -1,6 +1,6 @@
 """Shared least-privilege policy for `mainai_app`'s runtime table/function privileges.
 
-Two layers, applied together by the same callers, in the same transaction:
+Three layers, applied together by the same callers, in the same transaction:
 
 1. A SCHEMA-WIDE floor (`_NEVER_GRANTED_TABLE_PRIVS`, Pass 44): `TRUNCATE`, `REFERENCES` and
    `TRIGGER` are revoked from mainai_app on EVERY table in schema public — discovered
@@ -12,6 +12,13 @@ Two layers, applied together by the same callers, in the same transaction:
    docs/MAINAI_PROJECT_UNDERSTANDING_PLAN.md §4.8) in `_PROTECTED_TABLES`/`_FUNCTIONS`, which
    narrows a handful of specific tables further than the floor (down to SELECT-only, or to no
    direct privileges at all).
+3. MIGRATION STATE (`_MIGRATION_STATE_TABLES`, SFA-1): `alembic_version` grants the runtime
+   role NO privilege of any kind — not even SELECT. The floor in (1) deliberately leaves the
+   four DML privileges alone (they are genuinely needed on user-data tables), so without this
+   layer `GRANT ALL PRIVILEGES` collateral leaves `mainai_app` able to DELETE the row that
+   records the schema's current revision. Alembic runs exclusively on the admin/migration
+   connection (see `backend/alembic/env.py` and `backend/docker-entrypoint.sh`), so revoking
+   the runtime role's privileges here cannot affect a legitimate migration.
 
 Applied by TWO callers, each owning its own connection/transaction, with DIFFERENT
 completeness requirements (Pass 24 — see `require_complete` on `apply_privilege_policy()`):
@@ -120,6 +127,22 @@ _PROTECTED_TABLES = [
     ("message_source_units", ["SELECT", "INSERT"]),
     ("source_import_batches", ["SELECT", "INSERT", "UPDATE"]),
     ("source_import_batch_failures", ["SELECT", "INSERT"]),
+    # Founder Alpha Blueprint (migration 0070/0071). mainai_app may CREATE (INSERT) and read
+    # (SELECT) drafts, but holds NO direct UPDATE or DELETE: approval is the only legitimate
+    # write and it runs exclusively through the owner-scoped, transaction-safe SECURITY DEFINER
+    # function blueprint_approve_draft (migration 0071, in _FUNCTIONS below). Removing UPDATE is
+    # what makes it impossible for a compromised request path / SQL bug to forge an approval or
+    # tamper approved content; removing DELETE makes an approved draft an undeletable protected
+    # record. A BEFORE UPDATE/DELETE guard trigger enforces the same invariants for any writer
+    # as defense-in-depth (and is what the test suite's app-role sessions — which still hold the
+    # uniform DML floor — actually trip on).
+    ("blueprint_drafts", ["SELECT", "INSERT"]),
+    # S1D (migration 0072 on the 0069-composition integration branch; 0069 on its own PR
+    # branch) — repository_file_source_units is the exact same exclusive-arc
+    # pattern as document_source_units/message_source_units above (every field guarded
+    # immutable by trg_rfsu_guard_update, so UPDATE would always fail via the trigger anyway;
+    # narrowed at the grant level too for the same defense-in-depth reasoning).
+    ("repository_file_source_units", ["SELECT", "INSERT"]),
 ]
 
 _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]
@@ -191,6 +214,33 @@ _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFEREN
 # in `_PROTECTED_TABLES` with its own evidence — not in a blanket floor.
 _NEVER_GRANTED_TABLE_PRIVS = ["TRUNCATE", "REFERENCES", "TRIGGER"]
 
+# SFA-1 (independent review of the integrated Founder Alpha candidate): migration state must
+# be untouchable from the runtime role. `alembic_version` is a single row naming the revision
+# the schema is actually at; it is written only by Alembic, always through the admin/migration
+# connection (`DATABASE_URL`, never `APP_DATABASE_URL` — see backend/alembic/env.py and
+# backend/docker-entrypoint.sh's boot order). `mainai_app` therefore has no legitimate use for
+# it at all, yet held the full four-privilege DML set purely as collateral of the historical
+# `GRANT ALL PRIVILEGES ON ALL TABLES`.
+#
+# Why DELETE specifically matters (the reported finding): deleting that row does not drop the
+# schema, it LIES about it. `alembic upgrade head` then no longer sees an applied revision for
+# the head it is asked to reach, so it re-runs a migration the database has already had — real
+# destructive DDL attempted a second time, from an ordinary request path, with no RLS in the
+# way (RLS is row-scoped and this table has no policy). UPDATE is the same class of problem in
+# the other direction (a forged "already at head" claim skips migrations a restart believes
+# are done), and SELECT is included for the same reason the storage-deletion table grants
+# nothing: the runtime role has no query that needs it (verified — no code under app/ or
+# scripts/ reads `alembic_version`; the only readers are tests and operators, both on the
+# admin connection).
+#
+# This is a separate list from `_PROTECTED_TABLES` on purpose. Those entries carry S1A
+# provenance semantics and an ownership assertion ("owned by the role this boot authenticated
+# as"); `alembic_version` is Alembic's own bookkeeping object and can legitimately be owned by
+# a different provisioning identity on a managed provider, so an ownership assertion here
+# would fail boots for a reason unrelated to this policy. The invariant that matters is only
+# "the runtime role holds nothing on it", which is what is applied and verified below.
+_MIGRATION_STATE_TABLES = ["alembic_version"]
+
 # (function name, granted to mainai_app?, requires BYPASSRLS on its owner?, expected return
 # type, expected identity argument types) — resolved by name AND exact argument types (Pass
 # 25; see _resolve_function). The two owner-scoped functions enforce ownership themselves and
@@ -232,6 +282,11 @@ _FUNCTIONS = [
     ("erase_owner_memory_admin", False, True, "void", ("uuid",)),
     ("storage_key_still_referenced_global", True, True, "boolean", ("text",)),
     ("enqueue_account_erasure_storage_task", True, False, "void", ("uuid", "text")),
+    # blueprint_approve_draft (migration 0071): owner-scoped (derives the owner from
+    # app.current_user_id and re-asserts it, same as RLS — so no BYPASSRLS needed), the single
+    # controlled path that may set a Blueprint draft to 'approved'. mainai_app needs EXECUTE
+    # because approval runs from an ordinary owner-scoped request; it returns only the draft id.
+    ("blueprint_approve_draft", True, False, "uuid", ("uuid", "text")),
 ]
 
 
@@ -401,6 +456,16 @@ def apply_privilege_policy(
         if table not in tables_present and require_complete:
             errors.append(f"{table}: table does not exist (required)")
 
+    # SFA-1. Skipped (not an error) on a boot that runs BEFORE `alembic upgrade head` has ever
+    # created the table — ensure_app_role.py's `require_complete=False` path, where there is
+    # simply nothing to revoke yet. apply_runtime_privileges.py's `require_complete=True` path
+    # always runs after `alembic upgrade head`, where the table must exist, so its absence is a
+    # real configuration error there rather than something to silently tolerate.
+    migration_state_present = {table for table in _MIGRATION_STATE_TABLES if _table_exists(cur, table)}
+    for table in _MIGRATION_STATE_TABLES:
+        if table not in migration_state_present and require_complete:
+            errors.append(f"{table}: table does not exist (required)")
+
     signatures: dict[str, str] = {}
     for name, _grant_to_app, _requires_bypassrls, _expected_return_type, expected_args in _FUNCTIONS:
         sig, resolve_errors = _resolve_function(cur, name, expected_args)
@@ -430,6 +495,14 @@ def apply_privilege_policy(
             f'ALTER DEFAULT PRIVILEGES FOR ROLE "{expected_owner}" IN SCHEMA public '
             f"REVOKE {never_granted_sql} ON TABLES FROM {APP_ROLE}"
         )
+
+        # SFA-1: migration state grants the runtime role nothing at all. `REVOKE ALL` (not the
+        # floor's three-privilege list) is deliberate — SELECT/INSERT/UPDATE/DELETE must go too,
+        # see `_MIGRATION_STATE_TABLES` above.
+        for table in _MIGRATION_STATE_TABLES:
+            if table not in migration_state_present:
+                continue
+            cur.execute(f'REVOKE ALL ON TABLE public."{table}" FROM {APP_ROLE}')
 
         for table, allowed_privs in _PROTECTED_TABLES:
             if table not in tables_present:
@@ -475,6 +548,22 @@ def apply_privilege_policy(
                     f"grant {APP_ROLE} any of {_NEVER_GRANTED_TABLE_PRIVS} (RLS does not apply to "
                     f"TRUNCATE, and REFERENCES/TRIGGER are DDL-only privileges the runtime role "
                     f"never uses)"
+                )
+
+    # SFA-1 verification, in BOTH mutating and read-only (`mutate=False`, worker
+    # `--verify-only`) modes — the worker must fail closed on a database where the runtime role
+    # can still rewrite migration state, exactly as it does for the floor above.
+    for table in _MIGRATION_STATE_TABLES:
+        if table not in migration_state_present:
+            continue  # already reported above when require_complete
+        for priv in _ALL_TABLE_PRIVS:
+            cur.execute("SELECT has_table_privilege(%s, %s, %s)", (APP_ROLE, f'public."{table}"', priv))
+            if cur.fetchone()[0]:
+                errors.append(
+                    f"{table}.{priv}: {APP_ROLE} holds it — migration state must be "
+                    f"untouchable from the runtime role (SFA-1: a deleted or rewritten "
+                    f"version row makes `alembic upgrade head` lie about, or re-run, DDL the "
+                    f"database has already applied)"
                 )
 
     leaked_defaults = _default_acl_privileges(cur) & set(_NEVER_GRANTED_TABLE_PRIVS)
