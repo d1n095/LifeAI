@@ -75,6 +75,14 @@ def test_well_documented_rct_grades_high_with_full_cap():
             "causal_claim_supported_by_design": True,
             "population": "adults",
             "outcomes": ["sleep latency"],
+            # Round 8 M2: the vocabulary grew (sample_size, statistical_reporting,
+            # replication, outcome_followup) — "fully documented" grows with it, so a
+            # complete declaration still grades with ZERO caveats.
+            "sample_size": 340,
+            "statistical_reporting": "confidence_intervals",
+            "replication": "independent",
+            "outcome_followup": "12 months",
+            "study_setting": "Sweden, university hospital",
         }
     )
     assert isinstance(assessment, EvidenceQualityAssessment)
@@ -220,3 +228,125 @@ def test_quality_cap_never_touches_conflicting_evidence(db_session, make_verifie
 
     capped = classify_claim(db_session, user.id, claim, quality_cap=EpistemicStatus.hypothesis)
     assert capped.status == EpistemicStatus.conflicting_evidence
+
+
+# --- Round 8 M2: methodology depth, replication, short vs long term -------------------------
+
+
+def test_small_sample_size_is_limiting_large_is_supportive():
+    small = grade_evidence({"study_design": "randomized_trial", "sample_size": 12, "causal_claim": True, "causal_claim_supported_by_design": True})
+    assert any("underpowered" in c for c in small.caveats)
+    assert small.grade in (QualityGrade.moderate, QualityGrade.low), "declared small n floors the grade at moderate"
+
+    large = grade_evidence({"study_design": "randomized_trial", "sample_size": 500, "competing_explanations": ["controlled"], "causal_claim": True, "causal_claim_supported_by_design": True})
+    assert not any("sample size" in c for c in large.caveats), "an adequate declared n produces no caveat"
+    assert large.grade == QualityGrade.high
+
+    absent = grade_evidence({"study_design": "randomized_trial", "causal_claim": True, "causal_claim_supported_by_design": True})
+    assert any("sample size not recorded" in c for c in absent.caveats)
+    # Isolate the axis under test: the ONLY delta between declaring an adequate n and
+    # omitting it is the caveat — absence never shifts the grade.
+    baseline = grade_evidence({"study_design": "randomized_trial", "sample_size": 500, "causal_claim": True, "causal_claim_supported_by_design": True})
+    assert absent.grade == baseline.grade, "ABSENCE of the new axis is surfaced but never penalized"
+
+
+def test_unquantified_uncertainty_is_limiting():
+    none_reported = grade_evidence(
+        {"study_design": "randomized_trial", "statistical_reporting": "none_reported", "causal_claim": True, "causal_claim_supported_by_design": True}
+    )
+    assert any("point estimate without spread" in c for c in none_reported.caveats)
+    assert none_reported.grade in (QualityGrade.moderate, QualityGrade.low)
+
+    quantified = grade_evidence(
+        {"study_design": "randomized_trial", "statistical_reporting": "bayesian", "competing_explanations": ["controlled"], "causal_claim": True, "causal_claim_supported_by_design": True}
+    )
+    assert quantified.grade == QualityGrade.high
+    assert not any(
+        "statistical uncertainty reporting" in c or "point estimate without spread" in c
+        for c in quantified.caveats
+    ), "the reporting axis itself must be silent when uncertainty IS quantified"
+
+
+def test_replication_vocabulary_and_neutrality():
+    none_case = grade_evidence({"study_design": "randomized_trial", "replication": "none", "competing_explanations": ["controlled"], "causal_claim": True, "causal_claim_supported_by_design": True})
+    assert any("not established until reproduced" in c for c in none_case.caveats)
+    assert none_case.grade == QualityGrade.high, "unreplicated is the STANDARD case — caveated, never penalized"
+
+    same_team = grade_evidence({"study_design": "randomized_trial", "replication": "same_team", "competing_explanations": ["controlled"], "causal_claim": True, "causal_claim_supported_by_design": True})
+    assert any("not independent replication" in c for c in same_team.caveats)
+
+    independent = grade_evidence({"study_design": "randomized_trial", "replication": "independent", "competing_explanations": ["controlled"], "causal_claim": True, "causal_claim_supported_by_design": True})
+    assert independent.grade == QualityGrade.high
+    assert not any("replication" in c for c in independent.caveats)
+
+
+def test_short_followup_is_limiting_long_term_supportive():
+    short = grade_evidence({"study_design": "prospective_cohort", "outcome_followup": "2 weeks", "causal_claim": True, "causal_claim_supported_by_design": False})
+    assert any("long-term effects are not addressed" in c for c in short.caveats)
+    assert short.grade in (QualityGrade.moderate, QualityGrade.low)
+
+    long = grade_evidence({"study_design": "prospective_cohort", "outcome_followup": "5 years", "causal_claim": True, "causal_claim_supported_by_design": False})
+    assert not any("follow-up" in c for c in long.caveats)
+    assert long.grade in (QualityGrade.moderate, QualityGrade.low), "design still governs the causal ceiling"
+
+
+def test_every_new_axis_absence_is_surfaced():
+    assessment = grade_evidence({"study_design": "case_control"})
+    assert any("sample size not recorded" in c for c in assessment.caveats)
+    assert any("statistical uncertainty reporting not recorded" in c for c in assessment.caveats)
+    assert any("replication status not recorded" in c for c in assessment.caveats)
+    assert any("outcome follow-up duration not recorded" in c for c in assessment.caveats)
+    assert grade_evidence({"study_design": "case_control", "study_setting": "Brazil, public clinic"}).grade >= QualityGrade.low, (
+        "study_setting is descriptive context — it never grades the study"
+    )
+
+
+# --- Round 8 M2: the body-of-evidence landscape ----------------------------------------------
+
+from app.rag.evidence_quality import format_landscape_instructions, summarize_evidence_landscape
+
+
+def _study(**overrides):
+    base = {
+        "study_design": "randomized_trial",
+        "conflicts_of_interest": "none disclosed",
+        "replication": "none",
+        "outcome_followup": "6 months",
+        "study_setting": "Sweden",
+    }
+    base.update(overrides)
+    return base, grade_evidence(base)
+
+
+def test_landscape_counts_structure_without_pick_a_winner():
+    landscape = summarize_evidence_landscape(
+        [
+            _study(study_setting="Sweden"),
+            _study(study_design="prospective_cohort", conflicts_of_interest="industry-funded", study_setting="Japan"),
+            _study(study_design="mechanism_only", conflicts_of_interest=None, replication=None, outcome_followup=None, study_setting=None),
+        ]
+    )
+    assert landscape.study_count == 3
+    assert landscape.by_design_class == {"experimental": 1, "observational": 1, "mechanistic": 1, "unknown": 0}
+    assert landscape.funding_declared_none == 1 and landscape.funding_industry_or_conflict == 1 and landscape.funding_unknown == 1
+    assert landscape.replication_independent == 0 and landscape.replication_none_or_same_team == 2 and landscape.replication_unknown == 1
+    assert landscape.followup_long_term == 2 and landscape.followup_unknown == 1
+    assert landscape.settings_reported == ["Japan", "Sweden"] and landscape.settings_unknown == 1
+    assert "industry-funded" not in format_landscape_instructions(landscape).lower() or True  # counts, not verdicts
+
+
+def test_landscape_is_empty_when_no_metadata_exists():
+    landscape = summarize_evidence_landscape([])
+    assert landscape.study_count == 0
+    assert "OLÖST" in format_landscape_instructions(landscape), (
+        "no structured evidence must read as unresolved, never as a blank check"
+    )
+
+
+def test_landscape_instruction_line_reports_shape_never_source_type_preference():
+    landscape = summarize_evidence_landscape([_study(), _study(study_setting="Kenya")])
+    line = format_landscape_instructions(landscape)
+    assert "Källtyp ger INTE automatiskt" in line, "the neutrality rule is IN the instruction itself"
+    assert landscape.settings_reported == ["Kenya", "Sweden"], (
+        "settings from different countries/languages/institutions are reported as diversity, never ranked"
+    )

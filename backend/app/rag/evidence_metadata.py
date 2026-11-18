@@ -121,6 +121,40 @@ def _study_design_key(key: str):
     return _norm
 
 
+def _vocabulary_key(key: str, valid_values: tuple[str, ...], label: str):
+    """Closed-vocabulary string keys (statistical_reporting, replication): an out-of-
+    vocabulary value is REJECTED with the valid set named — fail-closed at the producer,
+    so the grader only ever sees values from its own vocabulary (it still defends itself
+    for direct callers, but the stamp path never relies on that)."""
+    def _norm(value, rejected: dict[str, str]):
+        if not isinstance(value, str):
+            rejected[key] = f"expected a string, got {type(value).__name__}"
+            return None
+        stripped = value.strip()
+        if stripped not in valid_values:
+            rejected[key] = f"'{value}' is not a known {label}; valid: {', '.join(valid_values)}"
+            return None
+        return stripped
+
+    return _norm
+
+
+def _int_key(key: str):
+    def _norm(value, rejected: dict[str, str]):
+        if isinstance(value, bool):
+            rejected[key] = "expected an integer, got a boolean"
+            return None
+        if isinstance(value, int):
+            if value < 0:
+                rejected[key] = "sample size cannot be negative"
+                return None
+            return value
+        rejected[key] = f"expected an integer, got {type(value).__name__}"
+        return None
+
+    return _norm
+
+
 # The exact vocabulary grade_evidence() reads — a closed whitelist. Keys outside it are
 # rejected, not silently stored: storing a key the grader never reads would be metadata
 # theater (the founder believes they declared something that changes the verdict; it
@@ -137,6 +171,18 @@ DECLARED_KEYS: dict[str, object] = {
     "competing_explanations": _str_list_key("competing_explanations"),
     "causal_claim": _bool_key("causal_claim"),
     "causal_claim_supported_by_design": _bool_key("causal_claim_supported_by_design"),
+    # Round 8 M2: methodology depth + replication + short/long-term + descriptive setting.
+    # study_setting is deliberately graded NOWHERE — it feeds the evidence-landscape
+    # summarizer's diversity report, and grading by geography/institution would be exactly
+    # the "mainstream vs alternative" bias the mission forbids.
+    "sample_size": _int_key("sample_size"),
+    "statistical_reporting": _vocabulary_key(
+        "statistical_reporting", ("confidence_intervals", "p_values", "bayesian", "none_reported"),
+        "statistical reporting value",
+    ),
+    "replication": _vocabulary_key("replication", ("independent", "same_team", "none"), "replication value"),
+    "outcome_followup": _str_key("outcome_followup"),
+    "study_setting": _str_key("study_setting"),
 }
 
 

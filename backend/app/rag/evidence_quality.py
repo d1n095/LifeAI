@@ -233,9 +233,107 @@ def _axis_causal_uncertainty(meta: dict, caveats: list[str]) -> tuple[AxisFindin
     return AxisFinding("causal_uncertainty", "neutral", "association only", "no causal claim to evaluate"), False
 
 
+def _axis_sample_size(meta: dict, caveats: list[str]) -> AxisFinding:
+    """Round 8 M2 axis. Limiting ONLY when a declared size is genuinely small — absence is
+    surfaced (power cannot be assessed) but never penalized, so every metadata dict graded
+    before this axis existed keeps its grade and only gains the explicit caveat."""
+    n = meta.get("sample_size")
+    if n is None or str(n).strip() == "":
+        caveats.append("sample size not recorded — statistical power cannot be assessed")
+        return AxisFinding("sample_size", "unknown", "not recorded", "an underpowered study can hide real effects")
+    try:
+        count = int(n)
+    except (TypeError, ValueError):
+        caveats.append("sample size not recorded as a number — power cannot be assessed")
+        return AxisFinding("sample_size", "unknown", str(n), "non-numeric sample size")
+    if count < 30:
+        caveats.append(f"sample size {count} is small — underpowered for small or moderate effects")
+        return AxisFinding("sample_size", "limiting", str(count), "small samples overstate precision and miss small effects")
+    supportive = count >= 100
+    return AxisFinding(
+        "sample_size",
+        "supportive" if supportive else "neutral",
+        str(count),
+        "adequate for moderate effects" if supportive else "moderate — adequate for large effects only",
+    )
+
+
+_STATISTICAL_REPORTING_VALUES = ("confidence_intervals", "p_values", "bayesian", "none_reported")
+
+
+def _axis_statistical_reporting(meta: dict, caveats: list[str]) -> AxisFinding:
+    """Round 8 M2 axis: does the study quantify its own uncertainty? `none_reported` is
+    LIMITING — a point estimate without spread cannot bound the evidence, and the absence
+    of uncertainty language is how overconfidence smuggles itself into a conclusion."""
+    raw = meta.get("statistical_reporting")
+    if raw is None or str(raw).strip() == "":
+        caveats.append("statistical uncertainty reporting not recorded — the precision of the effect is unknown")
+        return AxisFinding("statistical_reporting", "unknown", "not recorded", "uncertainty language is part of the evidence")
+    value = str(raw).strip()
+    if value not in _STATISTICAL_REPORTING_VALUES:
+        valid = ", ".join(_STATISTICAL_REPORTING_VALUES)
+        caveats.append(f"statistical reporting value '{value}' is not part of the closed vocabulary ({valid})")
+        return AxisFinding("statistical_reporting", "unknown", value, "unrecognized reporting vocabulary")
+    if value == "none_reported":
+        caveats.append("no uncertainty quantification reported — a point estimate without spread cannot bound the evidence")
+        return AxisFinding("statistical_reporting", "limiting", value, "unquantified uncertainty is unbounded uncertainty")
+    return AxisFinding("statistical_reporting", "supportive", value, "uncertainty quantified in the study itself")
+
+
+_REPLICATION_VALUES = ("independent", "same_team", "none")
+
+
+def _axis_replication(meta: dict, caveats: list[str]) -> AxisFinding:
+    """Round 8 M2 axis. `none` is deliberately NEUTRAL-with-caveat, not limiting: most
+    single studies are unreplicated at publication, and penalizing the standard case would
+    grade every honest study as weak. The caveat says why replication still matters; the
+    landscape summarizer is where replication coverage across studies is weighed."""
+    raw = meta.get("replication")
+    if raw is None or str(raw).strip() == "":
+        caveats.append("replication status not recorded — whether the finding has been reproduced is unknown")
+        return AxisFinding("replication", "unknown", "not recorded", "replication is how findings stop being one team's result")
+    value = str(raw).strip()
+    if value not in _REPLICATION_VALUES:
+        valid = ", ".join(_REPLICATION_VALUES)
+        caveats.append(f"replication value '{value}' is not part of the closed vocabulary ({valid})")
+        return AxisFinding("replication", "unknown", value, "unrecognized replication vocabulary")
+    if value == "independent":
+        return AxisFinding("replication", "supportive", value, "independently reproduced — the strongest ordinary evidence of reliability")
+    if value == "same_team":
+        caveats.append("replication is by the same team — not independent replication")
+        return AxisFinding("replication", "neutral", value, "same-team reproduction shares the original's methods and blind spots")
+    caveats.append("no independent replication recorded — a single finding is not established until reproduced")
+    return AxisFinding("replication", "neutral", value, "single study")
+
+
+def _axis_outcome_followup(meta: dict, caveats: list[str]) -> AxisFinding:
+    """Round 8 M2 axis: short-term versus long-term. Short declared follow-up is LIMITING
+    for any claim about lasting effects — acute outcomes cannot vouch for chronic ones.
+    Absence is surfaced, never penalized."""
+    raw = meta.get("outcome_followup")
+    if raw is None or str(raw).strip() == "":
+        caveats.append("outcome follow-up duration not recorded — short versus long-term effects cannot be distinguished")
+        return AxisFinding("outcome_followup", "unknown", "not recorded", "duration changes what an outcome can mean")
+    text_value = str(raw).lower()
+    long_term = any(w in text_value for w in ("month", "year", "chronic", "long-term", "long term", "longitudinal"))
+    if long_term:
+        return AxisFinding("outcome_followup", "supportive", str(raw), "documented long-term follow-up")
+    caveats.append(
+        f"short follow-up ({raw}) — long-term effects are not addressed by this evidence alone"
+    )
+    return AxisFinding("outcome_followup", "limiting", str(raw), "acute outcomes cannot vouch for chronic ones")
+
+
 def grade_evidence(meta: dict) -> EvidenceQualityAssessment:
     """Grade one study's structured metadata. Pure function: no DB, no model leg — the
-    same metadata always yields the same assessment."""
+    same metadata always yields the same assessment.
+
+    Round 8 M2 adds four axes (sample_size, statistical_reporting, replication,
+    outcome_followup) plus a descriptive study_setting field. The new axes are LIMITING
+    only when a value IS declared and that value is genuinely limiting; ABSENCE of a new
+    axis is surfaced as an explicit caveat but never penalized — every metadata dict graded
+    under the earlier vocabulary keeps its grade and only gains the caveats, so the
+    closed-vocabulary contract with stamped claims never shifts underneath them."""
     meta = meta or {}
     caveats: list[str] = []
 
@@ -256,6 +354,15 @@ def grade_evidence(meta: dict) -> EvidenceQualityAssessment:
     axes.append(_axis_competing_explanations(meta, caveats))
     causal_finding, causal_ok = _axis_causal_uncertainty(meta, caveats)
     axes.append(causal_finding)
+    # Round 8 M2 axes: methodology depth (sample size, uncertainty reporting), replication,
+    # and short-vs-long-term follow-up. study_setting is deliberately NOT a grading axis —
+    # where a study was done is descriptive context for the landscape summarizer, and
+    # grading by geography would be exactly the "mainstream vs alternative" bias the
+    # mission forbids.
+    axes.append(_axis_sample_size(meta, caveats))
+    axes.append(_axis_statistical_reporting(meta, caveats))
+    axes.append(_axis_replication(meta, caveats))
+    axes.append(_axis_outcome_followup(meta, caveats))
 
     # Aggregate: start from the design ceiling, then take every LIMITING axis's floor.
     grade = QualityGrade.high
@@ -265,6 +372,12 @@ def grade_evidence(meta: dict) -> EvidenceQualityAssessment:
         "conflicts_of_interest": QualityGrade.low,
         "competing_explanations": QualityGrade.moderate,
         "causal_uncertainty": QualityGrade.moderate,
+        # Round 8 M2: a declared-and-limiting methodology axis floors the grade at
+        # moderate — it degrades confidence in the EFFECT SIZE, it does not change what
+        # the design can structurally prove (the ladder cap stays design-driven).
+        "sample_size": QualityGrade.moderate,
+        "statistical_reporting": QualityGrade.moderate,
+        "outcome_followup": QualityGrade.moderate,
     }
     for finding in axes:
         if finding.direction == "limiting":
@@ -302,3 +415,166 @@ def epistemic_cap(meta: dict) -> EpistemicStatus:
     """Convenience: the highest EpistemicStatus the metadata can support — the single
     integration point with app/rag/epistemics.classify_claim(quality_cap=...)."""
     return grade_evidence(meta).epistemic_cap
+
+
+# --------------------------------------------------------------------------------------
+# Round 8 M2: the BODY-OF-EVIDENCE layer. grade_evidence() grades ONE study; a real
+# research question is decided by a SET of studies that may agree, disagree, replicate,
+# contradict, or share funders. summarize_evidence_landscape() aggregates a set of
+# already-computed assessments into a structured, provenance-aware report — and is
+# deliberately blind to source type: nothing here ranks, weights, or excludes by
+# mainstream/alternative/independent/industry. Funding conflicts are COUNTS with their
+# per-study provenance, never verdicts; institutional diversity is descriptive context.
+# --------------------------------------------------------------------------------------
+
+from collections import Counter  # noqa: E402  (module-level by design: pure stdlib)
+from dataclasses import dataclass  # noqa: E402
+
+_DESIGN_CLASS = {
+    StudyDesign.meta_analysis: "experimental",
+    StudyDesign.randomized_trial: "experimental",
+    StudyDesign.prospective_cohort: "observational",
+    StudyDesign.retrospective_cohort: "observational",
+    StudyDesign.case_control: "observational",
+    StudyDesign.case_series: "observational",
+    StudyDesign.in_vitro: "mechanistic",
+    StudyDesign.mechanism_only: "mechanistic",
+}
+
+
+@dataclass
+class EvidenceLandscape:
+    """The structured body-of-evidence report for one question. Every field is a COUNT
+    with its derivation documented — the report says what the corpus looks like, never
+    which side wins (contradiction handling stays with the ladder's conflicting_evidence
+    verdict and the graph layer, which carry claim-level provenance)."""
+
+    study_count: int
+    by_design_class: dict[str, int]          # experimental | observational | mechanistic | unknown
+    funding_declared_none: int
+    funding_industry_or_conflict: int
+    funding_unknown: int
+    replication_independent: int
+    replication_none_or_same_team: int
+    replication_unknown: int
+    followup_long_term: int
+    followup_short_term: int
+    followup_unknown: int
+    settings_reported: list[str]             # distinct, order-stable
+    settings_unknown: int
+    grade_counts: dict[str, int]
+    caveats_top: list[tuple[str, int]]       # the caveats the corpus keeps producing
+    limited_by: list[str]                    # axes that LIMIT the strongest studies here
+
+
+def summarize_evidence_landscape(items: list[tuple[dict, "EvidenceQualityAssessment"]]) -> EvidenceLandscape:
+    """Aggregate (metadata, assessment) pairs for studies addressing one question.
+
+    Deterministic; pure. `items` carries each study's own declared metadata next to its
+    assessment so every count is traceable to what the founder/producer actually declared
+    — no re-derivation, no inference of undisclosed fields."""
+    design_classes: Counter = Counter()
+    funding_none = funding_conflict = funding_unknown = 0
+    repl_independent = repl_weak = repl_unknown = 0
+    followup_long = followup_short = followup_unknown = 0
+    settings: list[str] = []
+    settings_unknown = 0
+    grades: Counter = Counter()
+    caveat_counter: Counter = Counter()
+    limited_axes: Counter = Counter()
+
+    for meta, assessment in items:
+        meta = meta or {}
+        design_raw = meta.get("study_design")
+        try:
+            design = StudyDesign(design_raw) if design_raw else StudyDesign.unknown
+        except ValueError:
+            design = StudyDesign.unknown
+        design_classes[_DESIGN_CLASS.get(design, "unknown")] += 1
+
+        coi = str(meta.get("conflicts_of_interest") or "").strip().lower()
+        if not coi:
+            funding_unknown += 1
+        elif any(w in coi for w in ("none", "no conflict", "declared none", "independent")):
+            funding_none += 1
+        else:
+            funding_conflict += 1
+
+        repl = str(meta.get("replication") or "").strip()
+        if not repl:
+            repl_unknown += 1
+        elif repl == "independent":
+            repl_independent += 1
+        else:
+            repl_weak += 1
+
+        fu = str(meta.get("outcome_followup") or "").lower()
+        if not fu:
+            followup_unknown += 1
+        elif any(w in fu for w in ("month", "year", "chronic", "long-term", "long term", "longitudinal")):
+            followup_long += 1
+        else:
+            followup_short += 1
+
+        setting = str(meta.get("study_setting") or "").strip()
+        if setting:
+            settings.append(setting)
+        else:
+            settings_unknown += 1
+
+        grades[assessment.grade.value] += 1
+        for caveat in assessment.caveats:
+            caveat_counter[caveat] += 1
+        for axis in assessment.axes:
+            if axis.direction == "limiting":
+                limited_axes[axis.axis] += 1
+
+    return EvidenceLandscape(
+        study_count=len(items),
+        by_design_class={k: design_classes.get(k, 0) for k in ("experimental", "observational", "mechanistic", "unknown")},
+        funding_declared_none=funding_none,
+        funding_industry_or_conflict=funding_conflict,
+        funding_unknown=funding_unknown,
+        replication_independent=repl_independent,
+        replication_none_or_same_team=repl_weak,
+        replication_unknown=repl_unknown,
+        followup_long_term=followup_long,
+        followup_short_term=followup_short,
+        followup_unknown=followup_unknown,
+        settings_reported=sorted(set(settings)),
+        settings_unknown=settings_unknown,
+        grade_counts={k: grades.get(k, 0) for k in ("high", "moderate", "low", "very_low", "unassessable")},
+        caveats_top=caveat_counter.most_common(5),
+        limited_by=sorted(limited_axes.keys()),
+    )
+
+
+def format_landscape_instructions(landscape: EvidenceLandscape) -> str:
+    """The one-line instruction text for research/chat prompt layers (Swedish, matching
+    format_epistemic_instructions). Structural neutrality is the point: it reports SHAPE
+    (designs, funding disclosure, replication, follow-up, settings) and NEVER a verdict —
+    the model is told to treat the corpus's limitations as limitations of the evidence,
+    not to prefer any source type."""
+    if landscape.study_count == 0:
+        return (
+            "EVIDENSlandskap: inga studier med deklarerad metadata att sammanfatta — "
+            "behandla frågan som OLÖST tills strukturerad evidens finns."
+        )
+    diversity = (
+        f"miljöer/inställningar rapporterade: {len(landscape.settings_reported)}"
+        if landscape.settings_reported
+        else "miljöer/inställningar ej rapporterade"
+    )
+    return (
+        f"EVIDENSlandskap ({landscape.study_count} studier): "
+        f"{landscape.by_design_class.get('experimental', 0)} experimentella, "
+        f"{landscape.by_design_class.get('observational', 0)} observationella, "
+        f"{landscape.by_design_class.get('mechanistic', 0)} mekanistiska; "
+        f"intressekonflikt deklarerad: ingen {landscape.funding_declared_none}, "
+        f"konflikt {landscape.funding_industry_or_conflict}, okänd {landscape.funding_unknown}; "
+        f"replikering oberoende {landscape.replication_independent}, "
+        f"ej oberoende {landscape.replication_none_or_same_team}, okänd {landscape.replication_unknown}; "
+        f"långtidsuppföljning {landscape.followup_long_term}, kort {landscape.followup_short_term}, "
+        f"okänd {landscape.followup_unknown}; {diversity}. "
+        "Källtyp ger INTE automatiskt förtroende eller misstro: väg strukturen, inte ursprunget."
+    )
