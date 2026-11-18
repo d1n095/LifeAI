@@ -43,6 +43,16 @@ class DocumentChunk(Base):
     embedding: Mapped[list[float]] = mapped_column(Vector(settings.embedding_dim))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+    # Embedding-space identity (migration 0069_embedding_space_identity): which embedding model
+    # produced this vector, and its NATIVE dimension before zero-padding to the storage column
+    # width (see app/rag/embedding_space.py). Retrieval filters strictly to the active
+    # (embedding_model, embedding_native_dim) so vectors from different models/dims — which
+    # share this one fixed-width column — are NEVER compared. Nullable: rows written before
+    # this migration (and legacy OpenAI-1536 rows) carry NULL and are invisible to a
+    # different active space until re-embedded, rather than being silently mixed in.
+    embedding_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    embedding_native_dim: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     # STEG 12: set together, both or neither — a chunk built from a timed transcript
     # segment (app/rag/media_import.py) carries the [start, end) it was built from, so a
     # citation can open the source at the exact moment instead of just the source itself.
