@@ -179,7 +179,28 @@ def _validate_repo_edit_file_path(path_value: object) -> str:
     path = PurePosixPath(path_value)
     if path.is_absolute() or ".." in path.parts:
         raise TaskExecutionError(f"Refusing an absolute or '..'-escaping file path from the code agent: {path_value!r}")
+    # PI-1b/PI-1c consistency fix. `.git/hooks/pre-commit` is repository-relative, has no `..`,
+    # and resolves *inside* the repo root -- so every check above passes it -- yet writing there
+    # is not a payload edit at all: it plants executable code that git itself runs, on the
+    # executor host, outside any verification step. `development_operator._path()` has denied
+    # `.git` (case-insensitively) since it was written; this older code-agent path, which runs
+    # against the shared checkout in proposal mode and against the per-task worktree otherwise,
+    # had no such rule. Denied here, matching that established policy rather than inventing a
+    # second one, and denied again on the RESOLVED path below so a symlink into .git cannot
+    # smuggle a syntactically clean name through either.
+    if ".git" in {part.lower() for part in path.parts}:
+        raise TaskExecutionError(f"Refusing a path into repository git metadata from the code agent: {path_value!r}")
     return path_value
+
+
+def _reject_git_metadata_target(resolved: Path, root: Path, *, proposed: str, where: str) -> None:
+    """Resolved-path half of the rule above: `resolved` has already had every symlink
+    followed, so this also catches a name that only reaches `.git` after resolution."""
+    git_dir = (root / ".git").resolve()
+    if resolved == git_dir or git_dir in resolved.parents:
+        raise TaskExecutionError(
+            f"Refusing to write into repository git metadata ({where}): {proposed!r} resolved to {resolved}."
+        )
 
 
 def _parse_code_agent_response(raw: str) -> dict:
@@ -233,6 +254,7 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
         abs_path = (repo_root / file["path"]).resolve()
         if abs_path != repo_root and repo_root not in abs_path.parents:
             raise TaskExecutionError(f"Refusing to write outside the repo root: {file['path']!r} resolved to {abs_path}.")
+        _reject_git_metadata_target(abs_path, repo_root, proposed=file["path"], where="shared checkout")
         previous_contents[file["path"]] = abs_path.read_text() if abs_path.exists() else None
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         abs_path.write_text(file["content"])
@@ -353,6 +375,9 @@ async def _handle_repo_edit(
         abs_path = (worktree_root / file["path"]).resolve()
         if abs_path != worktree_root and worktree_root not in abs_path.parents:
             raise TaskExecutionError(f"Refusing to write outside the worktree root: {file['path']!r} resolved to {abs_path}.")
+        # A worktree has its own `.git` FILE (not directory) pointing at the shared git dir; both
+        # the file itself and anything reachable through it are metadata, never payload.
+        _reject_git_metadata_target(abs_path, worktree_root, proposed=file["path"], where="task worktree")
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         abs_path.write_text(file["content"])
 
