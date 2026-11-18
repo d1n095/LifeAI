@@ -366,6 +366,10 @@ class KnowledgeClaimOut(BaseModel):
     grounding_score: float
     chunk_id: uuid.UUID | None
     created_at: datetime
+    # Evidence-aware epistemics (app/rag/epistemics.py): verified_fact |
+    # conflicting_evidence | hypothesis | assumption | unknown — additive; None only for
+    # constructors that predate the ladder (every live read path sets it).
+    epistemic_status: str | None = None
 
 
 class MediaSegmentOut(BaseModel):

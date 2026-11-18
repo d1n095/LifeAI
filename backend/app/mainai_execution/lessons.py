@@ -19,9 +19,14 @@ import uuid
 
 from sqlalchemy import String, cast, select
 from sqlalchemy.dialects.postgresql import ARRAY
+import logging
+
 from sqlalchemy.orm import Session
 
 from app.models.mainai_execution import EngineeringLesson, EngineeringLessonConfidence, EngineeringLessonStatus
+
+
+logger = logging.getLogger("mainai.lessons")
 
 
 def record_lesson(
@@ -196,3 +201,55 @@ def apply_lessons_to_verification_plan(db: Session, *, task_type: str, verificat
         applied_lesson_ids.append(lesson.id)
 
     return augmented, applied_lesson_ids
+
+def record_lesson_guard_advisory(
+    db,
+    *,
+    owner_id,
+    goal_id,
+    task_type: str,
+    spec_verification_plan: list[dict],
+    augmented_verification_plan: list[dict],
+    applied_lesson_ids: list,
+) -> None:
+    """Anti-overcorrection advisory at PLAN time (app/mainai_execution/correction_intelligence.py):
+    when the lesson layer's additions dominate a task's verification plan, the plan is
+    mostly re-checking past corrections instead of verifying new work — the mechanism by
+    which a correction would quietly disable legitimate behavior. ADVISORY ONLY: this never
+    mutates the plan (apply_lessons_to_verification_plan's additions stand), it records the
+    signal where the founder can see it — the audit trail — and logs it. Called from
+    planner.create_plan right after apply_lessons_to_verification_plan, inside the same
+    transaction (commit=False so the advisory is atomic with the plan itself)."""
+    from app.mainai_execution.correction_intelligence import overcorrection_risk
+
+    lesson_targets: set[str] = set()
+    if applied_lesson_ids:
+        from sqlalchemy.orm import Session  # noqa: F401 - typing only
+        from app.models.mainai_execution import EngineeringLesson
+
+        for lesson in db.query(EngineeringLesson).filter(EngineeringLesson.id.in_(list(applied_lesson_ids))).all():
+            if lesson.regression_test:
+                lesson_targets.add(lesson.regression_test)
+    founder_targets = {
+        step.get("target") for step in (spec_verification_plan or []) if step.get("kind") == "targeted_tests"
+    }
+    report = overcorrection_risk(
+        augmented_verification_plan or [],
+        lesson_targets=lesson_targets,
+        founder_targets=founder_targets,
+    )
+    if report.acceptable:
+        return
+    detail = f"task_type={task_type}; {report.summary}"
+    logger.warning("Overcorrectionsrisk i verifieringsplan: %s", detail)
+    from app.audit import record_audit
+
+    record_audit(
+        db,
+        user_id=owner_id,
+        action="lesson_guard_overcorrection_advisory",
+        entity_type="mainai_goal",
+        entity_id=str(goal_id) if goal_id else None,
+        detail=detail,
+        commit=False,
+    )

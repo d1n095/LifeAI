@@ -16,8 +16,13 @@ from app.providers.registry import chat_with_fallback
 from app.rag.ingest import index_document
 from app.rag.retrieve import retrieve_context
 from app.blueprint_readiness import collect_blueprint_readiness
+import logging
+
+from app.rag.epistemics import epistemic_status_counts_sql, format_epistemic_instructions
 from app.rag.trust import assess_confidence, build_trust_instructions, detect_conflicts
 from app.schemas import KnowledgeSourceOut, SourceRef, WorkbenchAnalyzeIn, WorkbenchAnalyzeOut, WorkbenchSaveIn
+
+logger = logging.getLogger("mainai.workbench")
 
 router = APIRouter(prefix="/api/workbench", tags=["workbench"], dependencies=[Depends(require_founder)])
 

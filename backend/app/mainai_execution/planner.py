@@ -27,7 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.mainai_execution.graph import recompute_task_readiness
-from app.mainai_execution.lessons import apply_lessons_to_verification_plan
+from app.mainai_execution.lessons import apply_lessons_to_verification_plan, record_lesson_guard_advisory
 from app.mainai_execution.verify import VerificationStepError, validate_targeted_tests_target
 from app.models.mainai_execution import (
     TERMINAL_MAINAI_TASK_STATUSES,
@@ -290,6 +290,18 @@ def create_plan(
         # ever ADDS to verification_plan, never removes a step the planner/founder specified.
         verification_plan, applied_lesson_ids = apply_lessons_to_verification_plan(
             db, task_type=spec.task_type, verification_plan=spec.verification_plan
+        )
+        # Anti-overcorrection advisory (app/mainai_execution/lessons.py): records the
+        # signal when past-lesson guards dominate this task's plan — advisory only, the
+        # plan above stands.
+        record_lesson_guard_advisory(
+            db,
+            owner_id=goal.owner_id,
+            goal_id=goal.id,
+            task_type=spec.task_type,
+            spec_verification_plan=spec.verification_plan,
+            augmented_verification_plan=verification_plan,
+            applied_lesson_ids=applied_lesson_ids,
         )
         task = MainAITask(
             goal_id=goal.id,

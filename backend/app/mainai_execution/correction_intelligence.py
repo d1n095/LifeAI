@@ -312,3 +312,26 @@ def overcorrection_risk(
         )
     report.acceptable = not report.risks
     return report
+
+
+def count_prior_occurrences(
+    db: Session,
+    owner_id: uuid.UUID,
+    title: str,
+    *,
+    window_days: int = 90,
+) -> int:
+    """How many of the owner's problems within the window share this (normalized) title —
+    the write-time recurrence signal for problem recording, BEFORE the new row exists.
+    Unlike detect_recurring_problems (which only returns groups already at
+    min_occurrences), this answers the "is this the second time?" question directly."""
+    signature = normalize_problem_signature(title)
+    if not signature:
+        return 0
+    since = datetime.utcnow() - timedelta(days=max(1, int(window_days)))
+    candidates = (
+        db.query(LifeProblem)
+        .filter(LifeProblem.owner_id == owner_id, LifeProblem.created_at >= since)
+        .all()
+    )
+    return sum(1 for p in candidates if normalize_problem_signature(p.title) == signature)

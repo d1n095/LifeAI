@@ -470,3 +470,96 @@ def cross_domain_claim_overlaps(db: Session, owner_id: uuid.UUID, *, limit: int 
             )
         )
     return overlaps
+
+
+# --------------------------------------------------------------------------------------
+# Execution-path integration (additive, fail-open): the reduced single-SQL rollup and
+# the instruction line the chat/workbench context builders append next to
+# build_trust_instructions' source-trust text. Per-claim verdicts above stay
+# authoritative; this rollup mirrors the same ladder in one bounded query so a
+# per-request call site never needs N per-claim subqueries.
+# --------------------------------------------------------------------------------------
+
+_ROLLUP_SQL = """
+WITH live AS (
+    SELECT c.id, c.status::text AS claim_status, c.confidence::text AS stored_confidence,
+           (c.chunk_id IS NOT NULL AND s.deleted_at IS NULL AND s.id IS NOT NULL) AS has_live_grounding,
+           s.active_truth_status::text AS source_status
+    FROM knowledge_claims c
+    JOIN documents s ON s.id = c.source_id AND s.uploaded_by = c.owner_id
+    WHERE c.owner_id = :owner
+      {project_filter}
+), contradicted AS (
+    SELECT DISTINCT r.from_claim_id AS cid FROM claim_relationships r
+    WHERE r.owner_id = :owner AND r.relationship_type = 'contradicts'
+    UNION
+    SELECT DISTINCT r.to_claim_id AS cid FROM claim_relationships r
+    WHERE r.owner_id = :owner AND r.relationship_type = 'contradicts'
+)
+SELECT
+    count(*) FILTER (WHERE c.cid IS NOT NULL OR l.claim_status = 'disputed')  AS conflicting_evidence,
+    count(*) FILTER (WHERE c.cid IS NULL AND l.claim_status <> 'disputed' AND l.has_live_grounding
+                      AND l.claim_status = 'active' AND l.source_status IS DISTINCT FROM 'superseded'
+                      AND l.stored_confidence IN ('certain', 'likely'))       AS verified_fact,
+    count(*) FILTER (WHERE c.cid IS NULL AND l.claim_status <> 'disputed'
+                      AND l.stored_confidence = 'no_basis')                  AS assumption,
+    count(*) FILTER (WHERE c.cid IS NULL AND l.claim_status <> 'disputed' AND l.stored_confidence <> 'no_basis'
+                      AND NOT l.has_live_grounding)                          AS unknown,
+    count(*) FILTER (WHERE c.cid IS NULL AND l.claim_status <> 'disputed' AND l.stored_confidence <> 'no_basis'
+                      AND l.has_live_grounding
+                      AND NOT (l.claim_status = 'active' AND l.source_status IS DISTINCT FROM 'superseded'
+                               AND l.stored_confidence IN ('certain', 'likely'))) AS hypothesis,
+    count(*)                                                                 AS total
+FROM live l
+LEFT JOIN contradicted c ON c.cid = l.id
+"""
+
+
+def epistemic_status_counts_sql(
+    db: Session,
+    owner_id: uuid.UUID,
+    *,
+    project_id: uuid.UUID | None = None,
+) -> dict[str, int]:
+    """One-query reduced rollup of the ladder for the owner (optionally one project).
+    Mirrors classify_claim's mapping in SQL: contradicted-or-disputed wins first, then
+    no_basis → assumption, then grounded-active-source-with-confident-bucket →
+    verified_fact, everything else → hypothesis. The stored confidence column is the
+    extraction-time bucket (assess_claim_confidence recomputes LIVE per claim); the rollup
+    therefore reads 'certain|likely' as the stored signal that no contradiction has been
+    recorded since — the authoritative per-claim verdicts remain classify_claim's."""
+    sql = _ROLLUP_SQL.format(
+        project_filter="AND s.project_id = :project_id" if project_id is not None else ""
+    )
+    params: dict = {"owner": str(owner_id)}
+    if project_id is not None:
+        params["project_id"] = str(project_id)
+    row = db.execute(text(sql), params).first()
+    if row is None:
+        return {s.value: 0 for s in EpistemicStatus} | {"total": 0}
+    return {
+        "conflicting_evidence": int(row[0]),
+        "verified_fact": int(row[1]),
+        "assumption": int(row[2]),
+        "unknown": int(row[3]),
+        "hypothesis": int(row[4]),
+        "total": int(row[5]),
+    }
+
+
+def format_epistemic_instructions(counts: dict[str, int]) -> str:
+    """The prompt-building layer's instruction line (Swedish, matching
+    build_trust_instructions' language): what the evidence ladder currently holds and how
+    to treat non-verified buckets. Deterministic; never names claim content."""
+    if not counts or counts.get("total", 0) == 0:
+        return "EPISTEMISK STATUS: inga lagrade påståenden att grading — verka utan påståenden om ej bevisade fakta."
+    return (
+        f"EPISTEMISK STATUS ({counts.get('total', 0)} påståenden): "
+        f"{counts.get('verified_fact', 0)} verifierade, "
+        f"{counts.get('conflicting_evidence', 0)} motstridiga, "
+        f"{counts.get('hypothesis', 0)} hypoteser, "
+        f"{counts.get('assumption', 0)} antaganden, "
+        f"{counts.get('unknown', 0)} okända. "
+        "Behandla hypoteser och antaganden som EJ bevisade fakta; presentera motstridiga "
+        "påståenden som en konflikt, aldrig som en sanning."
+    )

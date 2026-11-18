@@ -1,5 +1,6 @@
 """Deterministic problem/solution/decision learning; no provider calls or inference."""
 
+import uuid
 from datetime import datetime
 
 from sqlalchemy import select
@@ -148,9 +149,38 @@ def create_problem(
         _validate_ref(db, owner_id, kind, value)
     if supersedes_problem_id:
         _problem(db, owner_id, supersedes_problem_id)
+    # Recurrence detection (app/mainai_execution/correction_intelligence.py) at RECORD
+    # time: if this problem's normalized signature has already surfaced within the window,
+    # the new row carries that fact in its own provenance — the self-correction layer gets
+    # the "same mistake again" signal exactly where the mistake is written down. Additive
+    # and fail-open: a detection failure must never block recording the problem.
+    try:
+        from app.mainai_execution.correction_intelligence import count_prior_occurrences, normalize_problem_signature
+
+        signature = normalize_problem_signature(title)
+        prior_count = count_prior_occurrences(db, owner_id, title, window_days=90)
+        if prior_count > 0:
+            values["provenance"] = {
+                **(provenance or {}),
+                "recurrence": {
+                    "signature": signature,
+                    "prior_occurrences": prior_count,
+                    "occurrences_including_this": prior_count + 1,
+                },
+            }
+    except Exception:  # noqa: BLE001 - detection is an enhancement, never a gate
+        pass
+
     row = LifeProblem(owner_id=owner_id, idempotency_key=idempotency_key, **values)
+    # Client-side id (the column's uuid.uuid4 default is applied AT flush): the created-
+    # event below references problem.id BEFORE the flush, and both rows then flush in the
+    # SAME transaction under the SAME app.current_user_id RLS setting. The old order
+    # (flush, then _event) left the event pending, so a caller that recorded a problem for
+    # owner A and then — without committing in between — recorded one for owner B flushed
+    # A's event under B's RLS setting and failed with InsufficientPrivilege (reproduced in
+    # the epistemics-integration tests, 2026-11-18).
+    row.id = row.id or uuid.uuid4()
     db.add(row)
-    db.flush()
     _event(
         db,
         row,
@@ -158,6 +188,7 @@ def create_problem(
         {"status": status},
         "founder" if authority == "founder" else "system",
     )
+    db.flush()
     return row
 
 

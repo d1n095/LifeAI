@@ -26,6 +26,7 @@ from app.egress_policy import EgressDeniedError
 from app.providers.registry import embed_with_policy, resolve_active
 from app.providers.verification import classify_provider_exception
 from app.rag.library_import import maybe_purge_blob
+from app.rag.epistemics import classify_claim
 from app.rag.trust import assess_claim_confidence
 from app.rag.vector_store import hybrid_search
 from app.storage import get_storage
@@ -376,6 +377,11 @@ def get_source(source_id: uuid.UUID, db: Session = Depends(get_db), user: User =
             grounding_score=c.grounding_score,
             chunk_id=c.chunk_id,
             created_at=c.created_at,
+            # Evidence-aware epistemics (app/rag/epistemics.py): the five-state ladder
+            # verdict rides ADDITIVELY on the existing per-claim row — same cost shape as
+            # the live-confidence recomputation beside it, and the founder sees WHY each
+            # claim sits where it sits in the Library detail view.
+            epistemic_status=classify_claim(db, user.id, c).status.value,
         )
         for c in claims
     ]

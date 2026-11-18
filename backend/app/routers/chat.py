@@ -43,6 +43,7 @@ from app.providers.verification import classify_provider_exception
 from app.rag.context_status import build_context_status
 from app.rag.message_source import MessageSourceLocator, get_or_create_message_source_unit
 from app.rag.retrieve import retrieve_context
+from app.rag.epistemics import epistemic_status_counts_sql, format_epistemic_instructions
 from app.rag.trust import assess_confidence, build_trust_instructions, detect_claim_conflicts, detect_conflicts
 from app.schemas import ChatMessageIn, ChatMessageOut, ContextStatusOut, SourceRef
 
