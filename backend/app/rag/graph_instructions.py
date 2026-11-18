@@ -99,6 +99,13 @@ def format_graph_context_instructions(
     for topic in topics[:1]:
         landscape = summarize_topic_landscape(db, owner_id, topic)
         lines.append("- " + _topic_line(landscape))
+        # Round 10 M6: the topic's scientific composition + bounded investigation policy
+        # ride the same block (fail-open at the caller; deterministic, read-only here).
+        from app.rag.scientific_reasoning import analyze_topic_science, format_topic_science_instructions, investigation_policy
+
+        science = analyze_topic_science(db, owner_id, topic)
+        policy = investigation_policy(science)
+        lines.append("- " + format_topic_science_instructions(science, policy))
         if landscape.disagreements:
             for d in landscape.disagreements[:3]:
                 sides = f"'{d.from_claim_text}' vs '{d.to_claim_text}'"
