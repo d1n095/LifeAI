@@ -181,7 +181,10 @@ def simulated_github_pr_api(monkeypatch):
 
     async def _fake_create_pull_request(self, *, title, body, head, base):
         create_calls["n"] += 1
-        pr = {"number": 777, "html_url": "https://github.com/d1n095/LifeAI/pull/777", "head": f"d1n095:{head}", "base": base, "state": "open"}
+        # `draft: True` is not decoration: PR #450's security contract requires
+        # create_pull_request() to request a draft and _handle_open_pr() to fail closed unless
+        # the response confirms it. The simulated API must model the real one it stands in for.
+        pr = {"number": 777, "html_url": "https://github.com/d1n095/LifeAI/pull/777", "head": f"d1n095:{head}", "base": base, "state": "open", "draft": True}
         created_prs.append(pr)
         return pr
 
