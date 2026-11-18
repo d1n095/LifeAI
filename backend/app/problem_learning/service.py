@@ -1,5 +1,6 @@
 """Deterministic problem/solution/decision learning; no provider calls or inference."""
 
+import json
 import uuid
 from datetime import datetime
 
@@ -548,6 +549,34 @@ def record_decision(
         if authority == "ai_interpretation"
         else "system",
     )
+    if old is not None:
+        # Round 10 M5: a decision CORRECTION is an auditable event — the prior decision's
+        # id, the successor's id, and both rationale-bearing fields land on the append-only
+        # audit trail. The rows themselves are never edited in content; only the status
+        # marker moves. This is what "preserve not only what was decided but why" means at
+        # the storage layer: the superseded row keeps its decision text, basis, and
+        # alternatives; the audit row records the transition with BOTH ids.
+        from app.audit import record_audit
+
+        record_audit(
+            db,
+            user_id=owner_id,
+            action="decision_superseded",
+            entity_type="life_problem_decision",
+            entity_id=str(old.id),
+            detail=json.dumps(
+                {
+                    "problem_id": str(problem.id),
+                    "superseded_decision_id": str(old.id),
+                    "superseding_decision_id": str(row.id),
+                    "prior_decision": old.decision,
+                    "new_decision": decision,
+                    "prior_basis": old.basis,
+                    "new_basis": basis,
+                }
+            ),
+            commit=False,
+        )
     return row
 
 
