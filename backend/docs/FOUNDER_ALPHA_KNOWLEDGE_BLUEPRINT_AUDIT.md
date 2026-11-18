@@ -22,7 +22,7 @@ the fixes from this audit: `zai/alpha-knowledge-blueprint` (see §6).
 | Isolation (FORCE-RLS on every ingestion table, egress gate, erasure) | **IMPLEMENTED + TESTED (PG)** | `app/rls.py` registry + drift test `test_rls_policy_registry.py`; `tests/security/test_rls_isolation.py`; egress: `app/egress_policy/service.py`, `mainai/test_egress_policy.py` |
 | Formats: epub/mobi/odt/xlsx/pptx, OCR, tar/7z/rar archives; ≥2 GB books | **MISSING / DESIGN-ONLY** | no extractors exist (`app/rag/extract.py` table); `docs/LARGE_FILE_UPLOAD_PLAN.md` is plan-only; audio/video inside archives deliberately skipped (`app/rag/media_import.py` docstring) |
 | External conversation-history import (source_import_batches pipeline) | **MISSING** | `app/models/source_import_batch.py` columns exist (`discovered_conversations/discovered_messages`), no pipeline populates them |
-| Normative S1C spec doc | **MISSING (blocker)** | `docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md` is cited ~15× (e.g. `app/models/source_import_batch.py:26`, `app/rag/corpus_batch.py:1`) but absent from the repo — reconstruction must come from the founder/original branch, not be invented |
+| Normative S1C spec doc | **INTENTIONALLY ABSENT from this branch (not a blocker)** | `docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md` is cited ~15× (e.g. `app/models/source_import_batch.py:26`, `app/rag/corpus_batch.py:1`) but its absence is deliberate per `docs/BRANCH_REGISTRY.md:1942` — the doc lives on PR #60's design branch, and the hardening lessons it prescribes persist machine-readably in `engineering_lessons` via `scripts/mainai/seed_life_source_foundation_hardening_lessons.py`. No reconstruction needed; reconcile doc location at composition time. (Correction 2026-11-18b: the earlier version of this audit mislabeled this as MISSING/blocker, and also listed `MAINAI_CONTEXT_BUNDLE.md` as missing — it exists at the repo ROOT, cited by name from `app/rag/library_import.py:417`.) |
 
 ## Area 2 — Structured extraction & reconciliation (ideas, decisions, products, components, builds, projects, requirements; provenance, history, contradictions)
 
@@ -103,9 +103,11 @@ Regression: all sqlite-runnable suites green; 105 PG-host-blocked tests are pre-
    local-embedding work into one tree; the readiness view here is the attachment point.
 2. **Run `.github/workflows/verify.yml`** (disposable PG+Redis) to unlock the 105
    PG-blocked suites locally, including the provenance/immutability trigger tests.
-3. **Restore the two missing normative docs** (`docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md`,
-   `docs/MAINAI_CONTEXT_BUNDLE.md`) from their original source — they are cited as spec
-   by live code.
+3. **Doc-location reconciliation (small, was mislabeled a blocker earlier)**: the S1C
+   spec lives on PR #60's design branch (intentional per `docs/BRANCH_REGISTRY.md:1942`);
+   `MAINAI_CONTEXT_BUNDLE.md` exists at the repo root. At composition, consolidate doc
+   locations — no content reconstruction is needed; the S1C hardening lessons are already
+   persisted machine-readably in `engineering_lessons`.
 4. **Then**, in order: enable local embeddings for retrieval (Freebuff composition),
    turn on the founder's candidate-signal review surface (HTTP promotion endpoint, low
    priority), and only after independent verification of the composed system consider
