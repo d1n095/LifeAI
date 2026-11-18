@@ -118,6 +118,7 @@ def classify_claim(
     claim: KnowledgeClaim,
     *,
     quality_cap: "EpistemicStatus | None" = None,
+    ignore_relationship_id: uuid.UUID | None = None,
 ) -> EpistemicVerdict:
     """The deterministic evidence ladder for one claim (mapping order documented in the
     module docstring). Owner-scoped: the source is loaded through the owner's visibility
@@ -130,16 +131,18 @@ def classify_claim(
     the metadata quality), and a cap can only ever lower a verdict, never raise one."""
     reasons: list[str] = []
 
-    contradicted = (
-        db.query(ClaimRelationship)
-        .filter(
-            ClaimRelationship.owner_id == owner_id,
-            ClaimRelationship.relationship_type == ClaimRelationshipType.contradicts,
-            or_(ClaimRelationship.from_claim_id == claim.id, ClaimRelationship.to_claim_id == claim.id),
-        )
-        .first()
-        is not None
+    contradicted_q = db.query(ClaimRelationship).filter(
+        ClaimRelationship.owner_id == owner_id,
+        ClaimRelationship.relationship_type == ClaimRelationshipType.contradicts,
+        or_(ClaimRelationship.from_claim_id == claim.id, ClaimRelationship.to_claim_id == claim.id),
     )
+    if ignore_relationship_id is not None:
+        # Counterfactual classification (epistemic_shift detection): what would this claim's
+        # verdict be WITHOUT one specific contradicts edge? Used to name the PRIOR status
+        # when new information changes an earlier conclusion — never to hide the edge from
+        # any live read path (the default None keeps every edge in every verdict).
+        contradicted_q = contradicted_q.filter(ClaimRelationship.id != ignore_relationship_id)
+    contradicted = contradicted_q.first() is not None
     if contradicted:
         reasons.append("a claim_relationships contradicts edge is on record")
     if claim.status == ClaimStatus.disputed:
@@ -147,7 +150,11 @@ def classify_claim(
 
     source = _visible_source(db, owner_id, claim.source_id)
     has_live_grounding = claim.chunk_id is not None and source is not None and source.deleted_at is None
-    live_confidence = assess_claim_confidence(db, claim)
+    # The live confidence must see the SAME counterfactual the ladder does: with the edge
+    # excluded, an otherwise-verified claim would otherwise still land at `conflict` via
+    # assess_claim_confidence's own contradicts cap, and the shift's PRIOR status would be
+    # indistinguishable from the current one (reproduced and fixed 2026-11-18).
+    live_confidence = assess_claim_confidence(db, claim, ignore_relationship_id=ignore_relationship_id)
 
     if contradicted or claim.status == ClaimStatus.disputed:
         status = EpistemicStatus.conflicting_evidence
@@ -301,13 +308,21 @@ def _downstream_consequences(
     head_ids,
     max_depth: int,
     projects: dict[uuid.UUID, uuid.UUID | None],
+    exclude_source_id: uuid.UUID | None = None,
 ) -> list[SecondOrderConsequence]:
     hops = _dependents(db, owner_id, head_ids, max_depth)
     out = []
+    # `exclude_source_id` is the SELF-LOOP guard, deliberately separate from the report's
+    # anchor (`root_source_id`): for a contradicts trigger the two sides' walks are
+    # anchored on the TO end, but each side's own walk must exclude only ITSELF — excluding
+    # the anchor for both walks silently dropped the TO side's own dependents (reproduced
+    # 2026-11-18: a contradicts edge whose TO end had its own derived_from children
+    # reported only the FROM side's dependents).
+    exclude = exclude_source_id if exclude_source_id is not None else root_source_id
     for h in hops:
         terminal = h.from_source_id  # inbound walk: the dependent is the hop's FROM end
-        if terminal == root_source_id:
-            continue  # a direct edge on the root itself is recorded knowledge, not a discovery
+        if terminal == exclude:
+            continue  # a direct edge on the excluded source itself is recorded knowledge, not a discovery
         out.append(
             SecondOrderConsequence(
                 kind=kind,
@@ -358,7 +373,8 @@ def second_order_consequences(
         # ground — reported per side, so downstream branches can be compared.
         if rel == RelationshipType.supersedes.value:
             for c in _downstream_consequences(
-                db, owner_id, "stale_basis", trigger_from, (trigger_from, trigger_to, rel), [trigger_to], depth, projects
+                db, owner_id, "stale_basis", trigger_from, (trigger_from, trigger_to, rel), [trigger_to], depth, projects,
+                exclude_source_id=trigger_from,
             ):
                 key = (c.kind, c.trigger_edge, c.dependent_source_id)
                 if key not in results or c.depth < results[key].depth:
@@ -366,7 +382,8 @@ def second_order_consequences(
         else:
             for head in (trigger_from, trigger_to):
                 for c in _downstream_consequences(
-                    db, owner_id, "contested_ground", trigger_to, (trigger_from, trigger_to, rel), [head], depth, projects
+                    db, owner_id, "contested_ground", trigger_to, (trigger_from, trigger_to, rel), [head], depth, projects,
+                    exclude_source_id=head,
                 ):
                     key = (c.kind, c.trigger_edge, c.dependent_source_id)
                     if key not in results or c.depth < results[key].depth:

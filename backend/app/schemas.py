@@ -399,6 +399,50 @@ class ClaimEvidenceMetadataOut(BaseModel):
     recorded_at: datetime
 
 
+class ClaimGraphEdgeIn(BaseModel):
+    """A founder-declared claim-graph edge (Round 8 M3): the production input path for
+    connecting claims across domains. The type vocabulary is the table's own closed enum;
+    an unknown type is refused, never guessed."""
+
+    to_claim_id: uuid.UUID
+    relationship_type: str  # supports | contradicts | supersedes | duplicates
+    note: str | None = None
+
+
+class ClaimGraphEdgeOut(BaseModel):
+    id: uuid.UUID
+    from_claim_id: uuid.UUID
+    to_claim_id: uuid.UUID
+    relationship_type: str
+    note: str | None = None
+    # Epistemic-shift records (Round 8 M3): prior vs current ladder verdict for each
+    # endpoint, computed when a contradicts edge lands — "new information changed an
+    # earlier conclusion", with the reasons on both sides. Empty for non-contradicts edges.
+    epistemic_shifts: list[dict] = []
+
+
+class ClaimEvidenceChainOut(BaseModel):
+    """The full traceability record for one claim (Round 8 M3): verdict + reasons + the
+    source/chunk grounding + BOTH sides of every contradicting edge (a conflict is
+    presented, never adjudicated here) + the stamped study-metadata verdict + the
+    bounded second-order consequences of the claim's source."""
+
+    claim_id: uuid.UUID
+    claim_text: str
+    claim_type: str
+    claim_status: str
+    confidence: str
+    epistemic_status: str
+    verdict_reasons: list[str]
+    source: dict
+    chunk_grounded: bool
+    quality_metadata: dict | None = None
+    supporting_edges: list[dict] = []
+    contradicting_edges: list[dict] = []
+    other_edges: list[dict] = []
+    second_order_consequences: list[dict] = []
+
+
 class MediaSegmentOut(BaseModel):
     """STEG 13: the FULL timestamped chunk list for a media source — deliberately separate
     from chunk_preview (which stays truncated to CHUNK_PREVIEW_COUNT/CHUNK_PREVIEW_LENGTH

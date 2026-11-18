@@ -25,6 +25,15 @@ from app.models.user import User
 from app.egress_policy import EgressDeniedError
 from app.providers.registry import embed_with_policy, resolve_active
 from app.providers.verification import classify_provider_exception
+from app.models.audit import AuditLog
+from app.models.claim_relationship import ClaimRelationship
+from app.rag.claim_graph import (
+    EpistemicShift,
+    record_claim_relationship,
+    shifts_to_audit_detail,
+    trace_evidence_chain,
+)
+from app.rag.epistemics import cross_domain_claim_overlaps, second_order_consequences
 from app.rag.library_import import maybe_purge_blob
 from app.rag.epistemics import classify_claim
 from app.rag.evidence_metadata import (
@@ -48,6 +57,9 @@ from app.storage.references import (
 from app.schemas import (
     ClaimEvidenceMetadataIn,
     ClaimEvidenceMetadataOut,
+    ClaimEvidenceChainOut,
+    ClaimGraphEdgeIn,
+    ClaimGraphEdgeOut,
     DeleteConfirmIn,
     ImportJobOut,
     KnowledgeClaimOut,
@@ -652,6 +664,145 @@ def stamp_claim_evidence_metadata(
         declared_via=stamped.declared_via,
         recorded_at=stamped.recorded_at,
     )
+
+
+@router.post("/claims/{claim_id}/relationships", response_model=ClaimGraphEdgeOut)
+def create_claim_relationship(
+    claim_id: uuid.UUID,
+    payload: ClaimGraphEdgeIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Founder-declared claim-graph edge (Round 8 M3) — the production input path the claim
+    graph never had. Both endpoints must belong to this owner; an exact duplicate edge is
+    idempotent (the ladder counts edge EXISTENCE, not edge copies). On a contradicts edge,
+    the epistemic shift of BOTH endpoints (prior verdict with the edge excluded vs live
+    verdict) is computed in-transaction and written to the audit trail: the old conclusion
+    is never overwritten, it is superseded WITH its provenance. No winner is chosen — the
+    conflict lives in the ladder's conflicting_evidence verdict."""
+    try:
+        edge, shifts = record_claim_relationship(
+            db,
+            user.id,
+            from_claim_id=claim_id,
+            to_claim_id=payload.to_claim_id,
+            relationship_type=payload.relationship_type,
+            note=payload.note,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if shifts:
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                action="epistemic_shift",
+                entity_type="claim_relationship",
+                entity_id=str(edge.id),
+                detail=shifts_to_audit_detail(shifts),
+            )
+        )
+    db.commit()
+    return ClaimGraphEdgeOut(
+        id=edge.id,
+        from_claim_id=edge.from_claim_id,
+        to_claim_id=edge.to_claim_id,
+        relationship_type=edge.relationship_type.value,
+        note=edge.note,
+        epistemic_shifts=[
+            {
+                "claim_id": str(sh.claim_id),
+                "prior_status": sh.prior_status,
+                "current_status": sh.current_status,
+                "changed": sh.changed,
+                "prior_reasons": sh.prior_reasons,
+                "current_reasons": sh.current_reasons,
+            }
+            for sh in shifts
+        ],
+    )
+
+
+@router.get("/claims/{claim_id}/evidence-chain", response_model=ClaimEvidenceChainOut)
+def get_claim_evidence_chain(
+    claim_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Why does MainAI believe/dispute THIS claim? The bounded, structured answer: verdict
+    + reasons + source trust state + chunk grounding + stamped metadata verdict + BOTH
+    sides of every contradicting edge (presented, never adjudicated) + the second-order
+    consequences of the claim's source. Owner-scoped end to end."""
+    try:
+        chain = trace_evidence_chain(db, user.id, claim_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Påståendet hittades inte.")
+    return ClaimEvidenceChainOut(
+        claim_id=chain.claim_id,
+        claim_text=chain.claim_text,
+        claim_type=chain.claim_type,
+        claim_status=chain.claim_status,
+        confidence=chain.confidence,
+        epistemic_status=chain.verdict.status.value,
+        verdict_reasons=chain.verdict.reasons,
+        source=chain.source,
+        chunk_grounded=chain.chunk_grounded,
+        quality_metadata=chain.quality_metadata,
+        supporting_edges=chain.supporting_edges,
+        contradicting_edges=chain.contradicting_edges,
+        other_edges=chain.other_edges,
+        second_order_consequences=chain.second_order_consequences,
+    )
+
+
+@router.get("/graph/cross-domain-overlaps")
+def get_cross_domain_overlaps(
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """The same statement surfacing in 2+ projects — the cross-domain discovery signal
+    (app/rag/epistemics.py). Deterministic SQL, owner-scoped, LIMIT-bounded."""
+    overlaps = cross_domain_claim_overlaps(db, user.id, limit=min(max(1, int(limit)), 200))
+    return [
+        {
+            "claim_text": o.claim_text,
+            "claim_ids": [str(c) for c in o.claim_ids],
+            "source_ids": [str(s) for s in o.source_ids],
+            "project_ids": [str(p) if p else None for p in o.project_ids],
+        }
+        for o in overlaps
+    ]
+
+
+@router.get("/sources/{source_id}/consequences")
+def get_source_consequences(
+    source_id: uuid.UUID,
+    max_depth: int = 3,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Second-order consequences of THIS source's supersedes/contradicts edges through the
+    derived_from/supports dependency closure — owner-scoped, cycle-safe, depth-capped
+    (app/rag/epistemics.second_order_consequences). A source with no incident trigger
+    edges returns [] — never an error."""
+    if _visible_document_query(db, user.id).filter(Document.id == source_id).first() is None:
+        raise HTTPException(status_code=404, detail="Källan hittades inte.")
+    consequences = second_order_consequences(db, user.id, [source_id], max_depth=max_depth)
+    return [
+        {
+            "kind": c.kind,
+            "root_source_id": str(c.root_source_id),
+            "trigger_edge": [str(x) for x in c.trigger_edge],
+            "dependent_source_id": str(c.dependent_source_id),
+            "dependent_project_id": str(c.dependent_project_id) if c.dependent_project_id else None,
+            "depth": c.depth,
+            "path": [str(p) for p in c.path],
+        }
+        for c in consequences
+    ]
 
 
 @router.get("/search/hybrid", response_model=LibrarySearchResponseOut)

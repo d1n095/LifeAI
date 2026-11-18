@@ -19,6 +19,8 @@ from app.blueprint_readiness import collect_blueprint_readiness
 import logging
 
 from app.rag.epistemics import epistemic_status_counts_sql, format_epistemic_instructions
+from app.rag.evidence_metadata import summarize_owner_evidence_landscape
+from app.rag.evidence_quality import format_landscape_instructions
 from app.rag.trust import assess_confidence, build_trust_instructions, detect_conflicts
 from app.schemas import KnowledgeSourceOut, SourceRef, WorkbenchAnalyzeIn, WorkbenchAnalyzeOut, WorkbenchSaveIn
 
@@ -90,6 +92,17 @@ async def analyze(
         f"TILLFÖRLITLIGHETSINSTRUKTION:\n"
         f"{build_trust_instructions(trust.level, trust.top_source_status, trust.conflicts_detected)}"
     )
+    # Evidence-ladder rollup + body-of-evidence landscape (Round 8: these lines were
+    # imported but never appended — the seam existed without a driver). Fail-open: any
+    # failure degrades to the trust text alone, exactly the R7 contract.
+    _evidence_lines: list[str] = []
+    try:
+        _evidence_lines.append(format_epistemic_instructions(epistemic_status_counts_sql(db, user.id)))
+        _evidence_lines.append(format_landscape_instructions(summarize_owner_evidence_landscape(db, user.id)))
+    except Exception:
+        logger.warning("epistemic rollup failed; system prompt degrades to trust text alone", exc_info=True)
+    if _evidence_lines:
+        system_content += "\n\nEVIDENSSTATUS:\n" + "\n".join(_evidence_lines)
     messages = [Message(role="system", content=system_content), Message(role="user", content=payload.question)]
 
     try:

@@ -165,7 +165,9 @@ def detect_claim_conflicts(db: Session, owner_id: uuid.UUID, chunk_ids: list[str
     return any(assess_claim_confidence(db, claim) == ClaimConfidence.conflict for claim in claims)
 
 
-def assess_claim_confidence(db: Session, claim: KnowledgeClaim) -> ClaimConfidence:
+def assess_claim_confidence(
+    db: Session, claim: KnowledgeClaim, *, ignore_relationship_id=None
+) -> ClaimConfidence:
     """STEG 10's claim-level analogue of assess_confidence() above: the stored,
     extraction-time confidence (app/rag/claims.py's grounding-score heuristic) is only the
     starting point — this recomputes the CURRENT confidence from the claim's
@@ -189,15 +191,17 @@ def assess_claim_confidence(db: Session, claim: KnowledgeClaim) -> ClaimConfiden
     (e.g. two chunks of the same document both stating the same fact) is not independent
     corroboration and must never count toward "certain".
     """
-    contradicting = (
-        db.query(ClaimRelationship)
-        .filter(
-            ClaimRelationship.owner_id == claim.owner_id,
-            ClaimRelationship.relationship_type == ClaimRelationshipType.contradicts,
-            or_(ClaimRelationship.from_claim_id == claim.id, ClaimRelationship.to_claim_id == claim.id),
-        )
-        .first()
+    contradicting_q = db.query(ClaimRelationship).filter(
+        ClaimRelationship.owner_id == claim.owner_id,
+        ClaimRelationship.relationship_type == ClaimRelationshipType.contradicts,
+        or_(ClaimRelationship.from_claim_id == claim.id, ClaimRelationship.to_claim_id == claim.id),
     )
+    if ignore_relationship_id is not None:
+        # Counterfactual (epistemic-shift detection): the confidence must be computed as if
+        # ONE specific edge did not exist, so a shift's PRIOR status is honest. Live read
+        # paths never pass this — the default keeps every edge in every verdict.
+        contradicting_q = contradicting_q.filter(ClaimRelationship.id != ignore_relationship_id)
+    contradicting = contradicting_q.first()
     if contradicting is not None:
         return ClaimConfidence.conflict
 

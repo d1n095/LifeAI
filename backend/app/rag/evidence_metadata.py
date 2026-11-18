@@ -358,3 +358,25 @@ def cap_from_row(row: ClaimEvidenceMetadata | None) -> EpistemicStatus | None:
     if row.quality_cap in _CAP_VALUES:
         return EpistemicStatus(row.quality_cap)
     return None
+
+def summarize_owner_evidence_landscape(
+    db: Session, owner_id: uuid.UUID, *, limit: int = 50
+) -> "EvidenceLandscape":
+    """The chat/workbench instruction layer's landscape: re-grade THIS owner's stamped
+    declarations (deterministic — same declared dict always yields the same assessment)
+    and aggregate into the body-of-evidence report. Bounded (LIMIT), owner-scoped (RLS +
+    explicit filter), fail-open at the call site: an empty corpus yields the honest
+    "no structured evidence" landscape, never a blank check. Re-grading from the STORED
+    declaration keeps provenance exact — the report describes what the founder actually
+    declared, never an inferred field."""
+    from app.rag.evidence_quality import EvidenceLandscape, grade_evidence, summarize_evidence_landscape
+
+    rows = (
+        db.query(ClaimEvidenceMetadata)
+        .filter(ClaimEvidenceMetadata.owner_id == owner_id)
+        .order_by(ClaimEvidenceMetadata.updated_at.desc())
+        .limit(max(1, int(limit)))
+        .all()
+    )
+    items = [(row.metadata_json, grade_evidence(row.metadata_json)) for row in rows]
+    return summarize_evidence_landscape(items)
