@@ -30,13 +30,12 @@ surface like everywhere else: an unverified lesson is reported as unverified).
 
 from __future__ import annotations
 
-import uuid
 from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.agent_task import AgentTask, AgentTaskStatus
+from app.models.agent_task import AgentTask
 from app.models.document import Document
 from app.models.mainai_execution import EngineeringLesson, EngineeringLessonStatus
 from app.models.project_memory import ProjectBranchPRStatus, ProjectSource
@@ -44,8 +43,12 @@ from app.models.project_memory import ProjectBranchPRStatus, ProjectSource
 _CODE_SOURCE_TYPES = ("git_commit", "github_branch", "github_pr")
 
 # Closed vocabulary for the readiness verdict per component — derived ONLY from stored
-# verification statuses, never guessed.
-_VERIFIED = {"verified", "verified_by_ci", "checked"}
+# verification statuses, never guessed. `verified_by_regression_test` is the value migration
+# 0063's ck_engineering_lessons_verification_status CHECK actually permits for verified work —
+# omitting it here (the original set) made a DB-legal, regression-proven lesson present as
+# "other", i.e. planned work could never be distinguished from verified code. Found by the
+# Founder Acceptance Suite (scenario 6).
+_VERIFIED = {"verified", "verified_by_ci", "checked", "verified_by_regression_test"}
 _UNVERIFIED = {"unverified", "pending", "unknown", None}
 
 

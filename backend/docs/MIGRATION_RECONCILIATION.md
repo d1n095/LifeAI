@@ -1,5 +1,14 @@
 # Migration Reconciliation — Z.AI lane ↔ Founder-Alpha composition lane
 
+> ⚠️ **SUPERSEDED (2026-11-18, later):** §3's renumbering target (Z.AI 0069-0072 →
+> 0074-0077 onto `0073_provider_disclosure_local`) is obsolete — `codex/founder-alpha-final-composed-candidate`
+> now occupies 0069-0088, so 0074-0077 are taken. §4's "Freebuff candidate unavailable" is
+> also outdated — the current candidate is PR #457 (`freebuff/local-ai-integration-20261118`
+> @ `89140ba8`). The current graph, evidence and composition order live in
+> **`docs/MIGRATION_GRAPH_RECONCILIATION_20261118.md`**. The §3 procedure (git mv +
+> revision edits + parity tests in the same commit + disposable-PG verification) remains
+> valid as the mechanical recipe.
+
 Status: **read-only upstream inspection** (shallow fetch of
 `codex/founder-alpha-approved-precomposition` and
 `codex/founder-alpha-0069-migration-compat` / `-recovery` on 2026-11-18). Nothing
