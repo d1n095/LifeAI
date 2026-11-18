@@ -28,6 +28,7 @@ from app.agent_coordination.adapter_config import (
 )
 from app.agent_coordination.adapters import (
     AdapterProcessLostError,
+    AdapterScopeNotEnforceableError,
     AdapterTimeoutError,
     AgentHealth,
     AgentObservation,
@@ -355,6 +356,50 @@ def test_local_cli_adapter_never_uses_shell_true():
     source = inspect.getsource(LocalCLIAdapter.start_assignment)
     assert "shell=True" not in source
     assert "shell = True" not in source
+
+
+# ============================================================================ AT-1b/AT-1c:
+# LocalCLIAdapter cannot enforce an allowed_paths scope narrower than its own cwd -- founder
+# directive (independent review, Freebuff finding AT-1b/AT-1c) requires it to fail closed
+# rather than silently run unrestricted.
+
+@pytest.mark.asyncio
+async def test_local_cli_adapter_refuses_to_start_with_a_narrower_than_cwd_scope(tmp_path):
+    """No sandbox exists beneath this adapter's plain subprocess `cwd` -- a caller-supplied
+    `allowed_paths` narrower than the whole worktree can never actually be enforced, so
+    start_assignment() must refuse outright rather than silently proceed as if it were."""
+    adapter = LocalCLIAdapter(
+        provider_key="test-true", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5,
+        allowed_paths=("backend/app/finance/**",),
+    )
+    with pytest.raises(AdapterScopeNotEnforceableError):
+        await adapter.start_assignment(uuid.uuid4())
+    # Refusing to start must never leave a tracked (and therefore apparently "running") process.
+    assert not adapter._processes
+
+
+@pytest.mark.asyncio
+async def test_local_cli_adapter_still_runs_normally_with_no_path_restriction(tmp_path):
+    """Backward-compatible default: omitting allowed_paths (or passing an explicit empty
+    tuple) preserves the adapter's prior behavior exactly -- its only real boundary is cwd."""
+    adapter = LocalCLIAdapter(
+        provider_key="test-true", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5, allowed_paths=(),
+    )
+    assignment_id = uuid.uuid4()
+    await adapter.start_assignment(assignment_id)
+    result = await adapter.collect_result(assignment_id)
+    assert result.succeeded is True
+
+
+def test_get_real_adapter_passes_allowed_paths_through_to_the_real_adapter(monkeypatch, tmp_path):
+    """The factory must actually wire allowed_paths into the adapter it builds -- not just
+    accept the keyword and silently drop it."""
+    from app.agent_coordination import adapter_config
+
+    monkeypatch.setattr(adapter_config, "real_adapter_config", lambda provider_key: ("/usr/bin/true", (), 5))
+    adapter = get_real_adapter("cursor-agent", cwd=str(tmp_path), allowed_paths=("backend/app/finance/**",))
+    assert isinstance(adapter, LocalCLIAdapter)
+    assert adapter._allowed_paths == ("backend/app/finance/**",)
 
 
 # ============================================================================ Requirement 3 +
