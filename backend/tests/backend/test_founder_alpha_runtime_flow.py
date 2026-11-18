@@ -253,7 +253,13 @@ def test_an_uploaded_knowledge_source_is_retrievable_with_a_citation(client, _de
     assert matching, f"the imported source must be listed: {sources}"
     source_id = matching[0]["id"]
 
-    search = client.post("/api/knowledge/search", json={"query": token, "top_k": 5})
+    # A search POST is a mutation as far as this app's CSRF contract is concerned, so the
+    # token from login is required even though nothing is written.
+    search = client.post(
+        "/api/knowledge/search",
+        json={"query": token, "top_k": 5},
+        headers={"X-CSRF-Token": csrf},
+    )
     assert search.status_code == 200, search.text
     results = search.json()
     assert results, "retrieval returned nothing for the just-imported source"
@@ -272,7 +278,7 @@ def test_a_project_note_written_by_the_founder_survives_a_fresh_client_and_sessi
     content = f"Founder memory durability probe {uuid.uuid4()}"
 
     created = client.post(
-        "/api/memory/notes",
+        "/api/admin/memory/notes",
         json={
             "kind": "fact",
             "content": content,
@@ -285,6 +291,6 @@ def test_a_project_note_written_by_the_founder_survives_a_fresh_client_and_sessi
 
     with TestClient(app) as fresh_client:
         _login(fresh_client)
-        listed = fresh_client.get("/api/memory/notes", params={"status": "all"})
+        listed = fresh_client.get("/api/admin/memory/notes", params={"status": "all"})
         assert listed.status_code == 200, listed.text
         assert any(note["content"] == content for note in listed.json()), "the note did not survive a new session"
