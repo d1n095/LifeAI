@@ -206,6 +206,10 @@ DECLARED_KEYS: dict[str, object] = {
     "replication": _vocabulary_key("replication", ("independent", "same_team", "none"), "replication value"),
     "outcome_followup": _str_key("outcome_followup"),
     "study_setting": _str_key("study_setting"),
+    # Round 9 M2: the topic this study contributes to (e.g. "kaffe_sömn"). DESCRIPTIVE
+    # ONLY, like study_setting — it scopes the topic landscape and its disagreement
+    # detection, and is graded nowhere: a topic label is never evidence of quality.
+    "research_topic": _str_key("research_topic"),
 }
 
 
@@ -403,3 +407,174 @@ def summarize_owner_evidence_landscape(
     )
     items = [(row.metadata_json, grade_evidence(row.metadata_json)) for row in rows]
     return summarize_evidence_landscape(items)
+
+# --------------------------------------------------------------------------------------
+# Round 9 M2: the TOPIC layer. The Round 8 landscape aggregated an owner's corpus as a
+# whole; real research questions are decided per TOPIC. summarize_topic_landscape()
+# scopes the landscape to one declared research_topic and adds what the owner-wide view
+# structurally cannot carry: DECLARED disagreements (contradicts edges between claims of
+# the same topic, lifted from the claim graph — never inferred from text similarity) and
+# the methodology range across the topic's studies. Everything remains provenance-aware:
+# a disagreement names its two claims, their sources, and their declared settings, so a
+# cross-country disagreement is visible WITHOUT ranking either country's evidence.
+# --------------------------------------------------------------------------------------
+
+from dataclasses import dataclass as _dc  # noqa: E402
+
+
+@_dc
+class TopicDisagreement:
+    """One DECLARED contradiction inside a topic, with both sides' provenance. The system
+    presents the conflict symmetrically — neither side wins here; the ladder's
+    conflicting_evidence verdict and the claim graph carry the adjudication-free state."""
+
+    relationship_id: uuid.UUID
+    from_claim_id: uuid.UUID
+    from_claim_text: str
+    from_source_id: uuid.UUID
+    from_setting: str | None
+    from_design: str | None
+    to_claim_id: uuid.UUID
+    to_claim_text: str
+    to_source_id: uuid.UUID
+    to_setting: str | None
+    to_design: str | None
+    cross_country: bool
+    cross_design: bool
+
+
+@_dc
+class TopicLandscape:
+    """The per-topic evidence report: the base corpus landscape PLUS the topic's declared
+    disagreements and methodology range. `study_count == 0` is an HONEST outcome — the
+    instruction line says the topic is unresolved, never that it is settled."""
+
+    topic: str
+    base: "EvidenceLandscape"
+    disagreements: list  # list[TopicDisagreement]
+    cross_country_disagreements: int
+    cross_design_disagreements: int
+    sample_sizes_reported: list
+    designs_reported: list
+
+
+def summarize_topic_landscape(
+    db: Session, owner_id: uuid.UUID, topic: str, *, limit: int = 50
+) -> TopicLandscape:
+    """Aggregate the studies of ONE declared topic for THIS owner. Deterministic, bounded
+    (LIMIT), owner-scoped (RLS + explicit filter). Disagreements come ONLY from recorded
+    contradicts edges in the claim graph — a text-similarity heuristic never invents one."""
+    from app.models.claim_relationship import ClaimRelationship
+    from app.models.claim_relationship import ClaimRelationshipType
+    from app.rag.evidence_quality import EvidenceLandscape, grade_evidence, summarize_evidence_landscape
+
+    topic = (topic or "").strip()
+    rows = (
+        db.query(ClaimEvidenceMetadata)
+        .filter(
+            ClaimEvidenceMetadata.owner_id == owner_id,
+            ClaimEvidenceMetadata.metadata_json["research_topic"].astext == topic,
+        )
+        .order_by(ClaimEvidenceMetadata.updated_at.desc())
+        .limit(max(1, int(limit)))
+        .all()
+    )
+    items = [(row.metadata_json, grade_evidence(row.metadata_json)) for row in rows]
+    base = summarize_evidence_landscape(items)
+
+    by_claim = {row.claim_id: row.metadata_json for row in rows}
+    disagreements: list[TopicDisagreement] = []
+    if by_claim:
+        edges = (
+            db.query(ClaimRelationship)
+            .filter(
+                ClaimRelationship.owner_id == owner_id,
+                ClaimRelationship.relationship_type == ClaimRelationshipType.contradicts,
+                ClaimRelationship.from_claim_id.in_(list(by_claim)),
+                ClaimRelationship.to_claim_id.in_(list(by_claim)),
+            )
+            .order_by(ClaimRelationship.id)
+            .limit(100)
+            .all()
+        )
+        claim_rows = (
+            db.query(KnowledgeClaim.id, KnowledgeClaim.claim_text, KnowledgeClaim.source_id)
+            .filter(KnowledgeClaim.owner_id == owner_id, KnowledgeClaim.id.in_(list(by_claim)))
+            .all()
+        )
+        claim_texts = {r[0]: r[1] for r in claim_rows}
+        claim_sources = {r[0]: r[2] for r in claim_rows}
+        for e in edges:
+            from_meta = by_claim.get(e.from_claim_id) or {}
+            to_meta = by_claim.get(e.to_claim_id) or {}
+            from_setting = (from_meta.get("study_setting") or "").strip() or None
+            to_setting = (to_meta.get("study_setting") or "").strip() or None
+            from_design = (from_meta.get("study_design") or "").strip() or None
+            to_design = (to_meta.get("study_design") or "").strip() or None
+            disagreements.append(
+                TopicDisagreement(
+                    relationship_id=e.id,
+                    from_claim_id=e.from_claim_id,
+                    from_claim_text=claim_texts.get(e.from_claim_id, ""),
+                    from_source_id=claim_sources.get(e.from_claim_id, e.from_claim_id),
+                    from_setting=from_setting,
+                    from_design=from_design,
+                    to_claim_id=e.to_claim_id,
+                    to_claim_text=claim_texts.get(e.to_claim_id, ""),
+                    to_source_id=claim_sources.get(e.to_claim_id, e.to_claim_id),
+                    to_setting=to_setting,
+                    to_design=to_design,
+                    cross_country=bool(
+                        from_setting and to_setting and from_setting.lower() != to_setting.lower()
+                    ),
+                    cross_design=bool(from_design and to_design and from_design != to_design),
+                )
+            )
+
+    return TopicLandscape(
+        topic=topic,
+        base=base,
+        disagreements=disagreements,
+        cross_country_disagreements=sum(1 for d in disagreements if d.cross_country),
+        cross_design_disagreements=sum(1 for d in disagreements if d.cross_design),
+        sample_sizes_reported=sorted(
+            m["sample_size"] for m, _a in items if isinstance(m.get("sample_size"), int)
+        ),
+        designs_reported=sorted({m.get("study_design") for m, _a in items if m.get("study_design")}),
+    )
+
+
+def format_topic_landscape_instructions(landscape: "TopicLandscape") -> str:
+    """The topic's instruction line for research/chat/workbench prompt layers (Swedish).
+    Neutrality is preserved: settings and design classes are reported, never ranked; a
+    disagreement is presented as a CONFLICT with both sides named — the founder decides,
+    the evidence does not get a winner by assertion."""
+    if landscape.base.study_count == 0:
+        return (
+            f"ÄMNESlandskap '{landscape.topic}': inga studier med deklarerad metadata för detta "
+            "ämne — behandla frågan som OLÖST tills strukturerad evidens finns."
+        )
+    disagreement_part = ""
+    if landscape.disagreements:
+        disagreement_part = (
+            f" DEKLARERADE MOTSÄGELSELER: {len(landscape.disagreements)} "
+            f"(länder emellan {landscape.cross_country_disagreements}, "
+            f"design emellan {landscape.cross_design_disagreements}) — presentera som konflikt, "
+            "välj INGEN vinnare."
+        )
+    else:
+        disagreement_part = " inga deklarerade motsägelser (avsaknad av konflikt är inte konsensus)."
+    method_part = ""
+    if landscape.sample_sizes_reported:
+        method_part = (
+            f" metodik: n {min(landscape.sample_sizes_reported)}–{max(landscape.sample_sizes_reported)}, "
+            f"designer {', '.join(landscape.designs_reported)}."
+        )
+    return (
+        f"ÄMNESlandskap '{landscape.topic}' ({landscape.base.study_count} studier): "
+        f"{landscape.base.by_design_class.get('experimental', 0)} experimentella, "
+        f"{landscape.base.by_design_class.get('observational', 0)} observationella, "
+        f"{landscape.base.by_design_class.get('mechanistic', 0)} mekanistiska."
+        f"{method_part}{disagreement_part} "
+        "Välj INGEN sida efter ursprung eller land."
+    )
