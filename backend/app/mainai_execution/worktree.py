@@ -34,6 +34,7 @@ expected to hold a valid `mainai_jobs` lease (see app/jobs/mainai_job_lease.py) 
 duration these functions run; `lease_generation` is recorded on the worktree row purely as a
 durable ownership fact for later recovery inspection, not enforced here as a live check."""
 
+import base64
 import json
 import secrets
 import shutil
@@ -100,7 +101,25 @@ def _run_git(args: list[str], *, cwd: Path, timeout: int = _GIT_TIMEOUT_SECONDS)
 
 
 def _authed_remote_url(repo: str, token: str) -> str:
-    return f"https://x-access-token:{token}@github.com/{repo}.git"
+    """Hardening finding (founder directive, independent review PROV-1): deliberately never
+    embeds the token here. A `git remote add origin <url>` persists its URL verbatim, in
+    PLAINTEXT, into this worktree's own `.git/config` on disk for the worktree's entire
+    (potentially multi-hour, cross-recovery) lifetime — a real credential-exposure defect, not
+    a theoretical one, since nothing else in this module restricts that directory's
+    permissions. `token` is accepted (and still passed by every caller) purely to keep this
+    function's signature identical to what the existing test suite's `patched_github` fixture
+    already monkeypatches — see `_auth_header_args()` below for where the real token actually
+    goes instead."""
+    return f"https://github.com/{repo}.git"
+
+
+def _auth_header_args(token: str) -> list[str]:
+    """Per-invocation-only git auth: a `-c http.extraheader=...` flag applied just to the one
+    network-touching subprocess call that needs it, never to `remote add` — so the real token
+    is never written into any `.git/config` that outlives that single `git` process. Mirrors
+    the same Basic-auth-with-PAT shape GitHub's own tooling uses (`x-access-token:<token>`)."""
+    basic = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+    return ["-c", f"http.extraheader=AUTHORIZATION: basic {basic}"]
 
 
 def _marker_path(path: Path) -> Path:
@@ -170,6 +189,10 @@ def create_task_worktree_sync(
     if path.exists():
         shutil.rmtree(path, ignore_errors=True)
     path.mkdir(parents=True, exist_ok=True)
+    # Defense in depth alongside the no-persisted-token fix below (PROV-1): even the
+    # worktree's non-credential contents (source diffs, marker file) are this task's own,
+    # never meant to be world-readable under /tmp.
+    path.chmod(0o700)
 
     marker_token = secrets.token_hex(16)
     try:
@@ -177,7 +200,10 @@ def create_task_worktree_sync(
         _run_git(["config", "user.email", COMMIT_AUTHOR[1]], cwd=path)
         _run_git(["config", "user.name", COMMIT_AUTHOR[0]], cwd=path)
         _run_git(["remote", "add", "origin", _authed_remote_url(settings.github_repo, settings.github_token)], cwd=path)
-        _run_git(["fetch", "--depth", "1", "origin", base_sha], cwd=path, timeout=120)
+        _run_git(
+            [*_auth_header_args(settings.github_token), "fetch", "--depth", "1", "origin", base_sha],
+            cwd=path, timeout=120,
+        )
         _run_git(["checkout", "-b", branch, "FETCH_HEAD"], cwd=path)
 
         # The marker file itself must never look like "uncommitted work" to
@@ -264,8 +290,10 @@ def fetch_remote_branch(worktree: MainAITaskWorktree) -> str | None:
     the remote at all (nothing to compare against -- not an error)."""
     _require_ownership(worktree)
     path = Path(worktree.path)
+    settings = get_settings()
     result = subprocess.run(
-        ["git", "-C", str(path), "fetch", "origin", worktree.branch], cwd=str(path), capture_output=True, text=True, timeout=_GIT_TIMEOUT_SECONDS
+        ["git", "-C", str(path), *_auth_header_args(settings.github_token), "fetch", "origin", worktree.branch],
+        cwd=str(path), capture_output=True, text=True, timeout=_GIT_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
         return None
@@ -320,9 +348,13 @@ async def push_worktree_branch(worktree: MainAITaskWorktree) -> str:
     force, since a real divergence is exactly the case that must stop and ask, not overwrite."""
     _require_ownership(worktree)
     path = Path(worktree.path)
+    settings = get_settings()
 
     try:
-        _run_git(["push", "origin", f"{worktree.branch}:{worktree.branch}"], cwd=path, timeout=120)
+        _run_git(
+            [*_auth_header_args(settings.github_token), "push", "origin", f"{worktree.branch}:{worktree.branch}"],
+            cwd=path, timeout=120,
+        )
     except WorktreeError as exc:
         if "non-fast-forward" in str(exc) or "fetch first" in str(exc) or "rejected" in str(exc):
             raise WorktreePushRejected(str(exc)) from exc
