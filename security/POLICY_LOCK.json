@@ -8,7 +8,7 @@
     ".github/workflows/founder-alpha-verification.yml": "b36c4f3acc64520fff588725db90f4798a7160ca4494afa8f797943114ab18d0",
     ".github/workflows/opencode.yml": "48fe4704838dc8a27f5fd3043aa46d44e2bd2771341e7a87122143fa8d4c36fb",
     ".github/workflows/real-local-ai-verification.yml": "09076e19a88749e04a9d31f062441afe967d6e2dc0d36eadfedfb32636176750",
-    ".github/workflows/security.yml": "22ec7c51ec6fb48b79467773bd19e9843957069edd34a0a7357966b9c6af27db",
+    ".github/workflows/security.yml": "ef10de0970f15f1866a0ae19d8123591edfc0e81665115cfa35d240d1fa24ca1",
     ".gitleaks.toml": "990c683ba793691bc2195bd027c12c99988128df4d606fdc6e66946dd95223ca",
     ".semgrep/rules.yaml": "dfd965edf7522b5d0ac4a410c157fcb7ec9609b26257c41644e5cd75d253fcbc",
     "backend/scripts/security/apply_runtime_privileges.py": "6da5c663ee39d0da79c4ec8820943c8b792c01a07991663d80c8bd8853f1f19a",
@@ -16,8 +16,9 @@
     "backend/scripts/security/ensure_app_role.py": "6d82802d1ba1f92f4e8c974a01d8830e52e905105bd28ef5ef369ef27db16dbf",
     "backend/scripts/security/s1a_privilege_policy.py": "9c705c38db1b74e171ff708715b93888da4b353b7c9460724c100015e8a4edfc",
     "backend/scripts/security/verify_agent_capabilities.py": "ff7732907cdf979158ff0b3e1a078b9dde977c3a26c7d77a185da8f767f82a25",
-    "backend/scripts/security/verify_policy_lock.py": "f5419d5ed55ff78065556ebd27d87fa69d3d9343624fee0e0e5662ff8a80f6e5",
+    "backend/scripts/security/verify_policy_lock.py": "8cddc1128a77e967437b3923a122db56562823aa70e2c999ed2213f451eccbbd",
     "backend/tests/security/test_security_controls.py": "6fd629f87d1bada07d27a7234344190429652fce056560f0ecaa7a3d5f289b3b",
+    "osv-scanner.toml": "c3f4594c214a4a4b374d0bd110abcba85f862f83e492316fc990146d6d2c88ce",
     "security/agent_capabilities.json": "fcd30340565ec798bb9cc1d59a3e1c6a273b5a06fcf94026b4cfab88a1529734"
   },
   "version": 1

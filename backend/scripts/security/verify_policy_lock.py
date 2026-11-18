@@ -43,6 +43,8 @@ PROTECTED_GLOBS: tuple[str, ...] = (
     ".semgrep/*.yaml",
     ".semgrep/*.yml",
     ".gitleaks.toml",
+    # A file that can silence the supply-chain check is itself a control.
+    "osv-scanner.toml",
     "security/agent_capabilities.json",
     "backend/scripts/security/*.py",
     "backend/tests/security/test_security_controls.py",

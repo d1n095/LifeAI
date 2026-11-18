@@ -106,7 +106,7 @@ jobs:
       - name: Scan dependency manifests
         run: |
           set -o pipefail
-          osv-scanner -r --skip-git . | tee osv-results.txt
+          osv-scanner -r --skip-git --config osv-scanner.toml . | tee osv-results.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
