@@ -743,7 +743,7 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
         # Same ordering discipline as the outcome except-block below: this function's own
         # write is flushed (not committed) FIRST, and mark_cancelled()'s own commit is called
         # LAST, so a crash between the two loses nothing durable either way.
-        _finalize_cancelled_task(db, task, reason="cooperative_cancel")
+        finalize_cancelled_task(db, task, reason="cooperative_cancel")
         try:
             mark_cancelled(db, job, worker_id=worker_id, lease_generation=lease_generation)
         except JobLeaseLostError:
@@ -876,7 +876,7 @@ def _finalize_task_outcome(
         if locked.mainai_job_id is not None:
             job = db.get(MainAIJob, locked.mainai_job_id, populate_existing=True)
             if job is not None and job.cancel_requested:
-                _finalize_cancelled_task(
+                finalize_cancelled_task(
                     db,
                     locked,
                     reason="cancel_requested_beats_success_finalize",
@@ -924,7 +924,7 @@ def _finalize_task_outcome(
     _rollup_goal_after_task_boundary(db, task=task)
 
 
-def _finalize_cancelled_task(db: Session, task: MainAITask, *, reason: str) -> None:
+def finalize_cancelled_task(db: Session, task: MainAITask, *, reason: str) -> None:
     """V0.3: the cooperative-cancel counterpart to `_finalize_task_outcome()` -- a genuinely
     DIFFERENT terminal outcome, never routed through that function, because a cancel is not a
     failure: it must never count against `task.attempts`, schedule a `next_retry_at`, or record

@@ -20,7 +20,7 @@ from app.mainai_execution.checkpoint import (
     record_checkpoint,
 )
 from app.mainai_execution.execution_job import (
-    _finalize_cancelled_task,
+    finalize_cancelled_task,
     _finalize_task_outcome,
 )
 from app.models.mainai_execution import MainAIGoal, MainAITask, MainAITaskStatus
@@ -735,7 +735,7 @@ def run_driver(
             classification="CANCELLED",
             state=state,
         )
-        _finalize_cancelled_task(
+        finalize_cancelled_task(
             db, task, reason="cooperative_cancel_after_verify_before_finalize"
         )
         mark_cancelled(
