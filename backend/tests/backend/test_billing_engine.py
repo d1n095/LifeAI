@@ -72,7 +72,10 @@ def _settings(**kw) -> Settings:
 
 def _rollup(db, subject_type, subject_id, period_type, now=None):
     now = now or datetime.now(timezone.utc)
-    ps = now.strftime("%Y-%m-%d") if period_type == "day" else now.strftime("%Y-%m")
+    # period_start is a DATE column — month periods are anchored at the first of the month
+    # (see accounting._period_stamps; a bare "%Y-%m" string only ever worked on SQLite's
+    # TEXT storage and is rejected by real PostgreSQL).
+    ps = now.strftime("%Y-%m-%d") if period_type == "day" else now.strftime("%Y-%m-01")
     row = db.execute(
         text("SELECT tokens_in, tokens_out, cost_micros FROM usage_rollups WHERE subject_type=:st "
              "AND subject_id=:sid AND period_type=:pt AND period_start=:ps"),

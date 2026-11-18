@@ -28,7 +28,14 @@ from app.providers.pricing import estimate_cost
 
 
 def _period_stamps(now: datetime) -> tuple[str, str]:
-    return now.strftime("%Y-%m-%d"), now.strftime("%Y-%m")
+    # usage_rollups.period_start is a DATE column (app/models/billing.py) on BOTH dialects.
+    # A bare "%Y-%m" month key is not a valid date — PostgreSQL rejects it outright
+    # (InvalidDatetimeFormat ... '2026-11'), killing the request's transaction mid-chat.
+    # SQLite's TEXT storage string-compared the bare month fine, which is exactly why the
+    # in-memory-SQLite billing suite never caught this and every real-Postgres record_usage
+    # path failed (found 2026-11-18 via the real-PG regression sweep). A month period is
+    # anchored at its first day, which is a valid DATE on both dialects.
+    return now.strftime("%Y-%m-%d"), now.strftime("%Y-%m-01")
 
 
 def _effective_cost_usd(cost: Decimal | None, settings) -> Decimal:
