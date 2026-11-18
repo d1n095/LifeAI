@@ -91,6 +91,11 @@ def _dispatch_and_claim(db_session, superuser_db, owner_id):
     db_session.commit()
     claimed, _worker, generation = claim_next_mainai_job(superuser_db, "worker-skew", 120)
     assert claimed is not None and generation is not None
+    # The claim session must not carry an open transaction into the next test: an uncommitted
+    # transaction keeps row locks on mainai_jobs, and a later teardown that truncates the table
+    # then blocks on them -- which is exactly how a suite-level hang looks from the outside.
+    superuser_db.commit()
+    db_session.expire_all()
     return task, job
 
 
@@ -143,15 +148,46 @@ async def test_an_expired_lease_is_still_detected_when_the_app_clock_runs_behind
 
     record = superuser_db.query(MainAIRecoveryRecord).filter(MainAIRecoveryRecord.job_id == job_id).one_or_none()
     assert record is not None, "an expired lease must be recovered even when the app clock runs behind"
+    superuser_db.commit()
 
 
 def test_liveness_verdicts_follow_the_database_clock(db_session, superuser_db, owner_id):
     """`task_liveness()` is pure, so the caller supplies the clock. Judged with Python's wall
     clock a live job reads `stalled`; judged with `db_now()` it reads `running`, which is what
-    every API surface now passes."""
-    task, job = _dispatch_and_claim(db_session, superuser_db, owner_id)
+    every API surface now passes.
+
+    Deliberately NO claim here: this is a pure-function question about a live lease, and taking
+    a real claim would only add lock lifetime this test has no use for."""
+    goal = planner.create_goal(
+        db_session,
+        owner_id=owner_id,
+        title="Liveness clock probe",
+        original_instruction="Read-only audit.",
+        created_by="test",
+        approval_policy="standard_repo_work",
+    )
+    planner.create_plan(
+        db_session,
+        goal=goal,
+        rationale="single task",
+        tasks=[PlannedTaskSpec(description="audit", task_type="read_only_audit")],
+        created_by="test",
+    )
+    db_session.commit()
+    task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
+    executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+
     superuser_db.expire_all()
     task = superuser_db.get(MainAITask, task.id)
+    job = superuser_db.get(MainAIJob, task.mainai_job_id)
+    # Give the job a real future lease, DB-authored, exactly like claim_next_mainai_job() does.
+    superuser_db.execute(
+        sa_text("UPDATE mainai_jobs SET status = 'running', lease_expires_at = now() + interval '120 seconds' WHERE id = :id"),
+        {"id": str(job.id)},
+    )
+    superuser_db.commit()
+    superuser_db.expire_all()
     job = superuser_db.get(MainAIJob, job.id)
 
     assert task_liveness(task, job, now=datetime.utcnow() + timedelta(hours=3)) is TaskLiveness.stalled
