@@ -162,16 +162,66 @@ def check_dead_seams() -> tuple[str, dict]:
     return _run_script("backend/scripts/requirements/dead_seams.py", "--enforce-unread-settings")
 
 
+def check_runtime_privileges() -> tuple[str, dict]:
+    """The exact verification `app/main.py` performs at startup, run here so that "ready" means
+    "this database can actually boot the API" — not just "migrations match the tree".
+
+    Found the hard way: a freshly migrated database passed every other check while
+    `uvicorn app.main:app` refused to start, because `mainai_app` had no INSERT/SELECT on the
+    mainai_job_* tables. `scripts/security/apply_runtime_privileges.py` is the install step that
+    grants them, and nothing in the startup documentation named it.
+    """
+    import sys as _sys
+
+    backend_root = REPO_ROOT / "backend"
+    if str(backend_root) not in _sys.path:
+        _sys.path.insert(0, str(backend_root))
+    try:
+        from app.db import migration_engine
+        from app.rls import apply_mainai_execution_privileges, apply_mainai_job_runtime_privileges
+
+        # require_complete=True — the same mode app/main.py boots with. A non-fatal mode was tried
+        # first and was wrong: it logs drift and returns, so the check reported "passed" on a
+        # database where the API could not start at all. A readiness check that cannot fail is
+        # decoration.
+        apply_mainai_job_runtime_privileges(migration_engine)
+        apply_mainai_execution_privileges(migration_engine)
+    except Exception as exc:  # noqa: BLE001 - any failure here is a boot blocker worth reporting
+        return FAILED, {"error": f"{type(exc).__name__}: {exc}"}
+    return PASSED, {"note": "app/main.py's startup privilege policy is satisfiable on this database"}
+
+
 def check_local_model() -> tuple[str, dict]:
-    """A real local model is not part of this repository's infrastructure. Reported honestly."""
+    """Runs the real-inference harness when a local runtime is configured.
+
+    Previously this reported "skipped" even with a live model, so the report could say
+    `ready_for_private_start: True` while nothing had ever asked a model a question. The harness is
+    now invoked for real, and its three exit codes map to three different truths: 0 the model
+    answered, 2 the model is present but broken (a real failure), 3 the runtime or model is absent
+    (blocked — reported as not-verified with the exact `ollama pull` instruction).
+    """
     configured = bool(os.environ.get("OLLAMA_BASE_URL") or os.environ.get("LOCAL_LLM_BASE_URL"))
     if not configured:
         return SKIPPED, {
-            "reason": "no local model endpoint configured in this environment; protocol integration is "
-            "verified separately by .github/workflows/real-local-ai-verification.yml, which runs a real "
-            "Ollama server. Hardware/model deployment is NOT verified by this report."
+            "reason": "no local model endpoint configured in this environment; hardware/model "
+            "deployment is NOT verified by this report. Set OLLAMA_BASE_URL to have it run for real."
         }
-    return SKIPPED, {"reason": "endpoint configured but this harness does not perform a live generation call"}
+    try:
+        result = subprocess.run(
+            [sys.executable, str(BACKEND_ROOT / "scripts" / "acceptance" / "local_model_acceptance.py")],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            env={**os.environ},
+        )
+    except subprocess.TimeoutExpired:
+        return FAILED, {"error": "local model acceptance exceeded 600s"}
+    tail = (result.stdout or result.stderr).strip().splitlines()[-8:]
+    if result.returncode == 0:
+        return PASSED, {"exit_code": 0, "output": tail}
+    if result.returncode == 3:
+        return SKIPPED, {"exit_code": 3, "reason": "runtime or model absent", "output": tail}
+    return FAILED, {"exit_code": result.returncode, "output": tail}
 
 
 def _suite(path: str):
@@ -196,9 +246,10 @@ def build_checks(include_suites: bool) -> list[Check]:
         Check("redis", "Redis availability", "real", True, check_redis),
         Check("security.policy_lock", "Security controls unmodified and fully covered", "real", True, check_policy_lock),
         Check("security.capabilities", "Agent capabilities match the runtime contract", "real", True, check_capabilities),
+        Check("security.runtime_privileges", "Database grants satisfy the API's startup policy", "real", True, check_runtime_privileges),
         Check("requirements.registry", "Requirements registry verifies against the tree", "real", True, check_registry),
         Check("requirements.dead_seams", "No configuration flag that nothing reads", "real", True, check_dead_seams),
-        Check("model.local", "Local model communication", "not_verified", False, check_local_model),
+        Check("model.local", "Local model answered a real request", "real", False, check_local_model),
     ]
     if include_suites:
         checks.extend(

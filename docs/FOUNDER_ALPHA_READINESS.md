@@ -7,6 +7,35 @@ merged, nothing was deployed, and `first_cycle_go` remains `false`.
 Three things are kept apart on purpose: what is **verified by executable evidence**, what is
 **prepared but needs repository administration**, and what is **not verified at all**.
 
+## A first-start blocker found by actually booting the API
+
+Running `uvicorn app.main:app` against a freshly migrated database **failed to start**:
+
+```
+RuntimeError: mainai job runtime privilege policy violated:
+  - mainai_job_events: mainai_app effective privileges are [], expected exactly ['INSERT', 'SELECT']
+```
+
+The database had passed every acceptance check up to that moment. The cause is install order, not a
+code defect: migrations deliberately do not reference the `mainai_app` role (so they stay portable
+to a bare database), and the grants come from two scripts that no startup document named —
+`backend/scripts/security/ensure_app_role.py` and `apply_runtime_privileges.py`. The app correctly
+refuses to boot without them rather than running with a half-privileged role.
+
+Fixed here: the acceptance harness now runs `app/main.py`'s own startup privilege verification as a
+mandatory check (`security.runtime_privileges`), in the same `require_complete=True` mode the boot
+uses. A non-fatal mode was tried first and was wrong — it logs drift and returns, so it reported
+"passed" on a database that could not start. A readiness check that cannot fail is decoration.
+
+**Verified startup sequence** (all four steps run here, in this order):
+
+```
+alembic upgrade head
+MAINAI_APP_PASSWORD=… python backend/scripts/security/ensure_app_role.py
+python backend/scripts/security/apply_runtime_privileges.py
+uvicorn app.main:app        # then GET /api/health
+```
+
 ## Verdict
 
 **NO-GO for the founder's private start today**, for two reasons that are not engineering defects
@@ -118,6 +147,21 @@ The two unreachable packages are classified by evidence, not by coverage arithme
   activates a provider, or is imported by a router. Enabling it is the `first_cycle_go` decision.
 * `app/problem_learning/*` — 786 lines of owner-scoped, deterministic learning that no endpoint
   reaches: **missing integration**, recorded as `needs_founder_decision` with the gap written down.
+
+## Founder-facing state after boot
+
+The API was started against the acceptance database and asked for its own health:
+
+```json
+{"status":"ok","worker":"unknown",
+ "local_model":{"runtime":"ollama","reachable":true,
+   "configured_models":["qwen2.5:0.5b-instruct","nomic-embed-text"],
+   "missing_models":[]}}
+```
+
+That is the surface a founder (or an operator) needs in order to tell "the API is up but the model
+was never pulled" from "the model is fine and the chat is broken" without reading a provider error.
+`worker: unknown` is honest: no worker process was running for this check.
 
 ## What is still NOT verified
 
