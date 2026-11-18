@@ -219,16 +219,15 @@ def test_the_migration_role_keeps_full_write_access_to_its_own_bookkeeping(polic
     """The half of "least privilege" that must not be over-applied: Alembic's own role (the
     admin/migration connection) still owns and can rewrite the row. Asserted by performing a
     real no-op UPDATE and rolling it back, not by reading a catalog flag alone."""
+    # `Connection.execute()` already opened the transaction implicitly (SQLAlchemy 2.0), so the
+    # write commitment is undone with `rollback()` rather than a second `begin()`.
     with migration_engine.connect() as conn:
         can_write = conn.execute(
             text("SELECT has_table_privilege(current_user, 'public.alembic_version', 'UPDATE')")
         ).scalar()
         assert can_write is True, "the migration role lost UPDATE on alembic_version"
-        trans = conn.begin()
-        try:
-            conn.execute(text("UPDATE alembic_version SET version_num = version_num"))
-        finally:
-            trans.rollback()
+        conn.execute(text("UPDATE alembic_version SET version_num = version_num"))
+        conn.rollback()
 
 
 def test_alembic_upgrade_head_still_runs_after_the_revocation(policy_applied):
