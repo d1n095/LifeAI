@@ -27,7 +27,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.mainai_execution.graph import recompute_task_readiness
-from app.mainai_execution.lessons import apply_lessons_to_verification_plan, record_lesson_guard_advisory
+from app.mainai_execution.lessons import (
+    apply_lessons_to_verification_plan,
+    record_lesson_guard_advisory,
+    record_lesson_plan_decisions,
+)
 from app.mainai_execution.verify import VerificationStepError, validate_targeted_tests_target
 from app.models.mainai_execution import (
     TERMINAL_MAINAI_TASK_STATUSES,
@@ -332,6 +336,12 @@ def create_plan(
             )
 
     for task, applied_lesson_ids in zip(persisted, applied_lessons_by_task):
+        # Lesson -> plan-decision provenance edge (migration 0074, written where the change
+        # actually happened): one durable row per (lesson, task) the lesson really shaped —
+        # what lesson_effectiveness() joins guard observations against. Same transaction as
+        # the plan itself; ON CONFLICT DO NOTHING keeps a replayed pass from inflating counts.
+        if applied_lesson_ids:
+            record_lesson_plan_decisions(db, task=task, applied_lesson_ids=applied_lesson_ids)
         detail = {"plan_version": next_version}
         if applied_lesson_ids:
             detail["lessons_applied"] = [str(lesson_id) for lesson_id in applied_lesson_ids]

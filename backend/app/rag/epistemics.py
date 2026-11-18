@@ -484,9 +484,11 @@ _ROLLUP_SQL = """
 WITH live AS (
     SELECT c.id, c.status::text AS claim_status, c.confidence::text AS stored_confidence,
            (c.chunk_id IS NOT NULL AND s.deleted_at IS NULL AND s.id IS NOT NULL) AS has_live_grounding,
-           s.active_truth_status::text AS source_status
+           s.active_truth_status::text AS source_status,
+           em.quality_cap::text AS quality_cap
     FROM knowledge_claims c
     JOIN documents s ON s.id = c.source_id AND s.uploaded_by = c.owner_id
+    LEFT JOIN claim_evidence_metadata em ON em.claim_id = c.id AND em.owner_id = c.owner_id
     WHERE c.owner_id = :owner
       {project_filter}
 ), contradicted AS (
@@ -495,22 +497,43 @@ WITH live AS (
     UNION
     SELECT DISTINCT r.to_claim_id AS cid FROM claim_relationships r
     WHERE r.owner_id = :owner AND r.relationship_type = 'contradicts'
+),
+resolved AS (
+    -- The verified_fact bucket's conditions WITHOUT the cap clause, computed once: a
+    -- claim that would verify but carries a stricter materialized cap lands in the
+    -- CAP's bucket instead (classify_claim's exact downgrade rule — cap applies only
+    -- to a would-be verified_fact, never touches conflicting_evidence/assumption, and
+    -- a cap can only lower, never raise). cap values come from the grader's closed
+    -- vocabulary stored at stamp time (app/rag/evidence_metadata.py): 'verified_fact',
+    -- 'hypothesis' or 'unknown'.
+    SELECT l.*, (
+        l.has_live_grounding
+        AND l.claim_status = 'active' AND l.source_status IS DISTINCT FROM 'superseded'
+        AND l.stored_confidence IN ('certain', 'likely')
+    ) AS would_verify
+    FROM live l
 )
 SELECT
     count(*) FILTER (WHERE c.cid IS NOT NULL OR l.claim_status = 'disputed')  AS conflicting_evidence,
-    count(*) FILTER (WHERE c.cid IS NULL AND l.claim_status <> 'disputed' AND l.has_live_grounding
-                      AND l.claim_status = 'active' AND l.source_status IS DISTINCT FROM 'superseded'
-                      AND l.stored_confidence IN ('certain', 'likely'))       AS verified_fact,
+    count(*) FILTER (WHERE c.cid IS NULL AND l.claim_status <> 'disputed' AND l.would_verify
+                      AND (l.quality_cap IS NULL OR l.quality_cap = 'verified_fact'))
+                                                                              AS verified_fact,
     count(*) FILTER (WHERE c.cid IS NULL AND l.claim_status <> 'disputed'
                       AND l.stored_confidence = 'no_basis')                  AS assumption,
-    count(*) FILTER (WHERE c.cid IS NULL AND l.claim_status <> 'disputed' AND l.stored_confidence <> 'no_basis'
-                      AND NOT l.has_live_grounding)                          AS unknown,
-    count(*) FILTER (WHERE c.cid IS NULL AND l.claim_status <> 'disputed' AND l.stored_confidence <> 'no_basis'
-                      AND l.has_live_grounding
-                      AND NOT (l.claim_status = 'active' AND l.source_status IS DISTINCT FROM 'superseded'
-                               AND l.stored_confidence IN ('certain', 'likely'))) AS hypothesis,
+    count(*) FILTER (WHERE
+                        (c.cid IS NULL AND l.claim_status <> 'disputed' AND NOT l.has_live_grounding
+                         AND l.stored_confidence <> 'no_basis')
+                      OR (c.cid IS NULL AND l.claim_status <> 'disputed' AND l.would_verify
+                          AND l.quality_cap = 'unknown'))                    AS unknown,
+    count(*) FILTER (WHERE
+                        (c.cid IS NULL AND l.claim_status <> 'disputed' AND l.stored_confidence <> 'no_basis'
+                         AND l.has_live_grounding
+                         AND NOT (l.claim_status = 'active' AND l.source_status IS DISTINCT FROM 'superseded'
+                                  AND l.stored_confidence IN ('certain', 'likely')))
+                      OR (c.cid IS NULL AND l.claim_status <> 'disputed' AND l.would_verify
+                          AND l.quality_cap = 'hypothesis'))                 AS hypothesis,
     count(*)                                                                 AS total
-FROM live l
+FROM resolved l
 LEFT JOIN contradicted c ON c.cid = l.id
 """
 
@@ -527,7 +550,15 @@ def epistemic_status_counts_sql(
     verified_fact, everything else → hypothesis. The stored confidence column is the
     extraction-time bucket (assess_claim_confidence recomputes LIVE per claim); the rollup
     therefore reads 'certain|likely' as the stored signal that no contradiction has been
-    recorded since — the authoritative per-claim verdicts remain classify_claim's."""
+    recorded since — the authoritative per-claim verdicts remain classify_claim's.
+
+    Also mirrors classify_claim's quality-cap downgrade: a would-be verified_fact whose
+    stamped study metadata caps the ladder lower (claim_evidence_metadata.quality_cap —
+    materialized by app/rag/evidence_metadata.py at stamp time) is counted in the CAP's
+    bucket instead, so the chat/workbench instruction rollup agrees with the per-claim
+    detail view that passes quality_cap into classify_claim. The cap never moves a claim
+    INTO verified_fact and never touches conflicting_evidence/assumption, exactly like
+    classify_claim's rule."""
     sql = _ROLLUP_SQL.format(
         project_filter="AND s.project_id = :project_id" if project_id is not None else ""
     )

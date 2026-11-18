@@ -27,6 +27,13 @@ from app.providers.registry import embed_with_policy, resolve_active
 from app.providers.verification import classify_provider_exception
 from app.rag.library_import import maybe_purge_blob
 from app.rag.epistemics import classify_claim
+from app.rag.evidence_metadata import (
+    ClaimNotFoundError,
+    NothingDeclaredError,
+    cap_from_row,
+    quality_metadata_for_claims,
+    record_claim_evidence_metadata,
+)
 from app.rag.trust import assess_claim_confidence
 from app.rag.vector_store import hybrid_search
 from app.storage import get_storage
@@ -39,6 +46,8 @@ from app.storage.references import (
     get_storage_cleanup_ops_status,
 )
 from app.schemas import (
+    ClaimEvidenceMetadataIn,
+    ClaimEvidenceMetadataOut,
     DeleteConfirmIn,
     ImportJobOut,
     KnowledgeClaimOut,
@@ -367,6 +376,11 @@ def get_source(source_id: uuid.UUID, db: Session = Depends(get_db), user: User =
     # confidence is recomputed live (assess_claim_confidence), not read from the stored
     # extraction-time value — see app/rag/trust.py's docstring for why (a relationship added
     # after extraction must be reflected immediately).
+    # Evidence-quality caps (app/rag/evidence_metadata.py): ONE batch read for the page,
+    # then each claim's ladder verdict runs under its stamped cap — the same
+    # classify_claim(quality_cap=...) contract the SQL rollup mirrors, so the detail view
+    # and the chat/workbench instruction rollup can never disagree about a capped claim.
+    quality_rows = quality_metadata_for_claims(db, user.id, [c.id for c in claims])
     detail.claims = [
         KnowledgeClaimOut(
             id=c.id,
@@ -381,7 +395,12 @@ def get_source(source_id: uuid.UUID, db: Session = Depends(get_db), user: User =
             # verdict rides ADDITIVELY on the existing per-claim row — same cost shape as
             # the live-confidence recomputation beside it, and the founder sees WHY each
             # claim sits where it sits in the Library detail view.
-            epistemic_status=classify_claim(db, user.id, c).status.value,
+            epistemic_status=classify_claim(
+                db, user.id, c, quality_cap=cap_from_row(quality_rows.get(c.id))
+            ).status.value,
+            quality_grade=quality_rows[c.id].quality_grade if c.id in quality_rows else None,
+            quality_cap=quality_rows[c.id].quality_cap if c.id in quality_rows else None,
+            quality_caveats=list(quality_rows[c.id].quality_caveats) if c.id in quality_rows else [],
         )
         for c in claims
     ]
@@ -591,6 +610,48 @@ def create_relationship(
     db.commit()
     db.refresh(relationship)
     return relationship
+
+
+@router.put("/claims/{claim_id}/evidence-metadata", response_model=ClaimEvidenceMetadataOut)
+def stamp_claim_evidence_metadata(
+    claim_id: uuid.UUID,
+    payload: ClaimEvidenceMetadataIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Founder-declared study metadata for ONE claim — the producer side of the
+    evidence-quality layer (app/rag/evidence_metadata.py). Fail-closed: keys outside the
+    declared vocabulary are rejected with a named reason (and reported back in
+    `rejected_keys`, alongside the materialized verdict that only the ACCEPTED keys
+    produced); a declaration with zero valid keys is refused outright, so an honest
+    absence can never become a stored grade. Re-stamping updates the row in place — a
+    corrected declaration moves the materialized verdict with it."""
+    claim = db.query(KnowledgeClaim).filter(KnowledgeClaim.id == claim_id, KnowledgeClaim.owner_id == user.id).first()
+    if claim is None:
+        raise HTTPException(status_code=404, detail="Påståendet hittades inte.")
+    try:
+        stamped = record_claim_evidence_metadata(
+            db, user.id, claim_id, payload.metadata, declared_via=payload.declared_via
+        )
+    except NothingDeclaredError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ClaimNotFoundError as exc:  # unreachable behind the visibility check; kept for contract symmetry
+        raise HTTPException(status_code=404, detail="Påståendet hittades inte.") from exc
+    db.commit()
+    return ClaimEvidenceMetadataOut(
+        claim_id=stamped.claim_id,
+        declared=stamped.declared,
+        rejected=stamped.rejected,
+        quality_grade=stamped.grade.value,
+        quality_cap=stamped.cap.value,
+        quality_caveats=list(stamped.assessment.caveats),
+        axis_findings=[
+            {"axis": f.axis, "direction": f.direction, "finding": str(f.finding), "reason": f.reason}
+            for f in stamped.assessment.axes
+        ],
+        declared_via=stamped.declared_via,
+        recorded_at=stamped.recorded_at,
+    )
 
 
 @router.get("/search/hybrid", response_model=LibrarySearchResponseOut)

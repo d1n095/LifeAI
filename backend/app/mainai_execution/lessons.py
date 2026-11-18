@@ -202,6 +202,60 @@ def apply_lessons_to_verification_plan(db: Session, *, task_type: str, verificat
 
     return augmented, applied_lesson_ids
 
+
+def record_lesson_plan_decisions(db: Session, *, task, applied_lesson_ids: list[uuid.UUID]) -> int:
+    """The lesson -> changed-planning-decision PROVENANCE EDGE migration 0058 explicitly
+    deferred: one durable `engineering_lesson_plan_decisions` row per (lesson, task) the
+    lesson really shaped, written HERE — at the moment `apply_lessons_to_verification_plan()`
+    appended the lesson's regression target to this task's verification_plan and
+    planner.create_plan() persisted it — not re-derived later from event-detail strings.
+
+    Together with 0058's guard observations this edge is what lets
+    lesson_guard_observations.lesson_effectiveness() measure a rule's standing from
+    APPLIED-count to guard OUTCOME (observations are counted only where a decision row
+    proves the lesson actually shaped that task's plan) — the measured form of "recurring
+    failures lead to improvements in decision rules" without ever manufacturing causality:
+    a held guard is still "the guard held here", never "the lesson caused this".
+
+    Idempotent on (task_id, lesson_id) via ON CONFLICT DO NOTHING — a replayed planner pass
+    cannot inflate a lesson's applied count; a re-planned goal writes new rows because it
+    creates a new task. Append-only; the caller owns the transaction (called from
+    create_plan, commit=False, atomic with the plan itself)."""
+    if not applied_lesson_ids:
+        return 0
+
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    from app.models.lesson_plan_decisions import (
+        EngineeringLessonPlanDecision,
+        LessonPlanDecisionType,
+    )
+
+    lessons = (
+        db.query(EngineeringLesson).filter(EngineeringLesson.id.in_(list(applied_lesson_ids))).all()
+    )
+    written = 0
+    for lesson in lessons:
+        # The step appended is exactly what apply_lessons_to_verification_plan validated and
+        # added — rebuilding it here keeps the decision row faithful to the actual plan step
+        # (same target string, same kind).
+        step = {"kind": "targeted_tests", "target": lesson.regression_test}
+        db.execute(
+            pg_insert(EngineeringLessonPlanDecision)
+            .values(
+                owner_id=task.owner_id,
+                lesson_id=lesson.id,
+                task_id=task.id,
+                goal_id=task.goal_id,
+                decision_type=LessonPlanDecisionType.verification_step_added.value,
+                affected_step=step,
+            )
+            .on_conflict_do_nothing(constraint="uq_engineering_lesson_plan_decisions_source_ref")
+        )
+        written += 1
+    return written
+
+
 def record_lesson_guard_advisory(
     db,
     *,
@@ -241,6 +295,21 @@ def record_lesson_guard_advisory(
     if report.acceptable:
         return
     detail = f"task_type={task_type}; {report.summary}"
+    # The rules' own track record rides on the advisory (lesson_effectiveness, fed by the
+    # 0074 plan-decision edge): a founder reading "guards dominate this plan" also reads
+    # whether those same rules' guards have been HOLDING or FAILING where applied — the
+    # measurable-effectiveness half of the self-correction loop, surfaced where the
+    # overcorrection risk is already being reported. Advisory-only, like everything here.
+    try:
+        from app.mainai_execution.lesson_guard_observations import (
+            format_lesson_standing_for_advisory,
+            lesson_effectiveness,
+        )
+
+        standing = lesson_effectiveness(db, owner_id=owner_id, lesson_ids=list(applied_lesson_ids) if applied_lesson_ids else None)
+        detail += format_lesson_standing_for_advisory(standing)
+    except Exception:  # noqa: BLE001 - advisory enrichment must never break planning
+        logger.warning("lesson standing enrichment failed; advisory records the risk alone", exc_info=True)
     logger.warning("Overcorrectionsrisk i verifieringsplan: %s", detail)
     from app.audit import record_audit
 

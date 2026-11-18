@@ -370,6 +370,33 @@ class KnowledgeClaimOut(BaseModel):
     # conflicting_evidence | hypothesis | assumption | unknown — additive; None only for
     # constructors that predate the ladder (every live read path sets it).
     epistemic_status: str | None = None
+    # Evidence-quality metadata (app/rag/evidence_metadata.py): the founder-declared study
+    # facts and the MATERIALIZED verdict the pure grader computed from them. None/[] when
+    # nothing has been stamped for the claim — an honest absence, never a guess.
+    quality_grade: str | None = None
+    quality_cap: str | None = None
+    quality_caveats: list[str] = []
+
+
+class ClaimEvidenceMetadataIn(BaseModel):
+    """A founder-declared structured study-metadata block for one claim (the producer
+    input to app/rag/evidence_metadata.record_claim_evidence_metadata). Keys outside the
+    declared vocabulary come back in `rejected_keys` — fail-closed, never stored."""
+
+    metadata: dict = {}
+    declared_via: str = "founder_api"
+
+
+class ClaimEvidenceMetadataOut(BaseModel):
+    claim_id: uuid.UUID
+    declared: dict
+    rejected: dict[str, str]
+    quality_grade: str
+    quality_cap: str
+    quality_caveats: list[str]
+    axis_findings: list[dict]
+    declared_via: str
+    recorded_at: datetime
 
 
 class MediaSegmentOut(BaseModel):

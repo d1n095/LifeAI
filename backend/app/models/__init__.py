@@ -79,8 +79,13 @@ from app.models.intelligence_governance import (
     ParticipationMode,
     ReviewKind,
 )
+from app.models.claim_evidence_metadata import ClaimEvidenceMetadata
 from app.models.knowledge_claim import KnowledgeClaim
 from app.models.knowledge_version import KnowledgeVersion
+from app.models.lesson_plan_decisions import (
+    EngineeringLessonPlanDecision,
+    LessonPlanDecisionType,
+)
 from app.models.lesson_guard_observations import (
     EngineeringLessonGuardObservation,
     LessonGuardEvidenceStrength,
@@ -299,6 +304,7 @@ __all__ = [
     "LifeIntentEvent",
     "ParticipationMode",
     "ReviewKind",
+    "ClaimEvidenceMetadata",
     "KnowledgeClaim",
     "KnowledgeVersion",
     "ACTIVE_MAINAI_GOAL_STATUSES",
@@ -308,6 +314,8 @@ __all__ = [
     "TERMINAL_MAINAI_TASK_STATUSES",
     "EngineeringLesson",
     "EngineeringLessonGuardObservation",
+    "EngineeringLessonPlanDecision",
+    "LessonPlanDecisionType",
     "LessonGuardEvidenceStrength",
     "LessonGuardOutcome",
     "ProviderSpendAuthorization",
