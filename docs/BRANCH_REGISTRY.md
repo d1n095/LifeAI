@@ -9602,3 +9602,20 @@ test` kommer troligen också behöva samma `DEFAULT_LLM_MODEL`/`DEFAULT_EMBEDDIN
 **Ingen merge/deploy/aktivering/säkerhetsgrind ändrad. `first_cycle_go=false` genomgående.**
 Grundaren avgör om denna evidens räcker för att gå vidare, och i vilken ordning relativt
 punkterna ovan.
+
+## PR #463 — model routing security hardening (2026-11-19)
+
+Existing branch `codex/model-capability-routing-foundation`, base `69dc5ea5a9cfc750303ea1a9b335c78612bc8f39`.
+Active hardening of exact-model verification, catalog/adapter compatibility and Founder configuration.
+Reuses #458's runner pin and dependency updates; no competing CI implementation and no new advisory exceptions.
+#457 overlaps `providers/verification.py`; preserve its local timeout contract during integration.
+R12 has a different eval-only `providers/zai_provider.py` and global `zai` registration lifecycle; do not substitute it for this HTTP adapter.
+Freebuff R15 was subsequently supplied at `transfer/freebuff-r15-20261119` / `16a6bd301a8a389e7648b8a3c1cdd80a3d115662`: read-only compatibility review is recorded in `docs/MODEL_ROUTING_HARDENING.md`; its branch is untouched.
+No merge/rebase/deploy/provider activation. `first_cycle_go=false`.
+
+#463 integration checkpoint: targeted sharp/PostCSS patches now overlap #458's lockfile.
+A synthetic merge reports package-lock.json conflict; retain patches and regenerate the composed lock.
+#457 still conflicts in verification.py; R12 still conflicts in registry.py and the Z.ai adapter.
+
+R15 checkpoint review: adds `gemma3:4b` to #463's local model catalog without runtime guarantees.
+Combined activation remains blocked on Z.ai eval/HTTP identity separation, verifier contract composition and R15 billing's per-attempt/ambiguous-failure accounting. No merge or Freebuff branch changes performed.

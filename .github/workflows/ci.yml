@@ -55,6 +55,8 @@ jobs:
       # Fails the job on any high/critical vulnerability, except the small, dated,
       # ID-scoped allowlist in scripts/check-npm-audit.js — moderate-and-below are tracked
       # but don't block (see docs/SECURITY_BLOCKERS.md for the current baseline).
+      - run: node --test scripts/check-npm-audit.test.js
+        working-directory: frontend
       - run: node scripts/check-npm-audit.js
         working-directory: frontend
 
@@ -307,7 +309,11 @@ jobs:
   # ---------------------------------------------------------------------------------------
   e2e-tests:
     name: E2E — Playwright (full stack)
-    runs-on: ubuntu-latest
+    # Pinned deliberately: `ubuntu-latest` now resolves to ubuntu-26.04, and Playwright 1.56.1
+    # publishes no Chromium build for it ("Playwright does not support chromium on
+    # ubuntu26.04-x64"), so `npx playwright install` failed before any test ran. Revert to
+    # `ubuntu-latest` only once a Playwright release covers the newer image.
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -422,7 +428,7 @@ jobs:
             curl -sf -o /dev/null http://127.0.0.1:8010/api/health && break
             sleep 1
           done
-      - run: npx playwright test e2e/auth.spec.ts e2e/security.spec.ts e2e/account.spec.ts --project=chromium
+      - run: npx playwright test e2e/auth.spec.ts e2e/security.spec.ts e2e/account.spec.ts e2e/model-routing.spec.ts --project=chromium
         working-directory: frontend
       - name: Stop backend
         if: always()
@@ -473,7 +479,8 @@ jobs:
   # ---------------------------------------------------------------------------------------
   same-origin-proxy-test:
     name: E2E — same-origin proxy
-    runs-on: ubuntu-latest
+    # Pinned for the same Playwright/ubuntu-26.04 reason as e2e-tests above.
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -608,7 +615,8 @@ jobs:
   # ---------------------------------------------------------------------------------------
   combined-container-verify:
     name: Combined container — build, run, verify
-    runs-on: ubuntu-latest
+    # Pinned for the same Playwright/ubuntu-26.04 reason as e2e-tests above.
+    runs-on: ubuntu-24.04
     if: github.ref == 'refs/heads/claude/verify-combined-container' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm'
     services:
       postgres:
@@ -773,7 +781,7 @@ jobs:
         env:
           E2E_FRONTEND_URL: http://localhost:3020
           E2E_BACKEND_DIRECT_PORT: "8000"
-        run: npx playwright test --config=playwright.combined.config.ts e2e/auth.spec.ts e2e/security.spec.ts e2e/account.spec.ts --project=chromium
+        run: npx playwright test --config=playwright.combined.config.ts e2e/auth.spec.ts e2e/security.spec.ts e2e/account.spec.ts e2e/model-routing.spec.ts --project=chromium
 
       - name: Stop container B (verifies graceful SIGTERM shutdown)
         run: |

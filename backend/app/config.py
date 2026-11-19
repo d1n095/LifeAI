@@ -5,6 +5,23 @@ from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def validated_zai_base_url(value: str) -> str:
+    """Only supported HTTPS API endpoints may receive the Z.ai credential.
+
+    Fixed origins exclude arbitrary proxies, private IPs and metadata endpoints.
+    The adapter separately disables redirects and environment proxy inheritance.
+    """
+    if any(ord(c) <= 32 for c in value):
+        raise ValueError("Z.ai requires a supported HTTPS API endpoint")
+    parsed = urlsplit(value)
+    if (parsed.scheme != "https" or parsed.hostname != "api.z.ai"
+            or parsed.port not in (None, 443) or parsed.username or parsed.password
+            or parsed.query or parsed.fragment
+            or parsed.path.rstrip("/") not in ("/api/paas/v4", "/api/coding/paas/v4")):
+        raise ValueError("Z.ai requires a supported HTTPS API endpoint")
+    return value.rstrip("/")
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -132,6 +149,13 @@ class Settings(BaseSettings):
     google_api_key: str | None = None
     deepseek_api_key: str | None = None
     openrouter_api_key: str | None = None
+    zai_api_key: str | None = None
+    zai_base_url: str = "https://api.z.ai/api/paas/v4"
+    @field_validator("zai_base_url")
+    @classmethod
+    def validate_zai_endpoint(cls, value: str) -> str:
+        return validated_zai_base_url(value)
+
     ollama_base_url: str = "http://ollama:11434"
 
     # Fallback order per role: comma-separated provider names, tried in order after the

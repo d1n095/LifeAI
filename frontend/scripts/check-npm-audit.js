@@ -37,6 +37,15 @@ function runAudit() {
 }
 
 const audit = JSON.parse(runAudit());
+// A registry/network/auth error is not a clean audit. npm can return JSON even
+// when no vulnerability scan completed; never turn that into an empty green result.
+if (audit.error || !audit.vulnerabilities || typeof audit.vulnerabilities !== "object" ||
+    !audit.metadata || !audit.metadata.vulnerabilities ||
+    !Number.isInteger(audit.metadata.vulnerabilities.total)) {
+  console.error("npm audit: no valid completed audit report; refusing a green result.");
+  process.exit(1);
+}
+
 const offendingSources = new Set();
 
 for (const vuln of Object.values(audit.vulnerabilities || {})) {
