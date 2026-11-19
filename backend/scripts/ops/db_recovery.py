@@ -719,12 +719,33 @@ def _restore_via_sql(dump_path: Path, target_url: str) -> list[str]:
 
 
 def _apply_boot_privilege_policy(target_url: str) -> None:
-    """Boot sequence's step 3: the same module production runs, in its mutating mode, so the
-    restored database is left with narrowed S1A grants and no runtime privileges at all on
-    `alembic_version` (SFA-1). Raises SystemExit(1) on any policy mismatch, which is the
-    behaviour we want a restore drill to inherit unchanged."""
+    """Boot sequence's steps 3 AND 4, in their mutating modes, so the restored database is left
+    in the same privilege end state a clean install reaches: narrowed S1A grants, no runtime
+    privileges at all on `alembic_version` (SFA-1), and the MainAI job/execution function
+    policies applied. Raises on any mismatch, which is the behaviour a restore drill should
+    inherit unchanged.
+
+    Step 4 is not optional. `pg_restore --no-privileges` recreates Postgres's default PUBLIC
+    EXECUTE on functions, so a restore that stopped at step 3 produced a database that passed
+    the manifest comparison and then refused to boot with "PUBLIC must never hold EXECUTE".
+    That was found by actually restoring an encrypted backup into a clean database and starting
+    the API against it, which is the only way this class of defect shows up.
+    """
     module = _load_module(POLICY_DIR / "apply_runtime_privileges.py", "apply_runtime_privileges")
     module.apply_and_verify(target_url)
+
+    if str(BACKEND_ROOT) not in sys.path:
+        sys.path.insert(0, str(BACKEND_ROOT))
+    from sqlalchemy import create_engine
+
+    from app.rls import apply_mainai_execution_privileges, apply_mainai_job_runtime_privileges
+
+    engine = create_engine(target_url)
+    try:
+        apply_mainai_job_runtime_privileges(engine)
+        apply_mainai_execution_privileges(engine)
+    finally:
+        engine.dispose()
 
 
 def compare_to_manifest(manifest: dict, conn, *, content_digests: bool) -> list[str]:

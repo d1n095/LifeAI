@@ -4,6 +4,31 @@ These are repository settings, not code. Nothing here is claimed active until an
 confirms it in the GitHub UI or API; the Security workflow prints `NOT ENFORCED` for CodeQL until
 then, and no branch-protection evidence exists in this repository.
 
+## Verified repository state — 2026-11-19
+
+Read with `gh api`, not inferred from documentation:
+
+| Fact | Observed |
+|---|---|
+| default branch | `claude/det-kommer-mer-879lcm` (`gh repo view --json defaultBranchRef`) |
+| `main` exists | **no** — `branches/main` returns 404, `ls-remote --heads main` is empty |
+| PR #461 base | `claude/det-kommer-mer-879lcm` |
+| branch protection on `main` | 404 (branch does not exist) |
+| rulesets | none returned |
+| secret scanning / push protection | **enabled** |
+| Dependabot security updates | **disabled** |
+| CodeQL | gated by `CODEQL_ENABLED` + GHAS; no code-scanning evidence observed |
+| `Security`, `All required checks passed` on `b060ecf` | successful **runs**, not required checks |
+
+Consequence: today a pull request can merge without any of the security gates. The workflow code
+is fail-closed, but the repository does not require it.
+
+## Step 0 — establish a protected default branch (blocking)
+
+Protection cannot be configured on a branch that does not exist. An administrator must first create
+`main` at the reviewed baseline (or rename the intended baseline and update the default), then
+retarget the open PRs. This is a repository-administration action and was **not** performed here.
+
 ## 1. Required status checks on `main`
 
 Settings → Branches → branch protection rule for `main` (or Rulesets → new branch ruleset):

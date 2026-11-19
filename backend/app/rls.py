@@ -824,6 +824,13 @@ def apply_mainai_job_runtime_privileges(engine: Engine, *, require_complete: boo
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON mainai_job_events FROM mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON mainai_job_proposals FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_mainai_job_children() TO mainai_app"))
+        # Enforce what the verifier below asserts. Postgres grants EXECUTE on new functions to
+        # PUBLIC by default, and a pg_restore with --no-privileges recreates that default even
+        # for a database whose live instance had revoked it. Without this REVOKE the policy
+        # check could only ever fail on such a database (found by restoring an encrypted backup
+        # into a clean database: the API refused to boot), never repair it.
+        for spec in _MAINAI_JOB_FUNCTION_SPECS:
+            conn.execute(text(f"REVOKE ALL ON FUNCTION {spec['name']}({spec['identity_args']}) FROM PUBLIC"))
 
         for table in _MAINAI_JOB_TABLES:
             owner = conn.execute(
@@ -1125,6 +1132,9 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:
                 errors.append(f"{table}: mainai_app effective privileges are {sorted(granted)}, expected exactly {sorted(allowed)}")
+
+        for spec in _MAINAI_EXECUTION_FUNCTION_SPECS:
+            conn.execute(text(f"REVOKE ALL ON FUNCTION {spec['name']}({spec['identity_args']}) FROM PUBLIC"))
 
         for spec in _MAINAI_EXECUTION_FUNCTION_SPECS:
             name = spec["name"]

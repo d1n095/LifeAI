@@ -686,7 +686,8 @@
         "backend/scripts/ops/db_recovery.py"
       ],
       "integration_evidence": [
-        "backend/tests/backend/test_offsite_backup.py"
+        "backend/tests/backend/test_offsite_backup.py",
+        "backend/tests/backend/test_runtime_privilege_self_heal.py"
       ],
       "security_implications": "A backup on the same disk survives neither disk loss nor ransomware nor a compromised host — the exact events a founder needs continuity for.",
       "test_coverage": [
@@ -694,8 +695,9 @@
       ],
       "status": "partial",
       "gaps": [
-        "Encryption (AES-256-GCM), integrity manifests, retention and a restore were exercised end to end against a file:// directory on a different path — but that is still the same host, so off-host RETENTION is not proven. Every transport manifest records off_host_verified=false.",
-        "No remote destination has been authorized by the founder. Destination, retention window and key custody are founder decisions, not engineering defaults."
+        "The tested destination is a file:// directory on the same host, so off-host RETENTION is not proven. Every transport manifest records off_host_verified=false.",
+        "RPO is the manual backup interval; no schedule or retention window has been authorized by the founder.",
+        "RTO measured at 1.26 s restore and under 8 s to a healthy API for a ~1 MB database with 15 documents; not a capacity claim for a larger dataset."
       ]
     },
     {
@@ -774,7 +776,7 @@
     },
     {
       "id": "REQ-UX-001",
-      "title": "The founder workflow works through the real UI, not only through API calls",
+      "title": "The founder workflow works through the real Founder Console, not only through API calls",
       "class": "mandatory_before_private_start",
       "source": "Mission 3: 'Test the actual founder-facing workflow, not just backend APIs' and 'Do not claim this workflow is complete until exercised end to end'",
       "responsible_module": "backend/scripts/acceptance/founder_workflow.py",
@@ -783,20 +785,26 @@
         "REQ-OPS-005"
       ],
       "implementation_evidence": [
-        "backend/scripts/acceptance/founder_workflow.py",
-        "frontend/e2e/founder-alpha-workflow.spec.ts",
-        "frontend/app/api/[...path]/route.ts"
+        "frontend/components/living-core/LivingCore.tsx",
+        "frontend/app/(shell)/page.tsx",
+        "frontend/e2e/founder-console.spec.ts",
+        "backend/scripts/acceptance/founder_workflow.py"
       ],
       "integration_evidence": [
-        "backend/scripts/acceptance/founder_workflow.py",
-        "frontend/e2e/founder-alpha-workflow.spec.ts"
+        "frontend/e2e/founder-console.spec.ts",
+        "frontend/e2e/founder-alpha-workflow.spec.ts",
+        "backend/scripts/acceptance/founder_workflow.py"
       ],
-      "security_implications": "Runs through the same-origin proxy with real cookies and CSRF; verifies a founder session survives a process restart, and that uploaded content is owner-scoped.",
+      "security_implications": "Runs through the same-origin proxy with real cookies and CSRF; uploads are owner-scoped; approval-gated execution tasks are visually separated from autonomous work and only the backend's approval endpoints can clear them. The Living Core is a decorative canvas that imports no decision, auth or security module and cannot authorize anything.",
       "test_coverage": [
+        "frontend/e2e/founder-console.spec.ts",
         "frontend/e2e/founder-alpha-workflow.spec.ts"
       ],
       "status": "verified",
-      "gaps": []
+      "gaps": [
+        "Browser verification is desktop Chromium only; no mobile viewport pass yet.",
+        "Cancellation and approval are proven by real API/execution tests and wired to the console, but no automated browser click exercises a live running cancel because no long-running job is guaranteed at test time."
+      ]
     }
   ]
 }

@@ -397,6 +397,22 @@ export type WorkbenchAnalysis = {
   model: string;
 };
 
+// GET /api/health — the operational facts the Founder Console is allowed to display. Every
+// field here is measured by the backend (see backend/app/routers/health.py); the UI must never
+// invent a value for a missing field (e.g. `missing_models` absent means "not checked", not
+// "none missing").
+export type SystemHealth = {
+  status: "ok" | "unavailable";
+  worker: "alive" | "unknown";
+  storage: { writable: boolean };
+  local_model?: {
+    runtime: string;
+    reachable: boolean | null;
+    configured_models: string[];
+    missing_models?: string[];
+  } | null;
+};
+
 export type TaskItem = {
   id: string;
   project_id: string | null;
@@ -803,6 +819,7 @@ export const api = {
   logout: () => request("/api/auth/logout", { method: "POST" }),
   logoutAll: () => request("/api/auth/logout-all", { method: "POST" }),
   me: () => request<CurrentUser>("/api/auth/me"),
+  health: () => request<SystemHealth>("/api/health"),
 
   exportAccount: () => request<Record<string, unknown>>("/api/account/export"),
   deleteAccount: (password: string) =>

@@ -2,9 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { api, ChatResponse, ChatSource, Confidence, ContextStatus, ConversationItem } from "@/lib/api";
+import { api, ChatResponse, ChatSource, Confidence, ContextStatus, ConversationItem, SystemHealth } from "@/lib/api";
 import { useVoice } from "@/lib/useVoice";
-import Orb, { OrbState } from "@/components/Orb";
+import LivingCore, { CoreState } from "@/components/living-core/LivingCore";
 import ConfidenceBadge from "@/components/ConfidenceBadge";
 
 type ChatEntry = {
@@ -79,6 +79,8 @@ export default function ChatPage() {
   const [showErrorPulse, setShowErrorPulse] = useState(false);
   const [readAloud, setReadAloud] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [health, setHealth] = useState<SystemHealth | null>(null);
+  const [healthError, setHealthError] = useState(false);
 
   const voice = useVoice();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -96,6 +98,32 @@ export default function ChatPage() {
     // pattern, setState happens after an await inside refreshConversations().
     // eslint-disable-next-line react-hooks/set-state-in-effect
     refreshConversations();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function probe() {
+      try {
+        const next = await api.health();
+        if (!cancelled) {
+          setHealth(next);
+          setHealthError(false);
+        }
+      } catch {
+        if (!cancelled) {
+          setHealth(null);
+          setHealthError(true);
+        }
+      }
+    }
+    void probe();
+    const timer = setInterval(() => {
+      if (!document.hidden) void probe();
+    }, 20_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -211,15 +239,30 @@ export default function ChatPage() {
     );
   }
 
-  const orbState: OrbState = showErrorPulse
-    ? "error"
-    : voice.listening
-      ? "listening"
-      : loading
-        ? "thinking"
-        : voice.speaking
-          ? "speaking"
-          : "idle";
+  const modelUnavailable =
+    healthError || health?.status === "unavailable" || health?.local_model?.reachable === false;
+  const coreState: CoreState = showErrorPulse
+    ? "degraded"
+    : modelUnavailable
+      ? "degraded"
+      : voice.listening
+        ? "listening"
+        : loading
+          ? "reasoning"
+          : voice.speaking
+            ? "speaking"
+            : "resting";
+  const modelLabel = healthError
+    ? "Backend onåbar"
+    : !health
+      ? "Kontrollerar modell…"
+      : health.local_model?.reachable === false
+        ? "Lokal modell onåbar"
+        : health.local_model?.missing_models?.length
+          ? `Saknas: ${health.local_model.missing_models.join(", ")}`
+          : health.local_model
+            ? `${health.local_model.runtime} · ${health.local_model.configured_models.join(", ") || "ingen modell"}`
+            : "Ingen lokal modell konfigurerad";
 
   return (
     <div className="flex h-[calc(100vh-2rem)] md:h-[calc(100vh-4rem)] gap-4">
@@ -282,7 +325,18 @@ export default function ChatPage() {
           >
             Historik
           </button>
-          <h1 className="text-xl font-semibold hidden md:block">Chat med MainAI</h1>
+          <div className="hidden md:block">
+            <h1 className="text-xl font-semibold">Chat med MainAI</h1>
+            <div className="mt-0.5 flex items-center gap-2 text-[11px] text-white/40">
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  modelUnavailable ? "bg-red-400/80" : health ? "bg-emerald-400/80" : "bg-white/25"
+                }`}
+                aria-hidden="true"
+              />
+              <span>{modelLabel}</span>
+            </div>
+          </div>
           {voice.synthesisSupported && (
             <label className="flex items-center gap-2 text-xs text-white/50">
               <input
@@ -297,8 +351,17 @@ export default function ChatPage() {
         </div>
 
         <div className="flex justify-center py-2">
-          <Orb state={orbState} size={110} />
+          <LivingCore
+            state={coreState}
+            mode={loading ? "focus" : voice.listening || voice.speaking ? "care" : "harmony"}
+            size={120}
+          />
         </div>
+        {modelUnavailable && (
+          <div role="alert" className="mx-auto mb-2 max-w-2xl rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+            Modellen är inte tillgänglig just nu. Dina meddelanden sparas fortfarande och kan skickas igen när modellen svarar.
+          </div>
+        )}
 
         <div ref={scrollRef} className="flex-1 overflow-y-auto space-y-4 pr-2" aria-live="polite">
           {entries.length === 0 && (

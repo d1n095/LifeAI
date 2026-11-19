@@ -155,6 +155,24 @@ Two defects were found by exercising it, not by reading it:
    with an operator-actionable message. The UI test now waits for the document to become a library
    **link**, not merely matching text — the earlier assertion could pass on the queue item alone.
 
+## Founder Console + Living Core — verified 2026-11-19
+
+`/` is now the Founder Console, built on the existing shell rather than a second app: Living Core,
+backend-measured model/worker/storage/database status, a real chat composer, running jobs with
+cancel, approval-gated tasks separated from autonomous work, active decisions, and modular
+navigation (Research / Kunskap / Projekt / Säkerhet). Every value is fetched; failed dependencies
+render as degraded, and no security score or emotional state is invented.
+
+`frontend/components/living-core/LivingCore.tsx` is an isolated canvas renderer (no API/auth/job/
+security imports) with layered oscillations, eased state transitions and afterglow, 30 fps cap,
+DPR cap 2, paused when hidden, a static reduced-motion frame and a low-power profile. Its states
+come from real events only (chat in flight, durable jobs, speech callbacks, health failure).
+
+Evidence: `frontend/e2e/founder-console.spec.ts` **3/3 passed** in Chromium (status, real model
+answer with sources, reduced motion); the earlier workflow spec still **5/5**; `next build` and
+`tsc --noEmit` pass. Browser screenshot: `docs/evidence/founder-console.png`. Details and limits in
+`docs/FOUNDER_CONSOLE.md`.
+
 ## Security controls (M5/M3)
 
 Enforced in CI on every push and PR: Semgrep (project rules, validated in CI and tested against a
@@ -200,9 +218,26 @@ failure webhook. A real run on 2026-11-19: backup at 0079 (973,705 bytes) → ve
 `--keep 2` pruned exactly the oldest backup → downloaded, authenticated, decrypted, verified, and
 restored into a **fresh** database with **zero manifest differences** and privileges re-applied.
 
-**Still not verified: off-host *retention*.** The test destination is a different path on the same
-host, so it proves transport, encryption, integrity, retention and restore — not survival of host
-loss. Every transport manifest says `off_host_verified: false` for that reason. `REQ-OPS-006` is
+**Recovery proved into a clean database that actually boots — 2026-11-19.** A fresh encrypted
+backup of the live founder database (1,052,668 bytes, `off_host_verified: false`) was restored into
+an empty database and the API was started against it: `status: ok`, founder login `200`, **15
+documents, 15 library sources, 7 active decisions**, and real semantic search results. Measured on
+this dataset: push (dump → verify → encrypt → upload) **1.02 s**, restore (download → decrypt →
+verify → restore → apply privileges) **1.26 s**, API answering in under 8 s including process
+start. RPO is the backup interval (currently manual, founder decision); RTO observed under 15 s
+for this size and is not a capacity claim for a larger database.
+
+That restore drill found and fixed a real defect: `pg_restore --no-privileges` recreates Postgres's
+default `PUBLIC EXECUTE` on functions, and the job/execution privilege policy **verified** that
+PUBLIC held no EXECUTE but never issued the REVOKE. A restored database therefore passed the
+manifest comparison and then refused to boot forever. The policy now revokes what it asserts
+(`app/rls.py`), restore runs the full boot privilege contract (`db_recovery.py`), and
+`test_runtime_privilege_self_heal.py` deliberately grants PUBLIC EXECUTE and proves the next run
+removes it.
+
+**Still not verified: off-host *retention*.** The destination is still a different path on the same
+host, and every transport manifest says `off_host_verified: false`. It proves transport,
+encryption, integrity, retention, restore and boot — not survival of host loss. `REQ-OPS-006` is
 `partial`; destination, retention window and key custody are founder decisions.
 
 ## Requirements coverage (M6/M4)
@@ -242,10 +277,11 @@ was never pulled" from "the model is fine and the chat is broken" without readin
 
 ## What is still NOT verified
 
-* **Off-host retention** — the mechanism, encryption, retention and a restore are exercised, but
-  the destination is on the same host (`REQ-OPS-006`, partial).
-* **Z.ai Round 10 integration** — commit `9b0cb7ac` is not present as an object, ref, bundle or
-  patch series; nothing was reconstructed (`docs/ZAI_ROUND10_INTEGRATION_STATUS.md`).
+* **Off-host retention** — encryption, retention, restore and boot from the restored database are
+  exercised, but the destination is on the same host (`REQ-OPS-006`, partial).
+* **Z.ai Round 11 integration** — `df9150b4` is absent locally and GitHub returns 422; no bundle,
+  snapshot or `SHA256SUMS` reached this host, and nothing was reconstructed
+  (`docs/ZAI_ROUND11_INTEGRATION_STATUS.md`). Round 10 remains absent for the same reason.
 * **A real push to github.com** — the path is gated by `GITHUB_WRITE_ENABLED`, idempotent by
   branch/task, and crash-recoverable, but no test performs a real push: that would be a deployment
   action this branch is not authorized to perform (`REQ-EXEC-009`, partial).
@@ -256,12 +292,29 @@ was never pulled" from "the model is fine and the chat is broken" without readin
 * **CI does not re-prove inference** — the acceptance tests skip without a model runtime; a green CI
   run means "the code is intact", not "a model answered".
 
-## Exact administrator actions (minimal)
+## Exact administrator actions (minimal, verified state)
 
-1. Settings → Branches → `main`: require the `Security` and `All required checks passed` statuses,
-   and require review from `CODEOWNERS`.
-2. Enable GitHub Advanced Security for the repository, then set the Actions variable
-   `CODEQL_ENABLED=true` so the prepared CodeQL job runs (until then the gate prints `NOT ENFORCED`).
+Audited on 2026-11-19 via the GitHub API, not inferred from files:
+
+* the repository has **no `main` branch**; the default branch is `claude/det-kommer-mer-879lcm`,
+  and PR #461 targets it;
+* branch protection on `main` returns **404** (no such branch) and no ruleset is visible, so the
+  `Security` / `All required checks passed` successes are **not required** for merging;
+* secret scanning and push protection are **enabled**; Dependabot security updates are **disabled**;
+* CodeQL is gated behind `CODEQL_ENABLED` and GHAS availability; no code-scanning evidence was
+  observed;
+* `.github/CODEOWNERS` exists but cannot apply without the review requirement.
+
+Required administrator steps (none performed here):
+
+0. Create/rename the reviewed baseline to `main`, set it as the default, and retarget the open
+   PRs before protecting anything.
+1. Settings → Branches → `main`: require `Security` and `All required checks passed`, strict/up to
+   date, no administrator bypass, and review from `CODEOWNERS` (exact API in
+   `docs/GITHUB_ENFORCEMENT_ACTIONS.md`).
+2. Enable GitHub Advanced Security, then set the Actions variable `CODEQL_ENABLED=true` so the
+   prepared CodeQL job runs (until then the gate prints `NOT ENFORCED`).
+3. Decide whether Dependabot security updates should be enabled for a public repository.
 
 ## To start privately, after those
 

@@ -5,20 +5,43 @@ import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
 import { api } from "@/lib/api";
 
-const NAV = [
-  { href: "/", label: "Dashboard" },
-  { href: "/chat", label: "Chat" },
-  { href: "/library", label: "Knowledge Studio" },
-  { href: "/blueprint", label: "Blueprint" },
-  { href: "/workbench", label: "Workbench" },
-  { href: "/knowledge", label: "Kunskapsdatabas" },
-  { href: "/projects", label: "Projekt" },
-  { href: "/admin", label: "Admin" },
-  { href: "/admin/memory", label: "Projektminne" },
-  { href: "/admin/agents", label: "Agentuppdrag" },
-  { href: "/admin/jobs", label: "Jobb & Aktivitet" },
-  { href: "/admin/mainai-execution", label: "MainAI Execution" },
-  { href: "/account", label: "Konto" },
+// Grouped by the founder's job, not by backend module: every route below already existed, the
+// grouping only makes the console's modular areas (research, knowledge, security, projects)
+// findable. No route is duplicated and no capability is implied by a label.
+const NAV_SECTIONS: { heading: string; items: { href: string; label: string }[] }[] = [
+  { heading: "Konsol", items: [{ href: "/", label: "Founder Console" }, { href: "/chat", label: "Chat" }] },
+  {
+    heading: "Research",
+    items: [
+      { href: "/workbench", label: "Workbench" },
+      { href: "/blueprint", label: "Blueprint" },
+    ],
+  },
+  {
+    heading: "Kunskap",
+    items: [
+      { href: "/library", label: "Knowledge Studio" },
+      { href: "/documents", label: "Dokument" },
+      { href: "/knowledge", label: "Kunskapsdatabas" },
+    ],
+  },
+  {
+    heading: "Projekt",
+    items: [
+      { href: "/projects", label: "Projekt" },
+      { href: "/admin/memory", label: "Projektminne" },
+    ],
+  },
+  {
+    heading: "Säkerhet",
+    items: [
+      { href: "/admin", label: "Admin" },
+      { href: "/admin/agents", label: "Agentuppdrag" },
+      { href: "/admin/jobs", label: "Jobb & Aktivitet" },
+      { href: "/admin/mainai-execution", label: "MainAI Execution" },
+    ],
+  },
+  { heading: "Konto", items: [{ href: "/account", label: "Konto" }] },
 ];
 
 export default function Sidebar({ userEmail }: { userEmail: string }) {
@@ -37,23 +60,30 @@ export default function Sidebar({ userEmail }: { userEmail: string }) {
   }
 
   const navLinks = (
-    <nav aria-label="Huvudmeny" className="flex flex-col gap-1">
-      {NAV.map((item) => {
-        const active = pathname === item.href;
-        return (
-          <Link
-            key={item.href}
-            href={item.href}
-            aria-current={active ? "page" : undefined}
-            onClick={() => setMobileOpen(false)}
-            className={`rounded-lg px-3 py-2 text-sm transition-colors ${
-              active ? "bg-accent/20 text-white" : "text-white/60 hover:bg-white/5 hover:text-white"
-            }`}
-          >
-            {item.label}
-          </Link>
-        );
-      })}
+    <nav aria-label="Huvudmeny" className="flex flex-col gap-3">
+      {NAV_SECTIONS.map((section) => (
+        <div key={section.heading}>
+          <div className="px-3 pb-1 text-[10px] uppercase tracking-widest text-white/25">{section.heading}</div>
+          <div className="flex flex-col gap-0.5">
+            {section.items.map((item) => {
+              const active = pathname === item.href;
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  aria-current={active ? "page" : undefined}
+                  onClick={() => setMobileOpen(false)}
+                  className={`rounded-lg px-3 py-2 text-sm transition-colors ${
+                    active ? "bg-accent/20 text-white" : "text-white/60 hover:bg-white/5 hover:text-white"
+                  }`}
+                >
+                  {item.label}
+                </Link>
+              );
+            })}
+          </div>
+        </div>
+      ))}
     </nav>
   );
 

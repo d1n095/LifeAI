@@ -28,12 +28,12 @@ test("a founder can log in and the dashboard is connected to the backend", async
   test.setTimeout(90_000);
   await loginViaUi(page, FRONTEND_URL, FOUNDER_EMAIL, FOUNDER_PASSWORD);
   await expect(page).toHaveURL(new RegExp(`${FRONTEND_URL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/?$`));
-  await expect(page.getByRole("heading", { name: /God kväll/ })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "Founder Console" })).toBeVisible({ timeout: 30_000 });
   // Next.js renders its own empty route-announcer with role="alert", so a bare alert count
   // proves nothing. The dashboard's actual failure UI is this message; the loaded document
   // count proves the API answered.
   await expect(page.getByText("Kunde inte nå backend", { exact: false })).toHaveCount(0);
-  await expect(page.getByText("Indexerade dokument")).toBeVisible();
+  await expect(page.getByRole("link", { name: /Indexerade dokument/ })).toBeVisible();
 });
 
 test("chat shows a real local-model answer, not a placeholder", async ({ page }) => {
