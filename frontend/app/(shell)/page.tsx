@@ -2,13 +2,18 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { api, DocumentItem, ProjectItem, TaskItem } from "@/lib/api";
+import { api, DocumentItem, ProjectItem, ProjectStatus, TaskItem } from "@/lib/api";
+import ProjectOverview from "@/components/ProjectOverview";
 
 export default function DashboardPage() {
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [projects, setProjects] = useState<ProjectItem[]>([]);
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // The composed project status (blueprint, buckets, GitHub provenance, live work chain).
+  // A failed read is kept separate so it is shown as "not verified", never as an empty project.
+  const [projectStatus, setProjectStatus] = useState<ProjectStatus | null>(null);
+  const [projectStatusError, setProjectStatusError] = useState<string | null>(null);
 
   useEffect(() => {
     Promise.all([api.listDocuments(), api.listProjects(), api.listTasks()])
@@ -18,6 +23,11 @@ export default function DashboardPage() {
         setTasks(t);
       })
       .catch((e) => setError(e.message));
+
+    api
+      .projectStatus()
+      .then(setProjectStatus)
+      .catch((e) => setProjectStatusError(e instanceof Error ? e.message : "Okänt fel"));
   }, []);
 
   const indexed = documents.filter((d) => d.status === "indexed").length;
@@ -28,7 +38,9 @@ export default function DashboardPage() {
     <div className="space-y-8">
       <div>
         <h1 className="text-2xl font-semibold">God kväll, Dennis</h1>
-        <p className="text-white/50 text-sm mt-1">Allt system operationellt — anslutet till backend.</p>
+        <p className="text-white/50 text-sm mt-1">
+          Statusen nedan kommer från LifeAI:s register. Det som inte är verifierat står som osäkert.
+        </p>
       </div>
 
       {error && (
@@ -39,6 +51,8 @@ export default function DashboardPage() {
           Kunde inte nå backend: {error}. Kontrollera att API:et körs (se README).
         </div>
       )}
+
+      <ProjectOverview status={projectStatus} error={projectStatusError} />
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <StatCard label="Indexerade dokument" value={indexed} total={documents.length} />

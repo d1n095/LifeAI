@@ -6,7 +6,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from app.bootstrap import bootstrap_founder_user
+from app.bootstrap import bootstrap_founder_priorities, bootstrap_founder_user
 from app.config import get_settings
 from app.db import SessionLocal, call_with_db_retry, migration_engine
 from app.limiter import limiter
@@ -18,6 +18,8 @@ from app.providers.base import looks_like_placeholder_secret
 from app.rls import apply_mainai_execution_privileges, apply_mainai_job_runtime_privileges, apply_rls
 from app.routers import (
     improvement_proposals,
+    github_status,
+    project_status,
     account,
     ads,
     admin,
@@ -91,6 +93,8 @@ app.include_router(mainai_jobs.router)
 app.include_router(improvement_proposals.router)
 app.include_router(mainai_execution.router)
 app.include_router(project_entities.router)
+app.include_router(github_status.router)
+app.include_router(project_status.router)
 app.include_router(inspectable_memory.router)
 app.include_router(execution_envelopes.router)
 app.include_router(provider_spend.router)
@@ -138,6 +142,9 @@ def on_startup():
         db = SessionLocal()
         try:
             bootstrap_founder_user(db)
+            # Founder Alpha R14: the locked priority is registered ONCE, idempotently, as a
+            # founder decision — it must never live only in a conversation.
+            bootstrap_founder_priorities(db)
         finally:
             db.close()
 

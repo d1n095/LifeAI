@@ -1,0 +1,231 @@
+{
+  "started_at": "2026-11-19T20:28:39.869016+00:00",
+  "api": "http://127.0.0.1:8011",
+  "steps": [
+    {
+      "step": "login",
+      "status": 200
+    },
+    {
+      "step": "project_status_before",
+      "status": 200
+    },
+    {
+      "step": "chat_question",
+      "status": 200,
+      "latency_s": 31.67,
+      "provider": "ollama",
+      "model": "gemma3:4b",
+      "sources": 0,
+      "cognitive_state": null
+    },
+    {
+      "step": "create_goal",
+      "status": 201
+    },
+    {
+      "step": "create_plan",
+      "status": 201
+    },
+    {
+      "step": "approve_tasks",
+      "approvals": []
+    },
+    {
+      "step": "execution",
+      "goal_status": "completed",
+      "polls": 12
+    },
+    {
+      "step": "goal_report",
+      "status": 200
+    },
+    {
+      "step": "project_status_after",
+      "status": 200
+    },
+    {
+      "step": "follow_up_question",
+      "status": 200,
+      "model": "gemma3:4b"
+    }
+  ],
+  "before": {
+    "blueprint": null,
+    "active_goals": 0,
+    "completed_goals": 2,
+    "awaiting_approval": 0,
+    "warnings": [
+      "Ingen godkänd blueprint finns ännu — projektets målbild är inte fastställd.",
+      "GitHub är inte konfigurerad (GITHUB_TOKEN/GITHUB_REPO) — utvecklingsstatus kan inte verifieras."
+    ],
+    "priorities": [
+      "Prioritering (låst): Founder Alpha först, utökad autonomi senare."
+    ]
+  },
+  "chat": {
+    "question": "Var är vi i LifeAI-projektet just nu? Sammanfatta blueprint, låst prioritering, vad som väntar på mitt godkännande och nästa rimliga steg.",
+    "reply": "Vi befinner oss just nu i ett tidigt skede av LifeAI-projektet.\n\n**Blueprint:** Ingen godkänd blueprint finns ännu. Projektets målbild är alltså ännu inte fastställd.\n\n**Låst prioritering:** Prioriteringen är låst till Founder Alpha först, med utökad autonomi som en senare mål.\n\n**Väntar på mitt godkännande:** Det finns inget väntande på mitt godkännande i ögonblicket.\n\n**Nästa rimliga steg:** Inget väntar på grundaren – inga blockerade mål, granskningar eller förslag ligger öppna.",
+    "without_project_status": null
+  },
+  "goal": {
+    "id": "2b650431-b824-474d-930e-dc04644e5c1c",
+    "title": "Granska R15-projektstatusen (endast läsning) #202912",
+    "status": "pending"
+  },
+  "plan": {
+    "version": 1,
+    "rationale": "AI-proposed plan",
+    "tasks": [
+      {
+        "id": "eec2228c-1472-4bde-9802-c4750ed2f5d3",
+        "description": "Läs filen backend/app/project_status/work_chain.py",
+        "task_type": "read_only_audit",
+        "status": "ready",
+        "approval_required": false
+      }
+    ]
+  },
+  "execution_timeline": [
+    {
+      "at": "2026-11-19T20:29:59.026277+00:00",
+      "goal_status": "running",
+      "tasks": {
+        "eec2228c-1472-4bde-9802-c4750ed2f5d3": "ready"
+      }
+    },
+    {
+      "at": "2026-11-19T20:30:04.600082+00:00",
+      "goal_status": "running",
+      "tasks": {
+        "eec2228c-1472-4bde-9802-c4750ed2f5d3": "running"
+      }
+    },
+    {
+      "at": "2026-11-19T20:30:17.745135+00:00",
+      "goal_status": "running",
+      "tasks": {
+        "eec2228c-1472-4bde-9802-c4750ed2f5d3": "running"
+      }
+    },
+    {
+      "at": "2026-11-19T20:30:24.579181+00:00",
+      "goal_status": "running",
+      "tasks": {
+        "eec2228c-1472-4bde-9802-c4750ed2f5d3": "running"
+      }
+    },
+    {
+      "at": "2026-11-19T20:30:29.304928+00:00",
+      "goal_status": "running",
+      "tasks": {
+        "eec2228c-1472-4bde-9802-c4750ed2f5d3": "running"
+      }
+    },
+    {
+      "at": "2026-11-19T20:30:33.581561+00:00",
+      "goal_status": "running",
+      "tasks": {
+        "eec2228c-1472-4bde-9802-c4750ed2f5d3": "running"
+      }
+    },
+    {
+      "at": "2026-11-19T20:30:37.811696+00:00",
+      "goal_status": "running",
+      "tasks": {
+        "eec2228c-1472-4bde-9802-c4750ed2f5d3": "running"
+      }
+    },
+    {
+      "at": "2026-11-19T20:30:42.546641+00:00",
+      "goal_status": "running",
+      "tasks": {
+        "eec2228c-1472-4bde-9802-c4750ed2f5d3": "running"
+      }
+    },
+    {
+      "at": "2026-11-19T20:30:47.047864+00:00",
+      "goal_status": "running",
+      "tasks": {
+        "eec2228c-1472-4bde-9802-c4750ed2f5d3": "running"
+      }
+    },
+    {
+      "at": "2026-11-19T20:30:51.214960+00:00",
+      "goal_status": "running",
+      "tasks": {
+        "eec2228c-1472-4bde-9802-c4750ed2f5d3": "running"
+      }
+    },
+    {
+      "at": "2026-11-19T20:30:55.466014+00:00",
+      "goal_status": "running",
+      "tasks": {
+        "eec2228c-1472-4bde-9802-c4750ed2f5d3": "running"
+      }
+    },
+    {
+      "at": "2026-11-19T20:30:59.607889+00:00",
+      "goal_status": "completed",
+      "tasks": {
+        "eec2228c-1472-4bde-9802-c4750ed2f5d3": "completed"
+      }
+    }
+  ],
+  "goal_final_status": "completed",
+  "report": {
+    "summary": {
+      "total_tasks": 1,
+      "by_outcome": {
+        "completed": 1
+      },
+      "unresolved_risk_count": 0,
+      "tasks_with_recovery_history": 0,
+      "recovery_attempts_total": 0,
+      "tasks_with_wait_history": 0,
+      "tasks_awaiting_auto_retry": 0,
+      "plan_versions_total": 1,
+      "tasks_with_disputed_lesson_evidence": 0
+    },
+    "outcomes": [
+      {
+        "task": "Läs filen backend/app/project_status/work_chain.py",
+        "status": "completed",
+        "verification": true,
+        "attempts": 1
+      }
+    ]
+  },
+  "after": {
+    "completed_goals": 3,
+    "active_goals": 0,
+    "awaiting_approval": 0,
+    "warnings": [
+      "Ingen godkänd blueprint finns ännu — projektets målbild är inte fastställd.",
+      "GitHub är inte konfigurerad (GITHUB_TOKEN/GITHUB_REPO) — utvecklingsstatus kan inte verifieras."
+    ],
+    "recent_goals": [
+      {
+        "id": "2b650431-b824-474d-930e-dc04644e5c1c",
+        "title": "Granska R15-projektstatusen (endast läsning) #202912",
+        "status": "completed",
+        "created_at": "2026-11-19T20:29:12.911136+00:00"
+      },
+      {
+        "id": "ad56083f-bbcc-49de-89ab-6b216d4091d2",
+        "title": "Granska R15-projektstatusen (endast läsning)",
+        "status": "completed",
+        "created_at": "2026-11-19T20:21:17.213357+00:00"
+      },
+      {
+        "id": "8fcfb2a6-68eb-42e6-a6ed-d8a972fb51c7",
+        "title": "Granska R15-projektstatusen (endast läsning)",
+        "status": "completed",
+        "created_at": "2026-11-19T20:13:28.171037+00:00"
+      }
+    ]
+  },
+  "follow_up_reply": "Målet \"Granska R15-projektstatusen (endast läsning) #202912\" är slutfört.",
+  "ok": true,
+  "finished_at": "2026-11-19T20:31:18.393044+00:00"
+}

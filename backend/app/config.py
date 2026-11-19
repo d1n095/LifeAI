@@ -218,6 +218,15 @@ class Settings(BaseSettings):
     github_write_enabled: bool = False
     github_auto_merge_enabled: bool = False
 
+    # Founder Alpha R14: READ-ONLY development observation. `local_repo_path` is optional and
+    # only ever read (git rev-parse/log/rev-list) — never written, never pushed.
+    # `github_tracked_branch` selects the branch the snapshot describes (None = GitHub's own
+    # default branch). `github_status_stale_minutes` is when a verified picture is reported as
+    # stale instead of quietly staying current.
+    github_tracked_branch: str | None = None
+    github_status_stale_minutes: int = 30
+    local_repo_path: str | None = None
+
     # Direct OpenAI consultation (app/openai_consult/) — lets MainAI/the founder call an
     # OpenAI model through the official Responses API without anyone manually forwarding
     # messages. Same optional-until-configured + off-by-default pattern as github_write_enabled

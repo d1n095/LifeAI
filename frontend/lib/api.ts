@@ -774,7 +774,94 @@ export type BlueprintDraft = {
   approved_by: string | null;
 };
 
+// Founder Alpha R15 — the composed project status (backend/app/project_status/). One read that
+// joins blueprint, the four explicit buckets, GitHub provenance, the founder's durable memory
+// and the LIVE work chain (goals/tasks/approvals/jobs/agents). Every count here comes from a
+// register, never from the UI's own arithmetic.
+export type ProjectStatusBucket = {
+  count: number;
+  evidence: string;
+  examples: string[];
+};
+
+export type ProjectStatusWork = {
+  goals: {
+    active_count: number;
+    completed_count: number;
+    active: {
+      goal_id: string;
+      title: string;
+      status: string;
+      approval_policy: string;
+      plan_version: number | null;
+      task_counts: Record<string, number>;
+      source: string;
+    }[];
+  };
+  tasks: {
+    counts: Record<string, number>;
+    awaiting_approval_count: number;
+    awaiting_approval: { task_id: string; goal_title: string; description: string; task_type: string; risk_level: string; source: string }[];
+    blocked: { task_id: string; description: string; status: string; blocker_reason: string | null; source: string }[];
+  };
+  jobs: {
+    counts: Record<string, number>;
+    active: number;
+    stalled_count: number;
+    stalled: { job_id: string; job_type: string; status: string; reason: string; age_minutes: number | null; source: string }[];
+  };
+  agents: {
+    registered: number;
+    open_assignments: number;
+    blocked: { assignment_id: string; agent: string | null; role: string; status: string; source: string }[];
+    stale: { assignment_id: string; agent: string | null; role: string; status: string; idle_minutes: number | null; source: string }[];
+  };
+  authorizations: { pending_scope_proposals_count: number; active_envelopes: number };
+  candidates: { unreviewed_count: number };
+  suspected_duplicates: { goal_id: string; title: string; matches_completed_goal: { id: string; title: string }; similarity: number }[];
+  warnings: string[];
+};
+
+export type ProjectStatus = {
+  schema_version: string;
+  generated_at: string;
+  blueprint: {
+    approved: { id: string; title: string; version: number; source_count: number } | null;
+    latest_draft: { id: string; title: string; version: number; status: string } | null;
+  };
+  status_classes: Record<"implemented" | "verified" | "planned" | "blocked", ProjectStatusBucket>;
+  goals: { counts: Record<string, number>; recent: { id: string; title: string; status: string }[] };
+  github: {
+    configured: boolean;
+    repo: string | null;
+    development: {
+      last_verified_at: string | null;
+      age_minutes: number | null;
+      stale: boolean;
+      head_sha: string | null;
+      head_subject: string | null;
+      open_prs: number | null;
+      open_issues: number | null;
+      checks: { total?: number; [key: string]: unknown } | null;
+      local_unpushed_count: number | null;
+      local_unavailable_reason: string | null;
+      error: string | null;
+    };
+    accepted_evidence: number;
+    unreviewed_count: number;
+  };
+  memory: { type: string; content: string; authority: string; created_at: string | null }[];
+  priorities: { type: string; content: string; authority: string }[];
+  agents: { available: boolean; agents: number; open_assignments: number };
+  ideas: { id: string; title: string; status: string }[];
+  work: ProjectStatusWork;
+  warnings: string[];
+  next_steps: { kind: string; title: string; why: string; source: string; authorized: false }[];
+  authorization: { created_goals: number; created_tasks: number; note: string };
+};
+
 export const api = {
+  projectStatus: () => request<ProjectStatus>("/api/mainai/project-status"),
   login: (email: string, password: string) =>
     request<CurrentUser>("/api/auth/login", {
       method: "POST",

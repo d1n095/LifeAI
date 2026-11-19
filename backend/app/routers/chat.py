@@ -44,6 +44,7 @@ from app.rag.context_status import build_context_status
 from app.rag.message_source import MessageSourceLocator, get_or_create_message_source_unit
 from app.rag.retrieve import retrieve_context
 from app.mainai_execution.lesson_selection import format_lesson_feedback_instructions
+from app.project_status.service import format_project_status_instructions
 from app.rag.graph_instructions import format_graph_context_instructions
 from app.rag.untrusted_content import UNTRUSTED_CONTENT_POLICY, build_untrusted_context_block
 from app.rag.epistemics import epistemic_status_counts_sql, format_epistemic_instructions
@@ -264,6 +265,15 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
             system_content += "\n\n" + graph_context
     except Exception:
         logger.warning("graph context failed; system prompt degrades without it", exc_info=True)
+    # Founder Alpha R13/R15: the composed project status — blueprint, buckets, GitHub
+    # provenance, the founder's locked decisions and the LIVE work chain — so "var är vi?" is
+    # answered from the registers instead of the model's impression. Fail-open for the same
+    # reason as every block above: a status derivation problem must never cost the founder the
+    # reply they already earned.
+    try:
+        system_content += "\n\n" + format_project_status_instructions(db, owner_id=user.id)
+    except Exception:
+        logger.warning("project status block failed; reply unaffected", exc_info=True)
     messages = [Message(role="system", content=system_content)]
     messages += [Message(role=m.role.value, content=m.content) for m in history]
     messages.append(Message(role="user", content=user_message.content))
