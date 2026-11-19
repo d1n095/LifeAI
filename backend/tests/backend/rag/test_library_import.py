@@ -350,14 +350,14 @@ async def test_archive_progress_is_fenced_and_restart_finishes_remaining_files(
     db_session.expire_all()
     completed = db_session.get(ImportJob, job.id)
     assert completed.status == ImportJobStatus.completed
-    assert completed.succeeded_count == 2
+    assert completed.succeeded_count == 1
     assert completed.skipped_count == 1
     assert completed.progress_current == 2
     assert completed.file_results is not None
     assert len(completed.file_results) == 2
-    assert {result["filename"] for result in completed.file_results} == {
-        "first.txt",
-        "second.txt",
+    assert {result["filename"]: result["status"] for result in completed.file_results} == {
+        "first.txt": "duplicate",
+        "second.txt": "indexed",
     }
     assert {
         row.original_filename
