@@ -1,8 +1,8 @@
 {
   "tool": "lifeai-founder-release-acceptance",
   "version": 1,
-  "generated_at": "2026-11-19T11:51:20.691258Z",
-  "git_commit": "b2e9ea66f4320d3835a479eb29bdf290bfcdc158",
+  "generated_at": "2026-11-19T14:40:11.736156Z",
+  "git_commit": "10cc1bc2d4a6c925ffa2a4bcea3f3078cdc5379b",
   "branch": "freebuff/founder-alpha-ops-recovery-20261118",
   "items": [
     {
@@ -145,7 +145,7 @@
     },
     {
       "id": "11.browser",
-      "title": "Real browser functionality (Chromium, real backend)",
+      "title": "Real browser functionality, desktop and mobile viewport (Chromium, real backend)",
       "evidence": "local_real",
       "mandatory": true,
       "status": "passed",
@@ -187,6 +187,17 @@
         "suites.rls"
       ],
       "detail": []
+    },
+    {
+      "id": "15.architecture_invariants",
+      "title": "Startup architecture contract (one fence, deterministic approvals, optional egress, product seams)",
+      "evidence": "local_real",
+      "mandatory": true,
+      "status": "passed",
+      "checks": [
+        "architecture"
+      ],
+      "detail": []
     }
   ],
   "checks": {
@@ -194,7 +205,7 @@
       "status": "passed",
       "detail": {
         "exit_code": 0,
-        "seconds": 11.7,
+        "seconds": 14.3,
         "output": [
           "[passed ] model.local                  (real) Local model answered a real request",
           "",
@@ -209,14 +220,14 @@
       "status": "passed",
       "detail": {
         "exit_code": 0,
-        "seconds": 9.2,
+        "seconds": 9.1,
         "output": [
-          "[passed ] 4-5.question_and_answer: {\"provider\": \"ollama\", \"model\": \"qwen2.5:0.5b-instruct\", \"confidence\": \"high\", \"sources\": [\"Founder workflow 1eccfad3d402.md\", \"Founder workflow 683fa00d475f.md\", \"Founder workflow 71d4bbc35500.md\", \"Founder workflow b67",
-          "[passed ] 8.save_decision: {\"decision_id\": \"38fba2c8-e5f0-4bd0-8bfe-e961c679f5b8\", \"classification\": \"decisions\", \"status\": \"active\"}",
+          "[passed ] 4-5.question_and_answer: {\"provider\": \"ollama\", \"model\": \"qwen2.5:0.5b-instruct\", \"confidence\": \"high\", \"sources\": [\"Founder workflow 3bbb78ca74b8.md\", \"Founder workflow 71d4bbc35500.md\", \"Founder workflow b6785e4f172e.md\", \"Founder workflow 711",
+          "[passed ] 8.save_decision: {\"decision_id\": \"32b19c69-cf24-4091-9dca-90dd7bad7981\", \"classification\": \"decisions\", \"status\": \"active\"}",
           "[skipped] 9-10.restart_recovery: {\"reason\": \"not running under --supervise\"}",
-          "[passed ] 11-12.task_and_progress: {\"task_id\": \"b267d7df-c252-4f0b-ad2a-550815677f58\", \"job_id\": \"a3cda8dc-3460-4492-8027-e3eb060fcf53\", \"job_status\": \"completed\", \"progress\": \"1/1\", \"error_category\": null, \"events\": 6}",
+          "[passed ] 11-12.task_and_progress: {\"task_id\": \"6396ee57-15bc-4b34-987a-a536dd32b598\", \"job_id\": \"fb539f70-c52b-4522-9f91-54aec2bc0d3d\", \"job_status\": \"completed\", \"progress\": \"1/1\", \"error_category\": null, \"events\": 6}",
           "",
-          "founder workflow passed in 9.0s \u2014 report: /private/tmp/lifeai-int/docs/evidence/founder-workflow.json"
+          "founder workflow passed in 8.9s \u2014 report: /private/tmp/lifeai-int/docs/evidence/founder-workflow.json"
         ]
       }
     },
@@ -224,10 +235,10 @@
       "status": "passed",
       "detail": {
         "exit_code": 0,
-        "seconds": 14.8,
+        "seconds": 17.5,
         "output": [
           "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
-          "28 passed, 105 warnings in 13.92s",
+          "28 passed, 105 warnings in 16.31s",
           "/private/tmp/lifeai-venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:208: PytestDeprecationWarning: The configuration option \"asyncio_default_fixture_loop_scope\" is unset.",
           "The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: \"function\", \"class\", \"module\", \"package\", \"session\"",
           "",
@@ -239,10 +250,10 @@
       "status": "passed",
       "detail": {
         "exit_code": 0,
-        "seconds": 9.3,
+        "seconds": 17.5,
         "output": [
           "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
-          "18 passed, 137 warnings in 8.60s",
+          "18 passed, 137 warnings in 16.51s",
           "/private/tmp/lifeai-venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:208: PytestDeprecationWarning: The configuration option \"asyncio_default_fixture_loop_scope\" is unset.",
           "The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: \"function\", \"class\", \"module\", \"package\", \"session\"",
           "",
@@ -254,10 +265,10 @@
       "status": "passed",
       "detail": {
         "exit_code": 0,
-        "seconds": 5.9,
+        "seconds": 7.8,
         "output": [
           "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
-          "7 passed, 60 warnings in 5.15s",
+          "7 passed, 60 warnings in 6.72s",
           "/private/tmp/lifeai-venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:208: PytestDeprecationWarning: The configuration option \"asyncio_default_fixture_loop_scope\" is unset.",
           "The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: \"function\", \"class\", \"module\", \"package\", \"session\"",
           "",
@@ -269,10 +280,10 @@
       "status": "passed",
       "detail": {
         "exit_code": 0,
-        "seconds": 8.8,
+        "seconds": 12.6,
         "output": [
           "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
-          "11 passed, 450 warnings in 8.15s",
+          "11 passed, 450 warnings in 11.70s",
           "/private/tmp/lifeai-venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:208: PytestDeprecationWarning: The configuration option \"asyncio_default_fixture_loop_scope\" is unset.",
           "The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: \"function\", \"class\", \"module\", \"package\", \"session\"",
           "",
@@ -284,10 +295,10 @@
       "status": "passed",
       "detail": {
         "exit_code": 0,
-        "seconds": 7.8,
+        "seconds": 9.9,
         "output": [
           "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
-          "18 passed, 2 warnings in 7.15s",
+          "18 passed, 2 warnings in 8.80s",
           "/private/tmp/lifeai-venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:208: PytestDeprecationWarning: The configuration option \"asyncio_default_fixture_loop_scope\" is unset.",
           "The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: \"function\", \"class\", \"module\", \"package\", \"session\"",
           "",
@@ -299,10 +310,10 @@
       "status": "passed",
       "detail": {
         "exit_code": 0,
-        "seconds": 7.3,
+        "seconds": 9.4,
         "output": [
           "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
-          "5 passed, 54 warnings in 6.54s",
+          "5 passed, 54 warnings in 8.27s",
           "/private/tmp/lifeai-venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:208: PytestDeprecationWarning: The configuration option \"asyncio_default_fixture_loop_scope\" is unset.",
           "The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: \"function\", \"class\", \"module\", \"package\", \"session\"",
           "",
@@ -337,16 +348,31 @@
         }
       }
     },
+    "architecture": {
+      "status": "passed",
+      "detail": {
+        "exit_code": 0,
+        "seconds": 1.9,
+        "output": [
+          "[pass        ] provider_adapters_cannot_reach_data    (enforced) provider adapters cannot reach stored data",
+          "[pass        ] tor_not_a_startup_dependency           (preserved) Tor is not a hard startup dependency",
+          "[pass        ] life_products_not_core_coupled         (preserved) Life products remain addable modules, not core coupling",
+          "[pass        ] public_edge_only_ingress               (enforced) public edge separated from founder administration",
+          "[pass        ] single_migration_head                  (enforced) one linear migration DAG",
+          "report: /private/tmp/lifeai-int/docs/evidence/architecture-contract.json"
+        ]
+      }
+    },
     "install": {
       "status": "passed",
       "detail": {
-        "database": "lifeos_release_gate_20261119115057_40cc04",
-        "install_seconds": 2.3,
+        "database": "lifeos_release_gate_20261119143919_991af0",
+        "install_seconds": 6.2,
         "idempotent_reverify": [
           "[ok   0.1s] verify_schema: Database revision is the tree's single head",
-          "[ok   0.3s] verify_boot: app/main.py's startup privilege contract is satisfiable",
+          "[ok   0.7s] verify_boot: app/main.py's startup privilege contract is satisfiable",
           "[ok   0.0s] verify_grants: Runtime role can read everything and write where it must",
-          "[ok   0.1s] verify_s1a: S1A privilege policy verifies read-only",
+          "[ok   0.3s] verify_s1a: S1A privilege policy verifies read-only",
           "database is ready for `uvicorn app.main:app`."
         ],
         "dropped_after_run": true
@@ -355,14 +381,14 @@
     "restore": {
       "status": "passed",
       "detail": {
-        "artifact": "lifeos_founder_flow-20261119T115101Z.dump",
+        "artifact": "lifeos_founder_flow-20261119T143928Z.dump",
         "encrypted": true,
         "off_host_verified": false,
         "off_host_note": "file:// is a controlled remote-equivalent, not off-host retention",
         "restored_database_bootable": true,
         "boot_output": [
           "[ok   0.1s] verify_schema: Database revision is the tree's single head",
-          "[ok   0.3s] verify_boot: app/main.py's startup privilege contract is satisfiable",
+          "[ok   0.6s] verify_boot: app/main.py's startup privilege contract is satisfiable",
           "[ok   0.0s] verify_grants: Runtime role can read everything and write where it must",
           "[ok   0.1s] verify_s1a: S1A privilege policy verifies read-only",
           "database is ready for `uvicorn app.main:app`."
@@ -373,21 +399,21 @@
       "status": "passed",
       "detail": {
         "exit_code": 0,
-        "seconds": 17.1,
+        "seconds": 38.7,
         "output": [
           "",
-          "  8 passed (15.8s)",
-          "(node:12427) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.",
+          "  9 passed (35.5s)",
+          "(node:27528) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.",
           "(Use `node --trace-deprecation ...` to show where the warning was created)",
-          "(node:12429) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.",
+          "(node:27531) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.",
           "(Use `node --trace-deprecation ...` to show where the warning was created)"
         ]
       }
     }
   },
   "summary": {
-    "items_total": 14,
-    "items_passed": 13,
+    "items_total": 15,
+    "items_passed": 14,
     "items_failed": [],
     "items_blocked": [
       "4.cognitive_reasoning"

@@ -1,0 +1,143 @@
+{
+  "tool": "lifeai-architecture-contract",
+  "version": 1,
+  "generated_at": "2026-11-19T14:39:19.471923Z",
+  "checks": [
+    {
+      "id": "single_prompt_fence",
+      "requirement": "one canonical prompt-injection fence",
+      "strength": "enforced",
+      "status": "pass",
+      "detail": {
+        "definers": [
+          "backend/app/rag/prompt_fencing.py"
+        ],
+        "redeclared_markers": {},
+        "names_fence_without_defusing": [],
+        "defusing_callers": [
+          "backend/app/routers/blueprint.py",
+          "backend/app/routers/chat.py"
+        ],
+        "required_callers_missing": []
+      }
+    },
+    {
+      "id": "deterministic_privileged_path",
+      "requirement": "deterministic privileged-action path",
+      "strength": "enforced",
+      "status": "pass",
+      "detail": {
+        "scanned": [
+          "backend/app/mainai_execution/approval.py",
+          "backend/app/security.py",
+          "backend/app/rls.py",
+          "backend/app/deps.py",
+          "backend/app/token_revocation.py",
+          "backend/app/cookies.py",
+          "backend/app/password_policy.py",
+          "backend/app/mainai_execution/recovery_approval.py"
+        ],
+        "model_dependencies": {}
+      }
+    },
+    {
+      "id": "provider_adapters_cannot_reach_data",
+      "requirement": "provider adapters cannot reach stored data",
+      "strength": "enforced",
+      "status": "pass",
+      "detail": {
+        "scanned": [
+          "backend/app/providers/anthropic_provider.py",
+          "backend/app/providers/deepseek_provider.py",
+          "backend/app/providers/gemini_provider.py",
+          "backend/app/providers/ollama_provider.py",
+          "backend/app/providers/openai_provider.py",
+          "backend/app/providers/openrouter_provider.py",
+          "backend/app/providers/base.py"
+        ],
+        "data_access": {}
+      }
+    },
+    {
+      "id": "tor_not_a_startup_dependency",
+      "requirement": "Tor is not a hard startup dependency",
+      "strength": "preserved",
+      "status": "pass",
+      "detail": {
+        "startup_files": [
+          "backend/app/main.py",
+          "backend/app/bootstrap.py",
+          "backend/app/worker.py",
+          "backend/app/config.py"
+        ],
+        "references_anywhere": {},
+        "references_outside_startup": {}
+      }
+    },
+    {
+      "id": "life_products_not_core_coupled",
+      "requirement": "Life products remain addable modules, not core coupling",
+      "strength": "preserved",
+      "status": "pass",
+      "detail": {
+        "references": {},
+        "scanned": [
+          "backend/app",
+          "backend/alembic/versions"
+        ]
+      }
+    },
+    {
+      "id": "public_edge_only_ingress",
+      "requirement": "public edge separated from founder administration",
+      "strength": "enforced",
+      "status": "pass",
+      "detail": {
+        "reverse_proxy": [
+          "reverse_proxy frontend:3000"
+        ],
+        "published_ports": {
+          "caddy": [
+            "80:80",
+            "443:443"
+          ]
+        },
+        "problems": []
+      }
+    },
+    {
+      "id": "single_migration_head",
+      "requirement": "one linear migration DAG",
+      "strength": "enforced",
+      "status": "pass",
+      "detail": {
+        "head": "0079",
+        "heads": [
+          "0079"
+        ],
+        "revisions": 79,
+        "files": {
+          "0079": "0079_audit_log_append_only.py"
+        }
+      }
+    }
+  ],
+  "summary": {
+    "total": 7,
+    "passed": 7,
+    "failed": [],
+    "unverifiable": [],
+    "enforced": [
+      "single_prompt_fence",
+      "deterministic_privileged_path",
+      "provider_adapters_cannot_reach_data",
+      "public_edge_only_ingress",
+      "single_migration_head"
+    ],
+    "preserved": [
+      "tor_not_a_startup_dependency",
+      "life_products_not_core_coupled"
+    ]
+  },
+  "note": "A 'preserved' check passes because the capability is absent and nothing depends on it yet. It is a regression guard, not evidence that the capability works."
+}

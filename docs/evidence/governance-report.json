@@ -1,9 +1,9 @@
 {
   "tool": "lifeai-release-governance-verify",
   "version": 1,
-  "generated_at": "2026-11-19T11:45:53.316301Z",
+  "generated_at": "2026-11-19T14:36:13.439303Z",
   "repository": "d1n095/LifeAI",
-  "checked_ref": "d0292987aeadec8de1d192a0043ddd330005e569",
+  "checked_ref": "da23e58bf2f9574f2ec64d7f431297c4bcf48b4f",
   "mutations_performed": false,
   "checks": {
     "repository": {
@@ -41,7 +41,7 @@
       "detail": {
         "path": ".github/CODEOWNERS",
         "bytes": 1113,
-        "ref": "d0292987aeadec8de1d192a0043ddd330005e569"
+        "ref": "da23e58bf2f9574f2ec64d7f431297c4bcf48b4f"
       }
     },
     "required_contexts": {
@@ -65,12 +65,17 @@
           "Real local-AI verification (manual)",
           "Security"
         ],
-        "most_recent_run": {
+        "run_used": {
           "conclusion": "success",
-          "head_sha": "d0292987aeadec8de1d192a0043ddd330005e569",
-          "id": 44502219106,
-          "name": "CI"
+          "created_at": "2026-11-19T11:58:38Z",
+          "head_branch": "freebuff/founder-alpha-ops-recovery-20261118",
+          "head_sha": "da23e58bf2f9574f2ec64d7f431297c4bcf48b4f",
+          "id": 44519589301,
+          "name": "CI",
+          "status": "completed"
         },
+        "runs_considered": 1,
+        "completed_runs": 1,
         "contexts_verified": {
           "Security": true,
           "All required checks passed": true

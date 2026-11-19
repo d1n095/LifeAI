@@ -73,7 +73,7 @@ roundtrip. Reports: `docs/evidence/release-acceptance.json`,
 `docs/evidence/architecture-contract.json`. The mobile console screenshot is
 `docs/evidence/founder-console-mobile.png`, captured by the spec itself.
 
-CI on the parent commit `d029298`: run `44502219106` **success**, Security `44502219193`
+CI on the parent commit `da23e58`: run `44519589301` **success**, Security `44519589259`
 **success**. That is CI evidence, not a substitute for the local run above.
 
 The `git_commit` field inside `docs/evidence/release-acceptance.json` names the tree commit at
@@ -148,9 +148,15 @@ end.
 - Secret scanning and push protection are **enabled**; Dependabot security updates are
   **disabled**; CodeQL needs GHAS + `CODEQL_ENABLED`.
 - Branch protection is **not active**. `Security` and `All required checks passed` are verified
-  real contexts on run `44502219106`, but nothing requires them yet:
-  `python backend/scripts/ops/verify_release_governance.py` reports `ready_to_apply: False`,
-  blocking only `branch.main` and `protection.main`. No repository setting was changed.
+  real contexts on run `44519589301` (commit `da23e58`, conclusion `success`), but nothing
+  requires them yet: `python backend/scripts/ops/verify_release_governance.py` reports
+  `ready_to_apply: False`, blocking only `branch.main` and `protection.main`. No repository
+  setting was changed.
+- That verification is now scoped to the commit under test. It previously took whatever CI run
+  was newest in the repository, so another branch's in-progress push made
+  `All required checks passed` look missing; the report now records the run it used, and says
+  `pending` rather than "missing" when no run for the commit has finished. At the time of
+  writing, CI on `10cc1bc` had not started, so the recorded context evidence is from `da23e58`.
 
 ## Outstanding blockers and founder decisions
 

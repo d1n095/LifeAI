@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "generated_at": "2026-11-19T11:49:54.529777Z",
-  "git_commit": "b2e9ea66f4320d3835a479eb29bdf290bfcdc158",
+  "generated_at": "2026-11-19T14:37:53.493171Z",
+  "git_commit": "10cc1bc2d4a6c925ffa2a4bcea3f3078cdc5379b",
   "checks": [
     {
       "id": "config",
@@ -141,7 +141,7 @@
       "detail": {
         "exit_code": 0,
         "output": [
-          "[passed ] inference.chat               (real) 'READY' in 0.13s (36 prompt / 2 completion tokens)",
+          "[passed ] inference.chat               (real) 'READY' in 0.28s (36 prompt / 2 completion tokens)",
           "[passed ] inference.timeout_enforced   (real) a 1 ms budget failed closed as 'unreachable' in 0.01s",
           "[passed ] inference.missing_model_fails_closed (real) uninstalled model reported as category='unsupported' (404 => 'unsupported' is correct)",
           "[passed ] inference.concurrency        (real) two concurrent completions both returned",

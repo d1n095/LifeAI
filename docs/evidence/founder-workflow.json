@@ -1,15 +1,15 @@
 {
   "tool": "mainai-founder-workflow",
   "version": 1,
-  "generated_at": "2026-11-19T11:50:03.767043Z",
-  "base_url": "http://localhost:3020",
-  "seconds": 9.0,
+  "generated_at": "2026-11-19T14:38:02.754306Z",
+  "base_url": "http://127.0.0.1:3020",
+  "seconds": 8.9,
   "steps": [
     {
       "step": "1.start",
       "status": "passed",
       "detail": {
-        "base_url": "http://localhost:3020",
+        "base_url": "http://127.0.0.1:3020",
         "supervised": false
       }
     },
@@ -33,7 +33,7 @@
       "step": "6.upload",
       "status": "passed",
       "detail": {
-        "document_id": "109d1ff2-714d-454f-a8b4-c6a0978d246e",
+        "document_id": "d985e1d2-6921-40cc-bd20-9aba1db8f354",
         "chunks": 1
       }
     },
@@ -41,8 +41,8 @@
       "step": "7.cited_retrieval",
       "status": "passed",
       "detail": {
-        "title": "Founder workflow 1eccfad3d402.md",
-        "score": 0.8001818775480288,
+        "title": "Founder workflow 3bbb78ca74b8.md",
+        "score": 0.789483264869476,
         "phrase": "45 minuter"
       }
     },
@@ -54,20 +54,20 @@
         "model": "qwen2.5:0.5b-instruct",
         "confidence": "high",
         "sources": [
-          "Founder workflow 1eccfad3d402.md",
-          "Founder workflow 683fa00d475f.md",
+          "Founder workflow 3bbb78ca74b8.md",
           "Founder workflow 71d4bbc35500.md",
           "Founder workflow b6785e4f172e.md",
-          "Founder workflow 859bd3fa6af4.md"
+          "Founder workflow 711cdead2c7b.md",
+          "Founder workflow 683fa00d475f.md"
         ],
-        "answer_excerpt": "1eccfad3d402. \u00c5terst\u00e4llningstiden f\u00f6r produktionsmilj\u00f6n \u00e4r 45 minuter."
+        "answer_excerpt": "45 minuter."
       }
     },
     {
       "step": "8.save_decision",
       "status": "passed",
       "detail": {
-        "decision_id": "38fba2c8-e5f0-4bd0-8bfe-e961c679f5b8",
+        "decision_id": "32b19c69-cf24-4091-9dca-90dd7bad7981",
         "classification": "decisions",
         "status": "active"
       }
@@ -83,8 +83,8 @@
       "step": "11-12.task_and_progress",
       "status": "passed",
       "detail": {
-        "task_id": "b267d7df-c252-4f0b-ad2a-550815677f58",
-        "job_id": "a3cda8dc-3460-4492-8027-e3eb060fcf53",
+        "task_id": "6396ee57-15bc-4b34-987a-a536dd32b598",
+        "job_id": "fb539f70-c52b-4522-9f91-54aec2bc0d3d",
         "job_status": "completed",
         "progress": "1/1",
         "error_category": null,
@@ -93,10 +93,10 @@
     }
   ],
   "state": {
-    "document_id": "109d1ff2-714d-454f-a8b4-c6a0978d246e",
-    "conversation_id": "a4560f67-27a5-4fc2-9b70-cca00b1b3d70",
-    "decision_id": "38fba2c8-e5f0-4bd0-8bfe-e961c679f5b8",
-    "task_id": "b267d7df-c252-4f0b-ad2a-550815677f58"
+    "document_id": "d985e1d2-6921-40cc-bd20-9aba1db8f354",
+    "conversation_id": "5007893f-4e76-4573-b238-934f578d9a5c",
+    "decision_id": "32b19c69-cf24-4091-9dca-90dd7bad7981",
+    "task_id": "6396ee57-15bc-4b34-987a-a536dd32b598"
   },
   "passed": true
 }
