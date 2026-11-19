@@ -7,11 +7,20 @@ from app.config import get_settings
 from app.models.provider_config import ProviderConfig
 from app.providers.anthropic_provider import AnthropicProvider
 from app.providers.base import ChatResult, LLMProvider, Message, ProviderError
+from app.providers.catalog import (
+    ModelSelectionError,
+    ModelSelectionPolicy,
+    ModelSpec,
+    evaluate_model,
+    get_model_spec,
+    model_specs,
+)
 from app.providers.deepseek_provider import DeepSeekProvider
 from app.providers.gemini_provider import GeminiProvider
 from app.providers.ollama_provider import OllamaProvider
 from app.providers.openai_provider import OpenAIProvider
 from app.providers.openrouter_provider import OpenRouterProvider
+from app.providers.zai_provider import ZAIProvider
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +31,7 @@ _PROVIDERS: dict[str, type[LLMProvider]] = {
     "deepseek": DeepSeekProvider,
     "openrouter": OpenRouterProvider,
     "ollama": OllamaProvider,
+    "zai": ZAIProvider,
 }
 
 # Reasonable default chat model per provider, used only when falling back to a provider that
@@ -34,6 +44,7 @@ DEFAULT_CHAT_MODELS: dict[str, str] = {
     "deepseek": "deepseek-chat",
     "openrouter": "openrouter/auto",
     "ollama": "llama3.1",
+    "zai": "glm-5.3",
 }
 
 
@@ -50,6 +61,93 @@ def get_provider(name: str) -> LLMProvider:
     if cls is None:
         raise ProviderError(f"Okänd leverantör: {name}")
     return cls()
+
+
+def _model_is_freshly_verified(db: Session, spec: ModelSpec, role: str) -> bool:
+    """Verification is exact-model and TTL-bound; another model's PASS is not evidence."""
+
+    from datetime import datetime, timedelta
+
+    from app.models.provider_verification import ProviderVerificationCheck, VerificationResult
+
+    cutoff = datetime.utcnow() - timedelta(seconds=get_settings().provider_verification_cache_seconds)
+    return (
+        db.query(ProviderVerificationCheck)
+        .filter(
+            ProviderVerificationCheck.provider_name == spec.provider,
+            ProviderVerificationCheck.role == role,
+            ProviderVerificationCheck.model == spec.model_id,
+            ProviderVerificationCheck.result == VerificationResult.ok,
+            ProviderVerificationCheck.checked_at >= cutoff,
+        )
+        .order_by(ProviderVerificationCheck.checked_at.desc())
+        .first()
+        is not None
+    )
+
+
+def _require_policy_candidate(
+    db: Session,
+    spec: ModelSpec,
+    policy: ModelSelectionPolicy,
+) -> tuple[LLMProvider, str, ModelSpec]:
+    eligible, reason = evaluate_model(spec, policy)
+    if not eligible:
+        raise ModelSelectionError(f"{spec.provider}/{spec.model_id}: {reason}")
+    provider = get_provider(spec.provider)
+    if not provider.is_configured():
+        raise ModelSelectionError(f"{spec.provider}/{spec.model_id}: provider is not configured")
+    if policy.require_verified and not _model_is_freshly_verified(db, spec, policy.role):
+        raise ModelSelectionError(
+            f"{spec.provider}/{spec.model_id}: exact model has no fresh successful verification"
+        )
+    return provider, spec.model_id, spec
+
+
+def select_model(
+    db: Session,
+    policy: ModelSelectionPolicy,
+    *,
+    requested_provider: str | None = None,
+    requested_model: str | None = None,
+) -> tuple[LLMProvider, str, ModelSpec]:
+    """Deterministic manual or automatic model selection over the shared provider registry.
+
+    This function does not authorize provider spend or egress. Callers must still pass the
+    selected provider call through those existing authority boundaries.
+    """
+
+    if (requested_provider is None) != (requested_model is None):
+        raise ModelSelectionError("requested_provider and requested_model must be supplied together")
+    if requested_provider is not None and requested_model is not None:
+        return _require_policy_candidate(
+            db, get_model_spec(requested_provider, requested_model), policy
+        )
+
+    eligible: list[tuple[int, ModelSpec]] = []
+    for index, spec in enumerate(model_specs()):
+        allowed, _ = evaluate_model(spec, policy)
+        if not allowed:
+            continue
+        provider = get_provider(spec.provider)
+        if not provider.is_configured():
+            continue
+        if policy.require_verified and not _model_is_freshly_verified(db, spec, policy.role):
+            continue
+        eligible.append((index, spec))
+
+    if not eligible:
+        raise ModelSelectionError("no configured model satisfies the verified policy")
+
+    def _sort_key(item: tuple[int, ModelSpec]):
+        index, spec = item
+        local_rank = 0 if policy.prefer_local and not spec.external else 1
+        input_price = spec.pricing.input_per_million_usd
+        price_rank = input_price if input_price is not None else float("inf")
+        return local_rank, price_rank, index
+
+    selected = sorted(eligible, key=_sort_key)[0][1]
+    return get_provider(selected.provider), selected.model_id, selected
 
 
 def resolve_active(db: Session, role: str) -> tuple[LLMProvider, str]:
@@ -116,7 +214,10 @@ async def embed_with_policy(
     return await provider.embed(outbound_texts, model=model)
 
 
-def resolve_chat_chain(db: Session) -> list[tuple[LLMProvider, str]]:
+def resolve_chat_chain(
+    db: Session,
+    selection_policy: ModelSelectionPolicy | None = None,
+) -> list[tuple[LLMProvider, str]]:
     """Primary chat provider first (DB config / settings default, as usual), then the
     remaining providers in CHAT_FALLBACK_ORDER that are actually configured (have an API
     key) and aren't already the primary. Embedding has no fallback in MainAI 0.1 — an
@@ -125,6 +226,15 @@ def resolve_chat_chain(db: Session) -> list[tuple[LLMProvider, str]]:
     """
     settings = get_settings()
     primary_provider, primary_model = resolve_active(db, role="chat")
+    if selection_policy is not None:
+        if selection_policy.role != "chat":
+            raise ModelSelectionError("chat fallback requires a chat selection policy")
+        primary_provider, primary_model, _ = select_model(
+            db,
+            selection_policy,
+            requested_provider=primary_provider.name,
+            requested_model=primary_model,
+        )
     chain = [(primary_provider, primary_model)]
     seen_names = {primary_provider.name}
 
@@ -134,7 +244,18 @@ def resolve_chat_chain(db: Session) -> list[tuple[LLMProvider, str]]:
         provider = get_provider(name)
         if not provider.is_configured():
             continue
-        chain.append((provider, DEFAULT_CHAT_MODELS.get(name, primary_model)))
+        model = DEFAULT_CHAT_MODELS.get(name, primary_model)
+        if selection_policy is not None:
+            try:
+                provider, model, _ = select_model(
+                    db,
+                    selection_policy,
+                    requested_provider=name,
+                    requested_model=model,
+                )
+            except ModelSelectionError:
+                continue
+        chain.append((provider, model))
         seen_names.add(name)
 
     return chain
@@ -150,6 +271,7 @@ async def chat_with_fallback(
     task_id: uuid.UUID | None = None,
     goal_id: uuid.UUID | None = None,
     job_id: uuid.UUID | None = None,
+    selection_policy: ModelSelectionPolicy | None = None,
     **kwargs,
 ) -> tuple[ChatResult, list[str]]:
     """Try the primary chat provider, then fall back through CHAT_FALLBACK_ORDER on failure.
@@ -184,7 +306,7 @@ async def chat_with_fallback(
     # already-central module.
     from app.egress_policy import EgressDeniedError, enforce_egress_policy
 
-    chain = resolve_chat_chain(db)
+    chain = resolve_chat_chain(db, selection_policy=selection_policy)
     attempted: list[str] = []
     last_error: Exception | None = None
 
