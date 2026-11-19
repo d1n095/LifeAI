@@ -9612,3 +9612,7 @@ Reuses #458's runner pin and dependency updates; no competing CI implementation 
 R12 has a different eval-only `providers/zai_provider.py` and global `zai` registration lifecycle; do not substitute it for this HTTP adapter.
 Freebuff R15 has no identifiable remote ref or exact SHA at this checkpoint: compatibility remains blocked on delivery, its branch is untouched.
 No merge/rebase/deploy/provider activation. `first_cycle_go=false`.
+
+#463 integration checkpoint: targeted sharp/PostCSS patches now overlap #458's lockfile.
+A synthetic merge reports package-lock.json conflict; retain patches and regenerate the composed lock.
+#457 still conflicts in verification.py; R12 still conflicts in registry.py and the Z.ai adapter.

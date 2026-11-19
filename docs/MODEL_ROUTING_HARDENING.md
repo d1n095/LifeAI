@@ -15,9 +15,9 @@ Baseline: `69dc5ea5a9cfc750303ea1a9b335c78612bc8f39`; reviewed prior head: `e884
 
 ## CI and dependencies
 
-Reused #458 runner commit `646f595452c2b43c2048ea86a91d98b154eafe88` and package/lock updates from `2ac286d8fb4cf60c6b19ffc61d488ad91b8c6a3c` without copying its added advisory exceptions. `next`/`eslint-config-next` are 16.4.6 and `sharp` is patched to 0.35.5. No major tooling migration or `npm audit fix --force`.
+Reused #458 runner commit `646f595452c2b43c2048ea86a91d98b154eafe88` and package/lock updates from `2ac286d8fb4cf60c6b19ffc61d488ad91b8c6a3c` without copying its added advisory exceptions. `next`/`eslint-config-next` are 16.4.6 and `sharp` is patched to 0.35.5 and PostCSS to 8.5.33. No major tooling migration or `npm audit fix --force`.
 
-Current local audit: **0 high, 0 critical, 11 moderate**. The existing advisory allowlist is unchanged. Audit registry/network/incomplete-report errors now fail closed, with three Node tests. Both Playwright E2E jobs and the existing browser-dependent combined-container job use ubuntu-24.04; application tests/security gates are retained. The new browser regression is included in the full-stack job, with real authentication and intercepted provider endpoints so it cannot activate a paid provider.
+Current local audit: **0 high, 0 critical, 4 moderate**. The existing advisory allowlist is unchanged. Audit registry/network/incomplete-report errors now fail closed, with three Node tests. Both Playwright E2E jobs and the existing browser-dependent combined-container job use ubuntu-24.04; application tests/security gates are retained. The new browser regression is included in the full-stack job, with real authentication and intercepted provider endpoints so it cannot activate a paid provider.
 
 Reproduce in a disposable Cloud environment (Python 3.12, Node 22, PostgreSQL/pgvector 16, Redis 7):
 
@@ -50,3 +50,9 @@ The authoritative full CI workflow is `.github/workflows/ci.yml`; exact commit a
 - Runtime quotas, service latency, mutable alias identity and actual billing prices have not been measured. Do not present static values or a ping PASS as guarantees. No latency-based routing or invented quota controller was added.
 - Verification is a preflight snapshot: a remote outage or credential change can still happen after validation. Synchronous per-attempt rechecks reduce stale local decisions; they cannot atomically lock an external provider's state.
 - No migration, production secret change, provider activation, merge or deployment is authorized by these changes. Independent security acceptance and exact combined-tree integration evidence remain required.
+
+Remaining moderate advisories are the build-time `glob`/`minimatch` chain (propagated through sucrase/tailwindcss). Patches require crossing the current glob/minimatch major versions; no untested override is forced. Untrusted glob inputs are not accepted by a production route. This is residual dependency risk, not an assertion of zero vulnerabilities. PostCSS's sourceMappingURL advisory was fixed with a same-series 8.5.33 update.
+
+After taking newer patched versions, a synthetic merge with #458 conflicts in package-lock.json. Regenerate that lock from the combined package.json while retaining sharp/PostCSS patches and the unchanged advisory allowlist; do not take the older lockfile wholesale.
+
+Cloud validation before the final dependency/test checkpoint: **277 passed** across provider, egress, spend, config, RLS/security and account suites; **46 passed** in the final dedicated hardening suite (includes authenticated other-account/fake-Founder-role rejection). TypeScript, ESLint, production Next build and the three Node audit regressions passed. These are overlapping runs and must not be added together as a unique-test total. Full exact-head GitHub Actions status is recorded in the PR description.

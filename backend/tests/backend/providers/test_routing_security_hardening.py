@@ -276,3 +276,16 @@ async def test_controlled_routing_cannot_skip_egress_by_omitting_owner(db_sessio
     with pytest.raises(ModelSelectionError, match="requires owner_id"):
         await registry.chat_with_fallback(db_session, [Message("user", "private")],
             selection_policy=ModelSelectionPolicy(allow_external=True, require_verified=False))
+
+
+@pytest.mark.parametrize("role", ["member", "founder"])
+def test_other_account_cannot_route_or_verify_even_with_founder_role(client, make_verified_user, role):
+    user, password = make_verified_user(role=role)
+    login = client.post("/api/auth/login", json={"email":user.email, "password":password})
+    assert login.status_code == 200
+    headers = {"X-CSRF-Token":login.json()["csrf_token"]}
+    assert client.get("/api/admin/providers/models").status_code == 403
+    for path in ("/api/admin/providers/select/preview", "/api/admin/providers/verify", "/api/admin/providers/config"):
+        response = client.request("PUT" if path.endswith("/config") else "POST", path,
+            headers=headers, json={"provider":"zai", "role":"chat", "model":"glm-5.3"})
+        assert response.status_code == 403
