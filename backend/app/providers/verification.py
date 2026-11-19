@@ -158,7 +158,14 @@ async def ensure_verified(db: Session, role: str, *, checked_by: str = "system")
     return outcome
 
 
-async def verify_now(db: Session, provider_name: str, role: str, *, checked_by: str) -> Outcome:
+async def verify_now(
+    db: Session,
+    provider_name: str,
+    role: str,
+    *,
+    checked_by: str,
+    model: str | None = None,
+) -> Outcome:
     """Admin -> Providers' "Testa nu" action (POST /api/admin/providers/verify) — an
     explicit, founder-initiated check that ALWAYS makes a real call, bypassing the cache, for
     a specific provider (not necessarily the currently active one, so a founder can verify a
@@ -167,7 +174,7 @@ async def verify_now(db: Session, provider_name: str, role: str, *, checked_by: 
 
     settings = get_settings()
     provider = get_provider(provider_name)
-    model = _default_verification_model(provider, role)
+    model = model or _default_verification_model(provider, role)
     outcome = await verify_provider(provider, model, role, timeout=settings.provider_verification_timeout_seconds)
     db.add(
         ProviderVerificationCheck(
@@ -185,10 +192,17 @@ async def verify_now(db: Session, provider_name: str, role: str, *, checked_by: 
     return outcome
 
 
-def latest_check(db: Session, provider_name: str, role: str) -> ProviderVerificationCheck | None:
-    return (
-        db.query(ProviderVerificationCheck)
-        .filter(ProviderVerificationCheck.provider_name == provider_name, ProviderVerificationCheck.role == role)
-        .order_by(ProviderVerificationCheck.checked_at.desc())
-        .first()
+def latest_check(
+    db: Session,
+    provider_name: str,
+    role: str,
+    *,
+    model: str | None = None,
+) -> ProviderVerificationCheck | None:
+    query = db.query(ProviderVerificationCheck).filter(
+        ProviderVerificationCheck.provider_name == provider_name,
+        ProviderVerificationCheck.role == role,
     )
+    if model is not None:
+        query = query.filter(ProviderVerificationCheck.model == model)
+    return query.order_by(ProviderVerificationCheck.checked_at.desc()).first()
