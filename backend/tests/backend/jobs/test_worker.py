@@ -295,6 +295,7 @@ def test_commit_fence_checks_expiry_after_waiting_for_job_row_lock(
     release_lock = threading.Event()
     commit_started = threading.Event()
     outcome: list[str] = []
+    errors: list[Exception] = []
     backend_pid: list[int] = []
 
     def _hold_job_row() -> None:
@@ -334,6 +335,9 @@ def test_commit_fence_checks_expiry_after_waiting_for_job_row_lock(
         except ImportJobLeaseLostError:
             db.rollback()
             outcome.append("lease-lost")
+        except Exception as exc:  # noqa: BLE001 - surfaced by the parent-thread assertion
+            db.rollback()
+            errors.append(exc)
         finally:
             db.close()
 
@@ -342,8 +346,8 @@ def test_commit_fence_checks_expiry_after_waiting_for_job_row_lock(
     blocker.start()
     assert row_locked.wait(timeout=5)
     writer.start()
-    assert commit_started.wait(timeout=5)
     try:
+        assert commit_started.wait(timeout=5), errors
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             waiting = superuser_db.execute(
@@ -366,6 +370,7 @@ def test_commit_fence_checks_expiry_after_waiting_for_job_row_lock(
 
     assert not blocker.is_alive()
     assert not writer.is_alive()
+    assert errors == []
     assert outcome == ["lease-lost"]
     superuser_db.expire_all()
     assert superuser_db.get(ImportJob, job.id).progress_current == 0

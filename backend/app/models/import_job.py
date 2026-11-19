@@ -120,6 +120,8 @@ class ImportJob(Base):
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     manifest: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # Per-file outcome: [{"filename": ..., "status": "indexed"|"failed"|"skipped", "reason": ..., "source_id": ...}]
+    # NULL means no per-file outcome has ever committed. An empty list is a distinct, committed
+    # result and must never be fabricated by a stale worker after another claimant takes over.
     file_results: Mapped[list | None] = mapped_column(JSON, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

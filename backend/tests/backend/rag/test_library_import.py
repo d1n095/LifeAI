@@ -338,7 +338,9 @@ async def test_archive_progress_is_fenced_and_restart_finishes_remaining_files(
     assert interrupted.locked_by == "archive-restart"
     assert interrupted.status == ImportJobStatus.running
     assert interrupted.progress_current == 0
-    assert not interrupted.file_results
+    # NULL is the durable contract for "no per-file outcome has committed yet". The stale
+    # worker must not publish even an empty result list after the replacement claim wins.
+    assert interrupted.file_results is None
 
     monkeypatch.setattr(li, "_import_one_file", real_import_one)
     from app.worker import process_claimed_job
@@ -351,6 +353,8 @@ async def test_archive_progress_is_fenced_and_restart_finishes_remaining_files(
     assert completed.succeeded_count == 1
     assert completed.skipped_count == 1
     assert completed.progress_current == 2
+    assert completed.file_results is not None
+    assert len(completed.file_results) == 2
     assert {result["filename"]: result["status"] for result in completed.file_results} == {
         "first.txt": "duplicate",
         "second.txt": "indexed",

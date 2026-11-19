@@ -23,6 +23,7 @@ Acceptance criteria asserted below (recon §I):
        present as `local`.
 """
 
+import hashlib
 import math
 import re
 
@@ -66,7 +67,10 @@ def _deterministic_local_embed(texts: list[str]) -> list[list[float]]:
     for t in texts:
         vec = [0.0] * EMBEDDING_DIM
         for tok in _tokenize(t):
-            vec[hash(tok) % EMBEDDING_DIM] += 1.0
+            # Python hash() is process-salted and can make this security regression select a
+            # different source across CI workers. Bind the synthetic embedding to stable bytes.
+            bucket = int.from_bytes(hashlib.sha256(tok.encode("utf-8")).digest()[:8], "big")
+            vec[bucket % EMBEDDING_DIM] += 1.0
         norm = math.sqrt(sum(v * v for v in vec))
         if norm > 0:
             vec = [v / norm for v in vec]
