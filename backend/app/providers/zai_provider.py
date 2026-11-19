@@ -1,8 +1,10 @@
 """Z.ai / GLM adapter using the provider's OpenAI-compatible chat surface."""
 
+import math
+
 import httpx
 
-from app.config import get_settings
+from app.config import get_settings, validated_zai_base_url
 from app.providers.base import (
     ChatResult,
     LLMProvider,
@@ -10,6 +12,7 @@ from app.providers.base import (
     ProviderError,
     looks_like_placeholder_secret,
 )
+
 
 
 def _category(status_code: int) -> str:
@@ -51,6 +54,19 @@ class ZAIProvider(LLMProvider):
                 category="not_configured",
                 provider_request_may_have_left=False,
             )
+        try:
+            base_url = validated_zai_base_url(self.settings.zai_base_url)
+            if any(key not in {"temperature", "max_tokens"} for key in kwargs):
+                raise ValueError("unsupported chat options")
+            temperature = kwargs.get("temperature", 0.4)
+            if not isinstance(temperature, (int, float)) or not math.isfinite(temperature) or not 0 <= temperature <= 2:
+                raise ValueError("invalid temperature")
+            max_tokens = kwargs.get("max_tokens")
+            if max_tokens is not None and (type(max_tokens) is not int or max_tokens <= 0):
+                raise ValueError("invalid token bound")
+        except ValueError:
+            raise ProviderError("Z.ai konfiguration eller anropsparametrar stöds inte.",
+                                category="unsupported", provider_request_may_have_left=False) from None
         payload = {
             "model": model,
             "messages": [{"role": message.role, "content": message.content} for message in messages],
@@ -60,9 +76,9 @@ class ZAIProvider(LLMProvider):
             payload["max_tokens"] = kwargs["max_tokens"]
 
         try:
-            async with httpx.AsyncClient(timeout=timeout or 60) as client:
+            async with httpx.AsyncClient(timeout=timeout or 60, follow_redirects=False, trust_env=False) as client:
                 response = await client.post(
-                    f"{self.settings.zai_base_url.rstrip('/')}/chat/completions",
+                    f"{base_url}/chat/completions",
                     headers=self._headers(),
                     json=payload,
                 )
@@ -74,6 +90,9 @@ class ZAIProvider(LLMProvider):
                 category=_category(exc.response.status_code),
                 provider_request_may_have_left=True,
             ) from exc
+        except ValueError:
+            raise ProviderError("Z.ai returnerade ett ogiltigt svar.", category="unreachable",
+                                provider_request_may_have_left=True) from None
         except httpx.HTTPError as exc:
             raise ProviderError(
                 "Z.ai kunde inte nås.",
@@ -81,9 +100,19 @@ class ZAIProvider(LLMProvider):
                 provider_request_may_have_left=True,
             ) from exc
 
-        usage = data.get("usage", {})
+        try:
+            content = data["choices"][0]["message"]["content"]
+            usage = data["usage"]
+            if not isinstance(content, str) or not content.strip() or not isinstance(usage, dict):
+                raise ValueError("invalid response")
+            for key in ("prompt_tokens", "completion_tokens"):
+                if type(usage.get(key)) is not int or usage[key] < 0:
+                    raise ValueError("invalid usage")
+        except (KeyError, IndexError, TypeError, ValueError):
+            raise ProviderError("Z.ai returnerade ett ogiltigt svar.", category="unreachable",
+                                provider_request_may_have_left=True) from None
         return ChatResult(
-            content=data["choices"][0]["message"]["content"],
+            content=content,
             provider=self.name,
             model=model,
             raw_usage={

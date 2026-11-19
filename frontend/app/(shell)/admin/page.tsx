@@ -1,18 +1,20 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, ProviderStatus, ProviderVerification, UsageSummaryRow } from "@/lib/api";
+import { api, ModelCatalog, ProviderStatus, ProviderVerification, UsageSummaryRow } from "@/lib/api";
 
-const MODEL_SUGGESTIONS: Record<string, string> = {
-  openai: "gpt-4o-mini",
-  anthropic: "claude-sonnet-5",
-  gemini: "gemini-2.5-flash",
-  deepseek: "deepseek-chat",
-  openrouter: "openrouter/auto",
-  ollama: "llama3.1",
-};
 
 export default function AdminPage() {
+  const [models, setModels] = useState<ModelCatalog[]>([]);
+  const [choices, setChoices] = useState<Record<string, string>>({});
+  const candidates = (provider: string, role: string) => models.filter(
+    (m) => m.provider === provider && m.supported_capabilities.includes(role)
+  );
+  const selectedModel = (provider: string, role: string) => {
+    const options = candidates(provider, role);
+    return choices[`${provider}:${role}`] ??
+      options.find((m) => m.verification_result === "ok")?.model_id ?? options[0]?.model_id ?? "";
+  };
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [usage, setUsage] = useState<UsageSummaryRow[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -23,7 +25,8 @@ export default function AdminPage() {
 
   async function refresh() {
     try {
-      const [p, u] = await Promise.all([api.providerStatus(), api.usageSummary()]);
+      const [p, u, m] = await Promise.all([api.providerStatus(), api.usageSummary(), api.modelCatalog()]);
+      setModels(m);
       setProviders(p);
       setUsage(u);
     } catch (e: any) {
@@ -41,7 +44,7 @@ export default function AdminPage() {
   async function activate(role: "chat" | "embedding", provider: string) {
     setSaving(provider);
     try {
-      await api.setProviderConfig(role, provider, MODEL_SUGGESTIONS[provider] || "");
+      await api.setProviderConfig(role, provider, selectedModel(provider, role));
       await refresh();
     } catch (e: any) {
       setError(e.message);
@@ -56,7 +59,7 @@ export default function AdminPage() {
     const key = `${provider}:${role}`;
     setVerifying(key);
     try {
-      await api.verifyProvider(provider, role);
+      await api.verifyProvider(provider, role, selectedModel(provider, role));
       await refresh();
     } catch (e: any) {
       setError(e.message);
@@ -132,29 +135,51 @@ export default function AdminPage() {
                     />
                   </td>
                   <td className="px-4 py-3">
+                    <select
+                      aria-label={`Modell för ${p.name} chat`}
+                      className="block max-w-48 bg-panel text-sm mb-2"
+                      value={selectedModel(p.name, "chat")}
+                      disabled={verifying !== null || saving !== null}
+                      onChange={(e) => setChoices({...choices, [`${p.name}:chat`]: e.target.value})}
+                    >
+                      {candidates(p.name, "chat").map((m) => (
+                        <option key={m.model_id} value={m.model_id}>{m.model_id}</option>
+                      ))}
+                    </select>
                     <VerificationBadge
-                      verification={p.chat_verification}
+                      verification={p.chat_verification?.model === selectedModel(p.name, "chat") ? p.chat_verification : null}
                       onVerify={() => verifyNow("chat", p.name)}
-                      busy={verifying === `${p.name}:chat`}
+                      busy={verifying === `${p.name}:chat` || !selectedModel(p.name, "chat")}
                     />
                   </td>
                   <td className="px-4 py-3">
+                    <select
+                      aria-label={`Modell för ${p.name} embedding`}
+                      className="block max-w-48 bg-panel text-sm mb-2"
+                      value={selectedModel(p.name, "embedding")}
+                      disabled={verifying !== null || saving !== null}
+                      onChange={(e) => setChoices({...choices, [`${p.name}:embedding`]: e.target.value})}
+                    >
+                      {candidates(p.name, "embedding").map((m) => (
+                        <option key={m.model_id} value={m.model_id}>{m.model_id}</option>
+                      ))}
+                    </select>
                     <VerificationBadge
-                      verification={p.embedding_verification}
+                      verification={p.embedding_verification?.model === selectedModel(p.name, "embedding") ? p.embedding_verification : null}
                       onVerify={() => verifyNow("embedding", p.name)}
-                      busy={verifying === `${p.name}:embedding`}
+                      busy={verifying === `${p.name}:embedding` || !selectedModel(p.name, "embedding")}
                     />
                   </td>
                   <td className="px-4 py-3 text-right space-x-2 whitespace-nowrap">
                     <button
-                      disabled={!p.configured || saving === p.name}
+                      disabled={!p.configured || !selectedModel(p.name, "chat") || saving === p.name}
                       onClick={() => activate("chat", p.name)}
                       className="text-xs rounded border border-border px-2 py-1 disabled:opacity-30"
                     >
                       Använd för chat
                     </button>
                     <button
-                      disabled={!p.configured || saving === p.name}
+                      disabled={!p.configured || !selectedModel(p.name, "embedding") || saving === p.name}
                       onClick={() => activate("embedding", p.name)}
                       className="text-xs rounded border border-border px-2 py-1 disabled:opacity-30"
                     >

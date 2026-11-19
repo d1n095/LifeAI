@@ -68,22 +68,16 @@ def _model_is_freshly_verified(db: Session, spec: ModelSpec, role: str) -> bool:
 
     from datetime import datetime, timedelta
 
-    from app.models.provider_verification import ProviderVerificationCheck, VerificationResult
+    from app.models.provider_verification import VerificationResult
 
-    cutoff = datetime.utcnow() - timedelta(seconds=get_settings().provider_verification_cache_seconds)
-    return (
-        db.query(ProviderVerificationCheck)
-        .filter(
-            ProviderVerificationCheck.provider_name == spec.provider,
-            ProviderVerificationCheck.role == role,
-            ProviderVerificationCheck.model == spec.model_id,
-            ProviderVerificationCheck.result == VerificationResult.ok,
-            ProviderVerificationCheck.checked_at >= cutoff,
-        )
-        .order_by(ProviderVerificationCheck.checked_at.desc())
-        .first()
-        is not None
-    )
+    from app.providers.verification import latest_check
+
+    now = datetime.utcnow()
+    cutoff = now - timedelta(seconds=get_settings().provider_verification_cache_seconds)
+    check = latest_check(db, spec.provider, role, model=spec.model_id)
+    return bool(check is not None and check.result == VerificationResult.ok
+                and cutoff <= check.checked_at <= now)
+
 
 
 def _require_policy_candidate(
@@ -226,16 +220,22 @@ def resolve_chat_chain(
     """
     settings = get_settings()
     primary_provider, primary_model = resolve_active(db, role="chat")
+    chain = []
     if selection_policy is not None:
         if selection_policy.role != "chat":
             raise ModelSelectionError("chat fallback requires a chat selection policy")
-        primary_provider, primary_model, _ = select_model(
-            db,
-            selection_policy,
-            requested_provider=primary_provider.name,
-            requested_model=primary_model,
-        )
-    chain = [(primary_provider, primary_model)]
+        try:
+            primary_provider, primary_model, _ = select_model(
+                db, selection_policy, requested_provider=primary_provider.name,
+                requested_model=primary_model,
+            )
+            chain.append((primary_provider, primary_model))
+        except ModelSelectionError:
+            # The preference cannot waive policy. Only eligible configured fallbacks
+            # below may replace an unavailable/incompatible primary.
+            pass
+    else:
+        chain.append((primary_provider, primary_model))
     seen_names = {primary_provider.name}
 
     for name in [p.strip() for p in settings.chat_fallback_order.split(",") if p.strip()]:
@@ -258,6 +258,8 @@ def resolve_chat_chain(
         chain.append((provider, model))
         seen_names.add(name)
 
+    if not chain:
+        raise ModelSelectionError("no configured model satisfies the verified chat policy")
     return chain
 
 
@@ -308,6 +310,10 @@ async def chat_with_fallback(
     # re-export, which can become a stale alias under development/test module reloads.
     from app.egress_policy.service import EgressDeniedError, enforce_egress_policy
 
+    if selection_policy is not None and owner_id is None:
+        # New controlled-routing calls must carry authoritative caller context; selection
+        # permission alone must never opt into the legacy egress bypass.
+        raise ModelSelectionError("controlled chat routing requires owner_id for egress")
     chain = resolve_chat_chain(db, selection_policy=selection_policy)
     attempted: list[str] = []
     last_error: Exception | None = None
@@ -315,6 +321,9 @@ async def chat_with_fallback(
     for provider, model in chain:
         attempted.append(provider.name)
         try:
+            if selection_policy is not None:
+                # The chain was built earlier; a concurrent verification failure may now exist.
+                _require_policy_candidate(db, get_model_spec(provider.name, model), selection_policy)
             outbound_messages = messages
             if owner_id is not None:
                 payload = [{"role": m.role, "content": m.content} for m in messages]

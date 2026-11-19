@@ -55,7 +55,7 @@ def _verification_out(db: Session, provider_name: str, role: str) -> ProviderVer
     if check is None:
         return None
     return ProviderVerificationOut(
-        result=check.result.value, message=check.message, checked_by=check.checked_by, checked_at=check.checked_at
+        result=check.result.value, message=check.message, checked_by=check.checked_by, checked_at=check.checked_at, model=check.model
     )
 
 
@@ -101,6 +101,7 @@ def provider_model_catalog(db: Session = Depends(get_db)):
                 model_id=spec.model_id,
                 version=spec.version,
                 capabilities=sorted(spec.capabilities),
+                supported_capabilities=sorted(spec.supported_capabilities),
                 context_window_tokens=spec.context_window_tokens,
                 locality=spec.locality.value,
                 license_name=spec.license_name,
@@ -138,6 +139,8 @@ def preview_model_selection(payload: ModelSelectionPreviewIn, db: Session = Depe
         required_capabilities=frozenset(payload.required_capabilities),
         minimum_context_tokens=payload.minimum_context_tokens,
         estimated_input_tokens=payload.estimated_input_tokens,
+        estimated_output_tokens=payload.estimated_output_tokens,
+        max_pricing_age_days=payload.max_pricing_age_days,
         allow_external=payload.allow_external,
         prefer_local=payload.prefer_local,
         allowed_providers=frozenset(payload.allowed_providers),
@@ -211,9 +214,9 @@ async def verify_provider_now(
         detail=outcome.result.value,
         request=request,
     )
-    check = latest_check(db, payload.provider, payload.role)
     return ProviderVerificationOut(
-        result=check.result.value, message=check.message, checked_by=check.checked_by, checked_at=check.checked_at
+        result=outcome.result.value, message=outcome.message, checked_by="founder",
+        checked_at=outcome.checked_at, model=outcome.model,
     )
 
 
@@ -234,6 +237,11 @@ def set_provider_config(
     This is the single write path that changes what LLM the whole platform uses —
     no redeploy, no code change.
     """
+    # Serialize role writes including the first INSERT. No last-writer race can create
+    # duplicate active rows; this transaction lock is released by commit/rollback.
+    from sqlalchemy import text
+    db.execute(text("SELECT pg_advisory_xact_lock(:key)"),
+               {"key": 46301 if payload.role == "chat" else 46302})
     try:
         # Manual choice is exact, registered and freshly verified. This validates selection
         # only; it does not authorize provider spend or content egress.
@@ -259,8 +267,6 @@ def set_provider_config(
         entry.model = payload.model
         entry.is_active = True
     db.add(entry)
-    db.commit()
-    db.refresh(entry)
     record_audit(
         db,
         user_id=user.id,
@@ -269,7 +275,10 @@ def set_provider_config(
         entity_id=payload.role,
         detail=f"{payload.provider}/{payload.model}",
         request=request,
+        commit=False,
     )
+    db.commit()
+    db.refresh(entry)
     return entry
 
 

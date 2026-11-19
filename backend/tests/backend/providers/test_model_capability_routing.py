@@ -73,7 +73,8 @@ def test_catalog_covers_every_registered_provider_with_truthful_metadata():
         assert spec.capabilities
         assert spec.license_name
         assert spec.pricing.source
-        assert spec.pricing.as_of
+        # Inherited snapshots have no independently captured date; never label them fresh.
+        assert spec.pricing.as_of is None
         assert spec.quota.note
         assert spec.locality in (DeploymentLocality.local, DeploymentLocality.external)
 

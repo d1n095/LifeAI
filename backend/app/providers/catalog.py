@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
+from datetime import date
 from enum import Enum
 
 
@@ -31,7 +32,7 @@ class ModelPricing:
     input_per_million_usd: Decimal | None
     output_per_million_usd: Decimal | None
     source: str
-    as_of: str
+    as_of: str | None
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,12 @@ class ModelSpec:
     availability: ModelAvailability = ModelAvailability.active
 
     @property
+    def supported_capabilities(self) -> frozenset[str]:
+        # Current Message/ChatResult transports only expose text chat and embeddings.
+        # Model-vendor claims must not imply that tools/vision/JSON contracts are wired.
+        return self.capabilities & frozenset({"chat", "embedding"})
+
+    @property
     def external(self) -> bool:
         return self.locality == DeploymentLocality.external
 
@@ -77,6 +84,8 @@ class ModelSelectionPolicy:
     max_input_price_per_million_usd: Decimal | None = None
     max_output_price_per_million_usd: Decimal | None = None
     require_verified: bool = True
+    estimated_output_tokens: int = 0
+    max_pricing_age_days: int = 30
 
 
 class ModelSelectionError(ValueError):
@@ -88,7 +97,7 @@ def _price(
     output_price: str | None,
     *,
     source: str,
-    as_of: str = "2026-11-19",
+    as_of: str | None = None,
 ) -> ModelPricing:
     return ModelPricing(
         input_per_million_usd=Decimal(input_price) if input_price is not None else None,
@@ -224,6 +233,20 @@ _MODEL_SPECS: tuple[ModelSpec, ...] = (
         quota=ModelQuota(note="host capacity controlled; no external provider quota"),
     ),
     ModelSpec(
+        provider="ollama", model_id="qwen2.5:0.5b", version="local mutable tag",
+        capabilities=frozenset({"chat"}), context_window_tokens=None,
+        locality=DeploymentLocality.local, license_name="Apache-2.0",
+        license_url="https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct",
+        pricing=_price("0", "0", source="local inference; no provider charge"), quota=ModelQuota(),
+    ),
+    ModelSpec(
+        provider="ollama", model_id="all-minilm", version="local mutable tag",
+        capabilities=frozenset({"embedding"}), context_window_tokens=None,
+        locality=DeploymentLocality.local, license_name="Apache-2.0",
+        license_url="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2",
+        pricing=_price("0", "0", source="local inference; no provider charge"), quota=ModelQuota(),
+    ),
+    ModelSpec(
         provider="zai",
         model_id="glm-5.3",
         version="glm-5.3",
@@ -256,9 +279,17 @@ def get_model_spec(provider: str, model_id: str) -> ModelSpec:
 
 
 def evaluate_model(spec: ModelSpec, policy: ModelSelectionPolicy) -> tuple[bool, str]:
+    if policy.role not in {"chat", "embedding"}:
+        return False, "unsupported role"
+    if min(policy.minimum_context_tokens, policy.estimated_input_tokens,
+           policy.estimated_output_tokens, policy.max_pricing_age_days) < 0:
+        return False, "negative policy bound"
+    for ceiling in (policy.max_input_price_per_million_usd, policy.max_output_price_per_million_usd):
+        if ceiling is not None and (not Decimal(str(ceiling)).is_finite() or ceiling < 0):
+            return False, "invalid price ceiling"
     required = set(policy.required_capabilities)
     required.add(policy.role)
-    if not required.issubset(spec.capabilities):
+    if not required.issubset(spec.supported_capabilities):
         return False, "required capability is not declared"
     if spec.availability not in (ModelAvailability.active, ModelAvailability.variable):
         return False, f"availability is {spec.availability.value}"
@@ -268,12 +299,15 @@ def evaluate_model(spec: ModelSpec, policy: ModelSelectionPolicy) -> tuple[bool,
         return False, "provider is outside the allowlist"
     if policy.allowed_models and spec.model_id not in policy.allowed_models:
         return False, "model is outside the allowlist"
-    required_context = max(policy.minimum_context_tokens, policy.estimated_input_tokens)
+    required_context = max(policy.minimum_context_tokens, policy.estimated_input_tokens + policy.estimated_output_tokens)
     if required_context:
         if spec.context_window_tokens is None:
             return False, "context limit is unknown"
         if required_context > spec.context_window_tokens:
             return False, "context requirement exceeds the declared model limit"
+    if required_context and not spec.external:
+        # Vendor maximum != effective runtime num_ctx. No runtime context evidence is captured yet.
+        return False, "effective local context limit is unknown"
     if policy.max_input_price_per_million_usd is not None:
         if spec.pricing.input_per_million_usd is None:
             return False, "input price is unknown"
@@ -284,4 +318,13 @@ def evaluate_model(spec: ModelSpec, policy: ModelSelectionPolicy) -> tuple[bool,
             return False, "output price is unknown"
         if spec.pricing.output_per_million_usd > policy.max_output_price_per_million_usd:
             return False, "output price exceeds the policy ceiling"
+    bounded_price = (policy.max_input_price_per_million_usd is not None
+                     or policy.max_output_price_per_million_usd is not None)
+    if bounded_price and spec.external:
+        try:
+            age = (date.today() - date.fromisoformat(spec.pricing.as_of or "")).days
+        except ValueError:
+            return False, "price snapshot date is unknown"
+        if age < 0 or age > policy.max_pricing_age_days:
+            return False, "price snapshot is stale"
     return True, "eligible"
