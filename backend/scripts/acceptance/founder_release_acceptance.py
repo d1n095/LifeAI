@@ -177,15 +177,22 @@ def _admin_connection(database_url: str):
 
 
 def _create_database(database_url: str, name: str) -> None:
+    # `psycopg2.sql.Identifier` rather than an f-string: the names here are generated, but the
+    # repository's own Semgrep rule (mainai-sql-text-interpolation) rightly refuses interpolated
+    # SQL anywhere, and the driver's identifier quoting is the correct API regardless.
+    from psycopg2 import sql
+
     conn = _admin_connection(database_url)
     try:
         with conn.cursor() as cur:
-            cur.execute(f'CREATE DATABASE "{name}"')
+            cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     finally:
         conn.close()
 
 
 def _drop_database(database_url: str, name: str) -> None:
+    from psycopg2 import sql
+
     conn = _admin_connection(database_url)
     try:
         with conn.cursor() as cur:
@@ -194,7 +201,7 @@ def _drop_database(database_url: str, name: str) -> None:
                 "WHERE datname = %s AND pid <> pg_backend_pid()",
                 (name,),
             )
-            cur.execute(f'DROP DATABASE IF EXISTS "{name}"')
+            cur.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(name)))
     finally:
         conn.close()
 
