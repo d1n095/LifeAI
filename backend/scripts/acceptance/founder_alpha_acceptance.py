@@ -191,6 +191,25 @@ def check_runtime_privileges() -> tuple[str, dict]:
     return PASSED, {"note": "app/main.py's startup privilege policy is satisfiable on this database"}
 
 
+def check_storage() -> tuple[str, dict]:
+    """Uploads are the one founder workflow that used to fail only when tried.
+
+    A STORAGE_ROOT pointing at an unwritable directory produced a raw 500 on import while this
+    report still said ready. The probe is real I/O (mkdir + write/delete a temp file) and never
+    returns the path.
+    """
+    import tempfile
+
+    settings = _settings()
+    try:
+        os.makedirs(settings.storage_root, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=settings.storage_root, prefix=".acceptance-", delete=True):
+            pass
+    except OSError as exc:
+        return FAILED, {"error": f"storage root is not writable ({type(exc).__name__})"}
+    return PASSED, {"writable": True}
+
+
 def check_local_model() -> tuple[str, dict]:
     """Runs the real-inference harness when a local runtime is configured.
 
@@ -247,6 +266,7 @@ def build_checks(include_suites: bool) -> list[Check]:
         Check("security.policy_lock", "Security controls unmodified and fully covered", "real", True, check_policy_lock),
         Check("security.capabilities", "Agent capabilities match the runtime contract", "real", True, check_capabilities),
         Check("security.runtime_privileges", "Database grants satisfy the API's startup policy", "real", True, check_runtime_privileges),
+        Check("storage.writable", "Uploaded originals can actually be written", "real", True, check_storage),
         Check("requirements.registry", "Requirements registry verifies against the tree", "real", True, check_registry),
         Check("requirements.dead_seams", "No configuration flag that nothing reads", "real", True, check_dead_seams),
         Check("model.local", "Local model answered a real request", "real", False, check_local_model),

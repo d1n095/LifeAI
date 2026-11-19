@@ -148,12 +148,14 @@ async def import_package(
         if db.query(Project).filter_by(id=project_id).first() is None:
             raise HTTPException(status_code=404, detail="Projektet hittades inte.")
 
-    storage = get_storage()
-
     def _read_chunk() -> bytes:
         return file.file.read(1 << 20)
 
     try:
+        # Constructing the backend is I/O too (it creates the root directory), so it belongs
+        # inside this failure boundary: a bad STORAGE_ROOT must be a clear "dependency
+        # unavailable", not an unhandled PermissionError/500.
+        storage = get_storage()
         # The whole streaming write (chunk reads from the incoming multipart body AND writes
         # to the destination temp file) runs in a worker thread — run_in_threadpool, not a
         # bare call — so this sync I/O never blocks the event loop other requests share.
@@ -161,7 +163,10 @@ async def import_package(
     except StorageSizeLimitExceeded:
         raise HTTPException(status_code=413, detail=f"Filen är för stor (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB).")
     except StorageError as exc:
-        raise HTTPException(status_code=500, detail=f"Kunde inte lagra filen: {exc}")
+        # 503, not 500: the request was valid and the application is fine — a dependency
+        # (the storage volume) is unavailable. The message from StorageError is already safe
+        # to show and contains no path or OS detail.
+        raise HTTPException(status_code=503, detail=f"Kunde inte lagra filen: {exc}")
 
     if blob.size_bytes == 0:
         # Pass 30 (a fourth founder review round): a bare `storage.delete()` here used to

@@ -103,6 +103,15 @@ class OllamaProvider(LLMProvider):
             "messages": [{"role": m.role, "content": m.content} for m in messages],
             "stream": False,
         }
+        # `max_tokens` is the cross-provider convention every other adapter already honours
+        # (anthropic_provider.py, and provider_verification's 1-token probe). Ollama previously
+        # ignored it entirely, so a local generation could run until the model's full context
+        # and exceed the client's 120s timeout — observed as a corpus_review job failing after
+        # exactly 2m0s with an empty "unreachable" error. Mapping it to Ollama's own
+        # `options.num_predict` makes a bounded-output request actually bounded on this provider.
+        max_tokens = kwargs.get("max_tokens")
+        if max_tokens is not None:
+            payload["options"] = {"num_predict": int(max_tokens)}
         try:
             async with httpx.AsyncClient(timeout=timeout or 120) as client:
                 resp = await client.post(f"{self.settings.ollama_base_url}/api/chat", json=payload)

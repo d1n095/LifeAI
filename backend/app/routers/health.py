@@ -56,6 +56,29 @@ def _check_redis() -> bool:
         return False
 
 
+def _check_storage() -> bool:
+    """Can the application actually write an uploaded original right now?
+
+    Uploads are the one founder workflow whose failure was previously invisible until a
+    founder tried it: a STORAGE_ROOT pointing at an unwritable directory (e.g. the production
+    default on a laptop) produced a 500 on import while /api/health still said "ok". This is
+    a writability probe, not a free-space policy — library ops_status reports capacity.
+    Never returns or logs the path.
+    """
+    import os
+    import tempfile
+
+    root = settings.storage_root
+    try:
+        os.makedirs(root, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=root, prefix=".health-", delete=True):
+            pass
+        return True
+    except OSError:
+        logger.exception("Health check: lagringsroten är inte skrivbar")
+        return False
+
+
 def _fetch_local_model_names(base_url: str) -> set[str]:
     """The model names the local runtime actually has installed (GET /api/tags).
 
@@ -171,6 +194,9 @@ def health(response: Response, db: Session = Depends(get_db)):
     payload: dict[str, Any] = {
         "status": "ok",
         "worker": "alive" if worker_process_alive() is True else "unknown",
+        # A live API with unwritable storage is not a usable Founder Alpha: uploads, the entire
+        # knowledge path, fail. Reported explicitly so "is MainAI ready?" has a real answer.
+        "storage": {"writable": _check_storage()},
     }
     local_model = _check_local_model(db)
     if local_model is not None:

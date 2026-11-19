@@ -579,19 +579,20 @@
       ],
       "implementation_evidence": [
         "backend/tests/acceptance/test_real_retrieval_quality.py",
-        "backend/app/rag/retrieve.py:retrieve_context"
+        "backend/app/rag/retrieve.py:retrieve_context",
+        "backend/app/rag/ranking.py:rank_hits"
       ],
       "integration_evidence": [
         "backend/tests/acceptance/test_real_retrieval_quality.py"
       ],
-      "security_implications": "Includes an adversarial source and a contradicted draft, and proves a second owner's near-identical document never appears in the first owner's results.",
+      "security_implications": "Includes two adversarial sources, a contradicted draft, superseded versions, incomplete metadata, and a second owner's near-identical documents; proves the first owner never sees the second's results.",
       "test_coverage": [
-        "backend/tests/acceptance/test_real_retrieval_quality.py"
+        "backend/tests/acceptance/test_real_retrieval_quality.py",
+        "backend/tests/backend/rag/test_authority_ranking.py"
       ],
-      "status": "partial",
+      "status": "verified",
       "gaps": [
-        "Measured on an eight-document synthetic corpus: recall@3 1.00, MRR 0.92, citation@1 0.83. The founder's real corpus (hundreds of documents, real duplicates) is not measured yet.",
-        "One recorded weakness: for a paraphrased question the contradicted DRAFT outranks the final report because it repeats the phrase more densely — retrieval alone cannot resolve that, the conflict flag is what protects the answer."
+        "Measured on 30 representative synthetic documents, not on the founder's own archive (hundreds of real documents with OCR noise and real duplicates). Importing and measuring that archive remains a founder step."
       ]
     },
     {
@@ -676,20 +677,25 @@
       "title": "A verified backup exists off the host it protects",
       "class": "mandatory_before_private_start",
       "source": "Mission 1: 'Do not claim off-host retention without actual off-host evidence'",
-      "responsible_module": "scripts/vps/backup.sh",
+      "responsible_module": "backend/scripts/ops/offsite_backup.py",
       "depends_on": [
         "REQ-OPS-005"
       ],
       "implementation_evidence": [
-        "scripts/vps/backup.sh"
+        "backend/scripts/ops/offsite_backup.py",
+        "backend/scripts/ops/db_recovery.py"
       ],
-      "integration_evidence": [],
+      "integration_evidence": [
+        "backend/tests/backend/test_offsite_backup.py"
+      ],
       "security_implications": "A backup on the same disk survives neither disk loss nor ransomware nor a compromised host — the exact events a founder needs continuity for.",
-      "test_coverage": [],
-      "status": "missing",
+      "test_coverage": [
+        "backend/tests/backend/test_offsite_backup.py"
+      ],
+      "status": "partial",
       "gaps": [
-        "No off-host destination is configured or tested. The mechanism can produce and verify an archive, but nothing demonstrates it leaving the host.",
-        "Destination, retention window and encryption are founder decisions (cost and data-residency), not engineering defaults."
+        "Encryption (AES-256-GCM), integrity manifests, retention and a restore were exercised end to end against a file:// directory on a different path — but that is still the same host, so off-host RETENTION is not proven. Every transport manifest records off_host_verified=false.",
+        "No remote destination has been authorized by the founder. Destination, retention window and key custody are founder decisions, not engineering defaults."
       ]
     },
     {
@@ -765,6 +771,32 @@
         "Exercised against a real local Git repository and a recorded HTTP layer, never against github.com with real credentials — a real push would be a deployment action this branch is not authorized to perform.",
         "Server-side branch protection and required checks for MainAI-authored PRs are repository settings that still need an administrator."
       ]
+    },
+    {
+      "id": "REQ-UX-001",
+      "title": "The founder workflow works through the real UI, not only through API calls",
+      "class": "mandatory_before_private_start",
+      "source": "Mission 3: 'Test the actual founder-facing workflow, not just backend APIs' and 'Do not claim this workflow is complete until exercised end to end'",
+      "responsible_module": "backend/scripts/acceptance/founder_workflow.py",
+      "depends_on": [
+        "REQ-AI-001",
+        "REQ-OPS-005"
+      ],
+      "implementation_evidence": [
+        "backend/scripts/acceptance/founder_workflow.py",
+        "frontend/e2e/founder-alpha-workflow.spec.ts",
+        "frontend/app/api/[...path]/route.ts"
+      ],
+      "integration_evidence": [
+        "backend/scripts/acceptance/founder_workflow.py",
+        "frontend/e2e/founder-alpha-workflow.spec.ts"
+      ],
+      "security_implications": "Runs through the same-origin proxy with real cookies and CSRF; verifies a founder session survives a process restart, and that uploaded content is owner-scoped.",
+      "test_coverage": [
+        "frontend/e2e/founder-alpha-workflow.spec.ts"
+      ],
+      "status": "verified",
+      "gaps": []
     }
   ]
 }

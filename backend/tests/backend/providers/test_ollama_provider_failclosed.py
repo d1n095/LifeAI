@@ -15,6 +15,8 @@ No network and no Docker: `httpx.MockTransport` intercepts every request in-proc
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -61,6 +63,37 @@ async def test_chat_happy_path_returns_content_and_usage(mock_ollama):
     assert result.content == "hej"
     assert result.provider == "ollama"
     assert result.raw_usage == {"prompt_tokens": 3, "completion_tokens": 7}
+
+
+@pytest.mark.asyncio
+async def test_chat_maps_max_tokens_to_num_predict(mock_ollama):
+    """A bounded-output request must actually be bounded on the local provider.
+
+    Every other adapter honours `max_tokens`; Ollama used to drop it, so a background review
+    could generate until its full context and outlive the 120s client timeout.
+    """
+    seen: dict = {}
+
+    def handler(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"message": {"content": "ok"}})
+
+    mock_ollama(handler)
+    await OllamaProvider().chat([], model="qwen2.5:0.5b", max_tokens=400)
+    assert seen["options"] == {"num_predict": 400}
+
+
+@pytest.mark.asyncio
+async def test_chat_without_max_tokens_sends_no_options_override(mock_ollama):
+    seen: dict = {}
+
+    def handler(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"message": {"content": "ok"}})
+
+    mock_ollama(handler)
+    await OllamaProvider().chat([], model="qwen2.5:0.5b")
+    assert "options" not in seen
 
 
 @pytest.mark.asyncio

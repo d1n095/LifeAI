@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.providers.registry import embed_with_policy, resolve_active
 from app.rag.embedding_space import native_dim_of
 from app.rag.query_embedding import prepare_embedding_query
+from app.rag.ranking import rank_hits, superseded_document_ids
 from app.rag.vector_store import search
 
 
@@ -42,13 +43,25 @@ async def retrieve_context(
     # silent cross-model mixing (app/rag/embedding_space.py). search() zero-pads the query to
     # the storage width itself.
     native_dim = native_dim_of(vectors)
-    return search(
+    # Over-fetch before re-ranking. Status/version authority can only reorder documents that
+    # are actually candidates; fetching exactly top_k would let a superseded draft crowd the
+    # final report out of the candidate set before ranking ever sees it. The extra rows cost
+    # one query and are discarded after ranking (nothing is suppressed — see ranking.py).
+    candidate_k = max(top_k * 4, 20)
+    hits = search(
         db,
         owner_id,
         vectors[0],
-        top_k=top_k,
+        top_k=candidate_k,
         project_id=project_id,
         document_id=document_id,
         embedding_model=model,
         embedding_native_dim=native_dim,
+    )
+    if not hits:
+        return []
+    return rank_hits(
+        hits,
+        superseded_ids=superseded_document_ids(db, owner_id, [h["document_id"] for h in hits]),
+        top_k=top_k,
     )
