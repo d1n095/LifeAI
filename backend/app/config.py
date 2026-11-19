@@ -132,6 +132,8 @@ class Settings(BaseSettings):
     google_api_key: str | None = None
     deepseek_api_key: str | None = None
     openrouter_api_key: str | None = None
+    zai_api_key: str | None = None
+    zai_base_url: str = "https://api.z.ai/api/paas/v4"
     ollama_base_url: str = "http://ollama:11434"
 
     # Fallback order per role: comma-separated provider names, tried in order after the
