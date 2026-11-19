@@ -149,7 +149,8 @@ export default function AdminPage() {
                     <VerificationBadge
                       verification={p.chat_verification?.model === selectedModel(p.name, "chat") ? p.chat_verification : null}
                       onVerify={() => verifyNow("chat", p.name)}
-                      busy={verifying === `${p.name}:chat` || !selectedModel(p.name, "chat")}
+                      busy={verifying === `${p.name}:chat`}
+                      disabled={!selectedModel(p.name, "chat")}
                     />
                   </td>
                   <td className="px-4 py-3">
@@ -167,7 +168,8 @@ export default function AdminPage() {
                     <VerificationBadge
                       verification={p.embedding_verification?.model === selectedModel(p.name, "embedding") ? p.embedding_verification : null}
                       onVerify={() => verifyNow("embedding", p.name)}
-                      busy={verifying === `${p.name}:embedding` || !selectedModel(p.name, "embedding")}
+                      busy={verifying === `${p.name}:embedding`}
+                      disabled={!selectedModel(p.name, "embedding")}
                     />
                   </td>
                   <td className="px-4 py-3 text-right space-x-2 whitespace-nowrap">
@@ -296,10 +298,12 @@ function VerificationBadge({
   verification,
   onVerify,
   busy,
+  disabled = false,
 }: {
   verification: ProviderVerification | null;
   onVerify: () => void;
   busy: boolean;
+  disabled?: boolean;
 }) {
   return (
     <div className="flex items-center gap-2">
@@ -315,7 +319,7 @@ function VerificationBadge({
       )}
       <button
         onClick={onVerify}
-        disabled={busy}
+        disabled={busy || disabled}
         className="text-xs rounded border border-border px-2 py-1 disabled:opacity-30 whitespace-nowrap"
       >
         {busy ? "Testar…" : "Testa nu"}

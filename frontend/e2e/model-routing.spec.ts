@@ -28,7 +28,10 @@ test("admin verifies and activates the exact selected Z.ai model", async ({ page
   await page.goto(`${FRONTEND_URL}/admin`);
   await expect(page.getByLabel("Modell för zai chat")).toHaveValue("glm-5.3");
   await expect(page.getByRole("button", { name: "Använd för embedding", exact: true })).toBeDisabled();
-  await page.getByRole("button", { name: "Testa nu", exact: true }).click();
+  const verifyButtons = page.getByRole("button", { name: "Testa nu", exact: true });
+  await expect(verifyButtons.nth(1)).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Testar…", exact: true })).toHaveCount(0);
+  await verifyButtons.first().click();
   await expect.poll(() => captured.length).toBe(1);
   await page.getByRole("button", { name: "Använd för chat", exact: true }).click();
   await expect.poll(() => captured.length).toBe(2);
