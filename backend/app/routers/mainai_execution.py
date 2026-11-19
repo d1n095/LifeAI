@@ -46,6 +46,7 @@ from app.models.mainai_job import MainAIJob
 from app.models.mainai_recovery import AUTO_SALVAGEABLE_CLASSIFICATIONS, MainAIRecoveryRecord, MainAIRecoveryStatus
 from app.models.mainai_wait import MainAITaskWait
 from app.models.user import User
+from app.db_clock import db_now
 from app.schemas import (
     EngineeringLessonOut,
     MainAICheckpointOut,
@@ -82,7 +83,9 @@ def _get_task_or_404(db: Session, task_id: uuid.UUID) -> MainAITask:
 def _task_out(db: Session, task: MainAITask) -> MainAITaskOut:
     job = db.get(MainAIJob, task.mainai_job_id) if task.mainai_job_id is not None else None
     out = MainAITaskOut.model_validate(task)
-    out.liveness = task_liveness(task, job).value
+    # M4: the lease being judged was authored by Postgres, so it is judged against Postgres's
+    # clock, not this process's -- see app/db_clock.py for both failure directions.
+    out.liveness = task_liveness(task, job, now=db_now(db)).value
     return out
 
 

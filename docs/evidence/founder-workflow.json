@@ -1,0 +1,102 @@
+{
+  "tool": "mainai-founder-workflow",
+  "version": 1,
+  "generated_at": "2026-11-19T14:38:02.754306Z",
+  "base_url": "http://127.0.0.1:3020",
+  "seconds": 8.9,
+  "steps": [
+    {
+      "step": "1.start",
+      "status": "passed",
+      "detail": {
+        "base_url": "http://127.0.0.1:3020",
+        "supervised": false
+      }
+    },
+    {
+      "step": "2.authenticate",
+      "status": "passed",
+      "detail": {
+        "email": "founder@lifeos.local",
+        "csrf_issued": true
+      }
+    },
+    {
+      "step": "3.local_model",
+      "status": "passed",
+      "detail": {
+        "reachable": true,
+        "missing_models": []
+      }
+    },
+    {
+      "step": "6.upload",
+      "status": "passed",
+      "detail": {
+        "document_id": "d985e1d2-6921-40cc-bd20-9aba1db8f354",
+        "chunks": 1
+      }
+    },
+    {
+      "step": "7.cited_retrieval",
+      "status": "passed",
+      "detail": {
+        "title": "Founder workflow 3bbb78ca74b8.md",
+        "score": 0.789483264869476,
+        "phrase": "45 minuter"
+      }
+    },
+    {
+      "step": "4-5.question_and_answer",
+      "status": "passed",
+      "detail": {
+        "provider": "ollama",
+        "model": "qwen2.5:0.5b-instruct",
+        "confidence": "high",
+        "sources": [
+          "Founder workflow 3bbb78ca74b8.md",
+          "Founder workflow 71d4bbc35500.md",
+          "Founder workflow b6785e4f172e.md",
+          "Founder workflow 711cdead2c7b.md",
+          "Founder workflow 683fa00d475f.md"
+        ],
+        "answer_excerpt": "45 minuter."
+      }
+    },
+    {
+      "step": "8.save_decision",
+      "status": "passed",
+      "detail": {
+        "decision_id": "32b19c69-cf24-4091-9dca-90dd7bad7981",
+        "classification": "decisions",
+        "status": "active"
+      }
+    },
+    {
+      "step": "9-10.restart_recovery",
+      "status": "skipped",
+      "detail": {
+        "reason": "not running under --supervise"
+      }
+    },
+    {
+      "step": "11-12.task_and_progress",
+      "status": "passed",
+      "detail": {
+        "task_id": "6396ee57-15bc-4b34-987a-a536dd32b598",
+        "job_id": "fb539f70-c52b-4522-9f91-54aec2bc0d3d",
+        "job_status": "completed",
+        "progress": "1/1",
+        "error_category": null,
+        "events": 6
+      }
+    }
+  ],
+  "state": {
+    "document_id": "d985e1d2-6921-40cc-bd20-9aba1db8f354",
+    "conversation_id": "5007893f-4e76-4573-b238-934f578d9a5c",
+    "decision_id": "32b19c69-cf24-4091-9dca-90dd7bad7981",
+    "task_id": "6396ee57-15bc-4b34-987a-a536dd32b598"
+  },
+  "passed": true
+}

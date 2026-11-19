@@ -80,6 +80,36 @@ class PlanValidationError(PlannerError):
 # establishes for mainai_jobs job_types, applied one layer up.
 KNOWN_TASK_TYPES = frozenset({"read_only_audit", "repo_edit", "run_tests", "open_pr"})
 
+# Freebuff independent-review finding VS-1: app/mainai_execution/verify.py's verify_task()
+# deliberately passes an empty verification_plan trivially (zero steps, recorded as such --
+# see that function's own docstring for why that is the RIGHT behavior for a task with no real
+# side effect, e.g. read_only_audit). But nothing enforced the other half of that contract --
+# "the planner is responsible for populating verification_plan for any task whose work has
+# real risk of being wrong" -- at the one place the REAL risk actually enters the system:
+# propose_plan_via_ai()'s own response parsing below, the one AI-authored, untrusted plan
+# source (same "AI-proposed content" framing validate_targeted_tests_target()'s own docstring
+# already uses for exactly this reason). An AI-hallucinated or prompt-injected plan omitting
+# verification for a repo_edit task would otherwise sail all the way through
+# run_task_execution_job() (execution_job.py) to a real git push with zero actual test
+# evidence, because verify_task() trivially "passed" it.
+#
+# Deliberately NOT enforced inside create_plan()/plan_insertion.py's own general validation:
+# both are also the direct, trusted entry point dozens of existing tests (and other internal
+# callers) already use with hand-built PlannedTaskSpec(verification_plan=[]) for scenarios
+# that have nothing to do with verification (crash recovery, worktree mechanics, lesson
+# application, insertion policy, ...) -- rejecting there would be a sweeping, unrelated
+# breaking change across the whole mainai_execution test surface, not the "small, isolated,
+# non-overlapping" fix the founder's remediation directive asked for. If a BROADER guarantee
+# (reject ANY empty-verification repo_edit regardless of who created it) is wanted later, that
+# is a separate, deliberately-scoped follow-up that updates those call sites on purpose.
+#
+# open_pr/run_tests are NOT in this set either way: run_tests' own handler
+# (_handle_run_tests()) already independently rejects an empty `targeted_tests` list, and
+# open_pr's real side effect (creating the PR) is for a sibling repo_edit task's work that is
+# ALREADY verified by the time open_pr runs -- open_pr itself has no new risky work of its own
+# to verify.
+TASK_TYPES_REQUIRING_NONEMPTY_VERIFICATION_PLAN = frozenset({"repo_edit"})
+
 
 @dataclass
 class PlannedTaskSpec:
@@ -406,6 +436,13 @@ async def propose_plan_via_ai(db: Session, *, goal: MainAIGoal) -> tuple[list[Pl
         verification_plan = raw_task.get("verification_plan", [])
         if not isinstance(verification_plan, list):
             raise PlanValidationError(f"tasks[{i}].verification_plan must be a list.")
+        if task_type in TASK_TYPES_REQUIRING_NONEMPTY_VERIFICATION_PLAN and not verification_plan:
+            raise PlanValidationError(
+                f"tasks[{i}]: the AI-proposed plan gives task_type '{task_type}' an empty verification_plan -- "
+                f"a real, risky side effect (a git push) must have at least one real verification step "
+                f"(Freebuff finding VS-1). Rejecting rather than silently letting it reach execution with no "
+                f"test evidence at all."
+            )
 
         specs.append(
             PlannedTaskSpec(

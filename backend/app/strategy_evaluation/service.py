@@ -358,7 +358,7 @@ def _record_event(
 
 
 def transition_experiment(
-    db, *, owner_id, experiment_id, to_state, idempotency_key, failure_reason=None
+    db, *, owner_id, experiment_id, to_state, idempotency_key, failure_reason=None  # gitleaks:allow -- a parameter NAME
 ):
     row = _owned(
         db, StrategyExperiment, owner_id, experiment_id, "experiment", lock=True

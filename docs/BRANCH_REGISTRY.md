@@ -6,6 +6,134 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Blueprint-intelligensbacklogen KLAR: inkrementell dokumentförståelse (2026-11-14)
+
+**Ny branch: `claude/blueprint-incremental-document-understanding`** (PR #401, bas: #399
+`claude/blueprint-context-continuity` — åttonde lagret). Mergeordning: #387 → #388 → #389 →
+#390 → #393 → #398 → #399 → #401.
+
+Komplementet till kontextkontinuitet: `app.rag.vector_store._hit_dict()` fick ett nytt,
+rent additivt fält `document_updated_at` (gäller ALLA retrieval-anrop, inte bara Blueprint,
+eftersom `search()`/`hybrid_search()` båda redan går via samma funktion). Blueprint märker nu
+en källa som tillkommit/ändrats EFTER föregående version som `[NY/UPPDATERAD SEDAN
+FÖREGÅENDE VERSION]` och instruerar modellen att en sådan källa väger tyngre än
+kontinuitetstexten, aldrig tvärtom. Se PR #401 för detaljer.
+
+**Detta slutför direktivets Blueprint-intelligensbacklog (Sektion A):** Mission 1–5
+(#387–#390, #398), utvärderingssviten (#393), kontextkontinuitet (#399), och denna.
+
+## Blueprint: långsiktig kontextkontinuitet över regenereringar (2026-11-14)
+
+**Ny branch: `claude/blueprint-context-continuity`** (PR #399, bas: #398
+`claude/blueprint-founder-decision-recognition` — sjunde lagret i kedjan). Mergeordning:
+#387 → #388 → #389 → #390 → #393 → #398 → #399.
+
+Fann att `regenerate_draft()` tidigare anropade `_generate()` identiskt med en helt ny
+`create_draft()`-förfrågan — noll medvetenhet om vad den föregående RESOLVED-versionen
+faktiskt sade. Ny `app.blueprint.service.latest_resolved_draft()` (hoppar över
+`generating`/`failed`-rader) + ett nytt, tydligt märkt "PREVIOUS VERSION"-block i
+synteskommandot + en `_CONTINUITY_INSTRUCTION` som kräver att varje sakuppgift från
+föregående version fortfarande kontrolleras mot de aktuella numrerade källorna — aldrig
+upprepas bara för att den stod där förut. Se PR #399 för detaljer.
+
+## Blueprint Mission 5: Founder-decision/correction recognition (2026-11-14)
+
+**Ny branch: `claude/blueprint-founder-decision-recognition`** (PR #398, bas: #393
+`claude/blueprint-evaluation-harness` — sjätte lagret i samma `_generate()`-kedja som
+#387→#388→#389→#390→#393). Rekommenderad mergeordning oförändrad, nu förlängd: #387 → #388 →
+#389 → #390 → #393 → #398.
+
+Stängde direktivets sista öppna Blueprint-intelligensuppgift utan ny datamodell: `app.models.
+document.KnowledgeClassification.decisions` + `app.routers.workbench`s befintliga "decision"-
+sparningsväg + att varje retrieval-hit redan bar `classification` (app/rag/vector_store.py)
+fanns redan — Blueprint läste bara aldrig det fältet. En "korrigering" är bara en nyare
+`decisions`-källa, där den gamla redan märks `[KÄLLSTATUS: superseded]` via den BEFINTLIGA
+Mission 2-mekanismen (#388) — inget nytt begrepp behövdes. Se PR #398 för detaljer.
+## Section B, nästa steg: stateless GitHub-bevisrapport (2026-11-14)
+
+**Ny branch: `claude/github-work-queue-evidence-report`** (PR #396, bas: `claude/github-
+client-repo-evidence`/#395 — äkta beroende, inte bara bekvämlighet, eftersom modulen
+anropar #395:s nya `list_pull_requests()`/`list_issues()`/`list_check_runs()` direkt).
+
+**Öppen arkitekturfråga till grundaren (INTE avgjord här):** Jag utredde att återanvända
+`app.work_candidates` (det befintliga "signal producer ≠ truth writer"-mönstret — se
+migration 0054–0056) för att göra GitHub-bevis till en grundarbar granskningsbar kandidat,
+men förkastade det: `WorkCandidate.source_entity_id` är en composite-FK in i
+`project_entities`, som enbart nås via `InterpretationProposal` ← `KnowledgeClaim` —
+hela den kedjan är avsiktligt begränsad till GRUNDARENS EGEN KUNSKAP, inte levande extern
+systemstatus som en GitHub-PR. Att tvinga in GitHub-bevis i den kedjan (t.ex. en påhittad
+`KnowledgeClaim` enbart för att tillfredsställa FK:n) hade återanvänt tabellens FORM medan
+den invariant den byggdes för att upprätthålla bryts — exakt den typen av genväg CLAUDE.md:s
+isolerings-/återanvändningsprincip varnar för.
+
+**Beslut som krävs av grundaren (eller Codex för den säkerhetsrelevanta delen):** Ska
+GitHub-bevis-härledda förslag få sin EGEN grundarbara mellanlagringstabell (en syster till
+`work_candidates`, samma godkännande-grind-mönster, annan källmodell)? Det ändrar hur arbete
+kommer in i goal-skapande-pipelinen — exakt den typ av "unresolved authority decision" som
+direktivet säger ska pausas på, inte avgöras enväldigt. Tills det beslutet finns gör #396
+BARA läsning: `build_github_work_queue_report()` returnerar fakta (draft/stale/ci_red/
+ci_green/merge_conflict) om öppna PR:er/issues, skriver ingenting, skapar inget mål.
+
+## Känd, repo-bred CI-blockad: npm audit-drift, EJ fixad här (2026-11-14)
+
+Upptäckt som bieffekt av att jaga CI på PR #389/#390/#393/#394: jobbet "Frontend — npm audit"
+(`frontend/scripts/check-npm-audit.js`) misslyckas just nu på VARJE PR, oavsett diff —
+bekräftat på #390/#393/#394, inklusive #394 som enbart rör `.github/workflows/ci.yml` och den
+här filen. Skriptets allowlist täcker idag bara 3 advisory-source-ID:n för EN historisk fynd
+(brace-expansion, GHSA-mh99-v99m-4gvg, dokumenterad i `docs/SECURITY_BLOCKERS.md`) — verklig
+`npm audit` rapporterar nu 24 icke-allowlistade high/critical advisory-källor över många olika
+GHSA-ID:n, ren drift sedan allowlisten senast rördes.
+
+**Medvetet INTE fixad i någon av mina aktiva brancher.** Att göra det rätt kräver paket-för-
+paket-triage (version-bump vs. motiverad allowlist-post i `docs/SECURITY_BLOCKERS.md` per
+fynd) — verkligt säkerhetsomdöme, inte en enrads-infrastrukturpinning som Playwright/ubuntu-
+26.04-fixen (#394) ovan. Det ligger närmare Founder Alpha-säkerhetsspåret (Codex's ägarskap
+per `CLAUDE.md`s/direktivets rollfördelning) än Blueprint-intelligens-/MainAI-koordinator-
+spåret jag driver. Flaggat en gång per öppen PR (#389/#390/#393/#394) + här, i stället för att
+upprepa samma kommentar om och om igen eller gissa mig till en snabb fix. Kvarstår som ett
+OLÖST, synligt gap tills grundaren eller Codex bedömer det — ingen egen branch/PR öppnad för
+det ännu.
+
+## Grundardirektiv 2026-11-14: "Turn Life into a working engineering coordinator"
+
+Nytt, explicit direktiv efter #401: bygg en sammanhängande koordineringsväg ovanpå BEFINTLIG
+infrastruktur (Safe Planner, Work Driver, Supervisor Goal Lease, durable MainAI job/
+checkpoint, GitHub-bevis). Löste explicit den öppna arkitekturfrågan från #396/#397: en
+dedikerad, smal evidensmellanlagringsprojektion är auktoriserad eftersom work_candidates-
+kedjan inte kan representera GitHub-bevis utan att bryta grundarkunskaps-invarianten.
+
+**`claude/coordinator-evidence-staging`** (PR #403, bas: #396) — ny tabell
+`github_evidence_candidates`, samma "signal producer ≠ truth writer"-mönster som
+`work_candidates`, men identifierad via source_repo/source_kind/source_number istället för en
+grundarkunskaps-FK. Fullständig RLS/erasure-integration (app/rls.py, app/account/erasure.py).
+
+**Kvarstående delar av direktivet (ej byggda än):** next-task-selection (B), minimal-context-
+promptbyggare (C), checkpoint-reconciliation mot verifierad CI/PR-status (D, nästa steg),
+recovery/idempotent omfördelning (E). Ingen deploy/merge, `first_cycle_go=false` oförändrat.
+
+## Section B startpunkt: github_client.py repo-brett läs-API (2026-11-14)
+
+**Ny, isolerad branch: `claude/github-client-repo-evidence`** (PR #395, bas:
+`claude/det-kommer-mer-879lcm` direkt). Continuous Build Directive, Sektion B ("MainAI
+engineering coordinator") kräver att BEFINTLIG infrastruktur utökas innan något nytt byggs.
+En oberoende kartläggning (se separat registerpost om PR #394 ovan/nedan för samma datum,
+om den hunnit landas i den här grenen vid läsning) av Safe Planner (`app/safe_planner/
+service.py`), Work Driver (`app/development_driver/service.py`), Supervisor Goal Lease
+(`app/development_supervisor/lease.py`), godkännande-grinden (`app/mainai_execution/
+approval.py`), Dead Agent Recovery och den generella `mainai_jobs`-tabellen fann att nästan
+allt Sektion B/C behöver redan finns — UTOM en konkret lucka: `app/integrations/
+github_client.py` kan bara slå upp EN specifik ref/PR i taget, inte hela repot.
+
+**Tillägg (enbart läsning, inget skriv-/mergekapacitet tillagt):** `list_pull_requests()`,
+`list_issues()` (filtrerar bort PR:er som GitHubs `/issues`-endpoint annars blandar in),
+`list_commits()`. Avsiktligt litet — detta är enbart bevisinsamling, inte själva
+koordinator-/arbetskö-logiken (den hör till `app/safe_planner/service.py`s
+`plan_founder_request()`, en separat, senare ändring när den här bevisytan finns att mata
+in i). Isolerad från både Blueprint-kedjan (#387–#390/#393) och Playwright/ubuntu-26.04-
+CI-fixen (#394).
+
+---
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en
@@ -9258,6 +9386,7 @@ väntar på CI+granskning; Codex/Copilots SEPARATA #412/#413-kollision kvarstår
 work-candidate-fragmenteringskontrollen och #323/#394-fyndet är fortfarande redan klara och
 ska återanvändas, inte göras om). Grundarens fyra prioriteter från "RESUME ACTIVE DEVELOPMENT
 WHEN CAPACITY IS AVAILABLE" är nu alla levererade: #440 (P2), #441 (P1), #442 (P3), #443 (P4).
+ska återanvändas, inte göras om).
 
 ## Grundardirektiv "CONTINUE ACTIVE ENGINEERING" (2026-11-15) — fyra nya uppföljningar levererade
 
@@ -9602,3 +9731,25 @@ test` kommer troligen också behöva samma `DEFAULT_LLM_MODEL`/`DEFAULT_EMBEDDIN
 **Ingen merge/deploy/aktivering/säkerhetsgrind ändrad. `first_cycle_go=false` genomgående.**
 Grundaren avgör om denna evidens räcker för att gå vidare, och i vilken ordning relativt
 punkterna ovan.
+
+## New branch: `claude/founder-requirements-consolidation` (2026-11-16) — docs-only, PR TBD
+
+**Scope:** `docs/LIFE_FOUNDER_REQUIREMENTS_INDEX.md` (new file) — a founder-requirements/audit-
+findings consolidation sidequest ("FOUNDER SIDEQUEST — CONSOLIDATE LIFEAI REQUIREMENTS, NOTES &
+AUDIT FINDINGS"). Maps every universal founder requirement and independent-audit finding to its
+authoritative existing document, with current-code-revalidated status for each finding (not a new
+source of truth — an index into #440/#443/#445/#446/#447/#450 and the existing `docs/*.md` set).
+Two new P0 engineering defects confirmed present at the current `dev` tip while preparing this index
+(not fixed here, docs-only): `PROV-1` (GitHub write token persisted in cleartext into a worktree's
+`.git/config` via `worktree.py`'s `_authed_remote_url()`) and `VS-1` (an empty `verification_plan`
+on a `repo_edit`/`open_pr` task is never rejected at plan-validation time, only trivially "passes"
+at verification time — `verify.py`/`planner.py`). Neither overlaps any currently open branch's own
+diff.
+
+**Depends on:** nothing merges-wise — branched fresh from `dev` tip (`69dc5ea5`), same Merge-regel
+discipline as #450. Reads (never merges) `claude/ecosystem-vision-reconciliation` (#445) and
+`claude/first-cycle-readiness-matrix` (#446) by ref, to cross-reference without duplicating their
+content while they're still open.
+
+**Blocks nothing; blocked by nothing.** Pure documentation; safe to merge independently of #440/
+#443/#445/#446/#447/#450's own merge order. `first_cycle_go=false`, no merge/deploy/activation.

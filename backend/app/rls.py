@@ -17,6 +17,8 @@ RLS_STATEMENTS = [
     # real product requirement (see app/models/document.py's docstring update).
     "ALTER TABLE documents ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE documents FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE blueprint_drafts ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE blueprint_drafts FORCE ROW LEVEL SECURITY",
     "ALTER TABLE knowledge_versions ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE knowledge_versions FORCE ROW LEVEL SECURITY",
     "ALTER TABLE knowledge_import_jobs ENABLE ROW LEVEL SECURITY",
@@ -67,6 +69,15 @@ RLS_STATEMENTS = [
     # every owner-scoped table, matching the rest of this list.
     "ALTER TABLE messages ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE messages FORCE ROW LEVEL SECURITY",
+    # Founder calendar foundation (migration 0071 on the 0069-composition integration branch;
+    # 0069 on its own PR branch, 2026-11-15) -- ordinary owner-scoped,
+    # mutable table (same simple tier as documents/conversations above, not the heavier
+    # append-only tier life_intents/_MAINAI_EXECUTION_TABLES use below -- the Founder must be
+    # able to edit or delete their own calendar events outright). Also enabled directly in the
+    # migration itself; listed here too so this idempotent reapply path stays the single
+    # source of truth for every owner-scoped table, matching the rest of this list.
+    "ALTER TABLE calendar_events ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE calendar_events FORCE ROW LEVEL SECURITY",
     # Life Source Foundation Bootstrap (migration 0037) — see docs/
     # LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md. source_import_batches/source_import_batch_failures
     # are ordinary owner-scoped tracking tables; message_source_units is S1C (docs/
@@ -164,6 +175,16 @@ POLICY_DEFINITIONS = [
         "table": "documents",
         "name": "documents_isolation",
         "expr": "uploaded_by = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "blueprint_drafts",
+        "name": "blueprint_drafts_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "calendar_events",
+        "name": "calendar_events_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
     {
         "table": "knowledge_versions",
@@ -538,6 +559,13 @@ _MAINAI_EXECUTION_TABLES = (
     # transitions in place (unreviewed -> authorized/dismissed/superseded), never rewritten
     # content, deletion only through the SECURITY DEFINER erasure path.
     "work_candidates",
+    # Life MainAI Intelligence program (Continuous Build Directive, Section B): github_evidence_
+    # candidates plays the SAME structural role work_candidates already plays -- a mutable row
+    # whose status transitions in place (unreviewed -> authorized/dismissed), observation fields
+    # (title/signals/source_url/observed_at) refreshed in place on every re-scan, deletion only
+    # through the SECURITY DEFINER erasure path. See app.models.github_evidence's own docstring
+    # for why this is a SEPARATE table from work_candidates rather than reusing it.
+    "github_evidence_candidates",
     # Migration 0057 (Life Execution Authorization Envelope): execution_scope_proposals and
     # execution_authorization_envelopes play the SAME structural role -- mutable rows whose
     # status transitions in place, deletion only through the SECURITY DEFINER erasure path.
@@ -796,6 +824,13 @@ def apply_mainai_job_runtime_privileges(engine: Engine, *, require_complete: boo
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON mainai_job_events FROM mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON mainai_job_proposals FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_mainai_job_children() TO mainai_app"))
+        # Enforce what the verifier below asserts. Postgres grants EXECUTE on new functions to
+        # PUBLIC by default, and a pg_restore with --no-privileges recreates that default even
+        # for a database whose live instance had revoked it. Without this REVOKE the policy
+        # check could only ever fail on such a database (found by restoring an encrypted backup
+        # into a clean database: the API refused to boot), never repair it.
+        for spec in _MAINAI_JOB_FUNCTION_SPECS:
+            conn.execute(text(f"REVOKE ALL ON FUNCTION {spec['name']}({spec['identity_args']}) FROM PUBLIC"))
 
         for table in _MAINAI_JOB_TABLES:
             owner = conn.execute(
@@ -967,6 +1002,17 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_mainai_execution_children() TO mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON agent_work_assignment_events FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_agent_coordination_children() TO mainai_app"))
+        # Migration 0069 (System Activation Authorization): SELECT only -- no application code
+        # path, however reached, may ever write a row here (see that migration's own module
+        # docstring and app.models.agent_coordination.SystemActivationAuthorization). The REVOKE
+        # lives here rather than in the migration itself because mainai_app may not exist yet
+        # when migrations run in isolation (e.g. the "Alembic migration check" CI job).
+        conn.execute(
+            text(
+                "REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER "
+                "ON system_activation_authorizations FROM mainai_app"
+            )
+        )
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON capability_observation_events FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_capability_reality_children() TO mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_memory_notes FROM mainai_app"))
@@ -986,6 +1032,8 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_project_entities_children() TO mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON work_candidates FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_work_candidates_children() TO mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON github_evidence_candidates FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_github_evidence_children() TO mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON execution_scope_proposals FROM mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON execution_authorization_envelopes FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_execution_authorization_children() TO mainai_app"))
@@ -1017,6 +1065,10 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
                 errors.append(f"{table}: must never be owned by mainai_app")
 
         for table, allowed in (
+            # Migration 0069 (System Activation Authorization): SELECT only -- no application
+            # code path, however reached, may ever write a row here. See that migration's own
+            # module docstring and app.models.agent_coordination.SystemActivationAuthorization.
+            ("system_activation_authorizations", frozenset({"SELECT"})),
             ("mainai_task_events", _MAINAI_EXECUTION_TASK_EVENT_TABLE_ALLOWED_PRIVILEGES),
             ("mainai_checkpoints", _MAINAI_EXECUTION_CHECKPOINT_TABLE_ALLOWED_PRIVILEGES),
             ("mainai_recovery_events", _MAINAI_RECOVERY_EVENT_TABLE_ALLOWED_PRIVILEGES),
@@ -1068,6 +1120,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("project_entity_relationships", frozenset({"SELECT", "INSERT"})),
             ("project_entity_aliases", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("work_candidates", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("github_evidence_candidates", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("execution_scope_proposals", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("execution_authorization_envelopes", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("engineering_lesson_guard_observations", frozenset({"SELECT", "INSERT"})),
@@ -1079,6 +1132,9 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:
                 errors.append(f"{table}: mainai_app effective privileges are {sorted(granted)}, expected exactly {sorted(allowed)}")
+
+        for spec in _MAINAI_EXECUTION_FUNCTION_SPECS:
+            conn.execute(text(f"REVOKE ALL ON FUNCTION {spec['name']}({spec['identity_args']}) FROM PUBLIC"))
 
         for spec in _MAINAI_EXECUTION_FUNCTION_SPECS:
             name = spec["name"]

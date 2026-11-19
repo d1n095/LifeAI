@@ -44,6 +44,11 @@ from app.jobs.mainai_job_lease import JobLeaseLostError, renew_mainai_job_lease
 from app.jobs.retry import compute_backoff_seconds
 from app.jobs.service import mark_cancelled, mark_completed, mark_failed, update_progress
 from app.mainai_execution.checkpoint import latest_checkpoint_for_step, record_checkpoint
+from app.mainai_execution.proposal_worktree import (
+    ProposalWorktreeError,
+    create_isolated_proposal_checkout,
+    remove_isolated_proposal_checkout,
+)
 from app.mainai_execution.ci_wait import poll_ci_wait, start_ci_wait
 from app.mainai_execution.executor import _lock_task, task_for_job
 from app.mainai_execution.final_report import record_final_report
@@ -145,7 +150,20 @@ CODE_AGENT_SYSTEM_PROMPT = (
 
 async def _handle_read_only_audit(db: Session, task: MainAITask) -> dict:
     messages = [Message(role="system", content=READ_ONLY_AUDIT_SYSTEM_PROMPT), Message(role="user", content=task.description)]
-    result, _attempted = await chat_with_fallback(db, messages)
+    # Freebuff EGRESS-0/EGRESS-1: chat_with_fallback() only routes a call through the Life
+    # Vault egress policy (default-deny gate, NEVER_EGRESS hard-deny, secret redaction, the
+    # disclosure ledger -- docs/LIFE_VAULT_EGRESS_CONTROL.md) when `owner_id` is passed; it is
+    # OPTIONAL and silently skips the entire gate when omitted (see that function's own
+    # docstring: "gate skipped, unchanged legacy behavior"). This call was sending `task.
+    # description` -- arbitrary, possibly sensitive, founder-authored content -- to a real
+    # external provider with NO egress gate at all. `propose_plan_via_ai()` (planner.py)
+    # already passes owner_id/task identity correctly; this call site had simply never been
+    # migrated. Fixed by passing the real, already-available task/goal identity, never a
+    # resolved FOUNDER_USER_ID or any other weaker stand-in for actual authorization context.
+    result, _attempted = await chat_with_fallback(
+        db, messages, owner_id=task.owner_id, purpose="mainai_read_only_audit",
+        requested_by="mainai_execution.execution_job._handle_read_only_audit", task_id=task.id, goal_id=task.goal_id,
+    )
     return {"summary": result.content, "provider": result.provider, "model": result.model}
 
 
@@ -166,7 +184,85 @@ def _validate_repo_edit_file_path(path_value: object) -> str:
     path = PurePosixPath(path_value)
     if path.is_absolute() or ".." in path.parts:
         raise TaskExecutionError(f"Refusing an absolute or '..'-escaping file path from the code agent: {path_value!r}")
+    # PI-1b/PI-1c consistency fix. `.git/hooks/pre-commit` is repository-relative, has no `..`,
+    # and resolves *inside* the repo root -- so every check above passes it -- yet writing there
+    # is not a payload edit at all: it plants executable code that git itself runs, on the
+    # executor host, outside any verification step. `development_operator._path()` has denied
+    # `.git` (case-insensitively) since it was written; this older code-agent path, which runs
+    # against the shared checkout in proposal mode and against the per-task worktree otherwise,
+    # had no such rule. Denied here, matching that established policy rather than inventing a
+    # second one, and denied again on the RESOLVED path below so a symlink into .git cannot
+    # smuggle a syntactically clean name through either.
+    if ".git" in {part.lower() for part in path.parts}:
+        raise TaskExecutionError(f"Refusing a path into repository git metadata from the code agent: {path_value!r}")
     return path_value
+
+
+def _reject_git_metadata_target(resolved: Path, root: Path, *, proposed: str, where: str) -> None:
+    """Resolved-path half of the rule above: `resolved` has already had every symlink
+    followed, so this also catches a name that only reaches `.git` after resolution."""
+    git_dir = (root / ".git").resolve()
+    if resolved == git_dir or git_dir in resolved.parents:
+        raise TaskExecutionError(
+            f"Refusing to write into repository git metadata ({where}): {proposed!r} resolved to {resolved}."
+        )
+
+
+def _rollback_proposal_writes(work_result: dict | None) -> list[str]:
+    """PI-1d: put the shared checkout back exactly as it was before a proposal-mode write.
+
+    Proposal mode (`github_write_enabled` off) writes the code agent's content straight into the
+    single checkout this backend process itself runs from, so `verify_task()` can run against
+    real content. That write used to be permanent: `previous_contents` was captured and then
+    discarded (`not durable evidence -- was only needed transiently for a future
+    diff/rollback view`), so a proposal that failed verification — or raised, or lost its lease —
+    left the running deployment's own source tree modified, with no path back. A failed
+    PROPOSAL is not supposed to change anything; that is the entire difference between it and a
+    real edit.
+
+    Restoration is exact and per file: content is rewritten verbatim, a file the proposal newly
+    created is deleted, and any directory the proposal created for it is removed again if (and
+    only if) it is now empty and inside the repo root. Every target is re-resolved and
+    re-confined here rather than trusting the stored path — this runs on a failure path, which
+    is precisely when the rest of the code path is least trustworthy.
+
+    Returns the proposed paths that were restored, for the caller's log/evidence. Never raises:
+    a rollback failure must not replace the original error with a second one, but it is logged
+    loudly because the checkout is then in an unknown state and needs a human.
+    """
+    previous_contents = (work_result or {}).get("previous_contents") or {}
+    if not previous_contents:
+        return []
+
+    root = _repo_root().resolve()
+    git_dir = (root / ".git").resolve()
+    restored: list[str] = []
+    for path_value, content in previous_contents.items():
+        try:
+            target = (root / path_value).resolve()
+            if target != root and root not in target.parents:
+                logger.error("proposal rollback: refusing to touch %r — resolved outside the repo root", path_value)
+                continue
+            if target == git_dir or git_dir in target.parents:
+                logger.error("proposal rollback: refusing to touch %r — resolved into git metadata", path_value)
+                continue
+            if content is None:
+                if target.exists():
+                    target.unlink()
+                    restored.append(path_value)
+                # A brand-new file may have brought directories with it (`docs/new/thing.md`);
+                # leave the tree as it was, not with empty scaffolding behind.
+                parent = target.parent
+                while parent != root and root in parent.parents and parent.is_dir() and not any(parent.iterdir()):
+                    parent.rmdir()
+                    parent = parent.parent
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content)
+                restored.append(path_value)
+        except OSError as exc:  # pragma: no cover - defensive
+            logger.error("proposal rollback: could not restore %r: %s", path_value, exc)
+    return restored
 
 
 def _parse_code_agent_response(raw: str) -> dict:
@@ -191,41 +287,93 @@ def _parse_code_agent_response(raw: str) -> dict:
     return parsed
 
 
-async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
-    """github_write_enabled is off (or GitHub isn't configured): the ORIGINAL V0.1 proposal-only
-    model, completely unchanged -- writes to the single shared local checkout this backend
-    process itself runs from, purely so real local verification (verify_task()) can still run
-    against real content, never touching the network or creating any isolated per-attempt
-    state. Kept as a separate function (not a branch inside _handle_repo_edit()) specifically so
-    the extensive existing path-traversal/symlink-escape hardening tests targeting this exact
-    behavior (test_run_task_execution_job_repo_edit_with_an_absolute_ai_proposed_path_..., et
-    al.) keep exercising the identical code, unchanged."""
+async def _propose_repo_edit(db: Session, task: MainAITask, *, attempt_id=None) -> dict:
+    """github_write_enabled is off (or GitHub isn't configured): V0.1's proposal-only model, now
+    with an isolated write target.
+
+    M4 isolation: the code agent's content is written into a per-attempt checkout built by
+    `proposal_worktree.create_isolated_proposal_checkout()` — a local-only bare repository
+    (`git init --bare`) populated by a *filesystem-path* fetch of this checkout's HEAD, with no
+    remote configured at all. The live checkout this backend process executes from is therefore
+    never modified by a proposal, verified or not: the window PI-1d's rollback shrinks to a
+    restore-after-the-fact no longer exists. The path traversal/symlink/git-metadata guards below
+    are applied against the isolated root exactly as they were against the shared one.
+
+    Fallback (explicit or automatic): if isolation is disabled by configuration, or the bootstrap
+    cannot be built (no `git`, no HEAD, a shared checkout that moved mid-bootstrap), this logs the
+    reason and writes to the shared checkout as before — where `_rollback_proposal_writes()` still
+    restores it on every non-accepting path. Isolation is never silently claimed when it is not in
+    effect: `work_result["isolation"]` records which mode actually ran.
+    """
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=task.description)]
-    result, _attempted = await chat_with_fallback(db, messages)
+    # Freebuff EGRESS-0/EGRESS-1 -- see _handle_read_only_audit()'s matching comment above for
+    # why this owner_id/task_id/goal_id is required, not optional.
+    result, _attempted = await chat_with_fallback(
+        db, messages, owner_id=task.owner_id, purpose="mainai_repo_edit_proposal",
+        requested_by="mainai_execution.execution_job._propose_repo_edit", task_id=task.id, goal_id=task.goal_id,
+    )
     parsed = _parse_code_agent_response(result.content)
 
-    repo_root = _repo_root().resolve()
-    previous_contents: dict[str, str | None] = {}
-    for file in parsed["files"]:
-        # Defense in depth beyond _validate_repo_edit_file_path()'s absolute/'..' rejection --
-        # resolves symlinks too, so a pre-existing symlink inside the repo tree pointing outside
-        # it (a separate, lower-likelihood attack surface -- would require a malicious symlink
-        # already merged into the repo, not just a malicious AI response) still can't be used to
-        # escape repo_root via a syntactically clean relative path.
-        abs_path = (repo_root / file["path"]).resolve()
-        if abs_path != repo_root and repo_root not in abs_path.parents:
-            raise TaskExecutionError(f"Refusing to write outside the repo root: {file['path']!r} resolved to {abs_path}.")
-        previous_contents[file["path"]] = abs_path.read_text() if abs_path.exists() else None
-        abs_path.parent.mkdir(parents=True, exist_ok=True)
-        abs_path.write_text(file["content"])
+    shared_root = _repo_root().resolve()
+    checkout = None
+    isolation_failure: str | None = None
+    if get_settings().mainai_proposal_worktree_isolation:
+        try:
+            checkout = create_isolated_proposal_checkout(
+                shared_checkout=shared_root, attempt_id=attempt_id or task.id
+            )
+        except ProposalWorktreeError as exc:
+            isolation_failure = str(exc)
+            logger.warning(
+                "task %s: proposal isolation unavailable (%s) — falling back to the shared checkout; "
+                "PI-1d rollback remains the protection there.",
+                task.id,
+                exc,
+            )
 
-    return {
+    write_root = (checkout.tree if checkout is not None else shared_root).resolve()
+    previous_contents: dict[str, str | None] = {}
+    try:
+        for file in parsed["files"]:
+            # Defense in depth beyond _validate_repo_edit_file_path()'s absolute/'..' rejection --
+            # resolves symlinks too, so a pre-existing symlink inside the tree pointing outside it
+            # (a separate, lower-likelihood attack surface -- would require a malicious symlink
+            # already merged into the repo, not just a malicious AI response) still can't be used
+            # to escape the write root via a syntactically clean relative path.
+            abs_path = (write_root / file["path"]).resolve()
+            if abs_path != write_root and write_root not in abs_path.parents:
+                raise TaskExecutionError(f"Refusing to write outside the repo root: {file['path']!r} resolved to {abs_path}.")
+            _reject_git_metadata_target(
+                abs_path, write_root, proposed=file["path"],
+                where="isolated proposal checkout" if checkout is not None else "shared checkout",
+            )
+            if checkout is None:
+                # Only the shared checkout needs a rollback record: the isolated tree is discarded
+                # wholesale, and capturing contents there would be dead weight.
+                previous_contents[file["path"]] = abs_path.read_text() if abs_path.exists() else None
+            abs_path.parent.mkdir(parents=True, exist_ok=True)
+            abs_path.write_text(file["content"])
+    except Exception:
+        if checkout is not None:
+            remove_isolated_proposal_checkout(checkout)
+        raise
+
+    work_result: dict = {
         "files": parsed["files"],
         "commit_message": parsed.get("commit_message", task.description[:200]),
-        "previous_contents": previous_contents,
         "provider": result.provider,
         "model": result.model,
+        "isolation": "worktree" if checkout is not None else "shared_checkout",
     }
+    if checkout is not None:
+        work_result["proposal_worktree_path"] = str(checkout.tree)
+        work_result["proposal_base_sha"] = checkout.base_sha
+    else:
+        if previous_contents:
+            work_result["previous_contents"] = previous_contents
+        if isolation_failure:
+            work_result["proposal_isolation_failure"] = isolation_failure
+    return work_result
 
 
 async def _handle_repo_edit(
@@ -269,7 +417,7 @@ async def _handle_repo_edit(
     site in run_task_execution_job() can stop exactly like every other fenced-out write here."""
     settings = get_settings()
     if not settings.github_write_enabled:
-        return await _propose_repo_edit(db, task)
+        return await _propose_repo_edit(db, task, attempt_id=job.id)
 
     client = get_github_client()
     if not client.is_configured():
@@ -318,7 +466,13 @@ async def _handle_repo_edit(
         db.commit()
 
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=task.description)]
-    result, _attempted = await chat_with_fallback(db, messages)
+    # Freebuff EGRESS-0/EGRESS-1 -- see _handle_read_only_audit()'s matching comment for why
+    # this owner_id/task_id/goal_id/job_id is required, not optional. job_id is available here
+    # (unlike the two call sites above) since this is the real, worktree-backed edit path.
+    result, _attempted = await chat_with_fallback(
+        db, messages, owner_id=task.owner_id, purpose="mainai_repo_edit",
+        requested_by="mainai_execution.execution_job._handle_repo_edit", task_id=task.id, goal_id=task.goal_id, job_id=job.id,
+    )
     parsed = _parse_code_agent_response(result.content)
 
     worktree_root = Path(worktree.path).resolve()
@@ -329,6 +483,9 @@ async def _handle_repo_edit(
         abs_path = (worktree_root / file["path"]).resolve()
         if abs_path != worktree_root and worktree_root not in abs_path.parents:
             raise TaskExecutionError(f"Refusing to write outside the worktree root: {file['path']!r} resolved to {abs_path}.")
+        # A worktree has its own `.git` FILE (not directory) pointing at the shared git dir; both
+        # the file itself and anything reachable through it are metadata, never payload.
+        _reject_git_metadata_target(abs_path, worktree_root, proposed=file["path"], where="task worktree")
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         abs_path.write_text(file["content"])
 
@@ -380,12 +537,29 @@ def _run_pytest(target: str, *, cwd: Path, timeout_seconds: int = 300) -> dict:
     return {"target": target, "returncode": result.returncode, "passed": result.returncode == 0, "stdout_tail": result.stdout[-4000:], "stderr_tail": result.stderr[-2000:]}
 
 
-def _handle_run_tests(task: MainAITask) -> dict:
+def _handle_run_tests(db: Session, task: MainAITask, *, goal: MainAIGoal) -> dict:
+    """Hardening-pass finding (real production-scope gap, same class as the one
+    `_handle_repo_edit()`'s own docstring already describes): a `run_tests` task is always a
+    SEPARATE task from the `repo_edit` task whose change it verifies (see
+    `_DEMO1_PLAN_JSON`-shaped plans) -- once `github_write_enabled` is on, `repo_edit`'s own
+    edit lands in its real, isolated worktree (worktree.py), never in this shared backend
+    checkout. Running this task's own targeted tests against `_backend_root()` unconditionally
+    -- as this function did before this fix -- meant they could never find the file a sibling
+    repo_edit task actually committed, in the one mode (real git) this task type exists to
+    verify for real. Fixed the exact same way `_handle_open_pr()` already finds its sibling's
+    branch: `_find_repo_edit_branch()` locates the completed repo_edit event for this goal and,
+    if it ran for real, its `worktree_path` -- identical fallback logic to the one
+    `run_task_execution_job()` already uses for this task's OWN post-dispatch verification
+    step (`verify_cwd`), now also applied to this task's internal pytest invocation so both
+    checks agree on where the real code actually lives."""
     targets = [step["target"] for step in task.verification_plan if step.get("kind") == "targeted_tests" and step.get("target")]
     if not targets:
         raise TaskExecutionError("run_tests task has no 'targeted_tests' entries in its verification_plan to run.")
+    edit_info = _find_repo_edit_branch(db, goal_id=goal.id)
+    worktree_path = edit_info.get("worktree_path") if edit_info else None
+    cwd = Path(worktree_path) / "backend" if worktree_path else _backend_root()
     try:
-        results = [_run_pytest(target, cwd=_backend_root()) for target in targets]
+        results = [_run_pytest(target, cwd=cwd) for target in targets]
     except VerificationStepError as exc:
         raise TaskExecutionError(str(exc)) from exc
     return {"results": results}
@@ -439,9 +613,39 @@ async def _handle_open_pr(db: Session, task: MainAITask, goal: MainAIGoal) -> di
     repo_owner = settings.github_repo.split("/", 1)[0]
     existing = await client.list_pull_requests_for_head(head=f"{repo_owner}:{head_branch}", base=base_branch, state="open")
     if existing:
+        # Security contract (founder directive, independent review finding): an existing
+        # open PR for this exact head/base must NEVER be silently treated as "ours, already
+        # done" just because the branch name matches. GitHub allows only one open PR per
+        # head/base pair, so if a human already has a real, non-draft PR open here, MainAI
+        # cannot create a second one anyway -- the only safe move is to fail closed and let
+        # a human resolve it, never attribute someone else's PR to this task's own work
+        # result. `draft` missing/null (an API shape MainAI has never actually seen, but
+        # must not guess past) is treated identically to "not ours" -- `is not True`, never
+        # a falsy check, so None/missing fails exactly like False.
         pr = existing[0]
+        if pr.get("draft") is not True:
+            raise TaskExecutionError(
+                f"An existing open PR #{pr.get('number')} already occupies {head_branch} -> {base_branch} and is not a "
+                f"MainAI-created draft (draft={pr.get('draft')!r}) -- refusing to silently attribute it to this task."
+            )
+        expected_sha = edit_info.get("commit_sha")
+        actual_sha = (pr.get("head") or {}).get("sha")
+        if expected_sha is None or actual_sha != expected_sha:
+            raise TaskExecutionError(
+                f"Existing draft PR #{pr.get('number')}'s head commit ({actual_sha!r}) does not match this task's own "
+                f"real pushed commit ({expected_sha!r}) -- refusing to treat it as this task's own work result."
+            )
     else:
         pr = await client.create_pull_request(title=title, body=body, head=head_branch, base=base_branch)
+        if pr.get("draft") is not True:
+            # Defense in depth: create_pull_request() always requests draft:true, but a
+            # response that doesn't confirm it (an account/App permission quirk, a future
+            # GitHub API change) must not be silently trusted -- fail closed rather than
+            # assume the request was honored.
+            raise TaskExecutionError(
+                f"GitHub did not confirm PR #{pr.get('number')} as a draft (draft={pr.get('draft')!r}) despite "
+                f"create_pull_request() requesting one -- refusing to treat this as a safe MainAI-owned result."
+            )
     return {
         "proposed": False,
         "pull_request_number": pr.get("number"),
@@ -551,7 +755,7 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
                     db.rollback()
                     return
             elif task.task_type == "run_tests":
-                work_result = _handle_run_tests(task)
+                work_result = _handle_run_tests(db, task, goal=goal)
             elif task.task_type == "open_pr":
                 work_result = await _handle_open_pr(db, task, goal)
             else:
@@ -615,8 +819,26 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             # wired into the live path. Proposal mode (no worktree_path in work_result) keeps
             # verifying against the shared checkout, unchanged from V0.1.
             worktree_path = work_result.get("worktree_path") if task.task_type == "repo_edit" else None
-            verify_cwd = str(Path(worktree_path) / "backend") if worktree_path else str(_backend_root())
+            # Proposal-mode isolation (M4): the proposed files live in their own local checkout,
+            # so their verification must run there. Absent (isolation disabled, or the bootstrap
+            # fell back), the shared checkout is the tree that received them -- unchanged.
+            proposal_path = work_result.get("proposal_worktree_path") if task.task_type == "repo_edit" else None
+            source_root = worktree_path or proposal_path
+            verify_cwd = str(Path(source_root) / "backend") if source_root else str(_backend_root())
             verification = verify_task(task, cwd=verify_cwd)
+
+        # PI-1d: a proposal-mode write is provisional by definition. If verification failed,
+        # put the shared checkout back before anything durable records the attempt — otherwise
+        # the failed proposal's content stays in the tree the running deployment executes from.
+        if not verification.passed and task.task_type == "repo_edit":
+            rolled_back = _rollback_proposal_writes(work_result)
+            if rolled_back:
+                logger.warning(
+                    "task_execution job %s: proposal-mode edits rolled back from the shared checkout: %s",
+                    job_id,
+                    ", ".join(rolled_back),
+                )
+                work_result = {**work_result, "proposal_rollback": rolled_back}
 
         if verification_checkpoint is None and verification.passed:
             try:
@@ -696,7 +918,7 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
         # Same ordering discipline as the outcome except-block below: this function's own
         # write is flushed (not committed) FIRST, and mark_cancelled()'s own commit is called
         # LAST, so a crash between the two loses nothing durable either way.
-        _finalize_cancelled_task(db, task, reason="cooperative_cancel")
+        finalize_cancelled_task(db, task, reason="cooperative_cancel")
         try:
             mark_cancelled(db, job, worker_id=worker_id, lease_generation=lease_generation)
         except JobLeaseLostError:
@@ -710,6 +932,21 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
         db.rollback()
         job = db.get(MainAIJob, job_id)
         task = db.get(MainAITask, task.id)
+        # PI-1d, second hook: an exception after a proposal-mode write (provider error during a
+        # later step, verification raising instead of returning, lease loss) must roll the
+        # shared checkout back too, not only the explicit verification-failed path above.
+        # `work_result` may be unbound if the failure happened before the work step.
+        try:
+            proposal_result = work_result
+        except NameError:
+            proposal_result = None
+        rolled_back_after_error = _rollback_proposal_writes(proposal_result)
+        if rolled_back_after_error:
+            logger.warning(
+                "task_execution job %s: proposal-mode edits rolled back after failure: %s",
+                job_id,
+                ", ".join(rolled_back_after_error),
+            )
         # Crash-matrix finding (P1, found by testing a REAL crash point rather than reasoning
         # about it): mark_failed()/mark_completed() (app/jobs/service.py) each end with their
         # OWN real db.commit() -- the same "shared helper commits internally" shape that
@@ -829,7 +1066,7 @@ def _finalize_task_outcome(
         if locked.mainai_job_id is not None:
             job = db.get(MainAIJob, locked.mainai_job_id, populate_existing=True)
             if job is not None and job.cancel_requested:
-                _finalize_cancelled_task(
+                finalize_cancelled_task(
                     db,
                     locked,
                     reason="cancel_requested_beats_success_finalize",
@@ -877,7 +1114,7 @@ def _finalize_task_outcome(
     _rollup_goal_after_task_boundary(db, task=task)
 
 
-def _finalize_cancelled_task(db: Session, task: MainAITask, *, reason: str) -> None:
+def finalize_cancelled_task(db: Session, task: MainAITask, *, reason: str) -> None:
     """V0.3: the cooperative-cancel counterpart to `_finalize_task_outcome()` -- a genuinely
     DIFFERENT terminal outcome, never routed through that function, because a cancel is not a
     failure: it must never count against `task.attempts`, schedule a `next_retry_at`, or record

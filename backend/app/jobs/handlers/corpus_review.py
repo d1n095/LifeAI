@@ -210,6 +210,10 @@ async def run_corpus_review_job(
                 owner_id=document.uploaded_by,
                 purpose="corpus_review",
                 requested_by="jobs.handlers.corpus_review",
+                # A review is "a few sentences"; without a cap a local model can generate to
+                # its whole context, which exceeded the provider's 120s client timeout and
+                # failed the job. Bounded output makes the job's runtime predictable.
+                max_tokens=400,
             )
         except EgressDeniedError as exc:
             # Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V4):

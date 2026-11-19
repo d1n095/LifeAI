@@ -873,7 +873,7 @@ def test_empty_upload_never_creates_an_import_job(client, superuser_db):
 
 def test_ops_status_shows_degraded_when_a_storage_orphan_risk_audit_row_exists(client, superuser_db):
     """Test B (founder's Pass 32 blocker-1 lettering)."""
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     from app.models.audit import AuditLog
 
@@ -898,7 +898,13 @@ def test_ops_status_shows_degraded_when_a_storage_orphan_risk_audit_row_exists(c
     assert body["latest_storage_orphan_risk_at"] is not None
     # Sanity: the timestamp really is recent, not some stale/default value.
     latest = datetime.fromisoformat(body["latest_storage_orphan_risk_at"].replace("Z", "+00:00"))
-    assert (datetime.now(latest.tzinfo) - latest).total_seconds() < 60
+    # The API serialises a naive UTC timestamp, so `latest.tzinfo` is None; comparing it to
+    # `datetime.now(None)` reads it as local wall-clock time. That is only equal to UTC on a
+    # UTC host (CI), and fails by the host's offset everywhere else (measured: exactly 3600 s
+    # on CET). Normalise the value as UTC instead of assuming the host's timezone.
+    if latest.tzinfo is None:
+        latest = latest.replace(tzinfo=timezone.utc)
+    assert (datetime.now(timezone.utc) - latest).total_seconds() < 60
 
 
 def test_ops_status_never_exposes_a_raw_storage_key(client, superuser_db):

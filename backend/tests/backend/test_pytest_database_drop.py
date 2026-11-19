@@ -5,7 +5,7 @@ import psycopg2
 from urllib.parse import urlparse
 
 from app.config import get_settings
-from tests.conftest import _force_drop_database, _server_dsn
+from tests.conftest import _assert_disposable_database, _force_drop_database, _server_dsn
 
 
 def test_force_drop_database_rejects_non_identifier_names():
@@ -15,6 +15,21 @@ def test_force_drop_database_rejects_non_identifier_names():
 
     with pytest.raises(ValueError, match="non-identifier"):
         _force_drop_database(_Cur(), "lifeos_test; DROP DATABASE postgres")
+
+
+def test_the_suite_refuses_to_drop_an_installed_application_database():
+    """A real founder database was dropped this way, so the refusal is a test, not a comment.
+
+    The suite is autouse and session-scoped: it DROPs the database `DATABASE_URL` names at
+    teardown. Exporting an installed database into a pytest run therefore deleted it. The guard
+    rejects anything that is not a `lifeos_test*` name before the first DROP.
+    """
+    for name in ("lifeos_founder_flow", "lifeos_accept", "postgres", "lifeaI_test_x"):
+        with pytest.raises(pytest.UsageError, match="refusing to drop database"):
+            _assert_disposable_database(name)
+
+    for name in ("lifeos_test", "lifeos_test_4242", "lifeos_test_a1b2c3"):
+        _assert_disposable_database(name)  # does not raise
 
 
 def test_force_drop_database_succeeds_while_another_session_is_connected():

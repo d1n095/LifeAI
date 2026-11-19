@@ -1422,15 +1422,20 @@ async def test_handle_open_pr_resumes_correctly_without_creating_a_duplicate_pr(
     async def _fake_create_pull_request(self, *, title, body, head, base):
         # Mirrors a real GitHub quirk this fix relies on: create_pull_request()'s own `head`
         # is a bare branch name (same-repo PR), but the pulls-LIST endpoint's `head` filter
-        # requires the owner-prefixed `owner:branch` form -- so the stored/comparable value
-        # here is intentionally owner-prefixed even though the create call itself wasn't.
+        # requires the owner-prefixed `owner:branch` form -- so `head.label` below is
+        # intentionally owner-prefixed even though the create call itself wasn't. `head.sha`
+        # and `draft` mirror GitHub's real response shape (not a bare string) -- the
+        # draft-PR security contract's own checks in _handle_open_pr() read both of these.
         create_calls["n"] += 1
-        pr = {"number": 42, "html_url": "https://github.com/d1n095/LifeAI/pull/42", "head": f"d1n095:{head}", "base": base, "state": "open"}
+        pr = {
+            "number": 42, "html_url": "https://github.com/d1n095/LifeAI/pull/42",
+            "head": {"label": f"d1n095:{head}", "ref": head, "sha": "c" * 40}, "base": base, "state": "open", "draft": True,
+        }
         created_prs.append(pr)
         return pr
 
     async def _fake_list_pull_requests_for_head(self, *, head, base, state="all"):
-        return [pr for pr in created_prs if pr["head"] == head and pr["base"] == base and (state == "all" or pr["state"] == state)]
+        return [pr for pr in created_prs if pr["head"]["label"] == head and pr["base"] == base and (state == "all" or pr["state"] == state)]
 
     monkeypatch.setattr(GitHubClient, "create_pull_request", _fake_create_pull_request)
     monkeypatch.setattr(GitHubClient, "list_pull_requests_for_head", _fake_list_pull_requests_for_head)
@@ -1444,7 +1449,7 @@ async def test_handle_open_pr_resumes_correctly_without_creating_a_duplicate_pr(
             task_id=task.id,
             owner_id=owner_id,
             event_type=MainAITaskEventType.completed,
-            detail={"work_result": {"branch": "claude/mainai-task-abc", "base_branch": "claude/det-kommer-mer-879lcm"}},
+            detail={"work_result": {"branch": "claude/mainai-task-abc", "base_branch": "claude/det-kommer-mer-879lcm", "commit_sha": "c" * 40}},
         )
     )
     db_session.commit()
@@ -1460,6 +1465,91 @@ async def test_handle_open_pr_resumes_correctly_without_creating_a_duplicate_pr(
     assert second["pull_request_number"] == 42
 
     assert create_calls["n"] == 1, "create_pull_request() must never be called twice for the same head/base"
+
+
+async def _open_pr_with_existing_pr(db_session, owner_id, monkeypatch, *, existing_pr: dict):
+    """Shared setup for the three draft-PR security-contract tests below: an open_pr task
+    with a completed repo_edit sibling, and GitHubClient.list_pull_requests_for_head()
+    returning exactly one pre-existing PR (shaped however the caller wants) for that
+    branch/base -- never create_pull_request(), so each test can assert it was never called."""
+    from app.integrations.github_client import GitHubClient
+    from app.mainai_execution.execution_job import _handle_open_pr
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "github_write_enabled", True)
+    monkeypatch.setattr(settings, "github_token", "fake-token-never-real")
+    monkeypatch.setattr(settings, "github_repo", "d1n095/LifeAI")
+
+    create_calls = {"n": 0}
+
+    async def _fake_create_pull_request(self, *, title, body, head, base):
+        create_calls["n"] += 1
+        return {"number": 999, "html_url": "https://github.com/d1n095/LifeAI/pull/999", "draft": True, "head": {"sha": "unexpected"}}
+
+    async def _fake_list_pull_requests_for_head(self, *, head, base, state="all"):
+        return [existing_pr]
+
+    monkeypatch.setattr(GitHubClient, "create_pull_request", _fake_create_pull_request)
+    monkeypatch.setattr(GitHubClient, "list_pull_requests_for_head", _fake_list_pull_requests_for_head)
+
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(db_session, goal, task_type="open_pr")
+    db_session.add(
+        MainAITaskEvent(
+            task_id=task.id, owner_id=owner_id, event_type=MainAITaskEventType.completed,
+            detail={"work_result": {"branch": "claude/mainai-task-abc", "base_branch": "claude/det-kommer-mer-879lcm", "commit_sha": "c" * 40}},
+        )
+    )
+    db_session.commit()
+
+    return task, goal, create_calls, _handle_open_pr
+
+
+@pytest.mark.asyncio
+async def test_handle_open_pr_refuses_to_attribute_an_existing_non_draft_pr_to_mainai(db_session, owner_id, monkeypatch):
+    """Draft-PR security contract (founder directive, independent review finding): an
+    existing OPEN, NON-DRAFT PR for this exact head/base must never be silently treated as
+    "ours, already done" -- GitHub allows only one open PR per head/base pair, so a human's
+    own real PR occupying it must fail the task closed, never get attributed to MainAI."""
+    from app.mainai_execution.execution_job import TaskExecutionError
+
+    existing_pr = {"number": 7, "html_url": "https://github.com/d1n095/LifeAI/pull/7", "draft": False, "head": {"sha": "c" * 40}}
+    task, goal, create_calls, _handle_open_pr = await _open_pr_with_existing_pr(db_session, owner_id, monkeypatch, existing_pr=existing_pr)
+
+    with pytest.raises(TaskExecutionError, match="not a MainAI-created draft"):
+        await _handle_open_pr(db_session, task, goal)
+    assert create_calls["n"] == 0, "must never fall back to creating a second PR for an occupied head/base"
+
+
+@pytest.mark.asyncio
+async def test_handle_open_pr_fails_closed_when_an_existing_prs_draft_state_is_unknown(db_session, owner_id, monkeypatch):
+    """Same contract, the explicit "unknown state must fail closed" invariant: a PR response
+    missing (or null) `draft` must be treated exactly like `draft=False` -- never assumed
+    safe just because the field wasn't negative."""
+    from app.mainai_execution.execution_job import TaskExecutionError
+
+    existing_pr = {"number": 8, "html_url": "https://github.com/d1n095/LifeAI/pull/8", "head": {"sha": "c" * 40}}  # no "draft" key at all
+    task, goal, create_calls, _handle_open_pr = await _open_pr_with_existing_pr(db_session, owner_id, monkeypatch, existing_pr=existing_pr)
+
+    with pytest.raises(TaskExecutionError, match="not a MainAI-created draft"):
+        await _handle_open_pr(db_session, task, goal)
+    assert create_calls["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_handle_open_pr_refuses_to_reuse_a_draft_pr_whose_head_commit_does_not_match(db_session, owner_id, monkeypatch):
+    """Same contract, the commit-identity invariant: even a genuinely MainAI-shaped draft PR
+    for the right branch name must not be reused unless its OWN reported head commit matches
+    the real commit this task's own repo_edit sibling actually pushed -- a branch-name match
+    alone is not real identity."""
+    from app.mainai_execution.execution_job import TaskExecutionError
+
+    existing_pr = {"number": 9, "html_url": "https://github.com/d1n095/LifeAI/pull/9", "draft": True, "head": {"sha": "d" * 40}}  # wrong sha
+    task, goal, create_calls, _handle_open_pr = await _open_pr_with_existing_pr(db_session, owner_id, monkeypatch, existing_pr=existing_pr)
+
+    with pytest.raises(TaskExecutionError, match="does not match this task's own"):
+        await _handle_open_pr(db_session, task, goal)
+    assert create_calls["n"] == 0
 
 
 def test_record_engineering_lesson_for_the_mark_completed_mark_failed_finalize_ordering_fix(db_session, owner_id):

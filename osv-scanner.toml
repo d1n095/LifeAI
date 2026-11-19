@@ -1,0 +1,25 @@
+# Supply-chain risk register for OSV-Scanner.
+#
+# An ignore is an accepted, dated risk — never a way to make a check quiet. Every entry states
+# what the package is used for, why the available fix was not taken, and when the acceptance
+# expires (`ignoreUntil`). OSV-Scanner fails again once the date passes, so this cannot rot into a
+# permanent silence. This file is listed in PROTECTED_GLOBS and therefore SHA-256 pinned in
+# security/POLICY_LOCK.json: adding an ignore is a reviewed change, not an edit an agent can slip in.
+#
+# The rule applied when writing it: a RUNTIME dependency is fixed, not ignored. Only dev-only
+# build/lint tooling that never reaches the served bundle may appear here.
+
+[[IgnoredVulns]]
+id = "GHSA-3g3m-2fjr-6pw4"
+ignoreUntil = 2027-02-01
+reason = "glob is a dev-only transitive dependency of the lint/build toolchain and is never shipped in the runtime bundle. The patched release is glob 14, a major version of a transitive dependency consumed by eslint/next tooling; taking it is a toolchain migration with its own verification, not a runtime fix. Re-evaluate when the lint toolchain next upgrades."
+
+[[IgnoredVulns]]
+id = "GHSA-g3hv-75wg-m249"
+ignoreUntil = 2027-02-01
+reason = "minimatch is a dev-only transitive dependency of the same lint/build toolchain, not in the runtime bundle. The patched release is minimatch 11, a major bump of a transitive dependency; it moves together with glob/eslint's own dependency range, so it is handled as part of that toolchain migration rather than by an override that would break the tools."
+
+[[IgnoredVulns]]
+id = "PYSEC-2026-1845"
+ignoreUntil = 2027-02-01
+reason = "pytest is test-only and never installed in the production image (backend/Dockerfile installs requirements.txt, not requirements-dev.txt). The patched release is pytest 9, a major version that also requires the async/fixture plugin line to move (pytest-asyncio 1.x); that toolchain migration is scheduled work with its own verification, not a runtime fix."

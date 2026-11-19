@@ -1,0 +1,32 @@
+{
+  "algorithm": "sha256",
+  "description": "SHA-256 of every security control. Verified by backend/scripts/security/verify_policy_lock.py in the Security workflow. Regenerate with --update, in a reviewed commit.",
+  "files": {
+    ".github/CODEOWNERS": "5bf628dda3750d45a079154d79c311fe4cf2d6cec56e1b4af64bf460a1cddf33",
+    ".github/workflows/build-images.yml": "329852f38b7d5ffd6aed72dee669ea9b5f75ac0f979bbc3c8104ac742cbebcd3",
+    ".github/workflows/ci.yml": "68a2933646d19756ec7a8dc83f7947ae6bc8ee9d79bf753f83f20a4f9cf5c377",
+    ".github/workflows/founder-alpha-verification.yml": "b36c4f3acc64520fff588725db90f4798a7160ca4494afa8f797943114ab18d0",
+    ".github/workflows/opencode.yml": "48fe4704838dc8a27f5fd3043aa46d44e2bd2771341e7a87122143fa8d4c36fb",
+    ".github/workflows/real-local-ai-verification.yml": "09076e19a88749e04a9d31f062441afe967d6e2dc0d36eadfedfb32636176750",
+    ".github/workflows/security.yml": "ef10de0970f15f1866a0ae19d8123591edfc0e81665115cfa35d240d1fa24ca1",
+    ".gitleaks.toml": "990c683ba793691bc2195bd027c12c99988128df4d606fdc6e66946dd95223ca",
+    ".semgrep/rules.yaml": "dfd965edf7522b5d0ac4a410c157fcb7ec9609b26257c41644e5cd75d253fcbc",
+    "backend/scripts/acceptance/founder_alpha_acceptance.py": "f3b1bd4a8aaaf54f51bcc06dc513643fc61862d8cda5c7e5ab1ac4670991e425",
+    "backend/scripts/acceptance/founder_release_acceptance.py": "470a33273087ea9da09c6297b14aedaa57c0c970b2813649cf82d7ab80b41467",
+    "backend/scripts/acceptance/founder_workflow.py": "9d997cdf95a3619392faaef96aeebbdbf8482f983a3a337e7a7db279502283ea",
+    "backend/scripts/acceptance/local_model_acceptance.py": "0556e8d99551ef65672387c386d47cd4e78fc0d8f49af94e1882c0761d961312",
+    "backend/scripts/requirements/dead_seams.py": "ed3b26c9e921db370a0749c781991fa74b50ec4a6637aabbaad6515b14cddfb5",
+    "backend/scripts/requirements/verify_registry.py": "4e8a0e36b0c4bc7e625d1e204c7ed0ced0abacccc545fb158fa08ed197cc7bf4",
+    "backend/scripts/security/apply_runtime_privileges.py": "6da5c663ee39d0da79c4ec8820943c8b792c01a07991663d80c8bd8853f1f19a",
+    "backend/scripts/security/build_provenance.py": "84eb4e9b27a873eae67a2bc06f0a7b0fae71f4ff23c1e104146721d455d275c0",
+    "backend/scripts/security/ensure_app_role.py": "6d82802d1ba1f92f4e8c974a01d8830e52e905105bd28ef5ef369ef27db16dbf",
+    "backend/scripts/security/s1a_privilege_policy.py": "9c705c38db1b74e171ff708715b93888da4b353b7c9460724c100015e8a4edfc",
+    "backend/scripts/security/verify_agent_capabilities.py": "ff7732907cdf979158ff0b3e1a078b9dde977c3a26c7d77a185da8f767f82a25",
+    "backend/scripts/security/verify_policy_lock.py": "76d131c5a997ee3a4f6d1deac568ad5fb01405348020fbbc01d8db03162b8427",
+    "backend/tests/requirements/test_requirements_registry.py": "a2c2ca8134089879a2e61dac2cc48b70cebf9243edbd65ee56366d60cef2ba4f",
+    "backend/tests/security/test_security_controls.py": "6fd629f87d1bada07d27a7234344190429652fce056560f0ecaa7a3d5f289b3b",
+    "osv-scanner.toml": "a41c0d2d5a08159b9868c0e71b8dfb6773c48b9cd0ffa632da835dc1f39d7a92",
+    "security/agent_capabilities.json": "fcd30340565ec798bb9cc1d59a3e1c6a273b5a06fcf94026b4cfab88a1529734"
+  },
+  "version": 1
+}

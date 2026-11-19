@@ -22,7 +22,7 @@ This file proves:
   - A never-governed goal's takeover is completely unaffected (regression).
   - The existing approval gate (PUSHED_NO_PR/PR_EXISTS) still runs BEFORE the governance
     check and is never weakened or bypassed by it, in either direction.
-  - The new terminal-job-fencing primitive (`mark_job_failed_after_governed_recovery_decline`)
+  - The new terminal-job-fencing primitive (`mark_job_failed_after_recovery_decline`)
     only ever writes to a genuinely dead job, mirroring `mark_job_superseded`'s own three
     proven cases.
   - The REAL production path composes correctly end to end: a governed task's job crashes,
@@ -49,7 +49,7 @@ from app.execution_envelopes.service import goal_has_ever_been_envelope_governed
 from app.jobs.mainai_job_lease import (
     JobNotDeclinableError,
     claim_next_mainai_job,
-    mark_job_failed_after_governed_recovery_decline,
+    mark_job_failed_after_recovery_decline,
 )
 from app.mainai_execution import executor, planner
 from app.mainai_execution.planner import PlannedTaskSpec
@@ -59,7 +59,7 @@ from app.mainai_execution.recovery_inspector import get_or_create_recovery_recor
 from app.mainai_execution.recovery_takeover import TakeoverError, execute_takeover
 from app.models.mainai_execution import MainAITask, MainAITaskStatus
 from app.models.mainai_job import MainAIJob
-from app.models.mainai_recovery import MainAIRecoveryRecord, MainAIRecoveryStatus, RecoveryClassification
+from app.models.mainai_recovery import MainAIRecoveryEventType, MainAIRecoveryRecord, MainAIRecoveryStatus, RecoveryClassification
 from app.request_context import current_user_id as current_user_id_var
 from app.worker import Worker
 
@@ -249,6 +249,84 @@ async def test_takeover_still_declines_when_envelope_a_was_superseded_by_narrowe
     assert envelope_b.status == "active"  # B remains the maximum authority for whatever redispatches next
 
 
+# ---------------------------------------------------------------- Freebuff AV-1a/AV-2a: cancel_requested survives a crash
+
+
+@pytest.mark.asyncio
+async def test_takeover_declines_and_finalizes_cancelled_when_the_dead_job_had_cancel_requested(db_session, superuser_db, owner_id):
+    """The actual AV-1a/AV-2a scenario: a founder cancels a `running` task (cooperative --
+    cancel_task() sets `cancel_requested` on its live job, task.status stays `running` per
+    that function's own documented V0.3 limitation) and the job then crashes before ever
+    reaching one of execution_job.py's own cooperative-cancel checkpoints. Before this fix,
+    execute_takeover() never looked at `cancel_requested` at all -- it would reset the task to
+    `ready` and dispatch a genuinely NEW job (whose own `cancel_requested` defaults to False),
+    silently discarding the founder's cancellation. This asserts the actual fixed behavior:
+    the task ends `cancelled`, never `running`/`ready` again, and no new job is ever minted."""
+    goal = _goal(db_session, owner_id)
+    db_session.commit()
+
+    task, dead_job = _task_and_dead_job(db_session, superuser_db, owner_id, goal)
+    dead_job_id = dead_job.id
+
+    # The founder's cancel_task() call, had the job still been alive, would have set exactly
+    # this flag -- set directly here since the point of this test is what happens AFTER the
+    # job is already dead, not cancel_task()'s own (separately tested) cooperative path.
+    superuser_db.execute(sa_text("UPDATE mainai_jobs SET cancel_requested = true WHERE id = :id"), {"id": str(dead_job_id)})
+    superuser_db.commit()
+
+    record = await _through_classification(db_session, task, dead_job)
+    assert record.classification == RecoveryClassification.nothing_done
+
+    record, new_job = await execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
+    db_session.commit()
+
+    assert new_job is None  # no V0.1 job ever minted -- cancellation must never be silently discarded
+    assert record.status == MainAIRecoveryStatus.completed
+    assert record.takeover_job_id is None
+    assert record.takeover_executor is None
+
+    db_session.refresh(task)
+    assert task.status == MainAITaskStatus.cancelled  # never ready, never running again
+    assert task.mainai_job_id == dead_job_id  # unchanged -- no replacement minted
+
+    superuser_db.expire_all()
+    dead_row = superuser_db.execute(
+        sa_text("SELECT status, superseded_by_job_id FROM mainai_jobs WHERE id = :id"), {"id": str(dead_job_id)}
+    ).one()
+    assert dead_row[0] == "failed"  # not 'superseded' -- no successor job to link
+    assert dead_row[1] is None
+
+    assert _events(db_session, record.id) == [
+        "dead_detected", "recovery_started", "recovery_inspected", "recovery_classified",
+        "takeover_started", "recovery_blocked",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_requested_decline_takes_priority_over_governed_decline(db_session, superuser_db, owner_id):
+    """A task can be BOTH cancelled AND belong to an ever-governed goal. The cancellation
+    decline must win: sending it back to `ready` for governed redispatch (the governed-decline
+    branch's own behavior) would just discard the founder's cancel request a different way --
+    the task must end `cancelled`, not `ready`."""
+    goal = _goal(db_session, owner_id)
+    _authorize(db_session, owner_id, goal.id)
+    db_session.commit()
+
+    task, dead_job = _task_and_dead_job(db_session, superuser_db, owner_id, goal)
+    superuser_db.execute(sa_text("UPDATE mainai_jobs SET cancel_requested = true WHERE id = :id"), {"id": str(dead_job.id)})
+    superuser_db.commit()
+
+    record = await _through_classification(db_session, task, dead_job)
+    record, new_job = await execute_takeover(db_session, task=task, goal=goal, record=record, dispatched_by="recovery-worker")
+    db_session.commit()
+
+    assert new_job is None
+    db_session.refresh(task)
+    assert task.status == MainAITaskStatus.cancelled  # not 'ready' -- cancellation wins over governance
+    assert MainAIRecoveryEventType.recovery_blocked.value in _events(db_session, record.id)
+    assert "takeover_declined_governed" not in _events(db_session, record.id)
+
+
 @pytest.mark.asyncio
 async def test_takeover_still_performs_a_real_v01_takeover_for_a_never_governed_goal(db_session, superuser_db, owner_id):
     """Regression: a goal with NO execution-authorization-envelope row, ever, is completely
@@ -354,10 +432,10 @@ async def test_takeover_still_declines_for_a_governed_goal_even_once_pushed_no_p
     assert task.status == MainAITaskStatus.ready
 
 
-# ---------------------------------------------------------------- mark_job_failed_after_governed_recovery_decline
+# ---------------------------------------------------------------- mark_job_failed_after_recovery_decline
 
 
-def test_mark_job_failed_after_governed_recovery_decline_refuses_a_job_that_is_not_genuinely_dead(db_session, superuser_db, owner_id):
+def test_mark_job_failed_after_recovery_decline_refuses_a_job_that_is_not_genuinely_dead(db_session, superuser_db, owner_id):
     goal = _goal(db_session, owner_id)
     db_session.commit()
     planner.create_plan(
@@ -373,14 +451,14 @@ def test_mark_job_failed_after_governed_recovery_decline_refuses_a_job_that_is_n
     claim_next_mainai_job(superuser_db, "healthy-worker", 120)  # still well within its lease
 
     with pytest.raises(JobNotDeclinableError):
-        mark_job_failed_after_governed_recovery_decline(superuser_db, job_id=job.id)
+        mark_job_failed_after_recovery_decline(superuser_db, job_id=job.id)
     superuser_db.rollback()
 
     row = superuser_db.execute(sa_text("SELECT status FROM mainai_jobs WHERE id = :id"), {"id": str(job.id)}).one()
     assert row[0] == "running"  # untouched
 
 
-def test_mark_job_failed_after_governed_recovery_decline_accepts_terminal_without_finalize_during_takeover(db_session, superuser_db, owner_id):
+def test_mark_job_failed_after_recovery_decline_accepts_terminal_without_finalize_during_takeover(db_session, superuser_db, owner_id):
     """Terminal-without-finalize fence: job already failed, recovery record at taking_over --
     mirrors mark_job_superseded's own equivalent proven case."""
     goal = _goal(db_session, owner_id)
@@ -408,7 +486,7 @@ def test_mark_job_failed_after_governed_recovery_decline_accepts_terminal_withou
     )
     db_session.commit()
 
-    mark_job_failed_after_governed_recovery_decline(superuser_db, job_id=dead_job.id)
+    mark_job_failed_after_recovery_decline(superuser_db, job_id=dead_job.id)
     superuser_db.commit()
 
     row = superuser_db.execute(sa_text("SELECT status, superseded_by_job_id FROM mainai_jobs WHERE id = :id"), {"id": str(dead_job.id)}).one()
@@ -416,7 +494,7 @@ def test_mark_job_failed_after_governed_recovery_decline_accepts_terminal_withou
     assert row[1] is None
 
 
-def test_mark_job_failed_after_governed_recovery_decline_refuses_terminal_job_without_takeover_in_flight(db_session, superuser_db, owner_id):
+def test_mark_job_failed_after_recovery_decline_refuses_terminal_job_without_takeover_in_flight(db_session, superuser_db, owner_id):
     goal = _goal(db_session, owner_id)
     db_session.commit()
     planner.create_plan(
@@ -438,7 +516,7 @@ def test_mark_job_failed_after_governed_recovery_decline_refuses_terminal_job_wi
     superuser_db.commit()
 
     with pytest.raises(JobNotDeclinableError):
-        mark_job_failed_after_governed_recovery_decline(superuser_db, job_id=job.id)
+        mark_job_failed_after_recovery_decline(superuser_db, job_id=job.id)
     superuser_db.rollback()
 
 

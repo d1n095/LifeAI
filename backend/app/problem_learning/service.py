@@ -314,7 +314,7 @@ def evaluate_component(
     component_id,
     evaluation,
     reason,
-    idempotency_key,
+    idempotency_key,  # gitleaks:allow -- a parameter NAME, not a credential
     evaluator_basis="unknown",
     evidence_id=None,
     evaluator_execution_id=None,

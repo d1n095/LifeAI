@@ -9,7 +9,13 @@ from app.db import Base
 
 
 class AuditLog(Base):
-    """Immutable trail of security-relevant actions. Never stores API keys or secrets."""
+    """Immutable trail of security-relevant actions. Never stores API keys or secrets.
+
+    "Immutable" is enforced at the storage layer, not by convention: migration 0079 installs a
+    BEFORE UPDATE OR DELETE trigger that raises `restrict_violation`, so no application path — and no
+    inherited credential, and not even the superuser connection — can rewrite or erase history.
+    Verified by tests/security/test_audit_immutability.py. Append a new row to correct the record.
+    """
 
     __tablename__ = "audit_log"
 

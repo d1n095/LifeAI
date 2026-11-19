@@ -1,0 +1,109 @@
+{
+  "tool": "lifeai-release-governance-verify",
+  "version": 1,
+  "generated_at": "2026-11-19T14:36:13.439303Z",
+  "repository": "d1n095/LifeAI",
+  "checked_ref": "da23e58bf2f9574f2ec64d7f431297c4bcf48b4f",
+  "mutations_performed": false,
+  "checks": {
+    "repository": {
+      "ok": true,
+      "detail": {
+        "default_branch": "claude/det-kommer-mer-879lcm",
+        "visibility": "PUBLIC"
+      }
+    },
+    "branch.main": {
+      "ok": false,
+      "detail": {
+        "exists": false,
+        "probe": "GET /repos/{repo}/branches/main"
+      }
+    },
+    "protection.main": {
+      "ok": false,
+      "detail": {
+        "present": false,
+        "probe": [
+          "gh: Branch not found (HTTP 404)"
+        ]
+      }
+    },
+    "rulesets": {
+      "ok": true,
+      "detail": {
+        "count": 0,
+        "names": []
+      }
+    },
+    "codeowners": {
+      "ok": true,
+      "detail": {
+        "path": ".github/CODEOWNERS",
+        "bytes": 1113,
+        "ref": "da23e58bf2f9574f2ec64d7f431297c4bcf48b4f"
+      }
+    },
+    "required_contexts": {
+      "ok": true,
+      "detail": {
+        "workflow_names": [
+          "Backup integrity verification (atomic finalize + retention)",
+          "Build & push VPS images",
+          "CI",
+          "Copilot",
+          "Dependency Graph",
+          "Examiner \u2014 PR329 original retrieval security",
+          "Examiner \u2014 PR333 embedding-space security",
+          "Examiner \u2014 PR340 Blueprint security",
+          "Examiner \u2014 PR340 db83 security recheck",
+          "First-start verification (manual)",
+          "Founder Alpha verification (real local, manual)",
+          "Import security regression tests (frozen SHA)",
+          "Model-backed AI team (manual)",
+          "OpenCode",
+          "Real local-AI verification (manual)",
+          "Security"
+        ],
+        "run_used": {
+          "conclusion": "success",
+          "created_at": "2026-11-19T11:58:38Z",
+          "head_branch": "freebuff/founder-alpha-ops-recovery-20261118",
+          "head_sha": "da23e58bf2f9574f2ec64d7f431297c4bcf48b4f",
+          "id": 44519589301,
+          "name": "CI",
+          "status": "completed"
+        },
+        "runs_considered": 1,
+        "completed_runs": 1,
+        "contexts_verified": {
+          "Security": true,
+          "All required checks passed": true
+        }
+      }
+    },
+    "security_features": {
+      "ok": true,
+      "detail": {
+        "secret_scanning": "enabled",
+        "push_protection": "enabled",
+        "dependabot_security_updates": "disabled",
+        "advanced_security": null
+      }
+    }
+  },
+  "ready_to_apply": false,
+  "blocking_prerequisites": [
+    "branch.main",
+    "protection.main"
+  ],
+  "commands_to_apply_after_authorization": [
+    "# 1. create the release branch at the reviewed baseline (does not change the default)",
+    "gh api -X POST repos/d1n095/LifeAI/git/refs -f ref=refs/heads/main -f sha=<REVIEWED_BASELINE_SHA>",
+    "# 2. protect it (strict, no admin bypass, one founder review, CODEOWNERS)",
+    "gh api -X PUT repos/d1n095/LifeAI/branches/main/protection -F required_status_checks.strict=true -f 'required_status_checks.contexts[]=Security' -f 'required_status_checks.contexts[]=All required checks passed' -F enforce_admins=true -F required_pull_request_reviews.required_approving_review_count=1 -F required_pull_request_reviews.dismiss_stale_reviews=true -F required_pull_request_reviews.require_code_owner_reviews=true -F restrictions=",
+    "# 3. only after the protection is verified: switch the default and retarget open PRs",
+    "gh api -X PATCH repos/d1n095/LifeAI -f default_branch=main"
+  ],
+  "note": "Nothing here changed a repository setting. Applying these commands is the founder's decision and should happen when no other agent is mid-work on the current default branch."
+}
