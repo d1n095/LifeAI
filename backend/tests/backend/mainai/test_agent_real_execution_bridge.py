@@ -21,7 +21,11 @@ import uuid
 
 import pytest
 
-from app.agent_coordination.adapter_config import SUPPORTED_LOCAL_CLI_PROVIDERS, adapter_availability, real_adapter_config
+from app.agent_coordination.adapter_config import (
+    SUPPORTED_LOCAL_CLI_PROVIDERS,
+    adapter_availability,
+    real_adapter_config,
+)
 from app.agent_coordination.adapters import (
     AdapterProcessLostError,
     AdapterTimeoutError,
@@ -44,11 +48,20 @@ from app.agent_coordination.dispatch import (
     dispatch_assignment,
     evaluate_dispatch_readiness,
 )
-from app.agent_coordination.routing import OUTCOME_SCOPE_CONFLICT as ROUTING_SCOPE_CONFLICT
+from app.agent_coordination.routing import (
+    OUTCOME_SCOPE_CONFLICT as ROUTING_SCOPE_CONFLICT,
+)
 from app.agent_coordination.routing import eligible_agents_for
-from app.agent_coordination.service import OUTCOME_ASSIGNABLE, acquire_lease, create_work_assignment, register_agent, transition_status
+from app.agent_coordination.service import (
+    OUTCOME_ASSIGNABLE,
+    acquire_lease,
+    create_work_assignment,
+    register_agent,
+    transition_status,
+)
 from app.mainai_execution.approval import grant_task_approval
 from app.mainai_execution.planner import PlannedTaskSpec, create_goal, create_plan
+from app.models.agent_coordination import SystemActivationAuthorization
 from app.models.mainai_execution import MainAITask
 
 
@@ -60,6 +73,22 @@ def _apply_execution_privilege_policy_before_this_module():
     from app.rls import apply_mainai_execution_privileges
 
     apply_mainai_execution_privileges(migration_engine)
+
+
+@pytest.fixture(autouse=True)
+def _grant_system_activation_authority(superuser_db, monkeypatch):
+    """This file is about adapter MECHANICS (subprocess bounds, dispatch lifecycle), not the
+    activation gate itself (see test_activation_gate.py / the activation-gate-specific tests
+    in this file) -- grant default authorization for every test so `LocalCLIAdapter.
+    start_assignment()`'s own `require_system_activation_authority()` check never blocks what
+    each test actually means to exercise. Uses `superuser_db` to bypass
+    `system_activation_authorizations`' own SELECT-only restriction on `mainai_app`, same as
+    it already bypasses RLS elsewhere in this suite. A test proving the ABSENCE of
+    authorization overrides this via its own monkeypatch.delenv/setenv calls, applied after
+    this fixture runs."""
+    monkeypatch.setenv("FIRST_CYCLE_GO", "true")
+    superuser_db.add(SystemActivationAuthorization(authorized_by="test-fixture", reason="default grant for adapter-mechanics tests"))
+    superuser_db.commit()
 
 
 @pytest.fixture
@@ -201,10 +230,49 @@ def test_real_adapter_config_none_when_executable_missing(monkeypatch):
     assert real_adapter_config("codex") is None
 
 
-def test_get_real_adapter_returns_not_configured_when_disabled(monkeypatch):
+def test_get_real_adapter_returns_not_configured_when_disabled(monkeypatch, superuser_db):
     monkeypatch.delenv("LIFE_AGENT_ADAPTER_ENABLED__CURSOR_AGENT", raising=False)
-    adapter = get_real_adapter("cursor-agent", cwd="/tmp")
+    adapter = get_real_adapter("cursor-agent", cwd="/tmp", db=superuser_db)
     assert isinstance(adapter, NotConfiguredAdapter)
+
+
+def test_get_real_adapter_stays_not_configured_without_first_cycle_go_even_when_fully_enabled(monkeypatch, tmp_path, superuser_db):
+    """The new first_cycle_go gate (Founder directive 2026-11-14): every OTHER precondition
+    satisfied (enabled, executable found, args_template configured) must still fall back to
+    NotConfiguredAdapter -- never a real adapter -- until the founder's own external release
+    decision is set. Confirms get_real_adapter()'s "never raises" contract is unchanged."""
+    import shutil
+
+    import app.agent_coordination.adapter_config as adapter_config_module
+
+    real_true_path = shutil.which("true")
+    monkeypatch.setattr(adapter_config_module.shutil, "which", lambda name: real_true_path if name == "codex" else None)
+    monkeypatch.setenv("LIFE_AGENT_ADAPTER_ENABLED__CODEX", "true")
+    monkeypatch.setenv("LIFE_AGENT_ADAPTER_ARGS__CODEX", "--version")
+    monkeypatch.delenv("FIRST_CYCLE_GO", raising=False)
+
+    adapter = get_real_adapter("codex", cwd=str(tmp_path), db=superuser_db)
+
+    assert isinstance(adapter, NotConfiguredAdapter)
+
+
+def test_get_real_adapter_returns_a_real_adapter_once_first_cycle_go_is_set(monkeypatch, tmp_path, superuser_db):
+    """The positive case: with every precondition AND first_cycle_go satisfied, the factory
+    finally returns the real LocalCLIAdapter -- proving the gate is additive, not a silent
+    always-block."""
+    import shutil
+
+    import app.agent_coordination.adapter_config as adapter_config_module
+
+    real_true_path = shutil.which("true")
+    monkeypatch.setattr(adapter_config_module.shutil, "which", lambda name: real_true_path if name == "codex" else None)
+    monkeypatch.setenv("LIFE_AGENT_ADAPTER_ENABLED__CODEX", "true")
+    monkeypatch.setenv("LIFE_AGENT_ADAPTER_ARGS__CODEX", "--version")
+    monkeypatch.setenv("FIRST_CYCLE_GO", "true")
+
+    adapter = get_real_adapter("codex", cwd=str(tmp_path), db=superuser_db)
+
+    assert isinstance(adapter, LocalCLIAdapter)
 
 
 # ============================================================================ Requirement 4:
@@ -212,9 +280,9 @@ def test_get_real_adapter_returns_not_configured_when_disabled(monkeypatch):
 # a real coding agent CLI.
 
 @pytest.mark.asyncio
-async def test_local_cli_adapter_real_success_path(tmp_path):
+async def test_local_cli_adapter_real_success_path(tmp_path, superuser_db):
     """A genuinely real subprocess (/usr/bin/true), exact cwd, real exit-code capture."""
-    adapter = LocalCLIAdapter(provider_key="test-true", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5)
+    adapter = LocalCLIAdapter(provider_key="test-true", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5, db=superuser_db)
     assignment_id = uuid.uuid4()
     await adapter.start_assignment(assignment_id)
     observation = await adapter.observe(assignment_id)
@@ -224,8 +292,8 @@ async def test_local_cli_adapter_real_success_path(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_local_cli_adapter_real_failure_path(tmp_path):
-    adapter = LocalCLIAdapter(provider_key="test-false", executable="/usr/bin/false", args_template=(), cwd=str(tmp_path), timeout_seconds=5)
+async def test_local_cli_adapter_real_failure_path(tmp_path, superuser_db):
+    adapter = LocalCLIAdapter(provider_key="test-false", executable="/usr/bin/false", args_template=(), cwd=str(tmp_path), timeout_seconds=5, db=superuser_db)
     assignment_id = uuid.uuid4()
     await adapter.start_assignment(assignment_id)
     result = await adapter.collect_result(assignment_id)
@@ -234,10 +302,10 @@ async def test_local_cli_adapter_real_failure_path(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_local_cli_adapter_real_timeout_kills_the_process(tmp_path):
+async def test_local_cli_adapter_real_timeout_kills_the_process(tmp_path, superuser_db):
     """A genuinely real, genuinely long-running process (/bin/sleep 5), genuinely killed by a
     tight real bound (1s) -- proves the timeout is enforced, not merely documented."""
-    adapter = LocalCLIAdapter(provider_key="test-sleep", executable="/bin/sleep", args_template=("5",), cwd=str(tmp_path), timeout_seconds=1)
+    adapter = LocalCLIAdapter(provider_key="test-sleep", executable="/bin/sleep", args_template=("5",), cwd=str(tmp_path), timeout_seconds=1, db=superuser_db)
     assignment_id = uuid.uuid4()
     await adapter.start_assignment(assignment_id)
     with pytest.raises(AdapterTimeoutError):
@@ -245,29 +313,30 @@ async def test_local_cli_adapter_real_timeout_kills_the_process(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_local_cli_adapter_start_failure_raises_process_lost(tmp_path):
+async def test_local_cli_adapter_start_failure_raises_process_lost(tmp_path, superuser_db):
     adapter = LocalCLIAdapter(
-        provider_key="test-missing", executable="/a/binary/that/does/not/exist/anywhere-xyz", args_template=(), cwd=str(tmp_path), timeout_seconds=5
+        provider_key="test-missing", executable="/a/binary/that/does/not/exist/anywhere-xyz", args_template=(), cwd=str(tmp_path), timeout_seconds=5,
+        db=superuser_db,
     )
     with pytest.raises(AdapterProcessLostError):
         await adapter.start_assignment(uuid.uuid4())
 
 
 @pytest.mark.asyncio
-async def test_local_cli_adapter_collect_without_start_raises_process_lost(tmp_path):
-    adapter = LocalCLIAdapter(provider_key="test-true", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5)
+async def test_local_cli_adapter_collect_without_start_raises_process_lost(tmp_path, superuser_db):
+    adapter = LocalCLIAdapter(provider_key="test-true", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5, db=superuser_db)
     with pytest.raises(AdapterProcessLostError):
         await adapter.collect_result(uuid.uuid4())  # never started -- nothing tracked
 
 
 @pytest.mark.asyncio
-async def test_local_cli_adapter_uses_exact_cwd_never_inferred(tmp_path):
+async def test_local_cli_adapter_uses_exact_cwd_never_inferred(tmp_path, superuser_db):
     """Proves the adapter genuinely runs in the assignment's own worktree_path -- writes a
     marker file via a real subprocess and confirms it landed in the EXACT directory supplied,
     not the caller's own process cwd."""
     marker_dir = tmp_path / "exact-worktree"
     marker_dir.mkdir()
-    adapter = LocalCLIAdapter(provider_key="test-echo", executable="/bin/echo", args_template=("hello",), cwd=str(marker_dir), timeout_seconds=5)
+    adapter = LocalCLIAdapter(provider_key="test-echo", executable="/bin/echo", args_template=("hello",), cwd=str(marker_dir), timeout_seconds=5, db=superuser_db)
     assignment_id = uuid.uuid4()
     await adapter.start_assignment(assignment_id)
     assert assignment_id in adapter._processes  # a real, live subprocess handle is tracked
@@ -346,7 +415,8 @@ async def test_dispatch_assignment_distinguishes_process_lost_from_generic_failu
     _lease(superuser_db, a, cursor, branch="cursor/x", worktree="/tmp/wt-process-lost", paths=["backend/app/**"])
 
     adapter = LocalCLIAdapter(
-        provider_key="cursor-agent", executable="/a/binary/that/does/not/exist/xyz", args_template=(), cwd=str(tmp_path), timeout_seconds=5
+        provider_key="cursor-agent", executable="/a/binary/that/does/not/exist/xyz", args_template=(), cwd=str(tmp_path), timeout_seconds=5,
+        db=superuser_db,
     )
     decision = await dispatch_assignment(superuser_db, assignment=a, agent=cursor, adapter=adapter)
     assert decision.outcome == OUTCOME_ADAPTER_PROCESS_LOST
@@ -361,7 +431,7 @@ async def test_collect_dispatch_result_distinguishes_timeout(superuser_db, owner
     a = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=cursor, role="builder", mode="read_write", paths=["backend/app/**"])
     _lease(superuser_db, a, cursor, branch="cursor/x", worktree="/tmp/wt-collect-timeout", paths=["backend/app/**"])
 
-    adapter = LocalCLIAdapter(provider_key="cursor-agent", executable="/bin/sleep", args_template=("5",), cwd=str(tmp_path), timeout_seconds=1)
+    adapter = LocalCLIAdapter(provider_key="cursor-agent", executable="/bin/sleep", args_template=("5",), cwd=str(tmp_path), timeout_seconds=1, db=superuser_db)
     dispatch_decision = await dispatch_assignment(superuser_db, assignment=a, agent=cursor, adapter=adapter)
     assert dispatch_decision.outcome == OUTCOME_ASSIGNABLE
     superuser_db.refresh(a)
@@ -380,7 +450,7 @@ async def test_collect_dispatch_result_success_applies_result(superuser_db, owne
     a = _assign(superuser_db, owner_id=owner_id, goal=goal, task=task, agent=cursor, role="builder", mode="read_write", paths=["backend/app/**"])
     _lease(superuser_db, a, cursor, branch="cursor/x", worktree="/tmp/wt-collect-success", paths=["backend/app/**"])
 
-    adapter = LocalCLIAdapter(provider_key="cursor-agent", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5)
+    adapter = LocalCLIAdapter(provider_key="cursor-agent", executable="/usr/bin/true", args_template=(), cwd=str(tmp_path), timeout_seconds=5, db=superuser_db)
     dispatch_decision = await dispatch_assignment(superuser_db, assignment=a, agent=cursor, adapter=adapter)
     assert dispatch_decision.attempt_id is not None
 
