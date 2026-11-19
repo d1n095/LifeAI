@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 import redis
 
 from app.config import get_settings
+from app.redis_client import get_redis_client
 
 logger = logging.getLogger("mainai.jobs.heartbeat")
 
@@ -39,7 +40,11 @@ def _client() -> redis.Redis | None:
     settings = get_settings()
     if not settings.redis_url:
         return None
-    return redis.from_url(settings.redis_url, socket_connect_timeout=3, socket_timeout=3)
+    # The shared process-wide client (app/redis_client.py) — NOT a fresh from_url() per
+    # call: this runs on EVERY worker poll cycle, and the old per-call client churned one
+    # TCP connection per tick (300 calls → 304 server connections, see
+    # app/redis_client.py's docstring) until long soak runs degraded.
+    return get_redis_client()
 
 
 def record_worker_heartbeat(worker_id: str, *, ttl_seconds: int) -> None:

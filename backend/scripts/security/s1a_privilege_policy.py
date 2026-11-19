@@ -107,6 +107,22 @@ _PROTECTED_TABLES = [
     ("document_source_units", ["SELECT", "INSERT"]),
     ("memory_source_lifecycle_events", ["SELECT"]),
     ("storage_deletion_tasks", []),
+    # SFA-1 (2026-11-18, Founder Acceptance Suite scenario 8 + REAL-PG battery evidence):
+    # alembic_version is migration bookkeeping, written exclusively by Alembic under the
+    # migration URL (backend/app/config.py: database_url is the superuser/admin role used
+    # ONLY for schema migrations). No application code path reads or writes it, but the
+    # schema-wide floor above only revokes TRUNCATE/REFERENCES/TRIGGER, so the broad
+    # `GRANT ALL PRIVILEGES ON ALL TABLES` in ensure_app_role.py left the restricted
+    # runtime role holding INSERT/UPDATE/DELETE on this table as collateral. A compromised
+    # request path could there silently desynchronize schema bookkeeping (delete/rewrite
+    # the version row → a later `alembic upgrade head` re-runs or skips real migrations),
+    # attacking the recovery/observability substrate (FR-04/FR-17) rather than any one
+    # owner's data. SELECT-only keeps diagnostic read access; every mutation stays with
+    # the migration role. Narrowing here is self-enforcing: both callers re-verify with
+    # real has_table_privilege() checks on every boot, so a boot that finds broader
+    # privileges present fails closed instead of silently running. Placement: ordering in
+    # this list is not semantically significant.
+    ("alembic_version", ["SELECT"]),
     # Life Source Foundation Bootstrap (migration 0037, docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md
     # §D/§L) — message_source_units is S1C, the exact same exclusive-arc pattern as
     # document_source_units above (every field guarded immutable by trg_msgsu_guard_update,

@@ -377,3 +377,184 @@ def test_no_bootstrap_path_grants_all_privileges_on_tables():
     assert offenders == [], (
         "a table-wide ALL PRIVILEGES grant to mainai_app was reintroduced: " + "; ".join(offenders)
     )
+
+
+# --------------------------------------------------------------------------------------
+# 5. SFA-1 (2026-11-18): alembic_version must be SELECT-only for the runtime role
+# --------------------------------------------------------------------------------------
+# Finding (Founder Acceptance Suite scenario 8 observation, REAL-PG battery evidence;
+# reported in download/SECURITY_FINDING_ALEMBIC_VERSION_DELETE.md): `alembic_version` sat in
+# neither narrowing layer — the schema-wide floor only removes TRUNCATE/REFERENCES/TRIGGER —
+# so the runtime role held INSERT/UPDATE/DELETE on the migration bookkeeping row as GRANT-ALL
+# collateral. Nothing in backend/app/ or backend/scripts/ writes that row; Alembic
+# exclusively maintains it under the migration URL (backend/app/config.py: database_url is
+# the admin role, migrations ONLY). A compromised request path could silently desynchronize
+# schema bookkeeping (delete/rewrite version_num → the next `alembic upgrade head` re-runs
+# or skips real migrations) — an attack on the recovery and observability substrate
+# (FR-04/FR-17), not on any one owner's data. The policy now narrows it to SELECT-only
+# (diagnostic read visibility). Every test below measures Postgres's live
+# has_table_privilege answer or the server's actual refusal — never the SQL text.
+
+SFA1_TABLE = "alembic_version"
+
+
+def _load_apply_runtime_privileges():
+    """Loads the real mutating policy runner by path, exactly the way
+    tests/backend/test_ensure_app_role.py loads ensure_app_role.py — it is a standalone
+    pre-boot script, not part of the `app` package."""
+    path = BACKEND_ROOT / "scripts" / "security" / "apply_runtime_privileges.py"
+    spec = importlib.util.spec_from_file_location("apply_runtime_privileges_sfa1", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _sfa1_held_privileges(conn, table: str = SFA1_TABLE) -> set[str]:
+    """Postgres's own effective answer for which of the seven table privileges mainai_app
+    holds on `table` — the same catalog-level measurement discipline section 1 uses."""
+    return {
+        priv
+        for priv in ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
+        if conn.execute(
+            text("SELECT has_table_privilege('mainai_app', :t, :p)"),
+            {"t": f'public."{table}"', "p": priv},
+        ).scalar()
+    }
+
+
+@pytest.fixture
+def s1a_narrowed_database(restore_privileges):
+    """Puts the session database through the REAL production narrowing — the same
+    `apply_and_verify()` entry point docker-entrypoint.sh runs right after
+    `alembic upgrade head` — so the SFA-1 assertions measure the policy's actual effect, not
+    conftest's uniform arwd floor (which deliberately still grants INSERT/UPDATE/DELETE on
+    alembic_version, reproducing the pre-fix production state). Depends on
+    `restore_privileges` so its post-yield re-grant runs AFTER this fixture's yield,
+    restoring the conftest baseline for whichever test runs next."""
+    settings = get_settings()
+    _load_apply_runtime_privileges().apply_and_verify(settings.database_url)
+    yield
+
+
+def test_sfa1_migration_bookkeeping_grants_the_runtime_role_exactly_select(s1a_narrowed_database):
+    """After the real production narrowing, mainai_app must hold exactly {SELECT} on
+    alembic_version: no INSERT/UPDATE/DELETE collateral (the finding), and of course none of
+    the floor's three whole-table/DDL privileges either."""
+    with migration_engine.connect() as conn:
+        assert _sfa1_held_privileges(conn) == {"SELECT"}
+
+
+def test_sfa1_runtime_role_cannot_insert_update_or_delete_migration_bookkeeping(s1a_narrowed_database):
+    """The mutation-level proof, connecting as the REAL runtime credential (APP_DATABASE_URL):
+    the server must actually refuse each statement, not merely report the privilege absent
+    from a catalog view — the same discipline section 2 applies to TRUNCATE."""
+    settings = get_settings()
+    conn = psycopg2.connect(settings.app_database_url)
+    try:
+        with conn.cursor() as cur:
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                cur.execute("UPDATE alembic_version SET version_num = '0000'")
+            conn.rollback()
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                cur.execute("DELETE FROM alembic_version")
+            conn.rollback()
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                cur.execute("INSERT INTO alembic_version (version_num) VALUES ('9999')")
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def test_sfa1_runtime_role_can_still_read_migration_bookkeeping(s1a_narrowed_database):
+    """The narrowing must not overshoot: the diagnostic read path (checking which migration
+    head a database is actually on) stays usable under the restricted role. SELECT-only is
+    the deliberate contract — read visibility without any write path."""
+    settings = get_settings()
+    conn = psycopg2.connect(settings.app_database_url)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT version_num FROM alembic_version")
+            row = cur.fetchone()
+            assert row is not None and row[0], "alembic_version must remain readable as mainai_app"
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def test_sfa1_narrowing_repairs_a_legacy_database_that_still_holds_the_wide_grant(s1a_narrowed_database):
+    """Databases that booted before this fix have the wide ACL durably committed, and a GRANT
+    never removes anything — so the narrowing must repair an ALREADY-WIDE alembic_version,
+    not only leave fresh databases correct (same reasoning as section 3's legacy test, here
+    table-scoped to the SFA-1 finding)."""
+    policy = _load_policy()
+    settings = get_settings()
+
+    admin = psycopg2.connect(settings.database_url)
+    admin.autocommit = False
+    try:
+        with admin.cursor() as cur:
+            cur.execute("GRANT INSERT, UPDATE, DELETE ON TABLE public.alembic_version TO mainai_app")
+            admin.commit()
+
+            # Precondition sanity check, so a green result can never come from the legacy
+            # state having failed to apply.
+            cur.execute("SELECT has_table_privilege('mainai_app', 'public.alembic_version', 'DELETE')")
+            assert cur.fetchone()[0] is True, "precondition failed: legacy wide grant did not apply"
+
+            cur.execute("SELECT current_user")
+            (expected_owner,) = cur.fetchone()
+            policy.acquire_privilege_boot_lock(cur)
+            errors = policy.apply_privilege_policy(
+                cur, expected_owner=expected_owner, require_complete=False
+            )
+            assert errors == [], f"policy reported errors after repair: {errors}"
+            admin.commit()
+    finally:
+        admin.rollback()
+        admin.close()
+
+    with migration_engine.connect() as conn:
+        assert _sfa1_held_privileges(conn) == {"SELECT"}
+
+
+def test_sfa1_verify_only_mode_fails_closed_while_migration_bookkeeping_is_wide(s1a_narrowed_database):
+    """The durable worker's read-only verification path (apply_privilege_policy with
+    mutate=False) must FAIL CLOSED — report the alembic_version mismatches — on any database
+    where the wider privileges are still present, so a boot can never silently run with the
+    finding re-opened. Also proves the mutating pass repairs the state and the same
+    read-only verification then goes clean."""
+    policy = _load_policy()
+    settings = get_settings()
+
+    admin = psycopg2.connect(settings.database_url)
+    admin.autocommit = False
+    try:
+        with admin.cursor() as cur:
+            cur.execute("GRANT INSERT, UPDATE, DELETE ON TABLE public.alembic_version TO mainai_app")
+            admin.commit()
+
+            cur.execute("SELECT current_user")
+            (expected_owner,) = cur.fetchone()
+
+            read_only_errors = policy.apply_privilege_policy(
+                cur, expected_owner=expected_owner, require_complete=True, mutate=False
+            )
+            assert any("alembic_version" in e for e in read_only_errors), (
+                "verify-only mode must fail closed on a wide alembic_version ACL; reported: "
+                f"{read_only_errors}"
+            )
+
+            policy.acquire_privilege_boot_lock(cur)
+            errors = policy.apply_privilege_policy(
+                cur, expected_owner=expected_owner, require_complete=True
+            )
+            assert errors == [], f"mutating pass reported errors: {errors}"
+            admin.commit()
+
+            clean = policy.apply_privilege_policy(
+                cur, expected_owner=expected_owner, require_complete=True, mutate=False
+            )
+            assert clean == [], f"verification after repair must be clean; reported: {clean}"
+    finally:
+        admin.rollback()
+        admin.close()

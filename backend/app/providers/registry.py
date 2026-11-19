@@ -113,7 +113,29 @@ async def embed_with_policy(
             goal_id=goal_id,
             job_id=job_id,
         )
-    return await provider.embed(outbound_texts, model=model)
+    vectors = await provider.embed(outbound_texts, model=model)
+
+    # Revenue & Compute Engine (P1 review fix): embeddings are billable provider calls
+    # (text-embedding-3-small et al.) and were previously invisible to accounting. The
+    # embedding APIs return no usage object, so tokens are estimated at ~4 chars/token —
+    # an honest, slightly conservative approximation recorded in the audit row. Tenant
+    # membership is derived from the user row inside record_usage. System calls
+    # (owner_id=None) get an audit row with no subject rollups.
+    from app.billing import record_usage as _record_usage
+
+    _record_usage(
+        db,
+        user_id=owner_id,
+        tenant_id=None,
+        role="embedding",
+        provider=provider.name,
+        model=model,
+        prompt_tokens=sum(len(t) for t in outbound_texts) // 4,
+        completion_tokens=0,
+        agent="embedding",
+        task=purpose or "embedding",
+    )
+    return vectors
 
 
 def resolve_chat_chain(db: Session) -> list[tuple[LLMProvider, str]]:
@@ -122,11 +144,22 @@ def resolve_chat_chain(db: Session) -> list[tuple[LLMProvider, str]]:
     key) and aren't already the primary. Embedding has no fallback in MainAI 0.1 — an
     inconsistent embedding provider mid-conversation would silently corrupt retrieval
     quality, so a failed embedding call should surface as an error, not swap providers.
+
+    A primary that is NOT configured (e.g. the settings default is openai but no API key
+    is present) is demoted: the first CONFIGURED fallback becomes the chain head. Without
+    this, every single chat call would burn a guaranteed-failing attempt on the keyless
+    provider — and, for owner-scoped calls, an egress disclosure-ledger row for a request
+    that could never succeed — before local AI served it. resolve_active() is deliberately
+    left untouched so admin/status surfaces still report the configured default.
     """
     settings = get_settings()
     primary_provider, primary_model = resolve_active(db, role="chat")
-    chain = [(primary_provider, primary_model)]
-    seen_names = {primary_provider.name}
+    chain: list[tuple[LLMProvider, str]] = []
+    seen_names: set[str] = set()
+
+    if primary_provider.is_configured():
+        chain.append((primary_provider, primary_model))
+        seen_names.add(primary_provider.name)
 
     for name in [p.strip() for p in settings.chat_fallback_order.split(",") if p.strip()]:
         if name in seen_names or name not in _PROVIDERS:
@@ -137,6 +170,11 @@ def resolve_chat_chain(db: Session) -> list[tuple[LLMProvider, str]]:
         chain.append((provider, DEFAULT_CHAT_MODELS.get(name, primary_model)))
         seen_names.add(name)
 
+    if not chain:
+        # Nothing configured at all — keep the configured default as the head so callers
+        # get the familiar "provider X is not configured" ProviderError instead of an
+        # empty-chain error, and status surfaces keep reporting it.
+        chain.append((primary_provider, primary_model))
     return chain
 
 

@@ -10,10 +10,16 @@ from app.bootstrap import bootstrap_founder_user
 from app.config import get_settings
 from app.db import SessionLocal, call_with_db_retry, migration_engine
 from app.limiter import limiter
+# Direct OpenAI consultation (official Responses API) — standalone, fail-closed-until-configured
+# module; see app/openai_consult/__init__.py for the full gate list before any code path here
+# can reach the network.
+from app.openai_consult.router import router as openai_consult
 from app.providers.base import looks_like_placeholder_secret
 from app.rls import apply_mainai_execution_privileges, apply_mainai_job_runtime_privileges, apply_rls
 from app.routers import (
+    improvement_proposals,
     account,
+    ads,
     admin,
     agents,
     auth,
@@ -23,6 +29,7 @@ from app.routers import (
     conversations,
     documents,
     execution_envelopes,
+    founder_recovery,
     health,
     inspectable_memory,
     knowledge,
@@ -66,6 +73,7 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(auth.router)
+app.include_router(founder_recovery.router)
 app.include_router(account.router)
 app.include_router(blueprint.router)
 app.include_router(calendar.router)
@@ -80,11 +88,14 @@ app.include_router(admin.router)
 app.include_router(memory.router)
 app.include_router(agents.router)
 app.include_router(mainai_jobs.router)
+app.include_router(improvement_proposals.router)
 app.include_router(mainai_execution.router)
 app.include_router(project_entities.router)
 app.include_router(inspectable_memory.router)
 app.include_router(execution_envelopes.router)
 app.include_router(provider_spend.router)
+app.include_router(openai_consult)
+app.include_router(ads.router)
 
 
 @app.on_event("startup")
@@ -138,6 +149,12 @@ def on_startup():
 @app.on_event("shutdown")
 def on_shutdown():
     stop_scheduler()
+    # Release the shared Redis pools explicitly (app/redis_client.py) — a clean shutdown
+    # closes every pooled socket instead of stranding them for the process-exit GC sweep,
+    # which is what made long-running sessions accumulate sockets and made teardown noisy.
+    from app.redis_client import close_shared_redis_clients
+
+    close_shared_redis_clients()
 
 
 def _check_smtp_mode() -> None:

@@ -27,7 +27,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.mainai_execution.graph import recompute_task_readiness
-from app.mainai_execution.lessons import apply_lessons_to_verification_plan
+from app.mainai_execution.lesson_selection import LessonSelection, select_lessons_for_planning
+from app.mainai_execution.lessons import (
+    apply_lessons_to_verification_plan,
+    record_lesson_guard_advisory,
+    record_lesson_plan_decisions,
+)
 from app.mainai_execution.verify import VerificationStepError, validate_targeted_tests_target
 from app.models.mainai_execution import (
     TERMINAL_MAINAI_TASK_STATUSES,
@@ -313,13 +318,34 @@ def create_plan(
 
     persisted: list[MainAITask] = []
     applied_lessons_by_task: list[list[uuid.UUID]] = []
+    selections_by_task: list[LessonSelection | None] = []
     for spec in tasks:
         # Engineering-lesson influence (app/mainai_execution/lessons.py): a previously recorded
         # lesson tagged for this task_type can add a targeted_tests step the spec itself didn't
         # already have -- real influence on what gets verified, not a loose suggestion. Only
         # ever ADDS to verification_plan, never removes a step the planner/founder specified.
+        #
+        # M1 (Round 8): the candidate set is ranked by MEASURED standing for THIS owner
+        # (select_lessons_for_planning -- proven lessons first, single-failure lessons
+        # flagged but still applied, failed-majority / unusable-guard lessons excluded for
+        # this pass with their reasons on the record). The full decision block rides on the
+        # created event below, so every plan explains which rules influenced it and why.
+        selection = select_lessons_for_planning(db, owner_id=goal.owner_id, task_type=spec.task_type)
         verification_plan, applied_lesson_ids = apply_lessons_to_verification_plan(
-            db, task_type=spec.task_type, verification_plan=spec.verification_plan
+            db, task_type=spec.task_type, verification_plan=spec.verification_plan, selection=selection
+        )
+        selections_by_task.append(selection)
+        # Anti-overcorrection advisory (app/mainai_execution/lessons.py): records the
+        # signal when past-lesson guards dominate this task's plan — advisory only, the
+        # plan above stands.
+        record_lesson_guard_advisory(
+            db,
+            owner_id=goal.owner_id,
+            goal_id=goal.id,
+            task_type=spec.task_type,
+            spec_verification_plan=spec.verification_plan,
+            augmented_verification_plan=verification_plan,
+            applied_lesson_ids=applied_lesson_ids,
         )
         task = MainAITask(
             goal_id=goal.id,
@@ -349,10 +375,22 @@ def create_plan(
                 )
             )
 
-    for task, applied_lesson_ids in zip(persisted, applied_lessons_by_task):
+    for i, (task, applied_lesson_ids) in enumerate(zip(persisted, applied_lessons_by_task)):
+        # Lesson -> plan-decision provenance edge (migration 0074, written where the change
+        # actually happened): one durable row per (lesson, task) the lesson really shaped —
+        # what lesson_effectiveness() joins guard observations against. Same transaction as
+        # the plan itself; ON CONFLICT DO NOTHING keeps a replayed pass from inflating counts.
+        if applied_lesson_ids:
+            record_lesson_plan_decisions(db, task=task, applied_lesson_ids=applied_lesson_ids)
         detail = {"plan_version": next_version}
         if applied_lesson_ids:
             detail["lessons_applied"] = [str(lesson_id) for lesson_id in applied_lesson_ids]
+        selection = selections_by_task[i] if i < len(selections_by_task) else None
+        if selection is not None and selection.decisions:
+            # The explainable decision record: which rules were considered, their measured
+            # standing, who was selected/flagged/excluded and why — point-in-time, on the
+            # durable event history (the evidence tables stay the live source of truth).
+            detail["lesson_selection"] = selection.summary_for_event()
         db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.created, detail=detail))
 
     goal.current_plan_version = next_version

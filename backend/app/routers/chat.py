@@ -31,14 +31,24 @@ from app.founder_memory_signals import record_candidate_signal
 from app.limiter import limiter
 from app.mainai_runtime_contract import build_answer_response, sanitize_unverified_execution_claims
 from app.models.conversation import Conversation, Message as MessageModel, MessageRole, MessageStatus
-from app.models.usage import UsageLog
+from app.billing import record_usage
+from app.billing.enforcement import BillingBudgetExceededError, BillingEnforcementUnavailableError
+from app.billing.limits import effective_limits
+from app.billing.reservation import estimate_reservation_cost, release_reservation, reserve_compute, settle_reservation
 from app.models.user import User
 from app.providers.base import Message, ProviderError
 from app.providers.pricing import estimate_cost
 from app.providers.registry import chat_with_fallback
 from app.providers.verification import classify_provider_exception
 from app.rag.context_status import build_context_status
+from app.rag.message_source import MessageSourceLocator, get_or_create_message_source_unit
 from app.rag.retrieve import retrieve_context
+from app.mainai_execution.lesson_selection import format_lesson_feedback_instructions
+from app.rag.graph_instructions import format_graph_context_instructions
+from app.rag.untrusted_content import UNTRUSTED_CONTENT_POLICY, build_untrusted_context_block
+from app.rag.epistemics import epistemic_status_counts_sql, format_epistemic_instructions
+from app.rag.evidence_metadata import summarize_owner_evidence_landscape
+from app.rag.evidence_quality import format_landscape_instructions
 from app.rag.trust import assess_confidence, build_trust_instructions, detect_claim_conflicts, detect_conflicts
 from app.schemas import ChatMessageIn, ChatMessageOut, ContextStatusOut, SourceRef
 
@@ -160,8 +170,15 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     # reply reflects the real reason) and structured API metadata (context_status below) the
     # frontend can render without depending on the model having said it correctly.
     context_status = build_context_status(db, user.id, hit_count=len(hits), retrieval_degraded_reason=retrieval_degraded_reason)
-    context_block = "\n\n".join(f"{_label(h)}\n{h['text']}" for h in hits) or (
-        context_status.message if context_status is not None else "Ingen relevant kunskap hittades."
+    # Round 9 M4: retrieved document content is UNTRUSTED INPUT — every chunk is framed
+    # as DATA (never instructions) so content-level injections cannot pose as platform
+    # directives. The framing is deterministic and applied to every hit, not filtered by
+    # suspicion heuristics.
+    context_block = build_untrusted_context_block(
+        [{"title": _label(h), "text": h["text"]} for h in hits],
+        fallback=(
+            context_status.message if context_status is not None else "Ingen relevant kunskap hittades."
+        ),
     )
     context_status_out = (
         ContextStatusOut(
@@ -208,15 +225,70 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     _record_candidate_signal_if_worth_noticing(db, owner_id=user.id, user_message=user_message, context_resolution=context_resolution)
 
     system_content = (
-        f"{SYSTEM_PROMPT}\n\nKONTEXT:\n{context_block}\n\n"
+        f"{SYSTEM_PROMPT}\n\n{UNTRUSTED_CONTENT_POLICY}\n\nKONTEXT:\n{context_block}\n\n"
         f"TILLFÖRLITLIGHETSINSTRUKTION:\n"
         f"{build_trust_instructions(trust.level, trust.top_source_status, trust.conflicts_detected)}"
     )
+    # Evidence-ladder rollup + body-of-evidence landscape (Round 8: these lines were
+    # imported but never appended — the seam existed without a driver). Fail-open: any
+    # failure degrades to the trust text alone, exactly the R7 contract.
+    _evidence_lines: list[str] = []
+    try:
+        _evidence_lines.append(format_epistemic_instructions(epistemic_status_counts_sql(db, user.id)))
+        _evidence_lines.append(format_landscape_instructions(summarize_owner_evidence_landscape(db, user.id)))
+    except Exception:
+        logger.warning("epistemic rollup failed; system prompt degrades to trust text alone", exc_info=True)
+    if _evidence_lines:
+        system_content += "\n\nEVIDENSSTATUS:\n" + "\n".join(_evidence_lines)
+    # Round 9 M1: measured lesson standings + recurring-failure clusters ride the same
+    # instruction block (fail-open like everything above). This is planner FEEDBACK in the
+    # cognitive sense: the deterministic create_plan() ordering is unchanged — the prompt
+    # layer now KNOWS which rules are measured-useful, which are hypotheses, and which
+    # components keep failing under every rule pointed at them.
+    try:
+        lesson_feedback = format_lesson_feedback_instructions(db, owner_id=user.id)
+        if lesson_feedback:
+            system_content += "\n\n" + lesson_feedback
+    except Exception:
+        logger.warning("lesson feedback failed; system prompt degrades without it", exc_info=True)
+    # Round 9 M3: the claim graph IN the answer path — consequences, question-relevant
+    # cross-domain overlaps, and the retrieved claims' topic landscape are computed for the
+    # retrieved sources and appended (fail-open). The graph now influences what the model
+    # sees, not just what an endpoint would return.
+    try:
+        graph_context = format_graph_context_instructions(
+            db, user.id, [h.get("document_id") for h in hits], user_message.content if hasattr(user_message, "content") else payload.question,
+            top_hit_text=hits[0].get("text") if hits else None,
+        )
+        if graph_context:
+            system_content += "\n\n" + graph_context
+    except Exception:
+        logger.warning("graph context failed; system prompt degrades without it", exc_info=True)
     messages = [Message(role="system", content=system_content)]
     messages += [Message(role=m.role.value, content=m.content) for m in history]
     messages.append(Message(role="user", content=user_message.content))
 
     assistant_row = _get_or_create_reply_slot(db, user_message.id)
+
+    # Revenue & Compute Engine (app/billing/): reserve a worst-case estimate BEFORE the
+    # call, settle with real usage after, release on failure. When enforcement is off
+    # (default until the founder turns it on) reservation is None and nothing changes.
+    reservation = None
+    limits = effective_limits(db, user)
+    settings_chat = get_settings()
+    if settings_chat.billing_enforcement_enabled:
+        est_tokens = sum(len(m.content) for m in messages) // 4 + 1024
+        try:
+            reservation = reserve_compute(
+                db, user=user, limits=limits, estimated_tokens=est_tokens,
+                estimated_cost_usd=estimate_reservation_cost(settings_chat, est_tokens),
+            )
+        except BillingBudgetExceededError as exc:
+            raise HTTPException(status_code=402, detail=str(exc))
+        except BillingEnforcementUnavailableError as exc:
+            # Fail-closed: enforcement ON but the counter store is unavailable. Refuse
+            # cleanly (503) rather than admit an uncounted call.
+            raise HTTPException(status_code=503, detail=str(exc))
 
     try:
         result, attempted = await chat_with_fallback(
@@ -227,6 +299,8 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
             requested_by="routers.chat._attempt_assistant_reply",
         )
     except (ProviderError, EgressDeniedError) as exc:
+        if reservation is not None:
+            release_reservation(reservation)  # failed call: no phantom spend
         # Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V1): an
         # EgressDeniedError means the gate refused the WHOLE call before any provider was ever
         # reached (never a provider outage) -- always non-retryable, since the content that
@@ -249,6 +323,9 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
             assistant_row.content = ""
         db.commit()
         db.refresh(assistant_row)
+        # The failed reply row is still an honest part of the founder's history — capture
+        # its provenance too (fail-open, same helper as the success path).
+        _capture_message_source(db, message=assistant_row, conversation=conversation)
         return ChatMessageOut(
             conversation_id=conversation.id,
             user_message_id=user_message.id,
@@ -263,18 +340,27 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     usage = result.raw_usage or {}
     prompt_tokens = usage.get("prompt_tokens", 0)
     completion_tokens = usage.get("completion_tokens", 0)
-    cost = estimate_cost(result.provider, result.model, prompt_tokens, completion_tokens)
-    db.add(
-        UsageLog(
-            user_id=user.id,
-            conversation_id=conversation.id,
-            role="chat",
-            provider=result.provider,
-            model=result.model,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            cost_usd=cost,
-        )
+    if reservation is not None:
+        settle_reservation(reservation, actual_tokens=prompt_tokens + completion_tokens,
+                           actual_cost_usd=estimate_reservation_cost(
+                               settings_chat, prompt_tokens + completion_tokens,
+                               provider=result.provider, model=result.model))
+    # Revenue & Compute Engine: the SINGLE accounting writer (per-call audit row +
+    # enforcement rollups in one pipeline). Tenant/agent/task dimensions are platform
+    # plumbing; tier is snapshotted for audit. See app/billing/__init__.py.
+    record_usage(
+        db,
+        user_id=user.id,
+        tenant_id=getattr(user, "tenant_id", None),
+        role="chat",
+        provider=result.provider,
+        model=result.model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        agent="chat",
+        task="conversation_reply",
+        conversation_id=conversation.id,
+        tier=effective_limits(db, user).tier,
     )
 
     # Founder re-review round (PR #36): the runtime truthfulness contract (app/
@@ -304,6 +390,7 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     db.add(conversation)
     db.commit()
     db.refresh(assistant_row)
+    _capture_message_source(db, message=assistant_row, conversation=conversation)
 
     sources = [
         SourceRef(
@@ -334,6 +421,38 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
         context_confidence=context_resolution.confidence,
         context_status=context_status_out,
     )
+
+
+
+def _capture_message_source(db: Session, *, message, conversation) -> None:
+    """Capture the S1C immutable provenance unit (memory_source_units/message_source_units)
+    for a message AT WRITE TIME (Founder Alpha audit gap A1-a: previously these existed
+    only after a founder-triggered backfill job, so the provenance layer lagged the chat).
+
+    Deliberately FAIL-OPEN for chat delivery: provenance must never break or delay the
+    founder's conversation — the backfill job remains the safety net for anything this
+    misses, and it is idempotent (same identity key returns the same unit). Reuses the
+    existing race-safe find-or-create service and the DB-level immutability triggers;
+    no new storage is introduced."""
+    try:
+        get_or_create_message_source_unit(
+            db,
+            MessageSourceLocator(
+                owner_id=conversation.user_id,
+                message_id=message.id,
+                conversation_id=conversation.id,
+                role=message.role,
+                observed_at=message.created_at,
+                content_text=message.content,
+            ),
+        )
+        db.commit()
+    except Exception:
+        logger.exception(
+            "chat: message_source_unit capture failed for message %s — backfill will cover it",
+            message.id,
+        )
+        db.rollback()
 
 
 @router.post("", response_model=ChatMessageOut)
@@ -367,6 +486,7 @@ async def chat(
     db.add(user_message)
     db.commit()
     db.refresh(user_message)
+    _capture_message_source(db, message=user_message, conversation=conversation)
 
     return await _attempt_assistant_reply(db, conversation=conversation, user_message=user_message, user=user)
 

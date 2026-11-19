@@ -369,6 +369,85 @@ class KnowledgeClaimOut(BaseModel):
     grounding_score: float
     chunk_id: uuid.UUID | None
     created_at: datetime
+    # Evidence-aware epistemics (app/rag/epistemics.py): verified_fact |
+    # conflicting_evidence | hypothesis | assumption | unknown — additive; None only for
+    # constructors that predate the ladder (every live read path sets it).
+    epistemic_status: str | None = None
+    # Evidence-quality metadata (app/rag/evidence_metadata.py): the founder-declared study
+    # facts and the MATERIALIZED verdict the pure grader computed from them. None/[] when
+    # nothing has been stamped for the claim — an honest absence, never a guess.
+    quality_grade: str | None = None
+    quality_cap: str | None = None
+    quality_caveats: list[str] = []
+
+
+class ClaimEvidenceMetadataIn(BaseModel):
+    """A founder-declared structured study-metadata block for one claim (the producer
+    input to app/rag/evidence_metadata.record_claim_evidence_metadata). Keys outside the
+    declared vocabulary come back in `rejected_keys` — fail-closed, never stored."""
+
+    metadata: dict = {}
+    declared_via: str = "founder_api"
+
+
+class ClaimEvidenceMetadataOut(BaseModel):
+    claim_id: uuid.UUID
+    declared: dict
+    rejected: dict[str, str]
+    quality_grade: str
+    quality_cap: str
+    quality_caveats: list[str]
+    axis_findings: list[dict]
+    declared_via: str
+    recorded_at: datetime
+
+
+class ClaimGraphEdgeIn(BaseModel):
+    """A founder-declared claim-graph edge (Round 8 M3): the production input path for
+    connecting claims across domains. The type vocabulary is the table's own closed enum;
+    an unknown type is refused, never guessed."""
+
+    to_claim_id: uuid.UUID
+    relationship_type: str  # supports | contradicts | supersedes | duplicates
+    note: str | None = None
+
+
+class ClaimGraphEdgeOut(BaseModel):
+    id: uuid.UUID
+    from_claim_id: uuid.UUID
+    to_claim_id: uuid.UUID
+    relationship_type: str
+    note: str | None = None
+    # Epistemic-shift records (Round 8 M3): prior vs current ladder verdict for each
+    # endpoint, computed when a contradicts edge lands — "new information changed an
+    # earlier conclusion", with the reasons on both sides. Empty for non-contradicts edges.
+    epistemic_shifts: list[dict] = []
+
+
+class ClaimEvidenceChainOut(BaseModel):
+    """The full traceability record for one claim (Round 8 M3): verdict + reasons + the
+    source/chunk grounding + BOTH sides of every contradicting edge (a conflict is
+    presented, never adjudicated here) + the stamped study-metadata verdict + the
+    bounded second-order consequences of the claim's source. Round 10 M4 adds the
+    bounded INTELLECTUAL ADVERSARY review: evidence-backed objections when justified,
+    each with its epistemic category and provenance pointers; reviewed=False means no
+    justified objection — never silent approval."""
+
+    claim_id: uuid.UUID
+    claim_text: str
+    claim_type: str
+    claim_status: str
+    confidence: str
+    epistemic_status: str
+    verdict_reasons: list[str]
+    source: dict
+    chunk_grounded: bool
+    adversarial_review: dict
+    quality_metadata: dict | None = None
+    supporting_edges: list[dict] = []
+    contradicting_edges: list[dict] = []
+    other_edges: list[dict] = []
+    second_order_consequences: list[dict] = []
 
 
 class MediaSegmentOut(BaseModel):

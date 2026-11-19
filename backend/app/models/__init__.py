@@ -86,9 +86,14 @@ from app.models.intelligence_governance import (
     ParticipationMode,
     ReviewKind,
 )
+from app.models.claim_evidence_metadata import ClaimEvidenceMetadata
 from app.models.knowledge_claim import KnowledgeClaim
 from app.models.blueprint_draft import BlueprintDraft
 from app.models.knowledge_version import KnowledgeVersion
+from app.models.lesson_plan_decisions import (
+    EngineeringLessonPlanDecision,
+    LessonPlanDecisionType,
+)
 from app.models.lesson_guard_observations import (
     EngineeringLessonGuardObservation,
     LessonGuardEvidenceStrength,
@@ -211,6 +216,7 @@ from app.models.project_memory import (
     ProjectNote,
     ProjectSource,
 )
+from app.models.github_status import GithubStatusSnapshot
 from app.models.provider_config import ProviderConfig
 from app.models.provider_disclosure import (
     ProviderDisclosureDecision,
@@ -222,6 +228,8 @@ from app.models.provider_spend import (
     ProviderSpendUsageEvent,
     ProviderSpendUsageStatus,
 )
+from app.models.improvement_proposal import ImprovementSource, ImprovementStatus, MainAIImprovementProposal
+from app.models.cognitive_gate import CognitiveGateCaseResult, CognitiveGateRun, GateCaseStatus, GateExecutionMode
 from app.models.provider_verification import ProviderVerificationCheck
 from app.models.refresh_token import RefreshToken
 from app.models.revoked_access_token import RevokedAccessToken
@@ -261,6 +269,8 @@ from app.models.strategy_synthesis import (
 )
 from app.models.supervisor_lease import SupervisorGoalLease
 from app.models.usage import UsageLog
+from app.models.billing import BillingTenant, UsageRollup, RevenueLedger
+from app.models.ads import AdConsentEvent, AdEvent
 from app.models.user import User
 from app.models.work_candidate import WorkCandidate
 from app.models.work_intelligence import (
@@ -388,6 +398,7 @@ __all__ = [
     "LifeIntentEvent",
     "ParticipationMode",
     "ReviewKind",
+    "ClaimEvidenceMetadata",
     "KnowledgeClaim",
     "BlueprintDraft",
     "KnowledgeVersion",
@@ -398,6 +409,8 @@ __all__ = [
     "TERMINAL_MAINAI_TASK_STATUSES",
     "EngineeringLesson",
     "EngineeringLessonGuardObservation",
+    "EngineeringLessonPlanDecision",
+    "LessonPlanDecisionType",
     "LessonGuardEvidenceStrength",
     "LessonGuardOutcome",
     "ProviderSpendAuthorization",
@@ -573,6 +586,25 @@ __all__ = [
     "StorageDeletionReason",
     "StorageDeletionStatus",
     "StorageDeletionTask",
+    "SupervisorGoalLease",
+    "UsageLog",
+    "BillingTenant",
+    "UsageRollup",
+    "RevenueLedger",
+    "AdConsentEvent",
+    "AdEvent",
+    "User",
+    "WorkEfficiencyObservation",
+    "WorkSpecialistContribution",
+    "WorkStoppingDecision",
+    "WorkStrategy",
+    "WorkStrategyExecution",
+    "WorkStrategyFinding",
+    "WorkStrategyLessonLink",
+    "WorkTraceEvent",
+    "WorkVerificationObligation",
+    "WorkVerificationObservation",
+    "GithubStatusSnapshot",
     "StrategyComparabilityAssessment",
     "StrategyComparison",
     "StrategyEfficiencyDelta",
