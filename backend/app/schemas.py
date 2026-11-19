@@ -246,11 +246,90 @@ class ProviderConfigIn(BaseModel):
     provider: str
     model: str
 
+    @field_validator("role")
+    @classmethod
+    def valid_role(cls, value: str) -> str:
+        if value not in ("chat", "embedding"):
+            raise ValueError("role måste vara 'chat' eller 'embedding'.")
+        return value
+
+    @field_validator("provider", "model")
+    @classmethod
+    def non_empty_identifier(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("provider och model måste vara icke-tomma.")
+        return normalized
+
 
 class ProviderConfigOut(ProviderConfigIn):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     is_active: bool
+
+
+class ModelCatalogOut(BaseModel):
+    provider: str
+    model_id: str
+    version: str
+    capabilities: list[str]
+    context_window_tokens: int | None
+    locality: str
+    license_name: str
+    license_url: str | None
+    input_price_per_million_usd: float | None
+    output_price_per_million_usd: float | None
+    pricing_source: str
+    pricing_as_of: str
+    requests_per_minute: int | None
+    tokens_per_minute: int | None
+    quota_note: str
+    availability: str
+    configured: bool
+    verification_result: str | None = None
+    verification_checked_at: datetime | None = None
+
+
+class ModelSelectionPreviewIn(BaseModel):
+    role: str = "chat"
+    required_capabilities: list[str] = []
+    minimum_context_tokens: int = 0
+    estimated_input_tokens: int = 0
+    allow_external: bool = False
+    prefer_local: bool = True
+    allowed_providers: list[str] = []
+    allowed_models: list[str] = []
+    max_input_price_per_million_usd: float | None = None
+    max_output_price_per_million_usd: float | None = None
+    require_verified: bool = True
+    requested_provider: str | None = None
+    requested_model: str | None = None
+
+    @field_validator("role")
+    @classmethod
+    def valid_selection_role(cls, value: str) -> str:
+        if value not in ("chat", "embedding"):
+            raise ValueError("role måste vara 'chat' eller 'embedding'.")
+        return value
+
+    @field_validator("minimum_context_tokens", "estimated_input_tokens")
+    @classmethod
+    def non_negative_tokens(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("tokenvärden måste vara icke-negativa.")
+        return value
+
+
+class ModelSelectionPreviewOut(BaseModel):
+    provider: str
+    model: str
+    version: str
+    capabilities: list[str]
+    locality: str
+    verified_required: bool
+    authority_note: str = (
+        "selection is not spend, egress, execution, merge, deploy, or activation authority"
+    )
 
 
 class ProviderVerificationOut(BaseModel):
@@ -277,6 +356,7 @@ class ProviderStatus(BaseModel):
 class ProviderVerifyIn(BaseModel):
     provider: str
     role: str  # "chat" | "embedding"
+    model: str | None = None
 
     @field_validator("role")
     @classmethod
