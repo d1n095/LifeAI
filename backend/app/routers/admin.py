@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func
@@ -12,7 +13,13 @@ from app.deps import require_founder
 from app.models.provider_config import ProviderConfig
 from app.models.usage import UsageLog
 from app.models.user import User
-from app.providers.registry import get_provider, provider_names
+from app.providers.catalog import (
+    ModelSelectionError,
+    ModelSelectionPolicy,
+    get_model_spec,
+    model_specs,
+)
+from app.providers.registry import get_provider, provider_names, select_model
 from app.providers.verification import latest_check, verify_now
 from app.models.memory_source_backfill_run import BackfillRunMode, MemorySourceBackfillFailure, MemorySourceBackfillRun
 from app.rag.claims import backfill_claim_types
@@ -29,6 +36,9 @@ from app.schemas import (
     BackfillRunCreateIn,
     BackfillRunFailureOut,
     BackfillRunOut,
+    ModelCatalogOut,
+    ModelSelectionPreviewIn,
+    ModelSelectionPreviewOut,
     ProviderConfigIn,
     ProviderConfigOut,
     ProviderStatus,
@@ -77,6 +87,92 @@ def provider_status(db: Session = Depends(get_db)):
     return statuses
 
 
+@router.get("/providers/models", response_model=list[ModelCatalogOut])
+def provider_model_catalog(db: Session = Depends(get_db)):
+    """Founder-visible catalog joined with live configuration and exact-model evidence."""
+
+    rows: list[ModelCatalogOut] = []
+    for spec in model_specs():
+        check = latest_check(db, spec.provider, "embedding" if "embedding" in spec.capabilities else "chat", model=spec.model_id)
+        provider = get_provider(spec.provider)
+        rows.append(
+            ModelCatalogOut(
+                provider=spec.provider,
+                model_id=spec.model_id,
+                version=spec.version,
+                capabilities=sorted(spec.capabilities),
+                context_window_tokens=spec.context_window_tokens,
+                locality=spec.locality.value,
+                license_name=spec.license_name,
+                license_url=spec.license_url,
+                input_price_per_million_usd=(
+                    float(spec.pricing.input_per_million_usd)
+                    if spec.pricing.input_per_million_usd is not None
+                    else None
+                ),
+                output_price_per_million_usd=(
+                    float(spec.pricing.output_per_million_usd)
+                    if spec.pricing.output_per_million_usd is not None
+                    else None
+                ),
+                pricing_source=spec.pricing.source,
+                pricing_as_of=spec.pricing.as_of,
+                requests_per_minute=spec.quota.requests_per_minute,
+                tokens_per_minute=spec.quota.tokens_per_minute,
+                quota_note=spec.quota.note,
+                availability=spec.availability.value,
+                configured=provider.is_configured(),
+                verification_result=check.result.value if check is not None else None,
+                verification_checked_at=check.checked_at if check is not None else None,
+            )
+        )
+    return rows
+
+
+@router.post("/providers/select/preview", response_model=ModelSelectionPreviewOut)
+def preview_model_selection(payload: ModelSelectionPreviewIn, db: Session = Depends(get_db)):
+    """Read-only deterministic preview. Selection never creates authority or invokes a model."""
+
+    policy = ModelSelectionPolicy(
+        role=payload.role,
+        required_capabilities=frozenset(payload.required_capabilities),
+        minimum_context_tokens=payload.minimum_context_tokens,
+        estimated_input_tokens=payload.estimated_input_tokens,
+        allow_external=payload.allow_external,
+        prefer_local=payload.prefer_local,
+        allowed_providers=frozenset(payload.allowed_providers),
+        allowed_models=frozenset(payload.allowed_models),
+        max_input_price_per_million_usd=(
+            Decimal(str(payload.max_input_price_per_million_usd))
+            if payload.max_input_price_per_million_usd is not None
+            else None
+        ),
+        max_output_price_per_million_usd=(
+            Decimal(str(payload.max_output_price_per_million_usd))
+            if payload.max_output_price_per_million_usd is not None
+            else None
+        ),
+        require_verified=payload.require_verified,
+    )
+    try:
+        _, model, spec = select_model(
+            db,
+            policy,
+            requested_provider=payload.requested_provider,
+            requested_model=payload.requested_model,
+        )
+    except ModelSelectionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return ModelSelectionPreviewOut(
+        provider=spec.provider,
+        model=model,
+        version=spec.version,
+        capabilities=sorted(spec.capabilities),
+        locality=spec.locality.value,
+        verified_required=policy.require_verified,
+    )
+
+
 @router.post("/providers/verify", response_model=ProviderVerificationOut)
 async def verify_provider_now(
     payload: ProviderVerifyIn,
@@ -92,7 +188,20 @@ async def verify_provider_now(
     leverantör."""
     if payload.provider not in provider_names():
         raise HTTPException(status_code=400, detail="Okänd leverantör.")
-    outcome = await verify_now(db, payload.provider, payload.role, checked_by="founder")
+    if payload.model is not None:
+        try:
+            spec = get_model_spec(payload.provider, payload.model)
+        except ModelSelectionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if payload.role not in spec.capabilities:
+            raise HTTPException(status_code=400, detail="Modellen stöder inte den begärda rollen.")
+    outcome = await verify_now(
+        db,
+        payload.provider,
+        payload.role,
+        checked_by="founder",
+        model=payload.model,
+    )
     record_audit(
         db,
         user_id=user.id,
@@ -125,6 +234,23 @@ def set_provider_config(
     This is the single write path that changes what LLM the whole platform uses —
     no redeploy, no code change.
     """
+    try:
+        # Manual choice is exact, registered and freshly verified. This validates selection
+        # only; it does not authorize provider spend or content egress.
+        select_model(
+            db,
+            ModelSelectionPolicy(
+                role=payload.role,
+                allow_external=True,
+                prefer_local=False,
+                require_verified=True,
+            ),
+            requested_provider=payload.provider,
+            requested_model=payload.model,
+        )
+    except ModelSelectionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     entry = db.query(ProviderConfig).filter_by(role=payload.role).first()
     if entry is None:
         entry = ProviderConfig(role=payload.role, provider=payload.provider, model=payload.model, is_active=True)
