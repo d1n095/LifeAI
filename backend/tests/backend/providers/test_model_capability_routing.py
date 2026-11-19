@@ -9,7 +9,7 @@ from app.config import get_settings
 from app.egress_policy import EgressDeniedError
 from app.models.provider_disclosure import ProviderDisclosureEvent
 from app.models.provider_verification import ProviderVerificationCheck, VerificationResult
-from app.providers.base import Message
+from app.providers.base import ChatResult, Message
 from app.providers.catalog import (
     DeploymentLocality,
     ModelSelectionError,
@@ -286,24 +286,25 @@ def test_catalog_and_selection_endpoints_are_founder_only_and_manual_choice_is_v
     csrf = _login(client)
     monkeypatch.setattr(get_settings(), "openai_api_key", "configured")
 
+    async def _verified_chat(self, messages, model, **kwargs):
+        return ChatResult(content="pong", provider="openai", model=model)
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _verified_chat)
+
     verify = client.post(
         "/api/admin/providers/verify",
         json={"provider": "openai", "role": "chat", "model": "gpt-4o-mini"},
         headers={"X-CSRF-Token": csrf},
     )
-    # No network is made in this test suite fixture, so verification may report unavailable;
-    # the important contract is that an unverified model cannot be activated.
     assert verify.status_code == 200
+    assert verify.json()["result"] == "ok"
 
     update = client.put(
         "/api/admin/providers/config",
         json={"role": "chat", "provider": "openai", "model": "gpt-4o-mini"},
         headers={"X-CSRF-Token": csrf},
     )
-    if verify.json()["result"] == "ok":
-        assert update.status_code == 200
-    else:
-        assert update.status_code == 409
+    assert update.status_code == 200
 
 
 def test_unregistered_manual_model_is_rejected_before_configuration(client):
