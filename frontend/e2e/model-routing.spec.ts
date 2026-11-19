@@ -7,6 +7,9 @@ import { loginViaUi } from "./helpers";
 test("admin verifies and activates the exact selected Z.ai model", async ({ page }) => {
   await loginViaUi(page, FRONTEND_URL, "founder@lifeos.local",
     process.env.E2E_FOUNDER_PASSWORD || "TestFounderPassword123!");
+  // loginViaUi clicks Submit but does not await the authenticated redirect. Navigating
+  // immediately can abort login and send this test back to the login page.
+  await page.waitForURL(FRONTEND_URL + "/", { timeout: 5000 });
   const captured: Record<string, unknown>[] = [];
   await page.route("**/api/admin/providers/status", (route) => route.fulfill({ json: [{
     name: "zai", configured: true, active_chat: false, active_embedding: false,

@@ -240,6 +240,13 @@ _MODEL_SPECS: tuple[ModelSpec, ...] = (
         pricing=_price("0", "0", source="local inference; no provider charge"), quota=ModelQuota(),
     ),
     ModelSpec(
+        provider="ollama", model_id="gemma3:4b", version="local mutable tag",
+        capabilities=frozenset({"chat"}), context_window_tokens=None,
+        locality=DeploymentLocality.local, license_name="Gemma terms of use",
+        license_url="https://ai.google.dev/gemma/terms",
+        pricing=_price("0", "0", source="local inference; no provider charge"), quota=ModelQuota(),
+    ),
+    ModelSpec(
         provider="ollama", model_id="all-minilm", version="local mutable tag",
         capabilities=frozenset({"embedding"}), context_window_tokens=None,
         locality=DeploymentLocality.local, license_name="Apache-2.0",

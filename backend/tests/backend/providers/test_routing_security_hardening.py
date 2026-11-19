@@ -75,7 +75,7 @@ async def test_slow_older_success_cannot_override_newer_failure(db_session, monk
     assert verification.latest_check(db_session, "openai", "chat", model="gpt-4o-mini").id == newer.id
 
 
-@pytest.mark.parametrize("role,model", [("chat", "qwen2.5:0.5b"), ("embedding", "all-minilm")])
+@pytest.mark.parametrize("role,model", [("chat", "qwen2.5:0.5b"), ("embedding", "all-minilm"), ("chat", "gemma3:4b")])
 def test_alpha_models_can_be_selected_without_external_permission(db_session, role, model):
     check(db_session, provider="ollama", model=model, role=role)
     provider, chosen, _ = registry.select_model(db_session, ModelSelectionPolicy(role=role),
