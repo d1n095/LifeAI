@@ -29,14 +29,24 @@ def test_health_reports_alive_when_heartbeat_is_present(client, monkeypatch):
     monkeypatch.setattr(health_router, "worker_process_alive", lambda: True)
     res = client.get("/api/health")
     assert res.status_code == 200
-    assert res.json() == {"status": "ok", "worker": "alive"}
+    body = res.json()
+    assert body["status"] == "ok"
+    assert body["worker"] == "alive"
+    # The storage probe is part of the readiness contract now: a live API with unwritable
+    # storage cannot serve the knowledge path, so its shape is asserted rather than ignored.
+    assert set(body) == {"status", "worker", "storage"}
+    assert set(body["storage"]) == {"writable"}
 
 
 def test_health_reports_unknown_when_heartbeat_is_absent_without_503(client, monkeypatch):
     monkeypatch.setattr(health_router, "worker_process_alive", lambda: None)
     res = client.get("/api/health")
     assert res.status_code == 200
-    assert res.json() == {"status": "ok", "worker": "unknown"}
+    body = res.json()
+    assert body["status"] == "ok"
+    assert body["worker"] == "unknown"
+    assert set(body) == {"status", "worker", "storage"}
+    assert set(body["storage"]) == {"writable"}
 
 
 def test_health_unavailable_body_has_no_worker_field(client, monkeypatch):

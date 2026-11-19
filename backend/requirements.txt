@@ -23,3 +23,6 @@ slowapi==0.1.9
 redis==5.2.1
 alembic==1.13.3
 apscheduler==3.10.4
+# scripts/ops/offsite_backup.py encrypts every artifact with AES-256-GCM; without this the
+# backup tests fail in a clean install (found by CI, not locally where the venv had it).
+cryptography==50.0.2
