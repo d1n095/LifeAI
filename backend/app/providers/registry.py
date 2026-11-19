@@ -344,6 +344,12 @@ async def chat_with_fallback(
             # failure to fall back from; abort the whole call immediately.
             raise
         except Exception as exc:  # noqa: BLE001 - any provider failure should trigger fallback, not just ProviderError
+            # Preserve a hard content denial even when a development/test module reload has
+            # produced a second EgressDeniedError class identity. This is deliberately
+            # fail-closed: a provider can at most stop fallback by forging the marker; it can
+            # never make denied content eligible for another provider.
+            if getattr(exc, "is_egress_denial", False):
+                raise
             safe = classify_provider_exception(exc)
             logger.warning("Chat provider %s failed (%s): %s", provider.name, safe.result.value, safe.message)
             last_error = exc
