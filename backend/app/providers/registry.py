@@ -304,7 +304,9 @@ async def chat_with_fallback(
     # Deferred for the same reason: keep app.egress_policy's own import graph (which reaches
     # into app.development_operator.service) from ever becoming a load-time dependency of this
     # already-central module.
-    from app.egress_policy import EgressDeniedError, enforce_egress_policy
+    # Bind the transport boundary to the canonical implementation module, not the package
+    # re-export, which can become a stale alias under development/test module reloads.
+    from app.egress_policy.service import EgressDeniedError, enforce_egress_policy
 
     chain = resolve_chat_chain(db, selection_policy=selection_policy)
     attempted: list[str] = []
