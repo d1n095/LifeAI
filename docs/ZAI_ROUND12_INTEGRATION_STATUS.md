@@ -23,6 +23,19 @@ requirement and the reviewed plan that runs the moment the artifact arrives.
 Z.ai's sandbox filesystem is not shared with this machine. A "similar branch" is not a
 substitute: the commit id must match.
 
+### Re-probe 2026-11-19 (second pass, after the release gate was added)
+
+| Probe | Result |
+|---|---|
+| `git cat-file -t cc4d2804` | `fatal: Not a valid object name cc4d2804` |
+| `git for-each-ref` matching `round12` / `cognitive` / `zai` | no refs |
+| `find` for `*.bundle`, `*round12*`, `*R12*`, `*cognitive*zip` in `/tmp`, `~/Downloads`, `~/Desktop` | no artifact |
+| `lifeai-cognitive-core-r12-release/` in the repo root | absent |
+
+Still **BLOCKED at the same step**: nothing has been delivered to this host. No code was
+reconstructed, no migration was renumbered, and item 4 of the release gate remains
+`external_blocked` rather than being simulated.
+
 ## Exact transfer requirement (any one)
 
 1. `git bundle create lifeai-cognitive-core-r12-release.bundle <range>` containing `cc4d2804`,
@@ -81,7 +94,8 @@ Forbidden: renumbering `0075`–`0079`, editing applied migrations, or dropping 
 ## What is verified today without R12
 
 The release gate reports item `4.cognitive_reasoning` as `blocked` and every other item
-`passed` — 13 of 14. `ready_without_cognitive_core: True`, `full integration: False`.
+`passed` — 14 of 15 (item 15 is the architecture/startup contract; see
+`docs/ARCHITECTURE_STARTUP_CONTRACT.md`). `ready_without_cognitive_core: True`, `full integration: False`.
 See `docs/FOUNDER_RELEASE_CANDIDATE.md` for the exact evidence.
 
 There is no cognitive/premise module anywhere in this tree (`grep -rln premise backend/app`

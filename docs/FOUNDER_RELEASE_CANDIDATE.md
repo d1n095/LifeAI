@@ -1,14 +1,15 @@
 # Founder release candidate — private use, verified
 
 Branch: `freebuff/founder-alpha-ops-recovery-20261118` · Draft PR **#461** · `first_cycle_go`
-remains **false**. This document is committed in the release-candidate commit; `git log -1` on
+remains **false**. Second pass (2026-11-19): R12 re-probed and still absent, mobile console
+covered, Blueprint fencing defect found and fixed, architecture contract added as gate item 15. This document is committed in the release-candidate commit; `git log -1` on
 the branch names it exactly.
 
 ## Verdict
 
 | Question | Answer | Basis |
 |---|---|---|
-| Usable privately by the founder today, without the Cognitive Core? | **GO** | 13/14 release items verified with local-real evidence |
+| Usable privately by the founder today, without the Cognitive Core? | **GO** | 14/15 release items verified with local-real evidence |
 | Full integrated release including Z.ai Round 12? | **NO-GO** | item 4 is `external_blocked`: the artifact does not exist on this host |
 | Merge / deploy / change the default branch? | **Not authorised** | founder decision; nothing merged or deployed |
 | Enable autonomous privileged actions? | **No** | approvals stay enforced; `first_cycle_go` unchanged |
@@ -36,11 +37,15 @@ cd ../backend
 python scripts/acceptance/founder_release_acceptance.py --out release-acceptance.json
 ```
 
+Use the project interpreter, with its `bin` on `PATH`: one cancellation test spawns a real
+`python` subprocess, and a `PATH` that cannot resolve it fails that test for an environmental
+reason. Measured, not assumed — the first run of this pass failed item 10 exactly that way.
+
 `bootstrap_database.py --verify-only` mutates nothing and is the readiness check to run before
 starting the API. It must pass on a database that is already installed — that property is now
 tested (see defect 1).
 
-## Release gate — 14 items
+## Release gate — 15 items
 
 | # | Item | Evidence | Result |
 |---|---|---|---|
@@ -54,15 +59,19 @@ tested (see defect 1).
 | 8 | Approval and denial enforcement | local_real | passed |
 | 9 | Prompt-injection resistance (one canonical fence) | local_real | passed (7 tests) |
 | 10 | Worker cancellation and recovery | local_real | passed (11 tests) |
-| 11 | Real browser functionality | local_real | passed (Chromium, 8 specs) |
+| 11 | Real browser functionality, desktop and mobile | local_real | passed (Chromium, 9 specs incl. the 390×844 console spec) |
 | 12 | Encrypted backup and clean restore that boots | local_real | passed (push→verify→restore→boot) |
 | 13 | Model-provider switching and fail-closed fallback | local_real | passed (18 tests) |
 | 14 | Security and regression suites | local_real | passed |
+| 15 | Startup architecture contract | local_real | passed (7 checks; see `docs/ARCHITECTURE_STARTUP_CONTRACT.md`) |
 
 Suite totals in the recorded run: 87 backend tests (auth 28, RLS 18, injection 7, cancellation
-11, providers 18, memory 5), plus the structural install checks, the 12-step founder workflow,
-the fresh install and the backup roundtrip. Reports: `docs/evidence/release-acceptance.json`,
-`docs/evidence/founder-alpha-acceptance.json`, `docs/evidence/founder-workflow.json`.
+11, providers 18, memory 5), 9 browser specs (desktop + mobile), 7 architecture checks, plus the
+structural install checks, the 12-step founder workflow, the fresh install and the backup
+roundtrip. Reports: `docs/evidence/release-acceptance.json`,
+`docs/evidence/founder-alpha-acceptance.json`, `docs/evidence/founder-workflow.json`,
+`docs/evidence/architecture-contract.json`. The mobile console screenshot is
+`docs/evidence/founder-console-mobile.png`, captured by the spec itself.
 
 CI on the parent commit `d029298`: run `44502219106` **success**, Security `44502219193`
 **success**. That is CI evidence, not a substitute for the local run above.
@@ -89,7 +98,19 @@ code. Nothing about the measured result depends on the id; re-running the gate p
    `lifeos_test_gate_*` database with the same credentials. The suite also no longer inherits the
    app's provider and cookie configuration, which had made 4 tests fail for reasons unrelated to
    the code under test.
-3. **The console made two claims it could not support.** "Senast kontrollerad nu" was a constant
+3. **The Blueprint prompt path fenced raw text.** `blueprint.py` imported the shared markers and
+   appended each retrieved excerpt between them without defusing the text first. A document that
+   contained `<<< END UNTRUSTED SOURCE EXCERPT <<<` could therefore close its own fence and
+   continue in operator voice inside the synthesis prompt — while every existing assertion still
+   passed, because the marker *count* was correct. The chat path already used the defusing
+   function; this path did not, which is exactly the "two builders fencing differently" failure
+   the fence module warns about. Fixed by routing both the source excerpts and the continuity
+   block through `fence_untrusted()`. Regression test:
+   `tests/backend/test_founder_alpha_blueprint_e2e.py::test_blueprint_source_cannot_forge_its_own_fence_marker`
+   (forged marker becomes `[redacted marker]`; the injected sentence stays inside the fence). The
+   new architecture check `single_prompt_fence` is what surfaced it — a count-based test could
+   not.
+4. **The console made two claims it could not support.** "Senast kontrollerad nu" was a constant
    string while the console polls every 10s and pauses on hidden tabs; it now shows the real last
    check time. A failed execution-goals read rendered "Inga åtgärder väntar på godkännande"; it
    now reads "Kön kunde inte läsas — status är okänd, inte tom."
@@ -115,7 +136,10 @@ end.
 
 ## Security assessment
 
-- One canonical prompt fence (`app/rag/prompt_fencing.py`), policy-locked, 7 adversarial tests.
+- One canonical prompt fence (`app/rag/prompt_fencing.py`), policy-locked, 7 adversarial tests,
+  and both prompt builders (chat and Blueprint) now wrap content through the same defusing
+  function. The property is checked structurally by release item 15, so a future Core import
+  cannot add a second fence unnoticed.
 - Approvals are enforced in the backend; the console can only request approve/reject, and a
   rejected task is not executed. Cancellation is cooperative and observable.
 - Append-only job events and audit log: `mainai_app` holds `SELECT, INSERT` only on the event
@@ -130,8 +154,12 @@ end.
 
 ## Outstanding blockers and founder decisions
 
-1. **Z.ai Round 12** — transfer bundle/patch/ref containing `cc4d2804`. Details and the accepted
-   migration strategy: `docs/ZAI_ROUND12_INTEGRATION_STATUS.md`.
+1. **Z.ai Round 12** — the exact missing transfer step is delivery of `cc4d2804` to this host,
+   as any one of: (a) a git bundle plus its SHA-256 and `git bundle verify` output, (b) a
+   `git format-patch` series whose cover letter names the produced SHAs, or (c) a pushed scratch
+   ref carrying that commit. Nothing else is missing on this side. Details and the accepted
+   migration strategy (merge revision on `0079`, never renumbering applied migrations):
+   `docs/ZAI_ROUND12_INTEGRATION_STATUS.md`.
 2. **Protected release branch** — create `main` at the reviewed baseline, protect it, then
    switch the default. Exact commands are printed by the governance verifier; they are not run.
 3. **Genuinely off-host backup** — the roundtrip used a controlled remote-equivalent
@@ -145,6 +173,11 @@ end.
 - Cognitive reasoning and premise challenge: not present in this tree, therefore not tested.
 - Off-host retention: not tested; no authorised remote exists.
 - Branch protection enforcement: not active, therefore not tested.
-- Mobile viewport for the console: not tested in this pass (specs run Desktop Chrome).
-- Visual review of the console's new timestamps: covered by the browser specs' assertions, not
-  by a human looking at a screenshot.
+- Visual review by a human: the mobile and desktop screenshots are captured by the specs, and the
+  layout assertions are automated (no horizontal overflow at 390 px, nav reachable, composer
+  usable). Nobody has looked at the screenshots and judged them pleasant.
+- The founder's real corpus: the measured corpus is synthetic/test documents, so retrieval
+  quality on real material is still unmeasured.
+- Requirements that are architecture contracts, not features: the personal user-AI, research
+  source adapters, per-user at-rest encryption and the Life products are **not built**. Their
+  seams are checked, nothing more — see `docs/ARCHITECTURE_STARTUP_CONTRACT.md`.

@@ -127,8 +127,13 @@ def _local_head() -> str | None:
     return result.stdout.strip() or None
 
 
-def check_required_contexts_exist(repo: str) -> tuple[bool, dict]:
-    """The part a checklist gets wrong: prove each required context is a job that really runs."""
+def check_required_contexts_exist(repo: str, sha: str | None = None) -> tuple[bool, dict]:
+    """The part a checklist gets wrong: prove each required context is a job that really runs.
+
+    Scoped to the commit under test (`head_sha`) and to a run that has a verdict. Asking for the
+    newest run in the repository meant an unrelated branch's push — still building — became the
+    evidence, and a real context looked missing because its jobs had not been created yet.
+    """
     ok, workflows = _gh(
         ["api", f"repos/{repo}/actions/workflows", "--jq", "[.workflows[] | {id, name, path}]"]
     )
@@ -140,18 +145,23 @@ def check_required_contexts_exist(repo: str) -> tuple[bool, dict]:
     # unrelated skipped workflow, so the gate job was never in the job list and a real required
     # context looked missing.
     ci = next((w for w in workflows if isinstance(w, dict) and w.get("name") == "CI"), None)
+    query = "?per_page=20" + (f"&head_sha={sha}" if sha else "")
     ok_runs, runs = _gh(
         [
             "api",
-            f"repos/{repo}/actions/workflows/{ci.get('id') if ci else 'ci.yml'}/runs?per_page=1",
+            f"repos/{repo}/actions/workflows/{ci.get('id') if ci else 'ci.yml'}/runs{query}",
             "--jq",
-            "(.workflow_runs[0] // {}) | {id, name, conclusion, head_sha}",
+            "[.workflow_runs[] | {id, name, conclusion, status, head_sha, head_branch, created_at}]",
         ]
     )
+    considered = runs if isinstance(runs, list) else []
+    completed = [r for r in considered if isinstance(r, dict) and r.get("conclusion")]
+    run = completed[0] if completed else (considered[0] if considered else {})
+
     job_names: list[str] = []
-    if ok_runs and isinstance(runs, dict) and runs.get("id"):
+    if run.get("id"):
         ok_jobs, jobs = _gh(
-            ["api", f"repos/{repo}/actions/runs/{runs['id']}/jobs", "--jq", "[.jobs[] | .name]"]
+            ["api", f"repos/{repo}/actions/runs/{run['id']}/jobs", "--jq", "[.jobs[] | .name]"]
         )
         if ok_jobs and isinstance(jobs, list):
             job_names = jobs
@@ -160,11 +170,17 @@ def check_required_contexts_exist(repo: str) -> tuple[bool, dict]:
     for context in REQUIRED_CHECKS:
         # 'Security' is a workflow name; 'All required checks passed' is a job name inside CI.
         verified[context] = context in names or context in job_names
-    return all(verified.values()), {
+    detail = {
         "workflow_names": sorted(n for n in names if n),
-        "most_recent_run": runs if isinstance(runs, dict) else None,
+        "run_used": run or None,
+        "runs_considered": len(considered),
+        "completed_runs": len(completed),
         "contexts_verified": verified,
     }
+    if considered and not completed:
+        # Say precisely why this is unproven instead of implying a context does not exist.
+        detail["pending"] = "no completed CI run for this commit yet"
+    return bool(completed) and all(verified.values()), detail
 
 
 def check_security_features(repo: str) -> tuple[bool, dict]:
@@ -215,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
         ("protection.main", check_protection),
         ("rulesets", check_rulesets),
         ("codeowners", lambda repo: check_codeowners(repo, ref)),
-        ("required_contexts", check_required_contexts_exist),
+        ("required_contexts", lambda repo: check_required_contexts_exist(repo, ref)),
         ("security_features", check_security_features),
     ):
         ok, detail = fn(args.repo)

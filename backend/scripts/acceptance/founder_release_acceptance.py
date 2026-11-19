@@ -4,7 +4,7 @@
 `founder_alpha_acceptance.py` answers "can this database boot and is the install sound?".
 `founder_workflow.py` answers "can a founder do the twelve real steps?".
 Neither answers the release question on its own, and a green test file is not a green release.
-This script runs the fourteen release items once, in one report, and refuses to imply more than
+This script runs the fifteen release items once, in one report, and refuses to imply more than
 it measured.
 
 Every item declares how its evidence was produced:
@@ -476,6 +476,16 @@ def build_checks(args) -> dict[str, object]:
         ),
         "suites.memory": _pytest("tests/backend/test_founder_alpha_runtime_flow.py"),
         "cognitive": check_cognitive_core,
+        "architecture": lambda: _run(
+            [
+                sys.executable,
+                str(BACKEND_ROOT / "scripts" / "ops" / "verify_architecture_contract.py"),
+                "--out",
+                str(Path(args.out).with_name("architecture-contract.json")),
+            ],
+            cwd=REPO_ROOT,
+            timeout=300,
+        ),
     }
     if not args.skip_install:
         checks["install"] = check_fresh_install
@@ -488,6 +498,7 @@ def build_checks(args) -> dict[str, object]:
                 "playwright",
                 "test",
                 "e2e/founder-console.spec.ts",
+                "e2e/founder-console-mobile.spec.ts",
                 "e2e/founder-alpha-workflow.spec.ts",
             ],
             cwd=FRONTEND_ROOT,
@@ -513,10 +524,16 @@ def build_items(args) -> list[Run]:
         Run("8.approval_enforcement", "Approval and denial enforcement", "local_real", ["suites.auth"]),
         Run("9.injection_resistance", "Prompt-injection resistance under the canonical fence", "local_real", ["suites.injection"]),
         Run("10.worker_cancellation", "Worker cancellation and recovery", "local_real", ["suites.cancel"]),
-        Run("11.browser", "Real browser functionality (Chromium, real backend)", "local_real", ["browser"]),
+        Run("11.browser", "Real browser functionality, desktop and mobile viewport (Chromium, real backend)", "local_real", ["browser"]),
         Run("12.backup_restore", "Encrypted backup and clean restore that boots", "local_real", ["restore"]),
         Run("13.provider_switching", "Model-provider switching and fail-closed fallback", "local_real", ["suites.providers"]),
         Run("14.security_regression", "Security and regression suites", "local_real", ["structural", "suites.rls"]),
+        Run(
+            "15.architecture_invariants",
+            "Startup architecture contract (one fence, deterministic approvals, optional egress, product seams)",
+            "local_real",
+            ["architecture"],
+        ),
     ]
 
 
