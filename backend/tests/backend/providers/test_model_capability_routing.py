@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import httpx
 import pytest
+from sqlalchemy import text
 
 from app.config import get_settings
 from app.models.provider_disclosure import ProviderDisclosureEvent
@@ -212,6 +213,12 @@ async def test_never_egress_content_aborts_fallback_before_external_call(
     monkeypatch,
 ):
     user, _ = make_verified_user()
+    # The disclosure ledger is owner-scoped under RLS. Exercise the production boundary
+    # with the same authoritative tenant context used by the existing egress-policy tests.
+    db_session.execute(
+        text("SET LOCAL app.current_user_id = :owner_id"),
+        {"owner_id": str(user.id)},
+    )
     settings = get_settings()
     monkeypatch.setattr(settings, "default_llm_provider", "openai")
     monkeypatch.setattr(settings, "default_llm_model", "gpt-4o-mini")
