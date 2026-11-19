@@ -39,6 +39,11 @@ from app.models.claim_relationship import ClaimRelationship, ClaimRelationshipTy
 from app.models.knowledge_claim import ClaimConfidence, KnowledgeClaim
 from app.rag.evidence_metadata import quality_metadata_for_claims
 
+# Designs whose causal inference is inherently weaker — shared with scientific_reasoning's
+# composition buckets so the adversary and the science view never disagree about what is
+# "observational".
+_OBSERVATIONAL_DESIGNS = {"prospective_cohort", "retrospective_cohort", "case_control", "case_series"}
+
 
 @dataclass
 class AdversarialObjection:
@@ -129,7 +134,7 @@ def review_conclusion(db: Session, owner_id: uuid.UUID, claim_id: uuid.UUID) -> 
         )
 
     # 2. Weak causal inference + confounding: causal claim on an observational design.
-    if causal and design in ("observational", "cross_sectional", "case_control", "prospective_cohort", "retrospective_cohort"):
+    if causal and design in _OBSERVATIONAL_DESIGNS:
         objections.append(
             AdversarialObjection(
                 kind="weak_causal_inference",

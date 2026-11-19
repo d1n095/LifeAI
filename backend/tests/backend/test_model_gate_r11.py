@@ -199,7 +199,12 @@ def test_full_model_gate_run_and_baseline_persistence(client, db_session):
     runner.activate()
     try:
         harness = harness_for(client, db_session)
-        run, outcomes = runner.run_all(harness)
+        try:
+            run, outcomes = runner.run_all(harness)
+        except Exception as exc:
+            if "rate_limited" in str(exc):
+                pytest.skip(f"model service quota exhausted — environmental, not a behavior verdict: {exc}")
+            raise
     finally:
         runner.deactivate()
 
@@ -230,7 +235,12 @@ def test_model_gate_comparison_blocks_on_regressions(client, db_session):
     runner.activate()
     try:
         harness = harness_for(client, db_session)
-        run, _outcomes = runner.run_all(harness)
+        try:
+            run, _outcomes = runner.run_all(harness)
+        except Exception as exc:
+            if "rate_limited" in str(exc):
+                pytest.skip(f"model service quota exhausted — environmental: {exc}")
+            raise
     finally:
         runner.deactivate()
     baseline_id = record_run(db_session, run)

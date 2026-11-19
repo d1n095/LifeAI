@@ -44,6 +44,19 @@ def get_dim():
     return get_settings().embedding_dim
 
 
+def _bow_vec_local(text: str) -> list[float]:
+    """Deterministic bag-of-words vectors: retrieval RANKS by shared content words, so
+    the top hit is the relevant document — uniform vectors make the top hit arbitrary
+    (which the R11 relevance gate correctly reads as 'question not about this material')."""
+    import math
+
+    v = [0.0] * get_dim()
+    for w in (text or "").lower().split():
+        v[hash(w) % get_dim()] += 1.0
+    norm = math.sqrt(sum(x * x for x in v)) or 1.0
+    return [x / norm for x in v]
+
+
 def _set_rls_user(session, owner_id) -> None:
     current_user_id_var.set(str(owner_id))
     session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_id)})
@@ -55,7 +68,7 @@ def _study(db, owner_id, *, topic, meta):
     db.add(source)
     db.commit()
     text = meta.pop("_text", f"Studieuttalande {uuid.uuid4().hex[:8]}.")
-    chunk = DocumentChunk(document_id=source.id, owner_id=owner_id, chunk_index=0, text=text, embedding=[0.1] * get_dim())
+    chunk = DocumentChunk(document_id=source.id, owner_id=owner_id, chunk_index=0, text=text, embedding=_bow_vec_local(text))
     db.add(chunk)
     db.commit()
     claim = KnowledgeClaim(
@@ -161,7 +174,7 @@ def test_science_and_policy_ride_the_chat_prompt(db_session, client, monkeypatch
     captured: dict = {}
 
     async def _embed(self, texts, model, **kwargs):
-        return [[0.1] * get_dim() for _ in texts]
+        return [_bow_vec_local(t) for t in texts]
 
     async def _chat(self, messages, model, **kwargs):
         captured["system"] = messages[0].content

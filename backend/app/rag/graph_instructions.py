@@ -32,7 +32,12 @@ import uuid
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.rag.evidence_metadata import summarize_topic_landscape
+from app.rag.evidence_metadata import ClaimEvidenceMetadata, summarize_topic_landscape
+from app.rag.scientific_reasoning import (
+    analyze_topic_science,
+    format_topic_science_instructions,
+    investigation_policy,
+)
 from app.rag.epistemics import cross_domain_claim_overlaps, second_order_consequences
 
 
@@ -47,7 +52,7 @@ def _content_tokens(text: str) -> set[str]:
 
 
 def format_graph_context_instructions(
-    db: Session, owner_id: uuid.UUID, retrieved_source_ids, question_text: str, *, max_depth: int = 2
+    db: Session, owner_id: uuid.UUID, retrieved_source_ids, question_text: str, *, max_depth: int = 2, top_hit_text: str | None = None
 ) -> str:
     """The GRAFKONTEXT block for the retrieved sources. Returns '' when the sources carry
     no graph state — the caller appends nothing rather than an empty section."""
@@ -88,6 +93,12 @@ def format_graph_context_instructions(
     else:
         lines.append("- inga frågerelevanta korsdomän-överlapp (matchning kräver 2+ gemensama innehållsord).")
 
+    # Round 11 Phase 5 (ablation finding): the expensive topic lines (landscape +
+    # science composition + investigation policy) must not fire for a question that
+    # shares no content with the retrieved material — retrieval is best-effort (no
+    # distance floor), so a greeting would otherwise pull the whole machinery. A cheap
+    # deterministic relevance gate: the TOP retrieved chunk must share >= 2 content
+    # words with the question. One bounded extra query, worth its cost.
     topics = (
         db.execute(
             text(_TOPIC_SQL),
@@ -96,6 +107,29 @@ def format_graph_context_instructions(
         .scalars()
         .all()
     )
+    if topics:
+        qw = set(_content_tokens(question_text))
+        # The TOP HIT's text (rank-1 retrieval) decides relevance — never an arbitrary
+        # chunk: the gate samples the hit the model will actually lean on.
+        top_text = top_hit_text
+        cw = set(_content_tokens(top_text or ""))
+        # Prefix-aware overlap: "sömn" must match "sömnkvalitet" — Swedish compounds are
+        # the norm, so exact-token intersection alone would under-count real relevance.
+        def _related(qtok: str, ctok: str) -> bool:
+            shared = min(len(qtok), len(ctok), 6)
+            return shared >= 4 and (qtok[:shared] == ctok[:shared])
+
+        hits = 0
+        for q in qw:
+            if any(q in cw or _related(q, c) for c in cw):
+                hits += 1
+                if hits >= 1:
+                    break
+        # ONE strong lexical hit (4+ shared prefix chars) + retrieval ranking is the
+        # relevance bar: greetings/junk share ZERO content and are blocked; a real
+        # question about the corpus always shares at least one compound stem.
+        if hits < 1:
+            topics = []  # the question is not about the retrieved material — skip the expensive lines
     for topic in topics[:1]:
         landscape = summarize_topic_landscape(db, owner_id, topic)
         lines.append("- " + _topic_line(landscape))
@@ -103,9 +137,6 @@ def format_graph_context_instructions(
         # ride the same block (fail-open at the caller; deterministic, read-only here).
         # The landscape + rows are fetched ONCE and SHARED with the science analysis —
         # the perf-bound suite caught the duplicate-query cost of re-fetching.
-        from app.rag.evidence_metadata import ClaimEvidenceMetadata
-        from app.rag.scientific_reasoning import analyze_topic_science, format_topic_science_instructions, investigation_policy
-
         topic_rows = (
             db.query(ClaimEvidenceMetadata)
             .filter(

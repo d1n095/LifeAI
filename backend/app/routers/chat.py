@@ -256,7 +256,8 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     # sees, not just what an endpoint would return.
     try:
         graph_context = format_graph_context_instructions(
-            db, user.id, [h.get("document_id") for h in hits], user_message.content if hasattr(user_message, "content") else payload.question
+            db, user.id, [h.get("document_id") for h in hits], user_message.content if hasattr(user_message, "content") else payload.question,
+            top_hit_text=hits[0].get("text") if hits else None,
         )
         if graph_context:
             system_content += "\n\n" + graph_context

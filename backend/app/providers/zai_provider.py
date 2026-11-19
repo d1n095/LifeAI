@@ -57,6 +57,11 @@ class ZAIProvider(LLMProvider):
             except subprocess.TimeoutExpired as exc:
                 raise ProviderError("unreachable: z-ai CLI timed out") from exc
             if proc.returncode != 0 or not out_path.exists():
+                # Classify honestly: a 429 from the model service is RATE_LIMITED (a
+                # quota condition, retryable later), not "unreachable".
+                stderr = (proc.stderr or "") + (proc.stdout or "")
+                if "429" in stderr or "Too many requests" in stderr:
+                    raise ProviderError("rate_limited: model service quota exhausted — retry later")
                 raise ProviderError("unreachable: z-ai CLI failed (exit %s)" % proc.returncode)
             try:
                 payload = json.loads(out_path.read_text(encoding="utf-8"))

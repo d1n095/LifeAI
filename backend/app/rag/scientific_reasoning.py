@@ -63,6 +63,7 @@ class TopicScience:
     mechanistic_studies: int
     observational_studies: int
     experimental_studies: int
+    meta_analyses_studies: int  # secondary synthesis, kept DISTINCT from primary designs
     causal_claims_total: int
     causal_without_alternatives: int  # the confounding gap
     declared_disagreements: int
@@ -81,7 +82,7 @@ class TopicScience:
             "interaction_studies": self.interaction_studies,
             "populations": self.distinct_populations,
             "settings": self.distinct_settings,
-            "designs": {"mechanistic": self.mechanistic_studies, "observational": self.observational_studies, "experimental": self.experimental_studies},
+            "designs": {"mechanistic": self.mechanistic_studies, "observational": self.observational_studies, "experimental": self.experimental_studies, "meta_analyses": self.meta_analyses_studies},
             "causal_claims": self.causal_claims_total,
             "causal_without_declared_alternatives": self.causal_without_alternatives,
             "declared_disagreements": self.declared_disagreements,
@@ -120,7 +121,7 @@ def analyze_topic_science(
 
     long_f = short_f = unspecified_f = cumulative = dose_resp = interactions_n = 0
     causal_total = causal_gap = funding_flagged = 0
-    mech = obs = exp = 0
+    mech = obs = exp = meta_n = 0
     populations: set[str] = set()
     settings: set[str] = set()
     doses: list[str] = []
@@ -156,8 +157,10 @@ def analyze_topic_science(
             mech += 1
         elif design in _OBSERVATIONAL_DESIGNS:
             obs += 1
-        elif design == "randomized_trial" or design == "meta_analysis":
+        elif design == "randomized_trial":
             exp += 1
+        elif design == "meta_analysis":
+            meta_n += 1
         if m.get("causal_claim") is True:
             causal_total += 1
             if not (m.get("causal_claim_supported_by_design") is True or (m.get("competing_explanations") or [])):
@@ -182,6 +185,7 @@ def analyze_topic_science(
         mechanistic_studies=mech,
         observational_studies=obs,
         experimental_studies=exp,
+        meta_analyses_studies=meta_n,
         causal_claims_total=causal_total,
         causal_without_alternatives=causal_gap,
         declared_disagreements=len(landscape.disagreements),
@@ -217,7 +221,7 @@ def investigation_policy(
             reasons=["Frågan är normativ, inte empirisk — mer evidens ändrar inte svaret."],
             max_studies_to_examine=0,
         )
-    if science.study_count < 2 or not (science.experimental_studies + science.observational_studies + science.mechanistic_studies):
+    if science.study_count < 2 or not (science.experimental_studies + science.observational_studies + science.mechanistic_studies + science.meta_analyses_studies):
         reasons.append(f"{science.study_count} studier med deklarerad metadata — otillräcklig grund.")
         if science.unknown_axes:
             reasons.append("Saknade axlar: " + ", ".join(science.unknown_axes) + ".")
@@ -226,7 +230,9 @@ def investigation_policy(
     unresolved_disagreement = science.declared_disagreements > 0 and not conflict_resolved
     material_quality_signal = science.funding_flagged_studies > 0
     confounding_gap = science.causal_without_alternatives > 0
-    single_population = science.distinct_populations <= 1 and science.study_count >= 3
+    # >= 2 (not >= 3): a two-study single-population base already carries a real
+    # generalization risk worth naming — the honest threshold is "more than one study".
+    single_population = science.distinct_populations <= 1 and science.study_count >= 2
 
     if unresolved_disagreement or material_quality_signal or confounding_gap:
         if unresolved_disagreement:
@@ -242,7 +248,7 @@ def investigation_policy(
 
     if science.study_count >= 2:
         reasons.append(
-            f"{science.study_count} studier, inga olösta deklarerade motsägelser, {science.experimental_studies} experimentella — svara effektivt."
+            f"{science.study_count} studier, inga olösta deklarerade motsägelser, {science.experimental_studies} experimentella, {science.meta_analyses_studies} metaanalyser — svara effektivt."
         )
         if conflict_resolved:
             reasons.append("Kvarvarande motsägelser är redan speglade i verdictet conflicting_evidence — vidare grävning ändrar inte beslutet.")
