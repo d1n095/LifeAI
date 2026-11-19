@@ -6,7 +6,6 @@ import httpx
 import pytest
 
 from app.config import get_settings
-from app.egress_policy import EgressDeniedError
 from app.models.provider_disclosure import ProviderDisclosureEvent
 from app.models.provider_verification import ProviderVerificationCheck, VerificationResult
 from app.providers.base import ChatResult, Message
@@ -227,7 +226,9 @@ async def test_never_egress_content_aborts_fallback_before_external_call(
 
     monkeypatch.setattr(OpenAIProvider, "chat", _must_not_call)
 
-    with pytest.raises(EgressDeniedError):
+    # RuntimeError is the stable public base across test/dev module reloads; the exact
+    # denial message and ledger row prove this is the egress boundary, not a provider error.
+    with pytest.raises(RuntimeError, match="egress denied"):
         await chat_with_fallback(
             db_session,
             [Message(role="user", content="NEVER_EGRESS: tenant-private")],
