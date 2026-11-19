@@ -12,6 +12,7 @@
     ".gitleaks.toml": "990c683ba793691bc2195bd027c12c99988128df4d606fdc6e66946dd95223ca",
     ".semgrep/rules.yaml": "dfd965edf7522b5d0ac4a410c157fcb7ec9609b26257c41644e5cd75d253fcbc",
     "backend/scripts/acceptance/founder_alpha_acceptance.py": "f3b1bd4a8aaaf54f51bcc06dc513643fc61862d8cda5c7e5ab1ac4670991e425",
+    "backend/scripts/acceptance/founder_release_acceptance.py": "dd1c6f874220105a40281b5d3343949658fcfbe1877d47cfc541630414c2a41b",
     "backend/scripts/acceptance/founder_workflow.py": "9d997cdf95a3619392faaef96aeebbdbf8482f983a3a337e7a7db279502283ea",
     "backend/scripts/acceptance/local_model_acceptance.py": "0556e8d99551ef65672387c386d47cd4e78fc0d8f49af94e1882c0761d961312",
     "backend/scripts/requirements/dead_seams.py": "ed3b26c9e921db370a0749c781991fa74b50ec4a6637aabbaad6515b14cddfb5",

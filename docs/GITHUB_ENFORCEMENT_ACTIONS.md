@@ -101,3 +101,31 @@ gh api repos/OWNER/REPO/code-scanning/alerts --jq 'length'   # requires GHAS
 These are verified by `backend/tests/security/test_security_controls.py` and the Security workflow;
 they do not replace the administrator settings above, and the report never presents them as if they
 did.
+
+## Addendum 2026-11-19 — verified, not just described
+
+`backend/scripts/ops/verify_release_governance.py` performs this document's checks read-only and
+prints the exact commands, without running them. Current output
+(`docs/evidence/governance-report.json`):
+
+| Prerequisite | Observed |
+|---|---|
+| default branch | `claude/det-kommer-mer-879lcm` |
+| `main` | **missing** — `GET /repos/d1n095/LifeAI/branches/main` → 404 |
+| protection on `main` | **missing** — 404 (no branch to protect) |
+| rulesets | none (`[]`) |
+| `.github/CODEOWNERS` at the candidate commit | **present** (1,113 bytes at `d029298`) |
+| `Security` context | **verified** — workflow name in `.github/workflows/` |
+| `All required checks passed` context | **verified** — real job in CI run `44502219106` (success) |
+| secret scanning / push protection | enabled / enabled |
+| Dependabot security updates | disabled |
+| GitHub Advanced Security | not enabled (CodeQL stays gated) |
+
+`ready_to_apply: False` — the only blockers are `branch.main` and `protection.main`. Every other
+prerequisite is satisfied, so creating the branch and protecting it is a two-command operation
+once the founder authorises it at a moment when no other agent is mid-work on the current
+default branch.
+
+One correction to the table above: `CODEOWNERS` is queried **at the candidate ref**. Asking for
+it without a ref resolves against the current default branch, which does not carry it, and the
+first run reported a false "missing prerequisite".

@@ -57,6 +57,29 @@ def _server_dsn(database_url: str, dbname: str = "postgres") -> str:
     return f"postgresql://{auth}@{parsed.hostname}:{parsed.port or 5432}/{dbname}"
 
 
+# The suite drops the database it is pointed at, twice (session setup and teardown). That is
+# correct for a disposable test database and catastrophic for any other. It actually happened:
+# a release-acceptance run exported the founder's real `DATABASE_URL` into the pytest
+# environment, `os.environ.setdefault` below therefore kept it, and the session fixture dropped
+# the founder database at teardown. The guard below is the fix — fail closed, before any DROP.
+DISPOSABLE_DATABASE_NAME = re.compile(r"^lifeos_test(?:_[A-Za-z0-9]+)*$")
+
+
+def _assert_disposable_database(db_name: str) -> None:
+    """Refuse to run (and therefore to drop) anything that is not a test database.
+
+    A `pytest.UsageError` stops the session before the first test, which is the only outcome
+    that is safe when the configured database is not disposable.
+    """
+    if not DISPOSABLE_DATABASE_NAME.fullmatch(db_name):
+        raise pytest.UsageError(
+            f"refusing to drop database {db_name!r}: pytest owns the database it is pointed at "
+            "and drops it at session teardown. Set DATABASE_URL to a disposable name matching "
+            "lifeos_test / lifeos_test_<suffix> (or unset it and let conftest choose one), "
+            "never an installed application's database."
+        )
+
+
 def _force_drop_database(cur, db_name: str) -> None:
     """Terminate other backends on `db_name`, then DROP DATABASE IF EXISTS.
 
@@ -103,6 +126,7 @@ def _test_database():
 
     settings = get_settings()
     db_name = urlparse(settings.database_url).path.lstrip("/")
+    _assert_disposable_database(db_name)
     app_role = urlparse(settings.app_database_url).username
     app_role_password = urlparse(settings.app_database_url).password or "mainai_app_pw"
 

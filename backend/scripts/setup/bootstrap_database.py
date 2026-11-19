@@ -77,7 +77,6 @@ CORE_WRITE_TABLES = (
     "document_chunks",
     "projects",
     "mainai_jobs",
-    "mainai_job_events",
     "mainai_goals",
     "mainai_tasks",
 )
@@ -85,6 +84,20 @@ CORE_WRITE_TABLES = (
 # `audit_logs` is append-only by trigger (migration 0079): INSERT/SELECT yes, UPDATE only for
 # anonymisation, DELETE never. Probed separately so a policy change is visible here.
 AUDIT_TABLE = "audit_logs"
+
+# Tables that are write-once *by design*, so "can this role write?" is the wrong question for
+# them. `mainai_job_events` is append-only: app/rls.py's lockdown and migration 0027's integrity
+# policy require `mainai_app` to hold SELECT and INSERT and NOTHING ELSE.
+#
+# This was a real install defect, found by running the bootstrap twice: the first run passed
+# `verify_grants` because it ran before `verify_boot` re-asserted the append-only lockdown, and
+# every subsequent `--verify-only` on the same, correctly installed database failed with
+# "runtime role lacks DML on core write tables: {'mainai_job_events': ['UPDATE', 'DELETE']}".
+# A readiness check that fails on a healthy install is as damaging as one that passes on a broken
+# one, so the expectation now matches the policy the API enforces at startup.
+APPEND_ONLY_TABLES: dict[str, tuple[str, ...]] = {
+    "mainai_job_events": ("SELECT", "INSERT"),
+}
 
 # Tables the runtime role deliberately cannot touch directly. These are not gaps: each is a
 # reviewed design decision, and the verification below asserts the exemption still holds rather
@@ -275,6 +288,21 @@ def verify_runtime_grants(app_url: str) -> dict:
                     "exact class of failure that made a freshly migrated database unable to boot",
                 )
 
+            for table, allowed in APPEND_ONLY_TABLES.items():
+                if table not in tables:
+                    continue
+                missing = _missing_privileges(cur, table, allowed)
+                if missing:
+                    raise BootstrapError("verify_grants", f"runtime role lacks {missing} on append-only {table}")
+                forbidden = sorted(_granted_privileges(cur, table) - set(allowed))
+                if forbidden:
+                    raise BootstrapError(
+                        "verify_grants",
+                        f"append-only {table} must grant only {list(allowed)}, but the runtime role "
+                        f"also holds {forbidden} — app/rls.py revokes these on every boot; an install "
+                        "that leaves them granted has broken the append-only guarantee",
+                    )
+
             if AUDIT_TABLE in tables:
                 if _missing_privileges(cur, AUDIT_TABLE, ("INSERT", "SELECT")):
                     raise BootstrapError("verify_grants", f"{AUDIT_TABLE} must accept appends and reads")
@@ -323,7 +351,17 @@ def _has_privilege(cur, table: str, privilege: str) -> bool:
 
 
 def _granted_privileges(cur, table: str) -> set[str]:
-    cur.execute("SELECT privilege_type FROM information_schema.role_table_grants WHERE table_name = %s", (table,))
+    """Privileges the *runtime role itself* holds on this table.
+
+    Scoped to `current_user`: `information_schema.role_table_grants` also lists rows for other
+    enabled roles, and counting the owner among them made an "is this table exempt?" check
+    depend on which roles the session happened to be allowed to assume.
+    """
+    cur.execute(
+        "SELECT privilege_type FROM information_schema.role_table_grants "
+        "WHERE table_schema = 'public' AND table_name = %s AND grantee = current_user",
+        (table,),
+    )
     return {row[0].upper() for row in cur.fetchall()}
 
 
@@ -387,9 +425,18 @@ def bootstrap(*, verify_only: bool = False) -> dict:
         ]
     steps += [
         Step("verify_schema", "Database revision is the tree's single head", verify_schema_head),
+        # The boot contract is applied BEFORE the grants are verified, not after.
+        #
+        # `ensure_app_role` grants a broad DML floor so tables created by the following migration
+        # are usable at all; `app/main.py` then narrows that floor on every start (the append-only
+        # job-event log keeps SELECT/INSERT only). Verifying grants first and enforcing the boot
+        # contract last made the two halves of one install disagree: the install run passed, and
+        # every later `--verify-only` on that same database failed because the narrow policy had
+        # by then been applied. A freshly installed database now ends in the state the API
+        # enforces, and the report order says so.
+        Step("verify_boot", "app/main.py's startup privilege contract is satisfiable", verify_boot_contract),
         Step("verify_grants", "Runtime role can read everything and write where it must", lambda: verify_runtime_grants(app_url)),
         Step("verify_s1a", "S1A privilege policy verifies read-only", verify_s1a_policy),
-        Step("verify_boot", "app/main.py's startup privilege contract is satisfiable", verify_boot_contract),
     ]
 
     started = time.monotonic()

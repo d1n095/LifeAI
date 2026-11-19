@@ -1,0 +1,405 @@
+{
+  "tool": "lifeai-founder-release-acceptance",
+  "version": 1,
+  "generated_at": "2026-11-19T11:51:20.691258Z",
+  "git_commit": "b2e9ea66f4320d3835a479eb29bdf290bfcdc158",
+  "branch": "freebuff/founder-alpha-ops-recovery-20261118",
+  "items": [
+    {
+      "id": "1.fresh_install",
+      "title": "Fresh installation from an empty database",
+      "evidence": "local_real",
+      "mandatory": true,
+      "status": "passed",
+      "checks": [
+        "install",
+        "structural"
+      ],
+      "detail": []
+    },
+    {
+      "id": "2.login",
+      "title": "Real founder authentication through the same-origin proxy",
+      "evidence": "local_real",
+      "mandatory": true,
+      "status": "passed",
+      "checks": [
+        "workflow"
+      ],
+      "detail": []
+    },
+    {
+      "id": "3.model_conversation",
+      "title": "A real local model answers a real question",
+      "evidence": "local_real",
+      "mandatory": true,
+      "status": "passed",
+      "checks": [
+        "workflow",
+        "structural"
+      ],
+      "detail": []
+    },
+    {
+      "id": "4.cognitive_reasoning",
+      "title": "Cognitive reasoning and premise challenge (Z.ai R12)",
+      "evidence": "external_blocked",
+      "mandatory": true,
+      "status": "blocked",
+      "checks": [
+        "cognitive"
+      ],
+      "detail": [
+        {
+          "probes": {
+            "git cat-file -t": "fatal: Not a valid object name cc4d2804",
+            "lifeai-cognitive-core-r12-release/": "absent"
+          },
+          "commit": "cc4d2804",
+          "reason": "no Git object, ref, package directory or bundle containing the Cognitive Core",
+          "required_transfer": [
+            "a git bundle containing cc4d2804 plus its SHA-256 (git bundle create lifeai-cognitive-core-r12-release.bundle <range>)",
+            "a git format-patch series whose cover letter names the produced SHAs",
+            "or a pushed scratch ref in this repository carrying cc4d2804"
+          ],
+          "known_collision": {
+            "zai_reported_migrations": "0075-0077",
+            "this_tree": {
+              "0075": "system_activation_authorization",
+              "0076": "github_evidence_staging",
+              "0077": "calendar_foundation",
+              "0078": "repository_file_source_units",
+              "0079": "audit_log_append_only (head)"
+            },
+            "consequence": "the chain collides by identity, not just by number; resolving it requires a merge migration and a reviewed equivalence argument, never renumbering migrations that have already been applied"
+          }
+        }
+      ]
+    },
+    {
+      "id": "5.provenance",
+      "title": "Evidence provenance and citations from indexed documents",
+      "evidence": "local_real",
+      "mandatory": true,
+      "status": "passed",
+      "checks": [
+        "workflow"
+      ],
+      "detail": []
+    },
+    {
+      "id": "6.memory_continuity",
+      "title": "Cross-session memory and decision continuity",
+      "evidence": "local_real",
+      "mandatory": true,
+      "status": "passed",
+      "checks": [
+        "suites.memory",
+        "workflow"
+      ],
+      "detail": []
+    },
+    {
+      "id": "7.agent_execution",
+      "title": "Safe agent execution",
+      "evidence": "local_real",
+      "mandatory": true,
+      "status": "passed",
+      "checks": [
+        "structural"
+      ],
+      "detail": []
+    },
+    {
+      "id": "8.approval_enforcement",
+      "title": "Approval and denial enforcement",
+      "evidence": "local_real",
+      "mandatory": true,
+      "status": "passed",
+      "checks": [
+        "suites.auth"
+      ],
+      "detail": []
+    },
+    {
+      "id": "9.injection_resistance",
+      "title": "Prompt-injection resistance under the canonical fence",
+      "evidence": "local_real",
+      "mandatory": true,
+      "status": "passed",
+      "checks": [
+        "suites.injection"
+      ],
+      "detail": []
+    },
+    {
+      "id": "10.worker_cancellation",
+      "title": "Worker cancellation and recovery",
+      "evidence": "local_real",
+      "mandatory": true,
+      "status": "passed",
+      "checks": [
+        "suites.cancel"
+      ],
+      "detail": []
+    },
+    {
+      "id": "11.browser",
+      "title": "Real browser functionality (Chromium, real backend)",
+      "evidence": "local_real",
+      "mandatory": true,
+      "status": "passed",
+      "checks": [
+        "browser"
+      ],
+      "detail": []
+    },
+    {
+      "id": "12.backup_restore",
+      "title": "Encrypted backup and clean restore that boots",
+      "evidence": "local_real",
+      "mandatory": true,
+      "status": "passed",
+      "checks": [
+        "restore"
+      ],
+      "detail": []
+    },
+    {
+      "id": "13.provider_switching",
+      "title": "Model-provider switching and fail-closed fallback",
+      "evidence": "local_real",
+      "mandatory": true,
+      "status": "passed",
+      "checks": [
+        "suites.providers"
+      ],
+      "detail": []
+    },
+    {
+      "id": "14.security_regression",
+      "title": "Security and regression suites",
+      "evidence": "local_real",
+      "mandatory": true,
+      "status": "passed",
+      "checks": [
+        "structural",
+        "suites.rls"
+      ],
+      "detail": []
+    }
+  ],
+  "checks": {
+    "structural": {
+      "status": "passed",
+      "detail": {
+        "exit_code": 0,
+        "seconds": 11.7,
+        "output": [
+          "[passed ] model.local                  (real) Local model answered a real request",
+          "",
+          "ready_for_private_start: True",
+          "report: /private/tmp/lifeai-int/docs/evidence/founder-alpha-acceptance.json",
+          "/private/tmp/lifeai-int/backend/scripts/acceptance/founder_alpha_acceptance.py:337: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).",
+          "  \"generated_at\": datetime.utcnow().isoformat() + \"Z\","
+        ]
+      }
+    },
+    "workflow": {
+      "status": "passed",
+      "detail": {
+        "exit_code": 0,
+        "seconds": 9.2,
+        "output": [
+          "[passed ] 4-5.question_and_answer: {\"provider\": \"ollama\", \"model\": \"qwen2.5:0.5b-instruct\", \"confidence\": \"high\", \"sources\": [\"Founder workflow 1eccfad3d402.md\", \"Founder workflow 683fa00d475f.md\", \"Founder workflow 71d4bbc35500.md\", \"Founder workflow b67",
+          "[passed ] 8.save_decision: {\"decision_id\": \"38fba2c8-e5f0-4bd0-8bfe-e961c679f5b8\", \"classification\": \"decisions\", \"status\": \"active\"}",
+          "[skipped] 9-10.restart_recovery: {\"reason\": \"not running under --supervise\"}",
+          "[passed ] 11-12.task_and_progress: {\"task_id\": \"b267d7df-c252-4f0b-ad2a-550815677f58\", \"job_id\": \"a3cda8dc-3460-4492-8027-e3eb060fcf53\", \"job_status\": \"completed\", \"progress\": \"1/1\", \"error_category\": null, \"events\": 6}",
+          "",
+          "founder workflow passed in 9.0s \u2014 report: /private/tmp/lifeai-int/docs/evidence/founder-workflow.json"
+        ]
+      }
+    },
+    "suites.auth": {
+      "status": "passed",
+      "detail": {
+        "exit_code": 0,
+        "seconds": 14.8,
+        "output": [
+          "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
+          "28 passed, 105 warnings in 13.92s",
+          "/private/tmp/lifeai-venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:208: PytestDeprecationWarning: The configuration option \"asyncio_default_fixture_loop_scope\" is unset.",
+          "The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: \"function\", \"class\", \"module\", \"package\", \"session\"",
+          "",
+          "  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))"
+        ]
+      }
+    },
+    "suites.rls": {
+      "status": "passed",
+      "detail": {
+        "exit_code": 0,
+        "seconds": 9.3,
+        "output": [
+          "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
+          "18 passed, 137 warnings in 8.60s",
+          "/private/tmp/lifeai-venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:208: PytestDeprecationWarning: The configuration option \"asyncio_default_fixture_loop_scope\" is unset.",
+          "The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: \"function\", \"class\", \"module\", \"package\", \"session\"",
+          "",
+          "  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))"
+        ]
+      }
+    },
+    "suites.injection": {
+      "status": "passed",
+      "detail": {
+        "exit_code": 0,
+        "seconds": 5.9,
+        "output": [
+          "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
+          "7 passed, 60 warnings in 5.15s",
+          "/private/tmp/lifeai-venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:208: PytestDeprecationWarning: The configuration option \"asyncio_default_fixture_loop_scope\" is unset.",
+          "The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: \"function\", \"class\", \"module\", \"package\", \"session\"",
+          "",
+          "  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))"
+        ]
+      }
+    },
+    "suites.cancel": {
+      "status": "passed",
+      "detail": {
+        "exit_code": 0,
+        "seconds": 8.8,
+        "output": [
+          "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
+          "11 passed, 450 warnings in 8.15s",
+          "/private/tmp/lifeai-venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:208: PytestDeprecationWarning: The configuration option \"asyncio_default_fixture_loop_scope\" is unset.",
+          "The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: \"function\", \"class\", \"module\", \"package\", \"session\"",
+          "",
+          "  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))"
+        ]
+      }
+    },
+    "suites.providers": {
+      "status": "passed",
+      "detail": {
+        "exit_code": 0,
+        "seconds": 7.8,
+        "output": [
+          "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
+          "18 passed, 2 warnings in 7.15s",
+          "/private/tmp/lifeai-venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:208: PytestDeprecationWarning: The configuration option \"asyncio_default_fixture_loop_scope\" is unset.",
+          "The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: \"function\", \"class\", \"module\", \"package\", \"session\"",
+          "",
+          "  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))"
+        ]
+      }
+    },
+    "suites.memory": {
+      "status": "passed",
+      "detail": {
+        "exit_code": 0,
+        "seconds": 7.3,
+        "output": [
+          "-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html",
+          "5 passed, 54 warnings in 6.54s",
+          "/private/tmp/lifeai-venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:208: PytestDeprecationWarning: The configuration option \"asyncio_default_fixture_loop_scope\" is unset.",
+          "The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: \"function\", \"class\", \"module\", \"package\", \"session\"",
+          "",
+          "  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))"
+        ]
+      }
+    },
+    "cognitive": {
+      "status": "blocked",
+      "detail": {
+        "probes": {
+          "git cat-file -t": "fatal: Not a valid object name cc4d2804",
+          "lifeai-cognitive-core-r12-release/": "absent"
+        },
+        "commit": "cc4d2804",
+        "reason": "no Git object, ref, package directory or bundle containing the Cognitive Core",
+        "required_transfer": [
+          "a git bundle containing cc4d2804 plus its SHA-256 (git bundle create lifeai-cognitive-core-r12-release.bundle <range>)",
+          "a git format-patch series whose cover letter names the produced SHAs",
+          "or a pushed scratch ref in this repository carrying cc4d2804"
+        ],
+        "known_collision": {
+          "zai_reported_migrations": "0075-0077",
+          "this_tree": {
+            "0075": "system_activation_authorization",
+            "0076": "github_evidence_staging",
+            "0077": "calendar_foundation",
+            "0078": "repository_file_source_units",
+            "0079": "audit_log_append_only (head)"
+          },
+          "consequence": "the chain collides by identity, not just by number; resolving it requires a merge migration and a reviewed equivalence argument, never renumbering migrations that have already been applied"
+        }
+      }
+    },
+    "install": {
+      "status": "passed",
+      "detail": {
+        "database": "lifeos_release_gate_20261119115057_40cc04",
+        "install_seconds": 2.3,
+        "idempotent_reverify": [
+          "[ok   0.1s] verify_schema: Database revision is the tree's single head",
+          "[ok   0.3s] verify_boot: app/main.py's startup privilege contract is satisfiable",
+          "[ok   0.0s] verify_grants: Runtime role can read everything and write where it must",
+          "[ok   0.1s] verify_s1a: S1A privilege policy verifies read-only",
+          "database is ready for `uvicorn app.main:app`."
+        ],
+        "dropped_after_run": true
+      }
+    },
+    "restore": {
+      "status": "passed",
+      "detail": {
+        "artifact": "lifeos_founder_flow-20261119T115101Z.dump",
+        "encrypted": true,
+        "off_host_verified": false,
+        "off_host_note": "file:// is a controlled remote-equivalent, not off-host retention",
+        "restored_database_bootable": true,
+        "boot_output": [
+          "[ok   0.1s] verify_schema: Database revision is the tree's single head",
+          "[ok   0.3s] verify_boot: app/main.py's startup privilege contract is satisfiable",
+          "[ok   0.0s] verify_grants: Runtime role can read everything and write where it must",
+          "[ok   0.1s] verify_s1a: S1A privilege policy verifies read-only",
+          "database is ready for `uvicorn app.main:app`."
+        ]
+      }
+    },
+    "browser": {
+      "status": "passed",
+      "detail": {
+        "exit_code": 0,
+        "seconds": 17.1,
+        "output": [
+          "",
+          "  8 passed (15.8s)",
+          "(node:12427) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.",
+          "(Use `node --trace-deprecation ...` to show where the warning was created)",
+          "(node:12429) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.",
+          "(Use `node --trace-deprecation ...` to show where the warning was created)"
+        ]
+      }
+    }
+  },
+  "summary": {
+    "items_total": 14,
+    "items_passed": 13,
+    "items_failed": [],
+    "items_blocked": [
+      "4.cognitive_reasoning"
+    ],
+    "items_not_verified": [],
+    "external_blocked": [
+      "4.cognitive_reasoning"
+    ]
+  },
+  "ready_for_private_founder_use": false,
+  "ready_without_cognitive_core": true,
+  "first_cycle_go": false,
+  "authorization": "founder_authorization_required",
+  "note": "A passing suite is not a passing release. Read each item's evidence field: external_blocked items were not executed at all."
+}

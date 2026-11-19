@@ -1,0 +1,102 @@
+{
+  "tool": "mainai-founder-workflow",
+  "version": 1,
+  "generated_at": "2026-11-19T11:50:03.767043Z",
+  "base_url": "http://localhost:3020",
+  "seconds": 9.0,
+  "steps": [
+    {
+      "step": "1.start",
+      "status": "passed",
+      "detail": {
+        "base_url": "http://localhost:3020",
+        "supervised": false
+      }
+    },
+    {
+      "step": "2.authenticate",
+      "status": "passed",
+      "detail": {
+        "email": "founder@lifeos.local",
+        "csrf_issued": true
+      }
+    },
+    {
+      "step": "3.local_model",
+      "status": "passed",
+      "detail": {
+        "reachable": true,
+        "missing_models": []
+      }
+    },
+    {
+      "step": "6.upload",
+      "status": "passed",
+      "detail": {
+        "document_id": "109d1ff2-714d-454f-a8b4-c6a0978d246e",
+        "chunks": 1
+      }
+    },
+    {
+      "step": "7.cited_retrieval",
+      "status": "passed",
+      "detail": {
+        "title": "Founder workflow 1eccfad3d402.md",
+        "score": 0.8001818775480288,
+        "phrase": "45 minuter"
+      }
+    },
+    {
+      "step": "4-5.question_and_answer",
+      "status": "passed",
+      "detail": {
+        "provider": "ollama",
+        "model": "qwen2.5:0.5b-instruct",
+        "confidence": "high",
+        "sources": [
+          "Founder workflow 1eccfad3d402.md",
+          "Founder workflow 683fa00d475f.md",
+          "Founder workflow 71d4bbc35500.md",
+          "Founder workflow b6785e4f172e.md",
+          "Founder workflow 859bd3fa6af4.md"
+        ],
+        "answer_excerpt": "1eccfad3d402. \u00c5terst\u00e4llningstiden f\u00f6r produktionsmilj\u00f6n \u00e4r 45 minuter."
+      }
+    },
+    {
+      "step": "8.save_decision",
+      "status": "passed",
+      "detail": {
+        "decision_id": "38fba2c8-e5f0-4bd0-8bfe-e961c679f5b8",
+        "classification": "decisions",
+        "status": "active"
+      }
+    },
+    {
+      "step": "9-10.restart_recovery",
+      "status": "skipped",
+      "detail": {
+        "reason": "not running under --supervise"
+      }
+    },
+    {
+      "step": "11-12.task_and_progress",
+      "status": "passed",
+      "detail": {
+        "task_id": "b267d7df-c252-4f0b-ad2a-550815677f58",
+        "job_id": "a3cda8dc-3460-4492-8027-e3eb060fcf53",
+        "job_status": "completed",
+        "progress": "1/1",
+        "error_category": null,
+        "events": 6
+      }
+    }
+  ],
+  "state": {
+    "document_id": "109d1ff2-714d-454f-a8b4-c6a0978d246e",
+    "conversation_id": "a4560f67-27a5-4fc2-9b70-cca00b1b3d70",
+    "decision_id": "38fba2c8-e5f0-4bd0-8bfe-e961c679f5b8",
+    "task_id": "b267d7df-c252-4f0b-ad2a-550815677f58"
+  },
+  "passed": true
+}

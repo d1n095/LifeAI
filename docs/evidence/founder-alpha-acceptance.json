@@ -1,0 +1,168 @@
+{
+  "version": 1,
+  "generated_at": "2026-11-19T11:49:54.529777Z",
+  "git_commit": "b2e9ea66f4320d3835a479eb29bdf290bfcdc158",
+  "checks": [
+    {
+      "id": "config",
+      "title": "Configuration and dependency validation",
+      "evidence_kind": "config_only",
+      "mandatory": true,
+      "status": "passed",
+      "detail": {
+        "environment": "development",
+        "github_write_enabled": false,
+        "proposal_isolation": true,
+        "problems": []
+      }
+    },
+    {
+      "id": "postgres",
+      "title": "PostgreSQL availability",
+      "evidence_kind": "real",
+      "mandatory": true,
+      "status": "passed",
+      "detail": {
+        "server": "PostgreSQL",
+        "database": "lifeos_founder_flow"
+      }
+    },
+    {
+      "id": "migrations",
+      "title": "Database schema matches the code's migration head",
+      "evidence_kind": "real",
+      "mandatory": true,
+      "status": "passed",
+      "detail": {
+        "applied": "0079",
+        "heads": [
+          "0079"
+        ]
+      }
+    },
+    {
+      "id": "redis",
+      "title": "Redis availability",
+      "evidence_kind": "real",
+      "mandatory": true,
+      "status": "passed",
+      "detail": {
+        "ping": true
+      }
+    },
+    {
+      "id": "security.policy_lock",
+      "title": "Security controls unmodified and fully covered",
+      "evidence_kind": "real",
+      "mandatory": true,
+      "status": "passed",
+      "detail": {
+        "exit_code": 0,
+        "output": [
+          "policy lock verified: 25 controls unchanged"
+        ]
+      }
+    },
+    {
+      "id": "security.capabilities",
+      "title": "Agent capabilities match the runtime contract",
+      "evidence_kind": "real",
+      "mandatory": true,
+      "status": "passed",
+      "detail": {
+        "exit_code": 0,
+        "output": [
+          "agent capabilities verified: 4 runtime capabilities, 2 actors, no forbidden grants"
+        ]
+      }
+    },
+    {
+      "id": "security.runtime_privileges",
+      "title": "Database grants satisfy the API's startup policy",
+      "evidence_kind": "real",
+      "mandatory": true,
+      "status": "passed",
+      "detail": {
+        "note": "app/main.py's startup privilege policy is satisfiable on this database"
+      }
+    },
+    {
+      "id": "storage.writable",
+      "title": "Uploaded originals can actually be written",
+      "evidence_kind": "real",
+      "mandatory": true,
+      "status": "passed",
+      "detail": {
+        "writable": true
+      }
+    },
+    {
+      "id": "requirements.registry",
+      "title": "Requirements registry verifies against the tree",
+      "evidence_kind": "real",
+      "mandatory": true,
+      "status": "passed",
+      "detail": {
+        "exit_code": 0,
+        "output": [
+          "  necessary_for_safe_autonomy: 5",
+          "  required_for_production: 2",
+          "  status deferred: 1",
+          "  status needs_founder_decision: 2",
+          "  status partial: 5",
+          "  status verified: 24"
+        ]
+      }
+    },
+    {
+      "id": "requirements.dead_seams",
+      "title": "No configuration flag that nothing reads",
+      "evidence_kind": "real",
+      "mandatory": true,
+      "status": "passed",
+      "detail": {
+        "exit_code": 0,
+        "output": [
+          "  - /{envelope_id}",
+          "  - /{item_id}",
+          "  - /{item_id}/dispute",
+          "  - /{job_id}",
+          "  - /{project_id}",
+          "  - /{source_id}"
+        ]
+      }
+    },
+    {
+      "id": "model.local",
+      "title": "Local model answered a real request",
+      "evidence_kind": "real",
+      "mandatory": false,
+      "status": "passed",
+      "detail": {
+        "exit_code": 0,
+        "output": [
+          "[passed ] inference.chat               (real) 'READY' in 0.13s (36 prompt / 2 completion tokens)",
+          "[passed ] inference.timeout_enforced   (real) a 1 ms budget failed closed as 'unreachable' in 0.01s",
+          "[passed ] inference.missing_model_fails_closed (real) uninstalled model reported as category='unsupported' (404 => 'unsupported' is correct)",
+          "[passed ] inference.concurrency        (real) two concurrent completions both returned",
+          "[passed ] embeddings.available         (real) width 768, deterministic=True, sim(related)=0.945 > sim(unrelated)=0.388 = True",
+          "[passed ] embeddings.missing_model_fails_closed (real) uninstalled embedding model reported as category='unsupported'",
+          "",
+          "verdict: passed  (8 passed, 0 failed, 0 blocked)"
+        ]
+      }
+    }
+  ],
+  "summary": {
+    "total": 11,
+    "passed": 11,
+    "failed": 0,
+    "skipped": 0,
+    "mandatory_failed": [],
+    "real_evidence": 10
+  },
+  "ready_for_private_start": true,
+  "first_cycle_go": false,
+  "authorization": "founder_authorization_required",
+  "note": "Individual modules passing their tests is not readiness. Read the per-check evidence_kind: config_only and not_verified checks are not proof of working behavior."
+}

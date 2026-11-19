@@ -87,6 +87,12 @@ export default function FounderConsolePage() {
   const [partialErrors, setPartialErrors] = useState<string[]>([]);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // The console polls every 10s and pauses while the tab is hidden, so "checked now" is a claim
+  // the UI cannot make on its own. It shows the last attempt instead, and says so after a failure.
+  const [lastCheckedAt, setLastCheckedAt] = useState<Date | null>(null);
+  // A failed goals read is not an empty approval queue. Keeping the two apart stops the panel
+  // from telling the founder there is nothing to approve when it simply could not look.
+  const [approvalsUnreadable, setApprovalsUnreadable] = useState(false);
 
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
@@ -103,6 +109,8 @@ export default function FounderConsolePage() {
     } catch (e: unknown) {
       setHealth(null);
       setHealthError(e instanceof Error ? e.message : "Okänt fel");
+    } finally {
+      setLastCheckedAt(new Date());
     }
   }, []);
 
@@ -115,7 +123,12 @@ export default function FounderConsolePage() {
     if (jobsResult.status === "fulfilled") setJobs(jobsResult.value);
     else setPartialErrors((prev) => [...new Set([...prev, "Arbetsjobb kunde inte läsas."])]);
 
-    if (goalsResult.status !== "fulfilled") return;
+    if (goalsResult.status !== "fulfilled") {
+      setApprovalsUnreadable(true);
+      setPartialErrors((prev) => [...new Set([...prev, "Godkännandekön kunde inte läsas."])]);
+      return;
+    }
+    setApprovalsUnreadable(false);
     const activeGoals = goalsResult.value
       .filter((goal) => !["completed", "cancelled", "failed"].includes(goal.status))
       .slice(0, 4);
@@ -304,7 +317,13 @@ export default function FounderConsolePage() {
         <div className="rounded-2xl border border-border bg-panel/70 p-5">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-medium text-white/70">MainAI · driftstatus</h2>
-            <span className="text-[11px] text-white/30">{loading ? "Läser…" : "Senast kontrollerad nu"}</span>
+            <span className="text-[11px] text-white/30">
+              {loading
+                ? "Läser…"
+                : lastCheckedAt
+                  ? `Senast kontrollerad ${lastCheckedAt.toLocaleTimeString("sv-SE")}`
+                  : "Inte kontrollerad ännu"}
+            </span>
           </div>
           <dl className="mt-4 space-y-3">
             <StatusRow tone={model.tone} label="Lokal modell" value={model.value} detail={model.detail} />
@@ -454,7 +473,11 @@ export default function FounderConsolePage() {
           <p className="mb-3 text-[11px] text-white/35">
             Åtgärder som MainAI inte får utföra autonomt. Godkännande registreras i backend och krävs innan uppgiften fortsätter.
           </p>
-          {approvals.length === 0 ? (
+          {approvalsUnreadable ? (
+            <p className="text-sm text-amber-300/80">
+              Kön kunde inte läsas — status är okänd, inte tom.
+            </p>
+          ) : approvals.length === 0 ? (
             <p className="text-sm text-white/45">Inga åtgärder väntar på godkännande.</p>
           ) : (
             <ul className="space-y-3">

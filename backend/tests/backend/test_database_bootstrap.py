@@ -72,11 +72,14 @@ def test_role_provisioning_runs_before_migration_and_policy_verification_after(b
     report = module.bootstrap(verify_only=False)
 
     assert calls[:3] == ["step_ensure_app_role", "step_migrate", "step_apply_privileges"]
+    # The boot contract is enforced before the grants are verified: otherwise the broad floor
+    # `ensure_app_role` grants is verified as if it were the final state, and the very next run
+    # (after app/main.py narrows it) reports a healthy database as broken.
     assert calls[3:] == [
         "verify_schema_head",
+        "verify_boot_contract",
         "verify_runtime_grants",
         "verify_s1a_policy",
-        "verify_boot_contract",
     ]
     assert report["ready"] is True
     assert report["mode"] == "bootstrap"
@@ -92,9 +95,9 @@ def test_verify_only_never_runs_a_mutating_step(bootstrap_module, monkeypatch):
 
     assert calls == [
         "verify_schema_head",
+        "verify_boot_contract",
         "verify_runtime_grants",
         "verify_s1a_policy",
-        "verify_boot_contract",
     ]
 
 
@@ -131,3 +134,17 @@ def test_main_returns_two_for_configuration_errors_and_one_for_step_failures(boo
     module = bootstrap_module
     monkeypatch.delenv("DATABASE_URL")
     assert module.main(["--verify-only"]) == 2
+
+
+def test_append_only_job_events_are_not_expected_to_accept_updates(bootstrap_module):
+    """A second bootstrap run must not disagree with the first one.
+
+    Found by running the documented readiness check twice: `verify_grants` demanded
+    UPDATE/DELETE on `mainai_job_events`, but `verify_boot` — the last step of the same run —
+    re-asserts `app/rls.py`'s append-only lockdown, which requires `mainai_app` to hold only
+    SELECT and INSERT there. The first run therefore passed and every later `--verify-only` on
+    the same healthy database failed. The fix is to expect the policy the API actually enforces,
+    and to fail loudly if a future grant widens it again.
+    """
+    assert "mainai_job_events" not in bootstrap_module.CORE_WRITE_TABLES
+    assert bootstrap_module.APPEND_ONLY_TABLES["mainai_job_events"] == ("SELECT", "INSERT")
