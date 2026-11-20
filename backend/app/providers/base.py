@@ -76,6 +76,9 @@ class LLMProvider(ABC):
     """
 
     name: str
+    # A local provider does not leave the process/host. External providers must always
+    # pass through Life Vault egress with an authenticated owner or verified worker lease.
+    is_local: bool = False
 
     @abstractmethod
     async def chat(self, messages: list[Message], model: str, *, timeout: float | None = None, **kwargs) -> ChatResult: ...

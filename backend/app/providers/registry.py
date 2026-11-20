@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 import logging
 import uuid
+from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import Session
 
@@ -25,6 +28,9 @@ from app.providers.ollama_provider import OllamaProvider
 from app.providers.openai_provider import OpenAIProvider
 from app.providers.openrouter_provider import OpenRouterProvider
 from app.providers.zai_provider import ZAIProvider
+
+if TYPE_CHECKING:
+    from app.egress_policy.service import WorkerLease
 
 logger = logging.getLogger(__name__)
 
@@ -252,7 +258,7 @@ async def embed_with_policy(
     # The vector-only adapter contract cannot reconcile paid usage or an uncertain
     # embedding outcome. Do not repeat an unmetered external effect on chat retry.
     # Eval adapters require their own active lease and are never production providers.
-    if effect_guard and provider.name != "ollama":
+    if effect_guard and not provider.is_local:
         lease = _current_evaluation()
         if lease is None or provider.name != "zai_eval" or not isinstance(provider, lease.provider_class):
             raise ProviderError("External query embedding requires a metered effect contract.",
@@ -343,6 +349,7 @@ async def chat_with_fallback(
     messages: list[Message],
     *,
     owner_id: uuid.UUID | None = None,
+    worker_lease: WorkerLease | None = None,
     purpose: str | None = None,
     requested_by: str | None = None,
     task_id: uuid.UUID | None = None,
@@ -359,14 +366,16 @@ async def chat_with_fallback(
     (including the one that succeeded), so callers can log/audit exactly what happened
     instead of it being invisible.
 
-    Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V1): when
-    `owner_id` is passed, every attempt is routed through `enforce_egress_policy()` first --
-    default-deny gate, hard-deny on NEVER_EGRESS-marked content (never partial-send, and never
-    treated as "try the next provider" -- the content itself is what's denied, not a specific
-    provider being unreachable), otherwise secret-pattern redacted, with exactly one disclosure-
-    ledger row per real attempt. `owner_id` is optional and defaults to None (gate skipped,
-    unchanged legacy behavior) so existing callers migrate incrementally -- see the threat
-    model's V1/V4 blocker list for which callers still need to pass it.
+    Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V1): an
+    external chain now requires either `owner_id` or a verified `worker_lease`; an ownerless
+    external call is denied before any provider is contacted. A local-only chain (Ollama) may
+    still run without an owner because nothing leaves the host. When an owner is present,
+    every attempt is routed through `enforce_egress_policy()` first -- default-deny gate,
+    hard-deny on NEVER_EGRESS-marked content (never partial-send, and never treated as "try
+    the next provider" -- the content itself is what's denied, not a specific provider being
+    unreachable), otherwise secret-pattern redacted, with exactly one disclosure-ledger row
+    per real attempt. A worker lease is re-verified against `mainai_jobs` immediately before
+    the call; a revoked, expired or taken-over lease fails closed.
     """
     # Deferred import: app/providers/verification.py imports resolve_active from this module,
     # so importing it at module load time would be a circular import. classify_provider_exception
@@ -387,11 +396,23 @@ async def chat_with_fallback(
     # re-export, which can become a stale alias under development/test module reloads.
     from app.egress_policy.service import EgressDeniedError, enforce_egress_policy
 
-    if selection_policy is not None and owner_id is None:
+    if selection_policy is not None and owner_id is None and worker_lease is None:
         # New controlled-routing calls must carry authoritative caller context; selection
         # permission alone must never opt into the legacy egress bypass.
         raise ModelSelectionError("controlled chat routing requires owner_id for egress")
     chain = resolve_chat_chain(db, selection_policy=selection_policy)
+
+    # External providers are never allowed to run on the legacy ownerless path. A local-only
+    # chain may still run without an owner because nothing leaves the host. A worker presents
+    # its existing mainai_jobs lease, which is re-verified here (owner, worker, generation,
+    # running state, expiry) immediately before any provider call.
+    from app.egress_policy.service import resolve_egress_owner
+
+    if any(not provider.is_local for provider, _model in chain) or worker_lease is not None:
+        owner_id = resolve_egress_owner(
+            db, owner_id=owner_id, worker_lease=worker_lease
+        )
+
     attempted: list[str] = []
     last_error: Exception | None = None
 

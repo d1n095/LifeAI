@@ -157,9 +157,12 @@ def test_agent_dispatch_passes_effect_guard(monkeypatch):
     monkeypatch.setattr(agent_orchestration, "_record_event", lambda *a, **k: "event")
 
     assert asyncio.run(
-        agent_orchestration.dispatch_task(None, task.id, dispatched_by="test")
+        agent_orchestration.dispatch_task(
+            None, task.id, owner_id=uuid.uuid4(), dispatched_by="test"
+        )
     ) == "event"
     assert captured.get("effect_guard") is True
+    assert captured.get("owner_id") is not None
 
 
 def test_lesson_conflict_passes_effect_guard(monkeypatch):
@@ -180,8 +183,11 @@ def test_lesson_conflict_passes_effect_guard(monkeypatch):
     )
 
     conflict, reasoning = asyncio.run(
-        lesson_conflicts.detect_conflict(None, lesson_a=lesson, lesson_b=lesson)
+        lesson_conflicts.detect_conflict(
+            None, lesson_a=lesson, lesson_b=lesson, owner_id=uuid.uuid4()
+        )
     )
 
     assert (conflict, reasoning) == (False, "ok")
     assert captured.get("effect_guard") is True
+    assert captured.get("owner_id") is not None

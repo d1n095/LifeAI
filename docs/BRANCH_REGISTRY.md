@@ -9800,3 +9800,14 @@ Branched from exact PR #464 head `86671468a6dd271b61a3f985434130c4bf470ea8`; PR 
 **R15-07:** legitimate custom local Ollama tags are supported end to end: the catalog synthesizes a local-only spec with zero provider cost, exact verification is recorded per tag, admin config accepts it, and the admin UI exposes a free-text local-tag field. Unregistered external custom models remain fail-closed because their price/capabilities are not independently verified.
 
 **Still blocking:** R15-08–R15-11, DB-backed route tests, and exact-head CI/independent acceptance. No push, merge, deploy, or provider activation. `first_cycle_go=false`.
+
+## Egress owner/lease authorization — `security/r15-egress-owner-authorization` (2026-11-20)
+
+Branched from `d06c9eaf5574ce99bdbee2b462d1ba462323e378`; no PR opened yet. Closes the verified ownerless external-egress paths in `agent_orchestration.dispatch_task/review_task`, `lesson_conflicts.detect_conflict/resolve_conflicts_among`, and `provider_planning.RegistryPlanningAdapter`:
+
+- `chat_with_fallback` now denies an external chain before any provider call unless it receives an active, verified `owner_id` or a freshly re-verified `mainai_jobs` worker lease. A local-only Ollama chain remains ownerless-safe because nothing leaves the host.
+- Owner identity is threaded through all three call paths; `FOUNDER_USER_ID` is never used as a fallback.
+- `provider_planning` validates the owner and runs Life Vault egress before its explicit `provider.chat` path, while avoiding double enforcement for the built-in registry adapter.
+- New DB-free egress regressions: **13 passed**. R15 successor DB-free suite: **40 passed**. DB-backed orchestration/lesson tests remain **BLOCKED** locally because PostgreSQL on `localhost:5433` is not running.
+
+No push, merge, deploy, or provider activation. `first_cycle_go=false`.

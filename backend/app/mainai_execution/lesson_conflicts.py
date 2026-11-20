@@ -66,7 +66,13 @@ def find_conflict_candidate_pairs(db: Session, *, lessons: list[EngineeringLesso
     return pairs
 
 
-async def detect_conflict(db: Session, *, lesson_a: EngineeringLesson, lesson_b: EngineeringLesson) -> tuple[bool, str]:
+async def detect_conflict(
+    db: Session,
+    *,
+    lesson_a: EngineeringLesson,
+    lesson_b: EngineeringLesson,
+    owner_id: uuid.UUID,
+) -> tuple[bool, str]:
     """Returns (is_conflict, reasoning). The one real AI-judgment call in this module -- see
     module docstring for the fail-closed default on a malformed/errored response."""
     prompt = (
@@ -77,7 +83,14 @@ async def detect_conflict(db: Session, *, lesson_a: EngineeringLesson, lesson_b:
     )
     messages = [Message(role="system", content=LESSON_CONFLICT_SYSTEM_PROMPT), Message(role="user", content=prompt)]
     try:
-        result, _attempted = await chat_with_fallback(db, messages, effect_guard=True)
+        result, _attempted = await chat_with_fallback(
+            db,
+            messages,
+            owner_id=owner_id,
+            purpose="lesson_conflict_judgment",
+            requested_by="mainai_execution.lesson_conflicts.detect_conflict",
+            effect_guard=True,
+        )
         raw = result.content.strip()
         if raw.startswith("```"):
             raw = raw.split("```", 2)[1]
@@ -148,7 +161,25 @@ def mark_conflict(db: Session, *, lesson_a: EngineeringLesson, lesson_b: Enginee
     db.flush()
 
 
-async def resolve_conflicts_among(db: Session, *, lessons: list[EngineeringLesson]) -> list[EngineeringLesson]:
+def _owner_for_lesson_pair(
+    db: Session, lesson_a: EngineeringLesson, lesson_b: EngineeringLesson
+) -> uuid.UUID | None:
+    """Find a real owner-scoped task that applied either lesson.
+
+    Lessons themselves are founder-wide and have no owner column. External judgment is only
+    allowed when an actual task gives the pair a durable owner context; otherwise the pair is
+    skipped rather than attributed to a guessed or process-wide identity.
+    """
+    for lesson in (lesson_a, lesson_b):
+        tasks = _tasks_that_applied_lesson(db, lesson.id)
+        if tasks:
+            return tasks[0].owner_id
+    return None
+
+
+async def resolve_conflicts_among(
+    db: Session, *, lessons: list[EngineeringLesson], owner_id: uuid.UUID | None = None
+) -> list[EngineeringLesson]:
     """The one entry point callers actually use: given a candidate lesson list (e.g. lookup_
     lessons()'s result for a task_type), finds and resolves every genuine conflict among them,
     and returns the lessons that are STILL `active` afterward -- safe for a caller like
@@ -161,7 +192,17 @@ async def resolve_conflicts_among(db: Session, *, lessons: list[EngineeringLesso
     for lesson_a, lesson_b in pairs:
         if lesson_a.id in disputed_ids or lesson_b.id in disputed_ids:
             continue  # already resolved via an earlier pair this same call
-        is_conflict, reasoning = await detect_conflict(db, lesson_a=lesson_a, lesson_b=lesson_b)
+        pair_owner = owner_id or _owner_for_lesson_pair(db, lesson_a, lesson_b)
+        if pair_owner is None:
+            logger.warning(
+                "Skipping lesson conflict judgment for lessons %s/%s: no owner-scoped task applied either lesson.",
+                lesson_a.id,
+                lesson_b.id,
+            )
+            continue
+        is_conflict, reasoning = await detect_conflict(
+            db, lesson_a=lesson_a, lesson_b=lesson_b, owner_id=pair_owner
+        )
         if is_conflict:
             mark_conflict(db, lesson_a=lesson_a, lesson_b=lesson_b, reasoning=reasoning)
             disputed_ids.add(lesson_a.id)

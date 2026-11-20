@@ -151,7 +151,7 @@ async def test_detect_conflict_fails_closed_on_malformed_ai_response(db_session,
 
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat)
 
-    is_conflict, reasoning = await detect_conflict(db_session, lesson_a=a, lesson_b=b)
+    is_conflict, reasoning = await detect_conflict(db_session, lesson_a=a, lesson_b=b, owner_id=owner_id)
     assert is_conflict is False
     assert reasoning == ""
 
@@ -167,7 +167,7 @@ async def test_detect_conflict_fails_closed_when_the_ai_call_raises(db_session, 
 
     monkeypatch.setattr(OpenAIProvider, "chat", _raising_chat)
 
-    is_conflict, reasoning = await detect_conflict(db_session, lesson_a=a, lesson_b=b)
+    is_conflict, reasoning = await detect_conflict(db_session, lesson_a=a, lesson_b=b, owner_id=owner_id)
     assert is_conflict is False
 
 
@@ -232,7 +232,7 @@ async def test_resolve_conflicts_among_disputes_a_real_positive_conflict_and_exc
 
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat)
 
-    still_active = await resolve_conflicts_among(db_session, lessons=[a, b, unrelated])
+    still_active = await resolve_conflicts_among(db_session, lessons=[a, b, unrelated], owner_id=owner_id)
     db_session.commit()
 
     assert {lesson.id for lesson in still_active} == {unrelated.id}
@@ -255,7 +255,7 @@ async def test_resolve_conflicts_among_leaves_non_conflicting_lessons_active(db_
 
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat)
 
-    still_active = await resolve_conflicts_among(db_session, lessons=[a, b])
+    still_active = await resolve_conflicts_among(db_session, lessons=[a, b], owner_id=owner_id)
     db_session.commit()
 
     assert {lesson.id for lesson in still_active} == {a.id, b.id}

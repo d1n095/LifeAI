@@ -90,6 +90,7 @@ class OllamaProvider(LLMProvider):
     """Local model runner (Llama / Qwen / Mistral) — no API key, no external cost."""
 
     name = "ollama"
+    is_local = True
 
     def __init__(self):
         self.settings = get_settings()
