@@ -44,13 +44,18 @@ produktionscontainer användes.
 | Playwright Founder Knowledge Studio | 1 passed |
 | Playwright security/model-routing | 6 passed, 1 skipped |
 | Playwright account lifecycle | 5 passed |
+| Playwright media/upload-kö/mobil/pagination | 11 passed |
+| Playwright rate-limit | 2 passed |
+| Playwright same-origin-proxy | 2 passed |
 
 **Full vertikal resa (Playwright, riktig backend + worker):** import av
 `vertikalt-e2e-test.txt` → validering/lagring → extrahering → pgvector-indexering → synlig i
 biblioteket → hybridsökning → MainAI-chatt med källcitat → öppna exakt källa → fortsätta
 samtalet → radera med bekräftelse. Passerade. Den kombinerade E2E-körningen (auth, Founder
 Knowledge Studio, security, model-routing) slutade med **10 passed, 1 skipped**; account-körningen
-separat med **5 passed**. CI-YAML parsar och `py_compile` passerar för de ändrade Python-filerna.
+separat med **5 passed**; media/upload-kö/mobil/pagination med **11 passed**; rate-limit med
+**2 passed**; same-origin-proxy med **2 passed**. Sammanlagt **30 Playwright passed, 1 skipped**.
+CI-YAML parsar och `py_compile` passerar för de ändrade Python-filerna.
 
 **Reparerade defekter:** (1) okänd `is_local` kraschade/klassades fel — nu fail-closed;
 (2) E2E-harnesset saknade worker, så uppladdningar blev liggande `pending`; (3) E2E-faken för
@@ -60,16 +65,19 @@ reproducerades `pending`/`blocked_provider`; efter fixarna passerade hela resan.
 
 **Kvarstående begränsningar:** exakt-head GitHub Actions är inte körd eftersom inget har
 pushats; 10 tester hoppas över eftersom Z.ai-CLI saknas och 1 eftersom `zip` saknas. En
-säkerhetsspec hoppas över när backendens externa origin inte är konfigurerad. Övriga
-Playwright-specar (media, upload-kö, mobil workbench, pagination, rate-limit, proxy,
-shell-sidor) är inte körda i denna omgång. `ruff` på det avsiktliga E2E-skriptet rapporterar
+säkerhetsspec hoppas över när backendens externa origin inte är konfigurerad.
+`shell-pages.spec.ts` är den enda Playwright-spec som inte körts: dess första test förutsätter
+att `/documents` fortfarande har en tom-state och uppladdning, men sidan är avsiktligt en
+redirect till `/library` (verifierat av `library-upload-queue.spec.ts`). Den behöver skrivas om
+innan den kan köras — det är ett testproblem, inte en produktionsdefekt. `ruff` på det
+avsiktliga E2E-skriptet rapporterar
 fortsatt `E402` för imports efter env-setup; det är samma mönster som fanns före ändringen,
 medan `py_compile` och YAML-validering är gröna.
 
 **Beroende och merge-ordning:** bygger på R15 och ska mergas efter R15. Inga ändringar i
 Codex- eller Z-brancher; ingen känd överlappning med deras implementationer. Nästa steg är
-Godkänd push för exakt-head CI, resterande Playwright-specar och regenerering av
-leveransartefakterna.
+godkänd push för exakt-head CI och att skriva om/avveckla den obsoleta shell-specen.
+Leveransartefakterna är regenererade mot denna HEAD.
 
 ## Blueprint-intelligensbacklogen KLAR: inkrementell dokumentförståelse (2026-11-14)
 
