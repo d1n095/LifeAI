@@ -6,6 +6,36 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Founder Alpha reliability successor — lokal verifiering (2026-11-20)
+
+**Branch:** `claude/founder-alpha-reliability`, bas `6410abe` (R15-leveransen). R15-branchen
+och dess leverans i `delivery/r15/` är orörda. Ingen PR, ingen push och ingen merge har gjorts.
+
+**Scope (en avgränsad robusthetscommit, `9b731f4`):** provideradaptrarna för Ollama/OpenAI
+klassificerar ogiltig JSON, 429, auth-fel, 5xx och felaktiga svarsformat som `ProviderError`
+och markerar att en extern förfrågan kan ha lämnat systemet; ett omladdat samtal bevarar
+misslyckade assistentrader via `MessageOut.status/error_category/in_reply_to_id` och erbjuder
+endast säker retry; `hybrid_search` escap:ar `%`, `_` och backslash så att en rå söktext inte
+blir en LIKE-jokerteckenfråga. Inga nya tabeller, migrationer eller parallell
+minnesarkitektur.
+
+**Teststatus lokalt (DB-fri miljö):** 6 nya kontraktstester PASS
+(`test_message_out_contract.py`, `test_vector_store_like_escape.py`), 48 provider-tester PASS,
+R15 `security_r15_successor` 61 passed/5 skipped (Redis saknas), R15 `security_r15_egress`
+13 passed, `ruff` och `py_compile` PASS. De nya testerna reproducerade före fixen rå
+`JSONDecodeError`/`httpx.HTTPStatusError` respektive tappade assistentrader.
+
+**Blockerare / ej körd:** DB-backade tester (inkl. den utökade
+`test_chat_message_persistence.py`), full Founder Alpha-resa, prestandamätningar och
+Playwright är blockerade av att PostgreSQL/pgvector och Redis inte är tillgängliga lokalt
+(Docker-socket nekas). Frontend `tsc`/ESLint är blockerat av saknad `node_modules`; Chrome
+saknas. Ingen push har gjorts, så exakt-head GitHub Actions är inte verifierad.
+
+**Beroende och merge-ordning:** bygger på R15 och ska mergas efter R15. Inga ändringar i
+Codex- eller Z-brancher; ingen känd överlappning med deras implementationer. Nästa steg är
+CI-only körning av DB-sviten, `npm ci` + frontendkontroll och en full Founder
+Alpha-journey/performance-körning i isolerad miljö.
+
 ## Blueprint-intelligensbacklogen KLAR: inkrementell dokumentförståelse (2026-11-14)
 
 **Ny branch: `claude/blueprint-incremental-document-understanding`** (PR #401, bas: #399
