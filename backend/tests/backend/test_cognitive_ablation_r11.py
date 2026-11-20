@@ -21,6 +21,9 @@ Method notes (honest measurement, no theatrics):
     simple-ask case asserting the bounded statement counts stay low.
 """
 
+from app.config import get_settings as _guard_test_settings
+from app.providers.ollama_provider import OllamaProvider as _LocalQueryEmbedding
+
 import time
 
 import pytest
@@ -72,7 +75,9 @@ def abl_env(client, db_session, monkeypatch):
         state["usage"] = (len(messages[0].content), 0)
         return ChatResult(content="Sammanställt svar.", provider="openai", model=model, raw_usage={"prompt_tokens": len(messages[0].content) // 4, "completion_tokens": 3})
 
-    monkeypatch.setattr(OpenAIProvider, "embed", _embed)
+    monkeypatch.setattr(_guard_test_settings(), "default_embedding_provider", "ollama")
+
+    monkeypatch.setattr(_LocalQueryEmbedding, "embed", _embed)
     monkeypatch.setattr(OpenAIProvider, "chat", _chat)
     founder = db_session.query(User).filter(User.email == FOUNDER_EMAIL).first()
     _set_rls_user(db_session, founder.id)
@@ -88,7 +93,7 @@ def _seed_corpus(env):
         db.add(source)
         db.commit()
         _set_rls_user(db, owner)
-        chunk = DocumentChunk(document_id=source.id, owner_id=owner, chunk_index=0, text=text, embedding=_bow(text))
+        chunk = DocumentChunk(document_id=source.id, owner_id=owner, chunk_index=0, text=text, embedding=_bow(text), embedding_model=_guard_test_settings().default_embedding_model, embedding_native_dim=DIM)
         db.add(chunk)
         db.commit()
         _set_rls_user(db, owner)

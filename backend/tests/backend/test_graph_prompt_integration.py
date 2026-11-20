@@ -18,6 +18,9 @@ Scenario matrix:
                                  founder's prompt.
 """
 
+from app.config import get_settings as _guard_test_settings
+from app.providers.ollama_provider import OllamaProvider as _LocalQueryEmbedding
+
 import uuid
 
 import pytest
@@ -50,7 +53,7 @@ def _doc_with_claim(db, owner_id, *, title, claim_text, project_id=None):
     source = Document(title=title, source=DocumentSource.upload, uploaded_by=owner_id, project_id=project_id)
     db.add(source)
     db.commit()
-    chunk = DocumentChunk(document_id=source.id, owner_id=owner_id, chunk_index=0, text=claim_text, embedding=[0.1] * DIM)
+    chunk = DocumentChunk(document_id=source.id, owner_id=owner_id, chunk_index=0, text=claim_text, embedding=[0.1] * DIM, embedding_model=_guard_test_settings().default_embedding_model, embedding_native_dim=DIM)
     db.add(chunk)
     db.commit()
     claim = KnowledgeClaim(
@@ -77,7 +80,9 @@ def prompt_capture(monkeypatch):
         captured["system"] = messages[0].content
         return ChatResult(content="Svar.", provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 3})
 
-    monkeypatch.setattr(OpenAIProvider, "embed", _embed)
+    monkeypatch.setattr(_guard_test_settings(), "default_embedding_provider", "ollama")
+
+    monkeypatch.setattr(_LocalQueryEmbedding, "embed", _embed)
     monkeypatch.setattr(OpenAIProvider, "chat", _chat)
     return captured
 

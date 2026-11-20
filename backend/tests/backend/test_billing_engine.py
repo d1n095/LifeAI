@@ -358,7 +358,7 @@ def test_migrations_0070_plus_match_models_and_single_head():
     from pathlib import Path
 
     versions = Path(__file__).resolve().parents[2] / "alembic" / "versions"
-    sql70 = (versions / "0070_billing_foundation.py").read_text()
+    sql70 = (versions / "0081_billing_foundation.py").read_text()
     blocks = _ddl_blocks(sql70)
     # usage_log extensions match the model
     for name in ("tenant_id", "agent", "task", "tier", "kind"):
@@ -370,7 +370,7 @@ def test_migrations_0070_plus_match_models_and_single_head():
     rev = blocks["revenue_ledger"]
     assert "revenue_settled_requires_ref" in rev and "CHECK (status = 'estimated' OR verified_ref IS NOT NULL)" in rev
     # ads tables carry no free-text advertiser fields beyond bounded ids/labels
-    ads = _ddl_blocks((versions / "0071_advertising_tables.py").read_text())
+    ads = _ddl_blocks((versions / "0082_advertising_tables.py").read_text())
     assert set(ads) == {"ad_consent_events", "ad_events"}
     for forbidden in ("content", "payload", "conversation", "memory", "prompt"):
         assert forbidden not in ads["ad_events"], f"ad_events must never carry {forbidden} data"
@@ -388,7 +388,7 @@ def test_migrations_0070_plus_match_models_and_single_head():
     # Invariant, not a pinned hash: exactly ONE head — the newest migration of this
     # lineage (0071 ads at first write; 0072 usage-idempotency extends it).
     assert len(heads) == 1, f"lineage must have exactly one head, got {heads}"
-    for required in ("0069", "0070", "0071"):
+    for required in ("0080", "0081", "0082", "0083"):
         assert required in revs, f"migration {required} missing from the lineage"
 
 

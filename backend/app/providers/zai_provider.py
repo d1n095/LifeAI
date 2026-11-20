@@ -1,103 +1,135 @@
-"""Round 11 Phase 2: the ZAI provider adapter — an APPROVED MODEL available in this
-engineering environment, reached through the `z-ai` CLI, behind the platform's standard
-LLMProvider interface. This is NOT a production provider and registers nowhere by
-default: it exists so the Cognitive Regression Gate's MODEL-MODE cases can evaluate real
-model behavior through the real production call paths in THIS sandbox.
+"""Z.ai / GLM adapter using the provider's OpenAI-compatible chat surface."""
 
-Design contract:
-  - chat(): shells out to `z-ai chat` (system + user prompt via files to avoid argv
-    length/quoting issues), parses the JSON output. No API keys are read, printed, or
-    stored by this module — the CLI manages its own credentials.
-  - embed(): DETERMINISTIC bag-of-words vector (documented as an EVALUATION-ONLY
-    embedding). The z-ai CLI does not expose embeddings; the gate's model-mode cases do
-    not measure retrieval quality (deterministic cases cover that) — they measure what
-    the model DOES with the evidence the production prompt carries. A deterministic
-    embedding keeps the corpus-to-prompt mapping stable across trials.
-  - Failures raise ProviderError with a fixed classification ("unreachable") — never raw
-    CLI output, which could contain arbitrary text.
-"""
-
-from __future__ import annotations
-
-import json
 import math
-import subprocess
-import tempfile
-from pathlib import Path
 
-from app.config import get_settings
-from app.providers.base import ChatResult, LLMProvider, Message, ProviderError
+import httpx
 
-_MODEL = "zai-cli"
-_DIM = get_settings().embedding_dim
+from app.config import get_settings, validated_zai_base_url
+from app.providers.base import (
+    ChatResult,
+    LLMProvider,
+    Message,
+    ProviderError,
+    looks_like_placeholder_secret,
+)
+
+
+
+def _category(status_code: int) -> str:
+    if status_code in (401, 403):
+        return "invalid_key"
+    if status_code == 429:
+        return "rate_limited"
+    return "unreachable"
 
 
 class ZAIProvider(LLMProvider):
-    """Approved-model adapter for evaluation runs (see module docstring)."""
-
     name = "zai"
-    last_system: str | None = None  # for the gate runner's prompt-level assertions
-    last_model: str | None = None  # the model the CLI reports (e.g. glm-4-plus)
+
+    def __init__(self):
+        self.settings = get_settings()
 
     def is_configured(self) -> bool:
-        return Path("/usr/local/bin/z-ai").exists() or _which_zai() is not None
+        return bool(self.settings.zai_api_key) and not looks_like_placeholder_secret(
+            self.settings.zai_api_key
+        )
 
-    async def chat(self, messages: list[Message], model: str, *, timeout: float | None = None, **kwargs) -> ChatResult:
-        system_text = "\n\n".join(m.content for m in messages if m.role == "system")
-        user_text = "\n\n".join(m.content for m in messages if m.role != "system")
-        with tempfile.TemporaryDirectory(prefix="zai-gate-") as tmp:
-            out_path = Path(tmp) / "out.json"
-            # argv-form (list args, no shell): safe for arbitrary text; Linux argv limit
-            # is ~2MB, far above any assembled prompt this gate produces.
-            cmd = ["z-ai", "chat", "-p", user_text, "-s", system_text, "-o", str(out_path)]
-            try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout or 180)
-            except FileNotFoundError as exc:
-                raise ProviderError("unreachable: z-ai CLI not available") from exc
-            except subprocess.TimeoutExpired as exc:
-                raise ProviderError("unreachable: z-ai CLI timed out") from exc
-            if proc.returncode != 0 or not out_path.exists():
-                # Classify honestly: a 429 from the model service is RATE_LIMITED (a
-                # quota condition, retryable later), not "unreachable".
-                stderr = (proc.stderr or "") + (proc.stdout or "")
-                if "429" in stderr or "Too many requests" in stderr:
-                    raise ProviderError("rate_limited: model service quota exhausted — retry later")
-                raise ProviderError("unreachable: z-ai CLI failed (exit %s)" % proc.returncode)
-            try:
-                payload = json.loads(out_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError as exc:
-                raise ProviderError("unreachable: z-ai CLI returned unparseable output") from exc
-            # The CLI emits OpenAI-shaped JSON: choices[0].message.content + usage.
-            try:
-                content = payload["choices"][0]["message"]["content"]
-            except (KeyError, IndexError, TypeError) as exc:
-                raise ProviderError("unreachable: z-ai CLI output missing reply content") from exc
-            if not content or not str(content).strip():
-                raise ProviderError("unreachable: z-ai CLI returned an empty reply")
-            usage = payload.get("usage") or {}
-            reported_model = payload.get("model") or (model or _MODEL)
-            ZAIProvider.last_system = system_text
-            ZAIProvider.last_model = reported_model
-            return ChatResult(
-                content=str(content), provider=self.name, model=reported_model,
-                raw_usage={"prompt_tokens": usage.get("prompt_tokens", 0), "completion_tokens": usage.get("completion_tokens", 0)},
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.settings.zai_api_key}",
+            "Content-Type": "application/json",
+        }
+
+    async def chat(
+        self,
+        messages: list[Message],
+        model: str,
+        *,
+        timeout: float | None = None,
+        **kwargs,
+    ) -> ChatResult:
+        if not self.is_configured():
+            raise ProviderError(
+                "Z.ai API-nyckel saknas.",
+                category="not_configured",
+                provider_request_may_have_left=False,
             )
+        try:
+            base_url = validated_zai_base_url(self.settings.zai_base_url)
+            if any(key not in {"temperature", "max_tokens"} for key in kwargs):
+                raise ValueError("unsupported chat options")
+            temperature = kwargs.get("temperature", 0.4)
+            if not isinstance(temperature, (int, float)) or not math.isfinite(temperature) or not 0 <= temperature <= 2:
+                raise ValueError("invalid temperature")
+            max_tokens = kwargs.get("max_tokens")
+            if max_tokens is not None and (type(max_tokens) is not int or max_tokens <= 0):
+                raise ValueError("invalid token bound")
+        except ValueError:
+            raise ProviderError("Z.ai konfiguration eller anropsparametrar stöds inte.",
+                                category="unsupported", provider_request_may_have_left=False) from None
+        payload = {
+            "model": model,
+            "messages": [{"role": message.role, "content": message.content} for message in messages],
+            "temperature": kwargs.get("temperature", 0.4),
+        }
+        if kwargs.get("max_tokens") is not None:
+            payload["max_tokens"] = kwargs["max_tokens"]
 
-    async def embed(self, texts: list[str], model: str, *, timeout: float | None = None) -> list[list[float]]:
-        return [_bow_vec(t) for t in texts]
+        try:
+            async with httpx.AsyncClient(timeout=timeout or 60, follow_redirects=False, trust_env=False) as client:
+                response = await client.post(
+                    f"{base_url}/chat/completions",
+                    headers=self._headers(),
+                    json=payload,
+                )
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPStatusError as exc:
+            raise ProviderError(
+                f"Z.ai svarade med HTTP {exc.response.status_code}.",
+                category=_category(exc.response.status_code),
+                provider_request_may_have_left=True,
+            ) from exc
+        except ValueError:
+            raise ProviderError("Z.ai returnerade ett ogiltigt svar.", category="unreachable",
+                                provider_request_may_have_left=True) from None
+        except httpx.HTTPError as exc:
+            raise ProviderError(
+                "Z.ai kunde inte nås.",
+                category="unreachable",
+                provider_request_may_have_left=True,
+            ) from exc
 
+        try:
+            content = data["choices"][0]["message"]["content"]
+            usage = data["usage"]
+            if not isinstance(content, str) or not content.strip() or not isinstance(usage, dict):
+                raise ValueError("invalid response")
+            for key in ("prompt_tokens", "completion_tokens"):
+                if type(usage.get(key)) is not int or usage[key] < 0:
+                    raise ValueError("invalid usage")
+        except (KeyError, IndexError, TypeError, ValueError):
+            raise ProviderError("Z.ai returnerade ett ogiltigt svar.", category="unreachable",
+                                provider_request_may_have_left=True) from None
+        return ChatResult(
+            content=content,
+            provider=self.name,
+            model=model,
+            raw_usage={
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+            },
+        )
 
-def _bow_vec(text: str) -> list[float]:
-    v = [0.0] * _DIM
-    for w in (text or "").lower().split():
-        v[hash(w) % _DIM] += 1.0
-    norm = math.sqrt(sum(x * x for x in v)) or 1.0
-    return [x / norm for x in v]
-
-
-def _which_zai() -> str | None:
-    for d in ("/usr/local/bin", "/usr/bin", "/home/z/.local/bin"):
-        p = Path(d) / "z-ai"
-        if p.exists():
-            return str(p)
-    return None
+    async def embed(
+        self,
+        texts: list[str],
+        model: str,
+        *,
+        timeout: float | None = None,
+    ) -> list[list[float]]:
+        raise ProviderError(
+            "Det registrerade Z.ai/GLM-gränssnittet stöder inte embeddings.",
+            category="unsupported",
+            provider_request_may_have_left=False,
+        )

@@ -1,3 +1,7 @@
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+
 import logging
 import uuid
 
@@ -7,11 +11,20 @@ from app.config import get_settings
 from app.models.provider_config import ProviderConfig
 from app.providers.anthropic_provider import AnthropicProvider
 from app.providers.base import ChatResult, LLMProvider, Message, ProviderError
+from app.providers.catalog import (
+    ModelSelectionError,
+    ModelSelectionPolicy,
+    ModelSpec,
+    evaluate_model,
+    get_model_spec,
+    model_specs,
+)
 from app.providers.deepseek_provider import DeepSeekProvider
 from app.providers.gemini_provider import GeminiProvider
 from app.providers.ollama_provider import OllamaProvider
 from app.providers.openai_provider import OpenAIProvider
 from app.providers.openrouter_provider import OpenRouterProvider
+from app.providers.zai_provider import ZAIProvider
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +35,7 @@ _PROVIDERS: dict[str, type[LLMProvider]] = {
     "deepseek": DeepSeekProvider,
     "openrouter": OpenRouterProvider,
     "ollama": OllamaProvider,
+    "zai": ZAIProvider,
 }
 
 # Reasonable default chat model per provider, used only when falling back to a provider that
@@ -34,7 +48,46 @@ DEFAULT_CHAT_MODELS: dict[str, str] = {
     "deepseek": "deepseek-chat",
     "openrouter": "openrouter/auto",
     "ollama": "llama3.1",
+    "zai": "glm-5.3",
 }
+
+
+# Evaluation is task-local: it never mutates production registration/configuration.
+@dataclass
+class _EvaluationLease:
+    provider_class: type
+    models: dict[str, str]
+    active: bool = True
+    observation: dict = field(default_factory=dict)
+
+
+_evaluation_context: ContextVar[_EvaluationLease | None] = ContextVar("provider_evaluation", default=None)
+
+
+def _current_evaluation():
+    lease = _evaluation_context.get()
+    if lease is not None and not lease.active:
+        raise ProviderError("Evaluation context has expired.", category="unsupported",
+                            provider_request_may_have_left=False)
+    return lease
+
+
+@contextmanager
+def evaluation_provider_scope(provider_class, models: dict[str, str], *, authorized: bool = False):
+    if not authorized or get_settings().environment not in {"test", "development"}:
+        raise ProviderError("Model evaluation is not authorized in this environment.",
+                            category="unsupported", provider_request_may_have_left=False)
+    if provider_class.name != "zai_eval" or set(models) != {"chat", "embedding"}:
+        raise ProviderError("Invalid evaluation identity.", category="unsupported",
+                            provider_request_may_have_left=False)
+    lease = _EvaluationLease(provider_class, dict(models))
+    token = _evaluation_context.set(lease)
+    try:
+        yield
+    finally:
+        lease.active = False  # Copied task contexts cannot outlive evaluation authorization.
+        lease.observation.clear()
+        _evaluation_context.reset(token)
 
 
 def provider_names() -> list[str]:
@@ -46,10 +99,94 @@ def available_providers() -> list[LLMProvider]:
 
 
 def get_provider(name: str) -> LLMProvider:
+    context = _current_evaluation()
+    if name == "zai_eval" and context is not None:
+        return context.provider_class()
     cls = _PROVIDERS.get(name)
     if cls is None:
         raise ProviderError(f"Okänd leverantör: {name}")
     return cls()
+
+
+def _model_is_freshly_verified(db: Session, spec: ModelSpec, role: str) -> bool:
+    """Verification is exact-model and TTL-bound; another model's PASS is not evidence."""
+
+    from datetime import datetime, timedelta
+
+    from app.models.provider_verification import VerificationResult
+
+    from app.providers.verification import latest_check
+
+    now = datetime.utcnow()
+    cutoff = now - timedelta(seconds=get_settings().provider_verification_cache_seconds)
+    check = latest_check(db, spec.provider, role, model=spec.model_id)
+    return bool(check is not None and check.result == VerificationResult.ok
+                and cutoff <= check.checked_at <= now)
+
+
+
+def _require_policy_candidate(
+    db: Session,
+    spec: ModelSpec,
+    policy: ModelSelectionPolicy,
+) -> tuple[LLMProvider, str, ModelSpec]:
+    eligible, reason = evaluate_model(spec, policy)
+    if not eligible:
+        raise ModelSelectionError(f"{spec.provider}/{spec.model_id}: {reason}")
+    provider = get_provider(spec.provider)
+    if not provider.is_configured():
+        raise ModelSelectionError(f"{spec.provider}/{spec.model_id}: provider is not configured")
+    if policy.require_verified and not _model_is_freshly_verified(db, spec, policy.role):
+        raise ModelSelectionError(
+            f"{spec.provider}/{spec.model_id}: exact model has no fresh successful verification"
+        )
+    return provider, spec.model_id, spec
+
+
+def select_model(
+    db: Session,
+    policy: ModelSelectionPolicy,
+    *,
+    requested_provider: str | None = None,
+    requested_model: str | None = None,
+) -> tuple[LLMProvider, str, ModelSpec]:
+    """Deterministic manual or automatic model selection over the shared provider registry.
+
+    This function does not authorize provider spend or egress. Callers must still pass the
+    selected provider call through those existing authority boundaries.
+    """
+
+    if (requested_provider is None) != (requested_model is None):
+        raise ModelSelectionError("requested_provider and requested_model must be supplied together")
+    if requested_provider is not None and requested_model is not None:
+        return _require_policy_candidate(
+            db, get_model_spec(requested_provider, requested_model), policy
+        )
+
+    eligible: list[tuple[int, ModelSpec]] = []
+    for index, spec in enumerate(model_specs()):
+        allowed, _ = evaluate_model(spec, policy)
+        if not allowed:
+            continue
+        provider = get_provider(spec.provider)
+        if not provider.is_configured():
+            continue
+        if policy.require_verified and not _model_is_freshly_verified(db, spec, policy.role):
+            continue
+        eligible.append((index, spec))
+
+    if not eligible:
+        raise ModelSelectionError("no configured model satisfies the verified policy")
+
+    def _sort_key(item: tuple[int, ModelSpec]):
+        index, spec = item
+        local_rank = 0 if policy.prefer_local and not spec.external else 1
+        input_price = spec.pricing.input_per_million_usd
+        price_rank = input_price if input_price is not None else float("inf")
+        return local_rank, price_rank, index
+
+    selected = sorted(eligible, key=_sort_key)[0][1]
+    return get_provider(selected.provider), selected.model_id, selected
 
 
 def resolve_active(db: Session, role: str) -> tuple[LLMProvider, str]:
@@ -59,6 +196,9 @@ def resolve_active(db: Session, role: str) -> tuple[LLMProvider, str]:
     This is the single place the rest of the platform depends on — swapping a
     provider never requires touching routers, RAG code or the frontend.
     """
+    context = _current_evaluation()
+    if context is not None and role in context.models:
+        return context.provider_class(), context.models[role]
     settings = get_settings()
     config = db.query(ProviderConfig).filter_by(role=role, is_active=True).first()
     if config:
@@ -81,6 +221,7 @@ async def embed_with_policy(
     task_id: uuid.UUID | None = None,
     goal_id: uuid.UUID | None = None,
     job_id: uuid.UUID | None = None,
+    effect_guard: bool = False,
 ) -> list[list[float]]:
     """`provider.embed(texts, model=model)`, gated the same way `chat_with_fallback()` gates
     `.chat()` (Life Vault / External-AI Egress Control, V2 — see
@@ -97,6 +238,14 @@ async def embed_with_policy(
     change landing between the two resolutions could then embed with a provider different from
     the one that was actually verified.
     """
+    # The vector-only adapter contract cannot reconcile paid usage or an uncertain
+    # embedding outcome. Do not repeat an unmetered external effect on chat retry.
+    # Eval adapters require their own active lease and are never production providers.
+    if effect_guard and provider.name != "ollama":
+        lease = _current_evaluation()
+        if lease is None or provider.name != "zai_eval" or not isinstance(provider, lease.provider_class):
+            raise ProviderError("External query embedding requires a metered effect contract.",
+                                category="unsupported", provider_request_may_have_left=False)
     outbound_texts = texts
     if owner_id is not None:
         from app.egress_policy import enforce_egress_policy
@@ -113,53 +262,43 @@ async def embed_with_policy(
             goal_id=goal_id,
             job_id=job_id,
         )
-    vectors = await provider.embed(outbound_texts, model=model)
-
-    # Revenue & Compute Engine (P1 review fix): embeddings are billable provider calls
-    # (text-embedding-3-small et al.) and were previously invisible to accounting. The
-    # embedding APIs return no usage object, so tokens are estimated at ~4 chars/token —
-    # an honest, slightly conservative approximation recorded in the audit row. Tenant
-    # membership is derived from the user row inside record_usage. System calls
-    # (owner_id=None) get an audit row with no subject rollups.
-    from app.billing import record_usage as _record_usage
-
-    _record_usage(
-        db,
-        user_id=owner_id,
-        tenant_id=None,
-        role="embedding",
-        provider=provider.name,
-        model=model,
-        prompt_tokens=sum(len(t) for t in outbound_texts) // 4,
-        completion_tokens=0,
-        agent="embedding",
-        task=purpose or "embedding",
-    )
-    return vectors
+    return await provider.embed(outbound_texts, model=model)
 
 
-def resolve_chat_chain(db: Session) -> list[tuple[LLMProvider, str]]:
+def resolve_chat_chain(
+    db: Session,
+    selection_policy: ModelSelectionPolicy | None = None,
+) -> list[tuple[LLMProvider, str]]:
     """Primary chat provider first (DB config / settings default, as usual), then the
     remaining providers in CHAT_FALLBACK_ORDER that are actually configured (have an API
     key) and aren't already the primary. Embedding has no fallback in MainAI 0.1 — an
     inconsistent embedding provider mid-conversation would silently corrupt retrieval
     quality, so a failed embedding call should surface as an error, not swap providers.
-
-    A primary that is NOT configured (e.g. the settings default is openai but no API key
-    is present) is demoted: the first CONFIGURED fallback becomes the chain head. Without
-    this, every single chat call would burn a guaranteed-failing attempt on the keyless
-    provider — and, for owner-scoped calls, an egress disclosure-ledger row for a request
-    that could never succeed — before local AI served it. resolve_active() is deliberately
-    left untouched so admin/status surfaces still report the configured default.
     """
     settings = get_settings()
     primary_provider, primary_model = resolve_active(db, role="chat")
-    chain: list[tuple[LLMProvider, str]] = []
-    seen_names: set[str] = set()
-
-    if primary_provider.is_configured():
+    if _current_evaluation() is not None:
+        # Evaluation failures can never fall through to a credentialed production API.
+        if selection_policy is not None:
+            raise ModelSelectionError("evaluation cannot satisfy production selection policy")
+        return [(primary_provider, primary_model)]
+    chain = []
+    if selection_policy is not None:
+        if selection_policy.role != "chat":
+            raise ModelSelectionError("chat fallback requires a chat selection policy")
+        try:
+            primary_provider, primary_model, _ = select_model(
+                db, selection_policy, requested_provider=primary_provider.name,
+                requested_model=primary_model,
+            )
+            chain.append((primary_provider, primary_model))
+        except ModelSelectionError:
+            # The preference cannot waive policy. Only eligible configured fallbacks
+            # below may replace an unavailable/incompatible primary.
+            pass
+    elif primary_provider.is_configured():
         chain.append((primary_provider, primary_model))
-        seen_names.add(primary_provider.name)
+    seen_names = {primary_provider.name}
 
     for name in [p.strip() for p in settings.chat_fallback_order.split(",") if p.strip()]:
         if name in seen_names or name not in _PROVIDERS:
@@ -167,13 +306,23 @@ def resolve_chat_chain(db: Session) -> list[tuple[LLMProvider, str]]:
         provider = get_provider(name)
         if not provider.is_configured():
             continue
-        chain.append((provider, DEFAULT_CHAT_MODELS.get(name, primary_model)))
+        model = DEFAULT_CHAT_MODELS.get(name, primary_model)
+        if selection_policy is not None:
+            try:
+                provider, model, _ = select_model(
+                    db,
+                    selection_policy,
+                    requested_provider=name,
+                    requested_model=model,
+                )
+            except ModelSelectionError:
+                continue
+        chain.append((provider, model))
         seen_names.add(name)
 
     if not chain:
-        # Nothing configured at all — keep the configured default as the head so callers
-        # get the familiar "provider X is not configured" ProviderError instead of an
-        # empty-chain error, and status surfaces keep reporting it.
+        if selection_policy is not None:
+            raise ModelSelectionError("no configured model satisfies the verified chat policy")
         chain.append((primary_provider, primary_model))
     return chain
 
@@ -188,6 +337,9 @@ async def chat_with_fallback(
     task_id: uuid.UUID | None = None,
     goal_id: uuid.UUID | None = None,
     job_id: uuid.UUID | None = None,
+    selection_policy: ModelSelectionPolicy | None = None,
+    effect_guard: bool = False,
+    attempt_observer=None,
     **kwargs,
 ) -> tuple[ChatResult, list[str]]:
     """Try the primary chat provider, then fall back through CHAT_FALLBACK_ORDER on failure.
@@ -220,15 +372,25 @@ async def chat_with_fallback(
     # Deferred for the same reason: keep app.egress_policy's own import graph (which reaches
     # into app.development_operator.service) from ever becoming a load-time dependency of this
     # already-central module.
-    from app.egress_policy import EgressDeniedError, enforce_egress_policy
+    # Bind the transport boundary to the canonical implementation module, not the package
+    # re-export, which can become a stale alias under development/test module reloads.
+    from app.egress_policy.service import EgressDeniedError, enforce_egress_policy
 
-    chain = resolve_chat_chain(db)
+    if selection_policy is not None and owner_id is None:
+        # New controlled-routing calls must carry authoritative caller context; selection
+        # permission alone must never opt into the legacy egress bypass.
+        raise ModelSelectionError("controlled chat routing requires owner_id for egress")
+    chain = resolve_chat_chain(db, selection_policy=selection_policy)
     attempted: list[str] = []
     last_error: Exception | None = None
 
     for provider, model in chain:
         attempted.append(provider.name)
+        invoked = False
         try:
+            if selection_policy is not None:
+                # The chain was built earlier; a concurrent verification failure may now exist.
+                _require_policy_candidate(db, get_model_spec(provider.name, model), selection_policy)
             outbound_messages = messages
             if owner_id is not None:
                 payload = [{"role": m.role, "content": m.content} for m in messages]
@@ -245,7 +407,30 @@ async def chat_with_fallback(
                     job_id=job_id,
                 )
                 outbound_messages = [Message(role=m["role"], content=m["content"]) for m in redacted]
+            if not provider.is_configured():
+                raise ProviderError("Provider is not configured.", category="not_configured",
+                                    provider_request_may_have_left=False)
+            if attempt_observer is not None:
+                attempt_observer.before(provider.name, model)
+                # Disclosure and durable reply claim precede the external effect.
+                db.commit()
+            invoked = True
             result = await provider.chat(outbound_messages, model=model, **kwargs)
+            if effect_guard and (result.provider != provider.name or result.model != model):
+                raise ProviderError("Provider response identity mismatch.", category="external_effect_unknown",
+                                    provider_request_may_have_left=True)
+            if effect_guard and (not isinstance(result.content, str) or not result.content.strip()):
+                raise ProviderError("Provider returned no valid reply.", category="external_effect_unknown",
+                                    provider_request_may_have_left=True)
+            if effect_guard and attempt_observer is not None and getattr(attempt_observer, "requires_usage", True):
+                usage = result.raw_usage
+                if (not isinstance(usage, dict)
+                        or type(usage.get("prompt_tokens")) is not int or usage["prompt_tokens"] < 0
+                        or type(usage.get("completion_tokens")) is not int or usage["completion_tokens"] <= 0):
+                    raise ProviderError("Provider usage is unverified.", category="external_effect_unknown",
+                                        provider_request_may_have_left=True)
+            if attempt_observer is not None:
+                attempt_observer.succeeded(result)
             if len(attempted) > 1:
                 logger.warning(
                     "Chat fallback engaged: %s failed over to %s (attempted: %s)",
@@ -260,6 +445,22 @@ async def chat_with_fallback(
             # failure to fall back from; abort the whole call immediately.
             raise
         except Exception as exc:  # noqa: BLE001 - any provider failure should trigger fallback, not just ProviderError
+            # Preserve a hard content denial even when a development/test module reload has
+            # produced a second EgressDeniedError class identity. This is deliberately
+            # fail-closed: a provider can at most stop fallback by forging the marker; it can
+            # never make denied content eligible for another provider.
+            if getattr(exc, "is_egress_denial", False):
+                raise
+            if attempt_observer is not None:
+                if not invoked:
+                    # Budget/config refusal is authoritative; do not route around it.
+                    raise
+                attempt_observer.failed(exc)
+            if effect_guard and invoked and getattr(exc, "provider_request_may_have_left", None) is not False:
+                raise ProviderError(
+                    "Provider outcome is uncertain; automatic retry and fallback are blocked.",
+                    category="external_effect_unknown", provider_request_may_have_left=True,
+                ) from None
             safe = classify_provider_exception(exc)
             logger.warning("Chat provider %s failed (%s): %s", provider.name, safe.result.value, safe.message)
             last_error = exc

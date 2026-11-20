@@ -11,6 +11,7 @@ via the R10 policy interface (critical regression -> blocked_requires_approval; 
 switching anywhere).
 """
 
+import os
 import uuid
 
 import pytest
@@ -26,10 +27,10 @@ from app.models.knowledge_claim import ClaimConfidence, ClaimStatus, ClaimType, 
 from app.rag.claims import EXTRACTION_VERSION
 from app.rag.evidence_metadata import record_claim_evidence_metadata
 from app.request_context import current_user_id as current_user_id_var
-from app.providers.zai_provider import ZAIProvider, _which_zai
+from app.providers.zai_eval_provider import _which_zai, evaluation_observation
 from tests.backend.test_claim_graph_integration import _login
 
-pytestmark = pytest.mark.skipif(_which_zai() is None, reason="z-ai CLI (approved model) not available in this environment")
+pytestmark = pytest.mark.skipif(os.getenv("RUN_REAL_MODEL_EVAL") != "1" or _which_zai() is None, reason="z-ai CLI (approved model) not available in this environment")
 
 DIM = get_settings().embedding_dim
 FOUNDER_EMAIL = "founder@lifeos.local"
@@ -51,7 +52,7 @@ class ModelHarness:
         self.founder = db_session.query(User).filter(User.email == FOUNDER_EMAIL).first()
         _set_rls_user(db_session, self.founder.id)
         self.csrf = _login(client)
-        self.reported_model = ZAIProvider.last_model or "glm-4-plus"
+        self.reported_model = evaluation_observation().get("model") or "glm-4-plus"
         self._seed_corpus()
 
     def _doc(self, title: str, text: str, *, topic=None, meta=None, confidence=ClaimConfidence.likely):
@@ -185,7 +186,7 @@ class ModelHarness:
 
 
 def _bow(text: str) -> list[float]:
-    from app.providers.zai_provider import _bow_vec
+    from app.providers.zai_eval_provider import _bow_vec
 
     return _bow_vec(text)
 
@@ -199,7 +200,7 @@ def test_full_model_gate_run_and_baseline_persistence(client, db_session):
     """The REAL approved model runs all 8 behavior cases through the production path;
     results persist as a baseline run for future regression comparison."""
     runner = ModelGateRunner(client, db_session)
-    runner.activate()
+    runner.activate(evaluation_authorized=True)
     try:
         harness = harness_for(client, db_session)
         try:
@@ -235,7 +236,7 @@ def test_model_gate_comparison_blocks_on_regressions(client, db_session):
     from app.mainai_evals.cognitive_gate import CaseResult, GateRun, ObjectiveAssertion
 
     runner = ModelGateRunner(client, db_session)
-    runner.activate()
+    runner.activate(evaluation_authorized=True)
     try:
         harness = harness_for(client, db_session)
         try:

@@ -23,6 +23,7 @@ skip honestly and are reported as environmental limitations, never passes.
 """
 
 import time
+import os
 import uuid
 
 import pytest
@@ -38,17 +39,16 @@ from app.models.claim_relationship import ClaimRelationship, ClaimRelationshipTy
 from app.models.document import Document, DocumentSource
 from app.models.document_chunk import DocumentChunk
 from app.models.knowledge_claim import ClaimConfidence, ClaimStatus, ClaimType, KnowledgeClaim
-from app.models.provider_config import ProviderConfig
 from app.problem_learning.service import active_decision, create_problem, record_decision
 from app.rag.claims import EXTRACTION_VERSION
 from app.rag.evidence_metadata import record_claim_evidence_metadata
 from app.providers import registry as provider_registry
 from app.providers.base import ProviderError
-from app.providers.zai_provider import ZAIProvider, _which_zai
+from app.providers.zai_eval_provider import ZAIEvaluationProvider as ZAIProvider, _which_zai, evaluation_observation
 from app.request_context import current_user_id as current_user_id_var
 from tests.backend.test_claim_graph_integration import FOUNDER_EMAIL, FOUNDER_PASSWORD, _login
 
-pytestmark = pytest.mark.skipif(_which_zai() is None, reason="z-ai CLI (approved model) not available")
+pytestmark = pytest.mark.skipif(os.getenv("RUN_REAL_MODEL_EVAL") != "1" or _which_zai() is None, reason="z-ai CLI (approved model) not available")
 DIM = get_settings().embedding_dim
 
 
@@ -58,13 +58,8 @@ def _set_rls_user(session, owner_id) -> None:
 
 
 def _bow(text: str) -> list[float]:
-    import math
-
-    v = [0.0] * DIM
-    for w in (text or "").lower().split():
-        v[hash(w) % DIM] += 1.0
-    norm = math.sqrt(sum(x * x for x in v)) or 1.0
-    return [x / norm for x in v]
+    from app.providers.zai_eval_provider import _bow_vec
+    return _bow_vec(text)
 
 
 class ConversationRunner:
@@ -75,18 +70,12 @@ class ConversationRunner:
         self._recent: list[float] = []
 
     def activate_provider(self):
-        provider_registry._PROVIDERS["zai"] = ZAIProvider
-        self.db.add(ProviderConfig(role="chat", provider="zai", model="glm-4-plus", is_active=True))
-        self.db.add(ProviderConfig(role="embedding", provider="zai", model="bow-eval", is_active=True))
-        self.db.commit()
+        self._scope = provider_registry.evaluation_provider_scope(
+            ZAIProvider, {"chat": "glm-4-plus", "embedding": "bow-eval"}, authorized=True)
+        self._scope.__enter__()
 
     def deactivate_provider(self):
-        for role in ("chat", "embedding"):
-            cfg = self.db.query(ProviderConfig).filter_by(role=role, provider="zai").first()
-            if cfg is not None:
-                self.db.delete(cfg)
-        provider_registry._PROVIDERS.pop("zai", None)
-        self.db.commit()
+        self._scope.__exit__(None, None, None)
 
     def ask(self, message: str, conversation_id: str | None = None, csrf: str = "") -> tuple[str, str | None]:
         now = time.monotonic()
@@ -152,7 +141,7 @@ def _doc(env, title, text, meta=None, confidence=ClaimConfidence.likely, contrad
 
 
 def _replay_prompt(env) -> str:
-    return ZAIProvider.last_system or ""
+    return evaluation_observation().get("system", "")
 
 
 def _skip_env(exc: Exception):

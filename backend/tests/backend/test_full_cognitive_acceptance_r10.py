@@ -24,6 +24,9 @@ Plus the systemic requirements: bounded graph traversal, bounded query cost, own
 isolation, and restart recovery — asserted inside the same chain.
 """
 
+from app.config import get_settings as _guard_test_settings
+from app.providers.ollama_provider import OllamaProvider as _LocalQueryEmbedding
+
 import asyncio
 import uuid
 from datetime import datetime
@@ -78,7 +81,9 @@ def chain_env(client, db_session, monkeypatch):
         captured["provider"] = (self.__class__.__name__, model)
         return ChatResult(content="Sammanställt svar.", provider="openai", model=model, raw_usage={"prompt_tokens": 7, "completion_tokens": 5})
 
-    monkeypatch.setattr(OpenAIProvider, "embed", _embed)
+    monkeypatch.setattr(_guard_test_settings(), "default_embedding_provider", "ollama")
+
+    monkeypatch.setattr(_LocalQueryEmbedding, "embed", _embed)
     monkeypatch.setattr(OpenAIProvider, "chat", _chat)
 
     founder = db_session.query(User).filter(User.email == FOUNDER_EMAIL).first()
@@ -95,7 +100,7 @@ def _source_with_claim(env, *, title, text, topic=None, extra_meta=None, confide
     source = Document(title=title, source=DocumentSource.upload, uploaded_by=owner_id)
     db.add(source)
     db.commit()
-    chunk = DocumentChunk(document_id=source.id, owner_id=owner_id, chunk_index=0, text=text, embedding=[0.1] * DIM)
+    chunk = DocumentChunk(document_id=source.id, owner_id=owner_id, chunk_index=0, text=text, embedding=[0.1] * DIM, embedding_model=_guard_test_settings().default_embedding_model, embedding_native_dim=DIM)
     db.add(chunk)
     db.commit()
     claim = KnowledgeClaim(

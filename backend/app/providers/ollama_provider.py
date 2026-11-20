@@ -1,5 +1,6 @@
 import httpx
 
+from app.providers.base import chat_token_limit
 from app.config import get_settings
 from app.providers.base import ChatResult, LLMProvider, Message, ProviderError
 
@@ -103,6 +104,9 @@ class OllamaProvider(LLMProvider):
             "messages": [{"role": m.role, "content": m.content} for m in messages],
             "stream": False,
         }
+        token_limit = chat_token_limit(kwargs)
+        if token_limit is not None:
+            payload["options"] = {"num_predict": token_limit}
         try:
             async with httpx.AsyncClient(timeout=timeout or 120) as client:
                 resp = await client.post(f"{self.settings.ollama_base_url}/api/chat", json=payload)

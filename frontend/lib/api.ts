@@ -409,10 +409,19 @@ export type TaskItem = {
 };
 
 export type ProviderVerification = {
+  model: string | null;
   result: "ok" | "invalid_key" | "unreachable" | "rate_limited" | "unsupported" | "not_configured";
   message: string;
   checked_by: "system" | "founder";
   checked_at: string;
+};
+
+export type ModelCatalog = {
+  provider: string;
+  model_id: string;
+  supported_capabilities: string[];
+  verification_result: string | null;
+  metadata_note: string;
 };
 
 export type ProviderStatus = {
@@ -934,6 +943,7 @@ export const api = {
       body: JSON.stringify({ query }),
     }),
 
+  modelCatalog: () => request<ModelCatalog[]>("/api/admin/providers/models"),
   providerStatus: () => request<ProviderStatus[]>("/api/admin/providers/status"),
   setProviderConfig: (role: "chat" | "embedding", provider: string, model: string) =>
     request("/api/admin/providers/config", {
@@ -941,10 +951,10 @@ export const api = {
       body: JSON.stringify({ role, provider, model }),
     }),
   // P1: "Testa nu" — an explicit, real verification call, bypassing the cache.
-  verifyProvider: (provider: string, role: "chat" | "embedding") =>
+  verifyProvider: (provider: string, role: "chat" | "embedding", model: string) =>
     request<ProviderVerification>("/api/admin/providers/verify", {
       method: "POST",
-      body: JSON.stringify({ provider, role }),
+      body: JSON.stringify({ provider, role, model }),
     }),
   usageSummary: () => request<UsageSummaryRow[]>("/api/admin/usage/summary"),
 

@@ -28,6 +28,9 @@ Proven here, on real PostgreSQL through the real chat path:
      metadata says, and the epistemic instruction line tells the model so.
 """
 
+from app.config import get_settings as _guard_test_settings
+from app.providers.ollama_provider import OllamaProvider as _LocalQueryEmbedding
+
 import uuid
 
 import pytest
@@ -64,7 +67,7 @@ def _doc(db, owner_id, *, title, text, confidence=ClaimConfidence.likely):
     source = Document(title=title, source=DocumentSource.upload, uploaded_by=owner_id)
     db.add(source)
     db.commit()
-    chunk = DocumentChunk(document_id=source.id, owner_id=owner_id, chunk_index=0, text=text, embedding=[0.1] * DIM)
+    chunk = DocumentChunk(document_id=source.id, owner_id=owner_id, chunk_index=0, text=text, embedding=[0.1] * DIM, embedding_model=_guard_test_settings().default_embedding_model, embedding_native_dim=DIM)
     db.add(chunk)
     db.commit()
     claim = KnowledgeClaim(
@@ -97,7 +100,9 @@ def prompt_capture(monkeypatch):
         )
         # The fake model deliberately fabricates a citation — see test 3.
 
-    monkeypatch.setattr(OpenAIProvider, "embed", _embed)
+    monkeypatch.setattr(_guard_test_settings(), "default_embedding_provider", "ollama")
+
+    monkeypatch.setattr(_LocalQueryEmbedding, "embed", _embed)
     monkeypatch.setattr(OpenAIProvider, "chat", _chat)
     return captured
 
@@ -204,7 +209,7 @@ def test_false_consensus_same_source_support_never_promotes_to_certain(db_sessio
     # Two more chunks of the SAME document both support the claim — a source agreeing
     # with itself is not independent corroboration.
     for i in range(2):
-        chunk = DocumentChunk(document_id=source_a.id, owner_id=founder.id, chunk_index=i + 1, text=f"Upprepning {i}", embedding=[0.1] * DIM)
+        chunk = DocumentChunk(document_id=source_a.id, owner_id=founder.id, chunk_index=i + 1, text=f"Upprepning {i}", embedding=[0.1] * DIM, embedding_model=_guard_test_settings().default_embedding_model, embedding_native_dim=DIM)
         db_session.add(chunk)
         db_session.commit()
         supporter = KnowledgeClaim(
@@ -235,10 +240,12 @@ def test_retrieval_never_leaks_across_owners(db_session, client, monkeypatch, ma
     async def _fake_embed(self, texts, model, **kwargs):
         return [[0.1] * DIM for _ in texts]
 
-    monkeypatch.setattr(OpenAIProvider, "embed", _fake_embed)
+    monkeypatch.setattr(_guard_test_settings(), "default_embedding_provider", "ollama")
+
+    monkeypatch.setattr(_LocalQueryEmbedding, "embed", _fake_embed)
     import asyncio
 
-    hits = asyncio.get_event_loop().run_until_complete(
+    hits = asyncio.run(
         retrieve_context(db_session, founder.id, "Hemligt innehåll", top_k=5)
     )
     assert all(h["title"] != "Hemlig dokument" for h in hits), (

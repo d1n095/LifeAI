@@ -23,6 +23,12 @@ from app.config import Settings
 #   validates: short description of what, if anything, enforces correctness (pydantic
 #     validator, startup check in app/main.py, or "none" if nothing currently does).
 CONFIG_MATRIX: dict[str, dict] = {
+    "github_tracked_branch": {"required_in_production": False, "secret": False, "default": None,
+                              "validates": "none — optional read-only snapshot branch; grants no write authority"},
+    "github_status_stale_minutes": {"required_in_production": False, "secret": False, "default": 30,
+                                    "validates": "none — stale snapshot threshold, not evidence of current status"},
+    "local_repo_path": {"required_in_production": False, "secret": False, "default": None,
+                        "validates": "none — operator-provisioned optional read-only git observation path"},
     "environment": {
         "required_in_production": False,
         "secret": False,
@@ -133,6 +139,8 @@ CONFIG_MATRIX: dict[str, dict] = {
     "google_api_key": {"required_in_production": False, "secret": True, "default": None, "validates": "none — see openai_api_key"},
     "deepseek_api_key": {"required_in_production": False, "secret": True, "default": None, "validates": "none — see openai_api_key"},
     "openrouter_api_key": {"required_in_production": False, "secret": True, "default": None, "validates": "none — see openai_api_key"},
+    "zai_api_key": {"required_in_production": False, "secret": True, "default": None, "validates": "none — see openai_api_key"},
+    "zai_base_url": {"required_in_production": False, "secret": False, "default": "https://api.z.ai/api/paas/v4", "validates": "none — fixed provider endpoint, credential is carried only in the Authorization header"},
     "ollama_base_url": {"required_in_production": False, "secret": False, "default": "http://ollama:11434", "validates": "none"},
     "chat_fallback_order": {"required_in_production": False, "secret": False, "default": "openai,anthropic,gemini,ollama", "validates": "resolve_chat_chain (app/providers/registry.py) demotes unconfigured providers; ollama is the zero-key local last resort"},
     "frontend_origins": {"required_in_production": True, "secret": False, "default": "http://localhost:3000", "validates": "none — CORSMiddleware simply rejects any origin not in the list"},
@@ -258,7 +266,7 @@ def test_matrix_urls_all_actually_parse():
     """Sanity check on the matrix's own non-secret example/default values (e.g.
     ollama_base_url, public_app_url's default) — they should themselves be parseable URLs
     where the field name implies a URL, catching a typo in this file."""
-    url_like_fields = ["public_app_url", "ollama_base_url"]
+    url_like_fields = ["public_app_url", "ollama_base_url", "zai_base_url"]
     for field in url_like_fields:
         default = CONFIG_MATRIX[field]["default"]
         if default is None or default == "***":

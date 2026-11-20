@@ -7,6 +7,8 @@ assistant's response for an already-persisted user message — it creates or upd
 one assistant `MessageModel` row (enforced by migration 0016's partial unique index on
 `in_reply_to_id`), never a second, duplicate reply."""
 
+from base64 import urlsafe_b64encode
+
 import logging
 import uuid
 from datetime import datetime
@@ -34,10 +36,9 @@ from app.models.conversation import Conversation, Message as MessageModel, Messa
 from app.billing import record_usage
 from app.billing.enforcement import BillingBudgetExceededError, BillingEnforcementUnavailableError
 from app.billing.limits import effective_limits
-from app.billing.reservation import estimate_reservation_cost, release_reservation, reserve_compute, settle_reservation
+from app.billing.reservation import ChatAttemptBudget
 from app.models.user import User
 from app.providers.base import Message, ProviderError
-from app.providers.pricing import estimate_cost
 from app.providers.registry import chat_with_fallback
 from app.providers.verification import classify_provider_exception
 from app.rag.context_status import build_context_status
@@ -88,8 +89,30 @@ _RETRYABLE_ERROR_CATEGORIES = {"unreachable", "rate_limited"}
 
 
 def _get_or_create_reply_slot(db: Session, user_message_id: uuid.UUID) -> MessageModel | None:
-    return db.query(MessageModel).filter_by(in_reply_to_id=user_message_id).first()
+    return db.query(MessageModel).filter_by(in_reply_to_id=user_message_id).populate_existing().first()
 
+
+
+def _claim_reply_attempt(db, *, conversation, user_message, user):
+    # Row-lock the immutable user-message identity, including the no-reply-row race.
+    locked = db.query(MessageModel).filter_by(id=user_message.id, conversation_id=conversation.id).with_for_update().one()
+    if conversation.user_id != user.id or locked.role != MessageRole.user:
+        raise HTTPException(status_code=404, detail="Meddelandet hittades inte.")
+    reply = _get_or_create_reply_slot(db, locked.id)
+    if reply is not None and reply.status == MessageStatus.succeeded:
+        db.commit()
+        return reply
+    if reply is not None and (str(reply.error_category).startswith(("provider_inflight", "inflight:"))
+                              or reply.error_category in {"external_effect_unknown", "billing_outcome_unknown"}):
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Provider outcome is unresolved; retry is blocked.")
+    if reply is None:
+        reply = MessageModel(conversation_id=conversation.id, role=MessageRole.assistant,
+                             in_reply_to_id=locked.id, content="", status=MessageStatus.failed)
+        db.add(reply)
+    reply.error_category = f"inflight:{urlsafe_b64encode(uuid.uuid4().bytes).decode().rstrip('=')}"
+    db.commit()  # Durable before any outbound invocation; rollback cannot erase the claim.
+    return reply
 
 def _record_candidate_signal_if_worth_noticing(
     db: Session, *, owner_id: uuid.UUID, user_message: MessageModel, context_resolution: ContextResolution
@@ -138,9 +161,14 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     # MainAI 0.1 in the first place, see resolve_active()'s own docstring), and it degrades
     # exactly the same way a provider failure already does here: zero grounding, an accurate
     # degraded reason, the chat turn still completes ungrounded rather than crashing.
+    assistant_row = _claim_reply_attempt(db, conversation=conversation, user_message=user_message, user=user)
+    if assistant_row.status == MessageStatus.succeeded:
+        return ChatMessageOut(conversation_id=conversation.id, user_message_id=user_message.id,
+                              assistant_status="succeeded", assistant_message_id=assistant_row.id,
+                              reply=assistant_row.content, provider=assistant_row.provider, model=assistant_row.model)
     retrieval_degraded_reason: str | None = None
     try:
-        hits = await retrieve_context(db, user.id, user_message.content, top_k=5)
+        hits = await retrieve_context(db, user.id, user_message.content, top_k=5, effect_guard=True)
     except EgressDeniedError as exc:
         hits = []
         retrieval_degraded_reason = str(exc)
@@ -258,7 +286,7 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     # sees, not just what an endpoint would return.
     try:
         graph_context = format_graph_context_instructions(
-            db, user.id, [h.get("document_id") for h in hits], user_message.content if hasattr(user_message, "content") else payload.question,
+            db, user.id, [h.get("document_id") for h in hits], user_message.content,
             top_hit_text=hits[0].get("text") if hits else None,
         )
         if graph_context:
@@ -271,34 +299,19 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     # reason as every block above: a status derivation problem must never cost the founder the
     # reply they already earned.
     try:
-        system_content += "\n\n" + format_project_status_instructions(db, owner_id=user.id)
+        system_content += "\n\n" + format_project_status_instructions(
+            db, owner_id=user.id, question="\n".join([m.content for m in history if m.role == MessageRole.user][-2:] + [user_message.content]))
     except Exception:
         logger.warning("project status block failed; reply unaffected", exc_info=True)
     messages = [Message(role="system", content=system_content)]
     messages += [Message(role=m.role.value, content=m.content) for m in history]
     messages.append(Message(role="user", content=user_message.content))
 
-    assistant_row = _get_or_create_reply_slot(db, user_message.id)
-
-    # Revenue & Compute Engine (app/billing/): reserve a worst-case estimate BEFORE the
-    # call, settle with real usage after, release on failure. When enforcement is off
-    # (default until the founder turns it on) reservation is None and nothing changes.
-    reservation = None
     limits = effective_limits(db, user)
-    settings_chat = get_settings()
-    if settings_chat.billing_enforcement_enabled:
-        est_tokens = sum(len(m.content) for m in messages) // 4 + 1024
-        try:
-            reservation = reserve_compute(
-                db, user=user, limits=limits, estimated_tokens=est_tokens,
-                estimated_cost_usd=estimate_reservation_cost(settings_chat, est_tokens),
-            )
-        except BillingBudgetExceededError as exc:
-            raise HTTPException(status_code=402, detail=str(exc))
-        except BillingEnforcementUnavailableError as exc:
-            # Fail-closed: enforcement ON but the counter store is unavailable. Refuse
-            # cleanly (503) rather than admit an uncounted call.
-            raise HTTPException(status_code=503, detail=str(exc))
+    attempt_budget = ChatAttemptBudget(db, user=user, limits=limits,
+                                      estimated_tokens=sum(len(m.content.encode("utf-8")) for m in messages) + 1024,
+                                      source_ref=f"chat:{user_message.id}:{assistant_row.error_category}",
+                                      reply_slot=assistant_row, enforce=get_settings().billing_enforcement_enabled)
 
     try:
         result, attempted = await chat_with_fallback(
@@ -307,10 +320,21 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
             owner_id=user.id,
             purpose="chat",
             requested_by="routers.chat._attempt_assistant_reply",
+            effect_guard=True,
+            max_tokens=1024,
+            attempt_observer=attempt_budget,
         )
+    except BillingBudgetExceededError as exc:
+        # Proven pre-invoke refusal is retryable only after budget/policy changes.
+        assistant_row.error_category = "billing_refused"
+        db.commit()
+        raise HTTPException(status_code=402, detail=str(exc)) from None
+    except BillingEnforcementUnavailableError as exc:
+        assistant_row.error_category = ("billing_outcome_unknown" if getattr(exc, "reservation_outcome_unknown", True)
+                                        else "billing_refused")
+        db.commit()
+        raise HTTPException(status_code=503, detail="Provider budget could not be verified.") from None
     except (ProviderError, EgressDeniedError) as exc:
-        if reservation is not None:
-            release_reservation(reservation)  # failed call: no phantom spend
         # Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V1): an
         # EgressDeniedError means the gate refused the WHOLE call before any provider was ever
         # reached (never a provider outage) -- always non-retryable, since the content that
@@ -350,11 +374,6 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     usage = result.raw_usage or {}
     prompt_tokens = usage.get("prompt_tokens", 0)
     completion_tokens = usage.get("completion_tokens", 0)
-    if reservation is not None:
-        settle_reservation(reservation, actual_tokens=prompt_tokens + completion_tokens,
-                           actual_cost_usd=estimate_reservation_cost(
-                               settings_chat, prompt_tokens + completion_tokens,
-                               provider=result.provider, model=result.model))
     # Revenue & Compute Engine: the SINGLE accounting writer (per-call audit row +
     # enforcement rollups in one pipeline). Tenant/agent/task dimensions are platform
     # plumbing; tier is snapshotted for audit. See app/billing/__init__.py.
@@ -371,6 +390,7 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
         task="conversation_reply",
         conversation_id=conversation.id,
         tier=effective_limits(db, user).tier,
+        idempotency_key=f"chat-reply:{user_message.id}",
     )
 
     # Founder re-review round (PR #36): the runtime truthfulness contract (app/

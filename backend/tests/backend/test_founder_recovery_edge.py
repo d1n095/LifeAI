@@ -198,15 +198,15 @@ def test_recovery_code_is_not_a_time_bomb_and_never_logged(env):
 
 
 # ---------------------------------------------------------------------------
-# Migration / model parity (0069 vs FounderEmailChangeRequest)
+# Migration / model parity (composed 0080 vs FounderEmailChangeRequest)
 # ---------------------------------------------------------------------------
 
-def test_migration_0069_matches_model_and_is_lineage_head():
+def test_migration_0080_matches_model_and_preserves_single_lineage_head():
     import re
     from pathlib import Path
 
     versions = Path(__file__).resolve().parents[2] / "alembic" / "versions"
-    mig = (versions / "0069_founder_email_recovery.py").read_text()
+    mig = (versions / "0080_founder_email_recovery.py").read_text()
     ddl = re.search(r"CREATE TABLE founder_email_change_requests \((.*?)\n        \)", mig, re.S).group(1)
     ddl_cols = dict(re.findall(r"^\s+(\w+) ([\w()]+)", ddl, re.M))
 
@@ -220,7 +220,7 @@ def test_migration_0069_matches_model_and_is_lineage_head():
     # user_id is owner-scoped with a FK that cascades
     assert "REFERENCES users(id) ON DELETE CASCADE" in ddl
 
-    # lineage integrity: my tree's revisions form a single chain ending at 0069
+    # lineage integrity: the composed recovery revision remains in the single R15 chain
     revs, downs = {}, set()
     for p in versions.glob("*.py"):
         text = p.read_text()
@@ -230,9 +230,9 @@ def test_migration_0069_matches_model_and_is_lineage_head():
             revs[m.group(1)] = p.name
             if d:
                 downs.add(d.group(1))
-    assert "0069" in revs and "0068" in downs
+    assert "0080" in revs and "0078" in downs
     heads = set(revs) - downs
-    # The lineage must have EXACTLY ONE head — the newest migration. It was 0069 when
-    # this test was written; 0070 (billing) / 0071 (ads) legitimately extend the chain.
+    # Exactly one head; later billing/R15 revisions legitimately extend recovery.
+    assert re.search(r'^down_revision\s*=\s*"0078"', mig, re.M)
     assert len(heads) == 1, f"lineage must have exactly one head, got {heads}"
-    assert "0069" in revs and "0068" in downs, "recovery migration must stay chained 0068 -> 0069"
+    assert "0080" in revs and "0078" in downs, "composed recovery migration must stay chained 0078 -> 0080"

@@ -14,6 +14,9 @@ C3 rule rides every frame          C7 every chunk framed (no heuristics)
 C4 marker smuggling cannot escape  (plus: both production call sites use the fence)
 """
 
+from app.config import get_settings as _guard_test_settings
+from app.providers.ollama_provider import OllamaProvider as _LocalQueryEmbedding
+
 import pytest
 from sqlalchemy import text as sa_text
 
@@ -125,7 +128,9 @@ def test_production_paths_produce_a_contract_valid_prompt(client, db_session, mo
         state["system"] = messages[0].content
         return ChatResult(content="Svar.", provider="openai", model=model, raw_usage={})
 
-    monkeypatch.setattr(OpenAIProvider, "embed", _embed)
+    monkeypatch.setattr(_guard_test_settings(), "default_embedding_provider", "ollama")
+
+    monkeypatch.setattr(_LocalQueryEmbedding, "embed", _embed)
     monkeypatch.setattr(OpenAIProvider, "chat", _chat)
     founder = db_session.query(User).filter(User.email == FOUNDER_EMAIL).first()
     _set_rls_user(db_session, founder.id)
@@ -133,7 +138,8 @@ def test_production_paths_produce_a_contract_valid_prompt(client, db_session, mo
     db_session.add(source)
     db_session.commit()
     _set_rls_user(db_session, founder.id)
-    db_session.add(DocumentChunk(document_id=source.id, owner_id=founder.id, chunk_index=0, text=f"Studieinnehåll. {INJECTED}", embedding=[0.1] * DIM))
+    db_session.add(DocumentChunk(document_id=source.id, owner_id=founder.id, chunk_index=0, text=f"Studieinnehåll. {INJECTED}", embedding=[0.1] * DIM,
+                                     embedding_model=get_settings().default_embedding_model, embedding_native_dim=DIM))
     db_session.commit()
     from tests.backend.test_claim_graph_integration import _login
 
