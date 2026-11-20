@@ -449,7 +449,9 @@ async def propose_plan_via_ai(db: Session, *, goal: MainAIGoal) -> tuple[list[Pl
     last_error: PlanValidationError | None = None
     for attempt in (1, 2):
         result, _attempted = await chat_with_fallback(
-            db, messages, owner_id=goal.owner_id, purpose="mainai_planning", requested_by="mainai_execution.planner.propose_plan_via_ai", goal_id=goal.id
+            db, messages, owner_id=goal.owner_id, purpose="mainai_planning",
+            requested_by="mainai_execution.planner.propose_plan_via_ai", goal_id=goal.id,
+            effect_guard=True,
         )
         try:
             specs = _parse_plan_specs(result.content)

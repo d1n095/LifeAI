@@ -159,6 +159,7 @@ async def _handle_read_only_audit(db: Session, task: MainAITask) -> dict:
     result, _attempted = await chat_with_fallback(
         db, messages, owner_id=task.owner_id, purpose="mainai_read_only_audit",
         requested_by="mainai_execution.execution_job._handle_read_only_audit", task_id=task.id, goal_id=task.goal_id,
+        effect_guard=True,
     )
     return {"summary": result.content, "provider": result.provider, "model": result.model}
 
@@ -220,6 +221,7 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
     result, _attempted = await chat_with_fallback(
         db, messages, owner_id=task.owner_id, purpose="mainai_repo_edit_proposal",
         requested_by="mainai_execution.execution_job._propose_repo_edit", task_id=task.id, goal_id=task.goal_id,
+        effect_guard=True,
     )
     parsed = _parse_code_agent_response(result.content)
 
@@ -343,6 +345,7 @@ async def _handle_repo_edit(
     result, _attempted = await chat_with_fallback(
         db, messages, owner_id=task.owner_id, purpose="mainai_repo_edit",
         requested_by="mainai_execution.execution_job._handle_repo_edit", task_id=task.id, goal_id=task.goal_id, job_id=job.id,
+        effect_guard=True,
     )
     parsed = _parse_code_agent_response(result.content)
 

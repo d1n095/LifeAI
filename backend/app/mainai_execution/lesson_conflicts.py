@@ -77,7 +77,7 @@ async def detect_conflict(db: Session, *, lesson_a: EngineeringLesson, lesson_b:
     )
     messages = [Message(role="system", content=LESSON_CONFLICT_SYSTEM_PROMPT), Message(role="user", content=prompt)]
     try:
-        result, _attempted = await chat_with_fallback(db, messages)
+        result, _attempted = await chat_with_fallback(db, messages, effect_guard=True)
         raw = result.content.strip()
         if raw.startswith("```"):
             raw = raw.split("```", 2)[1]

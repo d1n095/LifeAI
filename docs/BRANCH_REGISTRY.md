@@ -9780,3 +9780,13 @@ Remote R15 checkpoint still equals the supplied SHA; no newer R15 head was adver
 Independent security acceptance remains external; `first_cycle_go=false`. No deployment or provider activation.
 
 Draft [PR #464](https://github.com/d1n095/LifeAI/pull/464) carries the isolated R15/#463 candidate against the exact transfer checkpoint. #463 stays frozen at `dbd7680d`; Freebuff R15 and Z.ai source heads were rechecked unchanged. Final targeted reply/nonce/intent/accounting regressions pass (48); full exact-head CI and independent acceptance remain separate gates. No merge/deploy/provider activation.
+
+## Successor branch: `security/r15-464-successor` (2026-11-20) — PR TBD
+
+Branched from exact PR #464 head `86671468a6dd271b61a3f985434130c4bf470ea8`; PR #464 itself is untouched and remains draft. Minimal security remediation of verified R15 findings:
+
+- **R15-01:** external models with a declared catalog price are admissible for a reservation under enforcement; unknown/missing prices still fail closed. Snapshot age remains a selection-policy concern, not an invented "unknown price".
+- **R15-04:** durable client idempotency for `POST /api/chat` via owner-scoped `chat_request_claims` (migration `0090`, FORCE RLS, `SELECT`/`INSERT`-only app role). Same key replays the existing outcome; unresolved/conflicting reuse is 409; no second user message or provider call.
+- **R15-05:** `effect_guard=True` on the remaining legacy `chat_with_fallback` callers (planner, execution_job, agent_orchestration, lesson_conflicts, workbench, rag/claims, provider_planning, corpus_review).
+
+**Tests:** 11 DB-free negative regressions pass; the DB idempotency test is collected but not executed locally (no disposable Postgres/Redis). Exact-head CI and independent acceptance remain separate gates. **Still blocking:** R15-02 (ambiguous timeout recovery), R15-03 (external query embedding/grounding), R15-06 (unverified external chat model), R15-07 (custom-model compatibility). No push, merge, deploy, or provider activation. `first_cycle_go=false`.

@@ -186,7 +186,7 @@ async def dispatch_task(db: Session, task_id: uuid.UUID, *, dispatched_by: str) 
     slice proves the dispatch -> record -> review -> propose chain end to end."""
     task = get_task(db, task_id)
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=_build_task_prompt(task))]
-    result, attempted = await chat_with_fallback(db, messages)
+    result, attempted = await chat_with_fallback(db, messages, effect_guard=True)
     return _record_event(
         db,
         task,
@@ -249,7 +249,7 @@ async def review_task(db: Session, task_id: uuid.UUID, *, reviewed_by: str) -> A
         f"## Testresultat\n{'GRÖNA' if tests_passed else 'RÖDA/EJ GRÖNA'}"
     )
     messages = [Message(role="system", content=REVIEW_AGENT_SYSTEM_PROMPT), Message(role="user", content=review_prompt)]
-    result, attempted = await chat_with_fallback(db, messages)
+    result, attempted = await chat_with_fallback(db, messages, effect_guard=True)
 
     first_line = result.content.strip().splitlines()[0].strip() if result.content.strip() else ""
     verdict = _parse_review_verdict(first_line)

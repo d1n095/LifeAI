@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, FetchedValue, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, Enum, FetchedValue, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -72,3 +72,35 @@ class Message(Base):
     # `ORDER BY sequence_number` becomes correct for a conversation only once
     # `count_unsequenced_messages()` reports 0 for it.
     sequence_number: Mapped[int | None] = mapped_column(Integer, nullable=True, server_default=FetchedValue())
+
+
+class ChatRequestClaim(Base):
+    """Durable idempotency claim for one logical POST /api/chat send.
+
+    Keyed by (owner_id, client_message_id). The row is committed in the SAME transaction
+    as the user message, before any provider call; a retry with the same key can therefore
+    replay the existing reply (or get 409 while the first attempt is unresolved) instead of
+    creating a second user message and a second billable provider call.
+
+    Owner-scoped under FORCE RLS (migration 0090), like conversations/messages. It carries
+    no provider authority and no budget state; those remain in their existing owners.
+    """
+
+    __tablename__ = "chat_request_claims"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    client_message_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    user_message_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("messages.id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("owner_id", "client_message_id", name="uq_chat_request_claims_owner_client"),
+    )

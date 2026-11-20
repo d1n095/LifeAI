@@ -152,6 +152,10 @@ _PROTECTED_TABLES = [
     # immutable by trg_rfsu_guard_update, so UPDATE would always fail via the trigger anyway;
     # narrowed at the grant level too for the same defense-in-depth reasoning).
     ("repository_file_source_units", ["SELECT", "INSERT"]),
+    # R15 successor (migration 0090): the durable chat idempotency claim is append/read-only
+    # for the runtime role. There is no application UPDATE or DELETE path; cascades from the
+    # owning user/conversation/message are performed by Postgres, not by mainai_app.
+    ("chat_request_claims", ["SELECT", "INSERT"]),
 ]
 
 _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]

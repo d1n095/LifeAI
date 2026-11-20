@@ -11,6 +11,16 @@ import { getCsrfToken, setCsrfToken } from "@/lib/auth";
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
+// One opaque key per logical send. A caller that retries the same send must pass the same
+// key explicitly; the default keeps ordinary UI sends covered without exposing message text.
+function newClientMessageId(): string {
+  const cryptoApi = globalThis.crypto as { randomUUID?: () => string } | undefined;
+  if (cryptoApi && typeof cryptoApi.randomUUID === "function") {
+    return cryptoApi.randomUUID();
+  }
+  return `chat-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 export class AuthError extends Error {}
 
 // Thrown when fetch() itself rejects — DNS failure, connection refused, TLS failure, CORS
@@ -904,10 +914,14 @@ export const api = {
   deleteAccount: (password: string) =>
     request("/api/account", { method: "DELETE", body: JSON.stringify({ password }) }),
 
-  sendChat: (message: string, conversationId?: string) =>
+  sendChat: (message: string, conversationId?: string, clientMessageId?: string) =>
     request<ChatResponse>("/api/chat", {
       method: "POST",
-      body: JSON.stringify({ message, conversation_id: conversationId }),
+      body: JSON.stringify({
+        message,
+        conversation_id: conversationId,
+        client_message_id: clientMessageId ?? newClientMessageId(),
+      }),
     }),
   retryChatMessage: (userMessageId: string) =>
     request<ChatResponse>(`/api/chat/messages/${userMessageId}/retry`, { method: "POST" }),

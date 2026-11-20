@@ -255,7 +255,7 @@ async def extract_claims_for_document(
             # the entire gate when omitted).
             result, _ = await chat_with_fallback(
                 db, messages, owner_id=owner_id, purpose="mainai_claim_extraction",
-                requested_by="rag.claims.extract_claims_for_document",
+                requested_by="rag.claims.extract_claims_for_document", effect_guard=True,
             )
         except ProviderError:
             continue
@@ -414,7 +414,7 @@ async def backfill_claim_types(
             # (see its docstring: "this only ever runs within one owner's RLS scope").
             chat_result, _ = await chat_with_fallback(
                 db, messages, owner_id=owner_id, purpose="mainai_claim_type_backfill",
-                requested_by="rag.claims.backfill_claim_types",
+                requested_by="rag.claims.backfill_claim_types", effect_guard=True,
             )
         except ProviderError:
             result.failed += len(candidates)

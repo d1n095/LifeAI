@@ -48,7 +48,7 @@ from app.models.capability_reality import (
 )
 from app.models.claim_relationship import ClaimRelationship
 from app.models.company import CompanyInfo
-from app.models.conversation import Conversation, Message
+from app.models.conversation import ChatRequestClaim, Conversation, Message
 from app.models.corpus_trial_run import CorpusTrialRun
 from app.models.diagnosis import (
     DIAGNOSIS_AUTHORITIES,
@@ -358,6 +358,7 @@ __all__ = [
     "ContextAuthority",
     "ContextBasis",
     "ContextMemberState",
+    "ChatRequestClaim",
     "Conversation",
     "CoordinationAgent",
     "CoordinationAgentStatus",

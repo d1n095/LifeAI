@@ -138,7 +138,8 @@ async def analyze(
 
     try:
         result, _ = await chat_with_fallback(
-            db, messages, owner_id=user.id, purpose="workbench_analyze", requested_by="routers.workbench.analyze"
+            db, messages, owner_id=user.id, purpose="workbench_analyze",
+            requested_by="routers.workbench.analyze", effect_guard=True,
         )
     except (ProviderError, EgressDeniedError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

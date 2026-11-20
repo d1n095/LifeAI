@@ -1,4 +1,5 @@
 from decimal import Decimal
+import re
 import uuid
 from datetime import datetime
 
@@ -90,6 +91,22 @@ class SessionOut(UserOut):
 class ChatMessageIn(BaseModel):
     conversation_id: uuid.UUID | None = None
     message: str
+    # Optional caller-supplied idempotency key. A retry of the same logical send must reuse
+    # this exact value; a new user intent gets a new value. Bounded/opaque so it can be used
+    # as a durable dedupe key without becoming a second message-content channel.
+    client_message_id: str | None = None
+
+    @field_validator("client_message_id")
+    @classmethod
+    def valid_client_message_id(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        if not re.fullmatch(r"[A-Za-z0-9._~:-]{1,128}", v):
+            raise ValueError(
+                "client_message_id måste vara 1–128 tecken och endast A-Z, a-z, 0-9, . _ ~ : -."
+            )
+        return v
 
     @field_validator("message")
     @classmethod

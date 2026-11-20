@@ -15,6 +15,7 @@ from datetime import datetime
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -32,7 +33,13 @@ from app.egress_policy import EgressDeniedError
 from app.founder_memory_signals import record_candidate_signal
 from app.limiter import limiter
 from app.mainai_runtime_contract import build_answer_response, sanitize_unverified_execution_claims
-from app.models.conversation import Conversation, Message as MessageModel, MessageRole, MessageStatus
+from app.models.conversation import (
+    ChatRequestClaim,
+    Conversation,
+    Message as MessageModel,
+    MessageRole,
+    MessageStatus,
+)
 from app.billing import record_usage
 from app.billing.enforcement import BillingBudgetExceededError, BillingEnforcementUnavailableError
 from app.billing.limits import effective_limits
@@ -90,6 +97,76 @@ _RETRYABLE_ERROR_CATEGORIES = {"unreachable", "rate_limited"}
 
 def _get_or_create_reply_slot(db: Session, user_message_id: uuid.UUID) -> MessageModel | None:
     return db.query(MessageModel).filter_by(in_reply_to_id=user_message_id).populate_existing().first()
+
+
+def _get_chat_request_claim(
+    db: Session, *, owner_id: uuid.UUID, client_message_id: str
+) -> ChatRequestClaim | None:
+    return (
+        db.query(ChatRequestClaim)
+        .filter_by(owner_id=owner_id, client_message_id=client_message_id)
+        .first()
+    )
+
+
+def _replay_chat_request(
+    db: Session, *, claim: ChatRequestClaim, payload: ChatMessageIn, user: User
+) -> ChatMessageOut:
+    """Replay an already-claimed client send without invoking any provider.
+
+    A retry with the same client_message_id either returns the original reply, returns the
+    original failed contract, or gets 409 while the first attempt is unresolved. This is
+    deliberately fail-closed: a crash between the durable claim and the provider call must
+    not turn a retry into a second billable call.
+    """
+    conversation = db.get(Conversation, claim.conversation_id)
+    user_message = db.get(MessageModel, claim.user_message_id)
+    if conversation is None or user_message is None or conversation.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Meddelandet hittades inte.")
+    if payload.conversation_id is not None and payload.conversation_id != conversation.id:
+        raise HTTPException(
+            status_code=409,
+            detail="Idempotensnyckeln användes redan för en annan konversation.",
+        )
+    if user_message.content != payload.message:
+        raise HTTPException(
+            status_code=409,
+            detail="Idempotensnyckeln användes redan för ett annat meddelande.",
+        )
+
+    reply = _get_or_create_reply_slot(db, user_message.id)
+    if reply is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Förfrågan pågår fortfarande; försök igen senare.",
+        )
+    if str(reply.error_category or "").startswith(("provider_inflight", "inflight:")) or (
+        reply.error_category in {"external_effect_unknown", "billing_outcome_unknown"}
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Provider outcome is unresolved; retry is blocked.",
+        )
+    if reply.status == MessageStatus.succeeded:
+        return ChatMessageOut(
+            conversation_id=conversation.id,
+            user_message_id=user_message.id,
+            assistant_status="succeeded",
+            assistant_message_id=reply.id,
+            reply=reply.content,
+            provider=reply.provider,
+            model=reply.model,
+        )
+    return ChatMessageOut(
+        conversation_id=conversation.id,
+        user_message_id=user_message.id,
+        assistant_status="failed",
+        assistant_message_id=reply.id,
+        provider=reply.provider,
+        model=reply.model,
+        error_category=reply.error_category,
+        retryable=reply.error_category in _RETRYABLE_ERROR_CATEGORIES,
+    )
 
 
 
@@ -493,6 +570,13 @@ async def chat(
     db: Session = Depends(get_db),
     user: User = Depends(require_founder),
 ):
+    if payload.client_message_id is not None:
+        existing_claim = _get_chat_request_claim(
+            db, owner_id=user.id, client_message_id=payload.client_message_id
+        )
+        if existing_claim is not None:
+            return _replay_chat_request(db, claim=existing_claim, payload=payload, user=user)
+
     conversation = None
     if payload.conversation_id:
         # RLS on `conversations` already prevents cross-user reads, but we check
@@ -504,17 +588,50 @@ async def chat(
     if conversation is None:
         conversation = Conversation(title=payload.message[:60], user_id=user.id)
         db.add(conversation)
-        db.commit()
+        if payload.client_message_id is None:
+            db.commit()
+        else:
+            # Keep the new conversation uncommitted until the claim and user message are
+            # durable together; a losing concurrent duplicate rolls all three back.
+            db.flush()
         # No db.refresh(): id/created_at/updated_at are populated client-side by SQLAlchemy
         # at flush (see app/models/conversation.py defaults), so the object is already
         # fully populated — a refresh would just be an unnecessary extra round-trip.
 
-    # THE FIX: persisted and committed on its own, before any provider is ever called. If
-    # everything after this point fails, the founder's message is still safely in the
-    # database — see this module's docstring and docs/BRANCH_REGISTRY.md's audit finding #1.
+    # THE FIX: persisted and committed before any provider is ever called. With a client
+    # idempotency key the user message and its claim are committed in the SAME transaction,
+    # so a concurrent duplicate either wins the unique constraint or replays the winner —
+    # never a second user message and never a second billable provider call.
     user_message = MessageModel(conversation_id=conversation.id, role=MessageRole.user, content=payload.message)
     db.add(user_message)
-    db.commit()
+    if payload.client_message_id is None:
+        db.commit()
+    else:
+        db.flush()
+        db.add(
+            ChatRequestClaim(
+                owner_id=user.id,
+                client_message_id=payload.client_message_id,
+                conversation_id=conversation.id,
+                user_message_id=user_message.id,
+            )
+        )
+        try:
+            db.commit()
+        except IntegrityError:
+            # Another request with the same (owner, client_message_id) won the race. The
+            # rollback removes only this request's conversation/message/claim; replay the
+            # winner's durable outcome instead of creating a second provider effect.
+            db.rollback()
+            existing_claim = _get_chat_request_claim(
+                db, owner_id=user.id, client_message_id=payload.client_message_id
+            )
+            if existing_claim is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Förfrågan kunde inte idempotenssäkras.",
+                ) from None
+            return _replay_chat_request(db, claim=existing_claim, payload=payload, user=user)
     db.refresh(user_message)
     _capture_message_source(db, message=user_message, conversation=conversation)
 

@@ -81,6 +81,12 @@ RLS_STATEMENTS = [
     # every owner-scoped table, matching the rest of this list.
     "ALTER TABLE messages ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE messages FORCE ROW LEVEL SECURITY",
+    # Chat request idempotency (migration 0090) — owner-scoped claim rows, committed with
+    # the user message before any provider call. Also enabled directly in the migration
+    # itself; listed here so this idempotent reapply path stays the single source of truth
+    # for every owner-scoped table.
+    "ALTER TABLE chat_request_claims ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE chat_request_claims FORCE ROW LEVEL SECURITY",
     # Founder calendar foundation (migration 0071 on the 0069-composition integration branch;
     # 0069 on its own PR branch, 2026-11-15) -- ordinary owner-scoped,
     # mutable table (same simple tier as documents/conversations above, not the heavier
@@ -172,6 +178,11 @@ POLICY_DEFINITIONS = [
         "table": "conversations",
         "name": "conversations_isolation",
         "expr": "user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "chat_request_claims",
+        "name": "chat_request_claims_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
     {
         "table": "document_chunks",

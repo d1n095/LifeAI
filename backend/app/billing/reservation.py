@@ -165,14 +165,25 @@ class ChatAttemptBudget:
         from app.providers.catalog import get_model_spec, evaluate_model, ModelSelectionPolicy, ModelSelectionError
         if self.reservation is not None:
             raise BillingEnforcementUnavailableError("Previous attempt budget is unresolved.")
-        # Unknown/stale external pricing cannot become an invented admission guarantee.
+        # A reservation needs a real catalog price, not a fabricated snapshot age. The
+        # catalog deliberately carries inherited prices with as_of=None (no independently
+        # captured capture date); treating that as "unknown price" refused every external
+        # model before invocation. Unknown/missing prices still fail closed here. Snapshot
+        # age is enforced where a caller actually requests a price ceiling (evaluate_model's
+        # max_input_price_per_million_usd path), not as an admission requirement for the
+        # model's own declared price.
         try:
             spec = get_model_spec(provider, model)
             if spec.external:
-                ceiling = spec.pricing.input_per_million_usd
-                if ceiling is None or not evaluate_model(spec, ModelSelectionPolicy(
-                    allow_external=True, max_input_price_per_million_usd=ceiling))[0]:
+                if spec.pricing.input_per_million_usd is None:
                     raise BillingPriceUnverifiedError("External price bound is not verified.")
+                eligible, reason = evaluate_model(
+                    spec, ModelSelectionPolicy(allow_external=True, require_verified=False)
+                )
+                if not eligible:
+                    raise BillingPriceUnverifiedError(
+                        f"External model is not admissible for reservation: {reason}"
+                    )
         except ModelSelectionError:
             raise BillingPriceUnverifiedError("Provider/model has no verified price bound.") from None
         self.reservation = reserve_compute(

@@ -139,6 +139,7 @@ class RegistryPlanningAdapter:
                 messages,
                 timeout=timeout_seconds,
                 max_tokens=max_output_bytes // 4,
+                effect_guard=True,
             )
         return ProviderResponse(
             content=result.content,
