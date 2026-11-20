@@ -8,6 +8,7 @@ reservation may never be priced at zero merely because pricing is incomplete.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -16,6 +17,8 @@ from sqlalchemy.orm import Session
 from app.config import Settings, get_settings
 from app.billing.enforcement import BillingEnforcementUnavailableError
 from app.providers.pricing import estimate_cost
+
+logger = logging.getLogger(__name__)
 
 
 def estimate_reservation_cost(
@@ -140,12 +143,15 @@ class ChatAttemptBudget:
     Ambiguous effects retain a HOLD (not fabricated measured spend). The durable chat
     claim prevents reinvocation; reconciliation requires real external evidence.
     """
-    def __init__(self, db, *, user, limits, estimated_tokens, source_ref, reply_slot, enforce):
+    def __init__(self, db, *, user, limits, estimated_tokens, source_ref, reply_slot, enforce,
+                 user_message_id=None):
         self.db, self.user, self.limits = db, user, limits
         self.estimated_tokens = estimated_tokens
         self.reservation = None
+        self.attempt = None
         self.source_ref = source_ref
         self.reply_slot = reply_slot
+        self.user_message_id = user_message_id or getattr(reply_slot, "in_reply_to_id", None)
         self.requires_usage = enforce
 
     def before(self, provider, model):
@@ -191,20 +197,130 @@ class ChatAttemptBudget:
             estimated_cost_usd=estimate_reservation_cost(None, self.estimated_tokens, provider=provider, model=model),
             idempotency_key=f"{self.source_ref}:{provider}:{model}",
         )
+        # Durable attempt identity BEFORE the invocation marker. A crash between this
+        # commit and mark_invoking leaves state="reserved" — the only state a later
+        # review may release without provider-side evidence. If the row cannot be
+        # written, the hold must not survive untraceably.
+        from app.billing import chat_attempts
+
+        conversation_id = getattr(self.reply_slot, "conversation_id", None)
+        assistant_message_id = getattr(self.reply_slot, "id", None)
+        if conversation_id is None or assistant_message_id is None or self.user_message_id is None:
+            # Production chat always has the full identity (reply row + user message). A
+            # minimal caller/test double may not; it still gets the hold, but there is no
+            # durable row to reconcile later. Never silently invent ids.
+            logger.warning("chat attempt identity is incomplete; reservation stays process-local")
+            return
+        try:
+            self.attempt = chat_attempts.create_attempt(
+                self.db,
+                owner_id=self.user.id,
+                conversation_id=conversation_id,
+                user_message_id=self.user_message_id,
+                assistant_message_id=assistant_message_id,
+                source_ref=self.source_ref,
+                provider=provider,
+                model=model,
+                reservations=self.reservation,
+            )
+            self.db.commit()
+        except Exception:
+            try:
+                release_reservation(self.reservation)
+            except Exception:
+                logger.exception("chat attempt row failed and reservation release also failed")
+            self.reservation = None
+            raise
+
+    def invoking(self):
+        """Durably mark that the provider call is about to be attempted.
+
+        Called after the reservation/attempt commit and immediately before provider.chat().
+        If this marker cannot be written, the call is refused and the hold is released,
+        because no request can have left the process yet.
+        """
+        if self.attempt is None:
+            return
+        from app.billing import chat_attempts
+
+        try:
+            chat_attempts.mark_invoking(self.db, self.attempt)
+            self.db.commit()
+        except Exception:
+            try:
+                if self.reservation is not None:
+                    release_reservation(self.reservation)
+                    self.reservation = None
+                    chat_attempts.mark_released(
+                        self.db, self.attempt,
+                        evidence={"reason": "invocation_marker_failed"},
+                    )
+                    self.db.commit()
+            except Exception:
+                logger.exception("could not release reservation after invocation marker failure")
+            raise
+
+    def _safe_mark(self, method: str, **kwargs) -> None:
+        if self.attempt is None:
+            return
+        from app.billing import chat_attempts
+
+        try:
+            getattr(chat_attempts, method)(self.db, self.attempt, **kwargs)
+            self.db.commit()
+        except Exception:
+            # The durable row already records the reservation identity; a failed state
+            # update must not turn a delivered reply into a client-visible failure. The
+            # row remains unresolved and is picked up by reconciliation.
+            logger.exception("could not persist chat attempt state %s", method)
 
     def succeeded(self, result):
         if not self.requires_usage:
             return
         usage = result.raw_usage or {}
-        settle_reservation(self.reservation, actual_tokens=usage.get("prompt_tokens", 0)+usage.get("completion_tokens", 0),
-                           actual_cost_usd=estimate_reservation_cost(None, usage.get("prompt_tokens", 0)+usage.get("completion_tokens", 0),
-                                                                    provider=result.provider, model=result.model))
+        prompt = int(usage.get("prompt_tokens", 0) or 0)
+        completion = int(usage.get("completion_tokens", 0) or 0)
+        evidence = {"usage": {"prompt_tokens": prompt, "completion_tokens": completion}}
+        try:
+            settle_reservation(
+                self.reservation,
+                actual_tokens=prompt + completion,
+                actual_cost_usd=estimate_reservation_cost(
+                    None, prompt + completion, provider=result.provider, model=result.model
+                ),
+            )
+        except Exception:
+            # The provider call succeeded, so the reply must still be delivered. The
+            # reserved hold and the recorded usage are durable; reconciliation settles it.
+            logger.exception("chat settlement is unresolved; marking settlement_pending")
+            self._safe_mark("mark_settlement_pending", evidence=evidence)
+        else:
+            self._safe_mark("mark_settled", boundary="observed", evidence=evidence)
         self.reservation = None
 
     def failed(self, error):
         if self.reservation is None:
             return
+        category = getattr(error, "category", None) or "unreachable"
         if getattr(error, "provider_request_may_have_left", None) is False:
-            release_reservation(self.reservation)
+            try:
+                release_reservation(self.reservation)
+            except Exception:
+                logger.exception("proven pre-egress release is unresolved; marking release_pending")
+                self._safe_mark(
+                    "mark_release_pending",
+                    evidence={"reason": "proven_pre_egress", "error_category": category},
+                )
+                return
             self.reservation = None
-        # Otherwise deliberately retain the hold. Never label unknown external effects free.
+            self._safe_mark(
+                "mark_released",
+                evidence={"reason": "proven_pre_egress", "error_category": category},
+            )
+            return
+        # Unknown external effect: retain the hold and persist it for review. Never label
+        # an ambiguous provider call free.
+        self._safe_mark(
+            "mark_held",
+            evidence={"reason": "ambiguous_external_effect", "error_category": category},
+        )

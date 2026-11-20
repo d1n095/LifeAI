@@ -156,6 +156,11 @@ _PROTECTED_TABLES = [
     # for the runtime role. There is no application UPDATE or DELETE path; cascades from the
     # owning user/conversation/message are performed by Postgres, not by mainai_app.
     ("chat_request_claims", ["SELECT", "INSERT"]),
+    # R15 successor (migration 0091): durable billable chat-attempt identity. UPDATE is
+    # required for the durable state machine (reserved -> invoking -> held/settled/released);
+    # DELETE is never granted, so an attempt's audit history cannot be erased by the runtime
+    # role. No prompt/reply text is stored here.
+    ("chat_provider_attempts", ["SELECT", "INSERT", "UPDATE"]),
 ]
 
 _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]

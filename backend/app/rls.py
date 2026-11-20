@@ -87,6 +87,12 @@ RLS_STATEMENTS = [
     # for every owner-scoped table.
     "ALTER TABLE chat_request_claims ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE chat_request_claims FORCE ROW LEVEL SECURITY",
+    # Durable billable chat-attempt identity (migration 0091) — owner-scoped rows holding the
+    # reservation identity needed to reconcile a timeout/crash after restart. Also enabled
+    # directly in the migration itself; listed here so this idempotent reapply path stays the
+    # single source of truth for every owner-scoped table.
+    "ALTER TABLE chat_provider_attempts ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE chat_provider_attempts FORCE ROW LEVEL SECURITY",
     # Founder calendar foundation (migration 0071 on the 0069-composition integration branch;
     # 0069 on its own PR branch, 2026-11-15) -- ordinary owner-scoped,
     # mutable table (same simple tier as documents/conversations above, not the heavier
@@ -182,6 +188,11 @@ POLICY_DEFINITIONS = [
     {
         "table": "chat_request_claims",
         "name": "chat_request_claims_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "chat_provider_attempts",
+        "name": "chat_provider_attempts_isolation",
         "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
     {

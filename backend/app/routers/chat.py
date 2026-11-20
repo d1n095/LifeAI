@@ -40,7 +40,8 @@ from app.models.conversation import (
     MessageRole,
     MessageStatus,
 )
-from app.billing import record_usage
+from app.billing import chat_attempts, record_usage
+from app.billing.chat_attempts import ReconciliationDenied, ReconciliationUnavailable
 from app.billing.enforcement import BillingBudgetExceededError, BillingEnforcementUnavailableError
 from app.billing.limits import effective_limits
 from app.billing.reservation import ChatAttemptBudget
@@ -50,7 +51,7 @@ from app.providers.registry import chat_with_fallback
 from app.providers.verification import classify_provider_exception
 from app.rag.context_status import build_context_status
 from app.rag.message_source import MessageSourceLocator, get_or_create_message_source_unit
-from app.rag.retrieve import retrieve_context
+from app.rag.retrieve import GroundingUnavailableError, retrieve_context
 from app.mainai_execution.lesson_selection import format_lesson_feedback_instructions
 from app.project_status.service import format_project_status_instructions
 from app.rag.graph_instructions import format_graph_context_instructions
@@ -59,7 +60,14 @@ from app.rag.epistemics import epistemic_status_counts_sql, format_epistemic_ins
 from app.rag.evidence_metadata import summarize_owner_evidence_landscape
 from app.rag.evidence_quality import format_landscape_instructions
 from app.rag.trust import assess_confidence, build_trust_instructions, detect_claim_conflicts, detect_conflicts
-from app.schemas import ChatMessageIn, ChatMessageOut, ContextStatusOut, SourceRef
+from app.schemas import (
+    ChatAttemptReconcileIn,
+    ChatMessageIn,
+    ChatMessageOut,
+    ChatUnresolvedAttemptOut,
+    ContextStatusOut,
+    SourceRef,
+)
 
 router = APIRouter(prefix="/api/chat", tags=["chat"], dependencies=[Depends(require_founder)])
 
@@ -93,6 +101,14 @@ settings = get_settings()
 # expect to work by simply trying again (transient), vs. ones that need a real config change
 # first (a bad/missing key, or a provider that structurally doesn't support this role).
 _RETRYABLE_ERROR_CATEGORIES = {"unreachable", "rate_limited"}
+
+# A retry must never turn an unresolved external effect into a second billable call. These
+# categories are terminal until an evidence-backed reconciliation closes the attempt.
+_UNRESOLVED_EFFECT_CATEGORIES = {
+    "external_effect_unknown",
+    "billing_outcome_unknown",
+    "external_effect_unresolved",
+}
 
 
 def _get_or_create_reply_slot(db: Session, user_message_id: uuid.UUID) -> MessageModel | None:
@@ -141,7 +157,7 @@ def _replay_chat_request(
             detail="Förfrågan pågår fortfarande; försök igen senare.",
         )
     if str(reply.error_category or "").startswith(("provider_inflight", "inflight:")) or (
-        reply.error_category in {"external_effect_unknown", "billing_outcome_unknown"}
+        reply.error_category in _UNRESOLVED_EFFECT_CATEGORIES
     ):
         raise HTTPException(
             status_code=409,
@@ -180,7 +196,7 @@ def _claim_reply_attempt(db, *, conversation, user_message, user):
         db.commit()
         return reply
     if reply is not None and (str(reply.error_category).startswith(("provider_inflight", "inflight:"))
-                              or reply.error_category in {"external_effect_unknown", "billing_outcome_unknown"}):
+                              or reply.error_category in _UNRESOLVED_EFFECT_CATEGORIES):
         db.rollback()
         raise HTTPException(status_code=409, detail="Provider outcome is unresolved; retry is blocked.")
     if reply is None:
@@ -246,12 +262,27 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     retrieval_degraded_reason: str | None = None
     try:
         hits = await retrieve_context(db, user.id, user_message.content, top_k=5, effect_guard=True)
+    except GroundingUnavailableError as exc:
+        # The effect guard refused the active embedding provider before any call. This is
+        # a configuration fact, not a provider outage, and it must never be silent: the
+        # reply is explicitly marked ungrounded below and in the response contract.
+        hits = []
+        retrieval_degraded_reason = str(exc)
     except EgressDeniedError as exc:
         hits = []
         retrieval_degraded_reason = str(exc)
     except (ProviderError, httpx.HTTPError) as exc:
         hits = []
         retrieval_degraded_reason = classify_provider_exception(exc).message
+    grounding_status = (
+        "grounded" if hits else ("degraded" if retrieval_degraded_reason else "empty")
+    )
+    if retrieval_degraded_reason:
+        logger.warning(
+            "chat retrieval degraded for message %s: %s",
+            user_message.id,
+            retrieval_degraded_reason,
+        )
     # Deleted sources can never appear here at all — app/rag/vector_store.py's search()
     # excludes Document.deleted_at IS NOT NULL at the query level, not just in the UI.
     conflicting_pairs = detect_conflicts(db, user.id, [h["document_id"] for h in hits])
@@ -388,7 +419,8 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     attempt_budget = ChatAttemptBudget(db, user=user, limits=limits,
                                       estimated_tokens=sum(len(m.content.encode("utf-8")) for m in messages) + 1024,
                                       source_ref=f"chat:{user_message.id}:{assistant_row.error_category}",
-                                      reply_slot=assistant_row, enforce=get_settings().billing_enforcement_enabled)
+                                      reply_slot=assistant_row, user_message_id=user_message.id,
+                                      enforce=get_settings().billing_enforcement_enabled)
 
     try:
         result, attempted = await chat_with_fallback(
@@ -446,6 +478,8 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
             error_message=str(exc),
             retryable=category in _RETRYABLE_ERROR_CATEGORIES,
             context_status=context_status_out,
+            grounding_status=grounding_status,
+            grounding_reason=retrieval_degraded_reason,
         )
 
     usage = result.raw_usage or {}
@@ -527,6 +561,8 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
         context_intent=context_resolution.intent,
         context_confidence=context_resolution.confidence,
         context_status=context_status_out,
+        grounding_status=grounding_status,
+        grounding_reason=retrieval_degraded_reason,
     )
 
 
@@ -671,3 +707,84 @@ async def retry_assistant_reply(
         )
 
     return await _attempt_assistant_reply(db, conversation=conversation, user_message=user_message, user=user)
+
+
+def _unresolved_attempt_out(attempt) -> ChatUnresolvedAttemptOut:
+    age = chat_attempts.attempt_age_seconds(attempt)
+    stale = age >= chat_attempts.DEFAULT_STALE_AFTER_SECONDS
+    release_allowed = stale and chat_attempts.release_is_provably_safe(attempt)
+    if release_allowed:
+        note = "Kan släppas: ingen anropsmarkering finns, så ingen begäran kan ha lämnat processen."
+    elif attempt.state == "reserved":
+        note = "Väntar på att bli stale innan den kan granskas och släppas."
+    else:
+        note = (
+            "Kan inte släppas utan leverantörsbevis. Avräkna konservativt eller från "
+            "dokumenterad användning."
+        )
+    return ChatUnresolvedAttemptOut(
+        id=attempt.id,
+        assistant_message_id=attempt.assistant_message_id,
+        user_message_id=attempt.user_message_id,
+        state=attempt.state,
+        effect_boundary=attempt.effect_boundary,
+        provider=attempt.provider,
+        model=attempt.model,
+        created_at=attempt.created_at,
+        updated_at=attempt.updated_at,
+        age_seconds=int(age),
+        release_allowed=release_allowed,
+        review_note=note,
+    )
+
+
+@router.get("/unresolved", response_model=list[ChatUnresolvedAttemptOut])
+def unresolved_chat_attempts(
+    db: Session = Depends(get_db), user: User = Depends(require_founder)
+):
+    """List this owner's unresolved billable chat attempts for review.
+
+    Never invokes a provider and never changes budget state; it is the read half of the
+    recovery workflow. Owner isolation is enforced by both the explicit filter and RLS.
+    """
+
+    return [
+        _unresolved_attempt_out(attempt)
+        for attempt in chat_attempts.list_unresolved_attempts(db, owner_id=user.id)
+    ]
+
+
+@router.post("/unresolved/{attempt_id}/reconcile", response_model=ChatUnresolvedAttemptOut)
+def reconcile_chat_attempt(
+    attempt_id: uuid.UUID,
+    payload: ChatAttemptReconcileIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Evidence-backed reconciliation of one unresolved attempt.
+
+    `release_pre_egress` is accepted only for a stale attempt that was never marked as
+    invoked; `settle_conservative` charges the already-reserved worst case; and
+    `settle_from_usage` requires recorded usage evidence. No path calls the provider or
+    creates a second billable attempt.
+    """
+
+    try:
+        attempt = chat_attempts.reconcile_attempt(
+            db,
+            owner_id=user.id,
+            attempt_id=attempt_id,
+            resolution=payload.resolution,
+            evidence_ref=payload.evidence_ref,
+            actor_id=user.id,
+        )
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Avstämningen hittades inte.") from None
+    except ReconciliationDenied as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except ReconciliationUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail="Budgetreservationen kunde inte slutföras; försöket är fortfarande oavstämt.",
+        ) from None
+    return _unresolved_attempt_out(attempt)

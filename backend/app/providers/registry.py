@@ -414,6 +414,11 @@ async def chat_with_fallback(
                 attempt_observer.before(provider.name, model)
                 # Disclosure and durable reply claim precede the external effect.
                 db.commit()
+                # Durable invocation boundary: after this commit the attempt can no longer
+                # be proven pre-egress, so recovery will not release it blind.
+                marker = getattr(attempt_observer, "invoking", None)
+                if marker is not None:
+                    marker()
             invoked = True
             result = await provider.chat(outbound_messages, model=model, **kwargs)
             if effect_guard and (result.provider != provider.name or result.model != model):

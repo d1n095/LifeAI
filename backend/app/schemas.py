@@ -2,6 +2,7 @@ from decimal import Decimal
 import re
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -187,6 +188,39 @@ class ChatMessageOut(BaseModel):
     error_category: str | None = None
     error_message: str | None = None
     retryable: bool = False
+    # R15-03: grounding is never silently absent. "grounded" means real retrieval hits were
+    # used; "degraded" means retrieval could not run (the reason is safe and explicit);
+    # "empty" means retrieval ran but matched nothing; "unknown" is used on replay paths
+    # where the original retrieval outcome was not persisted. See app/routers/chat.py.
+    grounding_status: str = "unknown"
+    grounding_reason: str | None = None
+
+
+class ChatUnresolvedAttemptOut(BaseModel):
+    """One billable chat attempt whose provider outcome is not yet reconciled.
+
+    Safe metadata only: no prompt/reply text, no reservation ids, no provider credentials.
+    `release_allowed` is true only for a stale attempt that is provably pre-egress; every
+    ambiguous attempt requires a conservative settlement or recorded usage.
+    """
+
+    id: uuid.UUID
+    assistant_message_id: uuid.UUID
+    user_message_id: uuid.UUID
+    state: str
+    effect_boundary: str | None = None
+    provider: str
+    model: str
+    created_at: datetime
+    updated_at: datetime
+    age_seconds: int
+    release_allowed: bool
+    review_note: str
+
+
+class ChatAttemptReconcileIn(BaseModel):
+    resolution: Literal["release_pre_egress", "settle_conservative", "settle_from_usage"]
+    evidence_ref: str = Field(min_length=8, max_length=256)
 
 
 class MessageOut(BaseModel):

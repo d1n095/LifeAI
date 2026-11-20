@@ -29,6 +29,8 @@ type ChatEntry = {
   // VERIFIED reason (worker down, files still processing, no provider, genuinely no match...)
   // without depending on the model having said it correctly in its own reply text.
   contextStatus?: ContextStatus | null;
+  groundingStatus?: "grounded" | "degraded" | "empty" | "unknown";
+  groundingReason?: string | null;
 };
 
 function buildAssistantEntry(res: ChatResponse): ChatEntry {
@@ -41,6 +43,8 @@ function buildAssistantEntry(res: ChatResponse): ChatEntry {
       retryable: res.retryable,
       userMessageId: res.user_message_id,
       contextStatus: res.context_status,
+      groundingStatus: res.grounding_status,
+      groundingReason: res.grounding_reason,
     };
   }
   return {
@@ -54,6 +58,8 @@ function buildAssistantEntry(res: ChatResponse): ChatEntry {
     providersAttempted: res.providers_attempted,
     conflictsDetected: res.conflicts_detected,
     contextStatus: res.context_status,
+    groundingStatus: res.grounding_status,
+    groundingReason: res.grounding_reason,
   };
 }
 
@@ -331,13 +337,23 @@ export default function ChatPage() {
                   {entry.content}
                 </div>
               )}
-              {entry.contextStatus && (
+              {entry.contextStatus && entry.groundingStatus !== "degraded" && (
                 <div
                   className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200"
                   title="Verifierad orsak från biblioteket/workern — inte en gissning från AI-svaret."
                 >
                   <span className="font-medium">{CONTEXT_STATUS_LABELS[entry.contextStatus.reason]}:</span>{" "}
                   {entry.contextStatus.message}
+                </div>
+              )}
+              {entry.groundingStatus === "degraded" && (
+                <div
+                  role="status"
+                  className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200"
+                  title="Kunskapssökningen kunde inte köras. Svaret är därför uttryckligen utan kunskapsunderlag."
+                >
+                  <span className="font-medium">Svar utan kunskapsunderlag:</span>{" "}
+                  {entry.groundingReason ?? "embedding-leverantören är inte tillgänglig för guardad chat."}
                 </div>
               )}
               {entry.confidence && (

@@ -200,6 +200,10 @@ export type ChatResponse = {
   context_intent?: string | null;
   context_confidence?: string | null;
   context_status?: ContextStatus | null;
+  // R15-03: explicit grounding outcome. "degraded" means retrieval could not run (the
+  // safe reason is in grounding_reason); never infer grounding from the reply text.
+  grounding_status?: "grounded" | "degraded" | "empty" | "unknown";
+  grounding_reason?: string | null;
   error_category: string | null;
   error_message: string | null;
   retryable: boolean;
