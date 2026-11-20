@@ -1,4 +1,3 @@
-import os
 """Phase 2 tests: the MODEL-MODE Cognitive Regression Gate against the approved model.
 
 These tests call the REAL approved model (z-ai CLI -> glm-4-plus) through the REAL
@@ -12,6 +11,7 @@ via the R10 policy interface (critical regression -> blocked_requires_approval; 
 switching anywhere).
 """
 
+import os
 import uuid
 
 import pytest
@@ -27,7 +27,7 @@ from app.models.knowledge_claim import ClaimConfidence, ClaimStatus, ClaimType, 
 from app.rag.claims import EXTRACTION_VERSION
 from app.rag.evidence_metadata import record_claim_evidence_metadata
 from app.request_context import current_user_id as current_user_id_var
-from app.providers.zai_eval_provider import ZAIEvaluationProvider as ZAIProvider, _which_zai
+from app.providers.zai_eval_provider import _which_zai, evaluation_observation
 from tests.backend.test_claim_graph_integration import _login
 
 pytestmark = pytest.mark.skipif(os.getenv("RUN_REAL_MODEL_EVAL") != "1" or _which_zai() is None, reason="z-ai CLI (approved model) not available in this environment")
@@ -52,7 +52,7 @@ class ModelHarness:
         self.founder = db_session.query(User).filter(User.email == FOUNDER_EMAIL).first()
         _set_rls_user(db_session, self.founder.id)
         self.csrf = _login(client)
-        self.reported_model = ZAIProvider.last_model or "glm-4-plus"
+        self.reported_model = evaluation_observation().get("model") or "glm-4-plus"
         self._seed_corpus()
 
     def _doc(self, title: str, text: str, *, topic=None, meta=None, confidence=ClaimConfidence.likely):

@@ -66,7 +66,8 @@ def _doc(env, title, text, meta=None, status=ActiveTruthStatus.active, confidenc
     db.add(source)
     db.commit()
     _set_rls_user(db, owner)
-    chunk = DocumentChunk(document_id=source.id, owner_id=owner, chunk_index=0, text=text, embedding=_bow(text))
+    chunk = DocumentChunk(document_id=source.id, owner_id=owner, chunk_index=0, text=text, embedding=_bow(text),
+                          embedding_model=get_settings().default_embedding_model, embedding_native_dim=DIM)
     db.add(chunk)
     db.commit()
     _set_rls_user(db, owner)
@@ -133,31 +134,14 @@ def test_superseded_source_never_rides_as_current(env, monkeypatch):
         return ChatResult(content="Svar.", provider="openai", model=model, raw_usage={})
 
     monkeypatch.setattr(OpenAIProvider, "chat", _chat)
-    # Scoped provider activation: without it the fallback ladder probes unconfigured
-    # openai/ollama (network hangs). The admin-config path again, restored after.
-    from app.models.provider_config import ProviderConfig
-    from app.providers import registry as provider_registry
-    from app.providers.zai_provider import ZAIProvider
-
-    provider_registry._PROVIDERS["zai"] = ZAIProvider
-    env["db"].add(ProviderConfig(role="chat", provider="zai", model="glm-4-plus", is_active=True))
-    env["db"].commit()
-    client = _client_for(env)
-    csrf = _login(client)
-    res = client.post("/api/chat", json={"conversation_id": None, "message": "Vad säger studierna om ämne X och effekt Y?"}, headers={"X-CSRF-Token": csrf})
-    assert res.status_code == 200
-    # The scoped zai config routes to the REAL approved model; the adapter captured
-    # the assembled system prompt itself (ZAIProvider.last_system).
-    system = ZAIProvider.last_system or ""
+    # Deterministic prompt-contract test: use the mocked production transport above,
+    # not the CLI or a global registry/config override.
+    csrf = _login(env["client"])
+    res = env["client"].post("/api/chat", json={"message":"Vad säger studierna om ämne X?"}, headers={"X-CSRF-Token":csrf})
+    assert res.status_code == 200 and res.json()["assistant_status"] == "succeeded"
+    system = state["system"]
     assert "(status: superseded)" in system, "the citation line carries the superseded status to the model"
     assert "Ny studie 2024" in system
-    # restore: drop the scoped config rows
-    for role in ("chat", "embedding"):
-        cfg = env["db"].query(ProviderConfig).filter_by(role=role, provider="zai").first()
-        if cfg is not None:
-            env["db"].delete(cfg)
-    provider_registry._PROVIDERS.pop("zai", None)
-    env["db"].commit()
 
 
 def _client_for(env):

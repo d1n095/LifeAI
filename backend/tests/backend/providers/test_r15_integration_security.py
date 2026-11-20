@@ -295,3 +295,37 @@ async def test_output_limit_reaches_every_transport(monkeypatch, provider_name):
         assert payload["options"]["num_predict"] == 7
     else:
         assert payload["max_tokens"] == 7
+
+
+def test_evaluation_observations_are_scoped_and_erased(monkeypatch):
+    from app.providers.zai_eval_provider import evaluation_observation
+    monkeypatch.setattr(get_settings(),"environment","test")
+    with registry.evaluation_provider_scope(FakeEvaluation,{"chat":"glm","embedding":"bow"},authorized=True):
+        lease = registry._current_evaluation()
+        lease.observation["system"] = "owner-private"
+        assert Context().run(evaluation_observation) == {}
+        with registry.evaluation_provider_scope(FakeEvaluation,{"chat":"other","embedding":"bow"},authorized=True):
+            assert evaluation_observation() == {}
+        assert evaluation_observation()["system"] == "owner-private"
+    assert lease.observation == {} and evaluation_observation() == {}
+
+
+@pytest.mark.asyncio
+async def test_eval_cli_never_inherits_http_credentials(monkeypatch):
+    import json
+    import subprocess
+    from pathlib import Path
+    monkeypatch.setattr(get_settings(),"environment","test")
+    for key in ("OPENAI_API_KEY","ZAI_API_KEY","DATABASE_URL","SECRET_KEY"):
+        monkeypatch.setenv(key,"must-not-reach-cli")
+    captured = {}
+    def run(cmd,**kwargs):
+        captured.update(kwargs)
+        Path(cmd[cmd.index("-o")+1]).write_text(json.dumps({"model":"glm", "choices":[{"message":{"content":"ok"}}],
+            "usage":{"prompt_tokens":1,"completion_tokens":1}}))
+        return SimpleNamespace(returncode=0,stdout="",stderr="")
+    monkeypatch.setattr(subprocess,"run",run)
+    with registry.evaluation_provider_scope(ZAIEvaluationProvider,{"chat":"glm","embedding":"bow"},authorized=True):
+        result = await ZAIEvaluationProvider().chat([Message("user","safe")],model="glm")
+    assert result.provider == "zai_eval" and result.model == "glm"
+    assert all(key not in captured["env"] for key in ("OPENAI_API_KEY","ZAI_API_KEY","DATABASE_URL","SECRET_KEY"))

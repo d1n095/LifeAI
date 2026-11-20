@@ -271,6 +271,15 @@ jobs:
           cache-dependency-path: backend/requirements.txt
       - run: pip install -r requirements.txt
         working-directory: backend
+      - name: Provision restricted migration-grant target
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mainai_app') THEN
+              CREATE ROLE mainai_app LOGIN PASSWORD 'ci-only-migration-role' NOSUPERUSER NOBYPASSRLS NOINHERIT;
+            END IF;
+          END $$;
+          SQL
       - name: Fresh install to head
         working-directory: backend
         env:

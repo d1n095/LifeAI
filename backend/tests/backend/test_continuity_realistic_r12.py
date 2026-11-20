@@ -30,13 +30,13 @@ from app.db import SessionLocal
 from app.models.audit import AuditLog
 from app.models.document import ActiveTruthStatus, Document, DocumentSource
 from app.models.document_chunk import DocumentChunk
-from app.models.knowledge_claim import ClaimConfidence, ClaimStatus, ClaimType, KnowledgeClaim
 from app.models.provider_config import ProviderConfig
+from app.models.knowledge_claim import ClaimConfidence, ClaimStatus, ClaimType, KnowledgeClaim
 from app.problem_learning.service import active_decision, create_problem, record_decision
 from app.rag.claims import EXTRACTION_VERSION
 from app.rag.evidence_metadata import record_claim_evidence_metadata
 from app.providers import registry as provider_registry
-from app.providers.zai_provider import ZAIProvider
+from app.providers.zai_eval_provider import ZAIEvaluationProvider
 from app.request_context import current_user_id as current_user_id_var
 from app.security import hash_password
 
@@ -234,20 +234,11 @@ def test_c6_provider_switch_changes_no_cognition(env):
     d1 = record_decision(db, owner_id=owner, problem_id=problem.id, decision="C6: arkitekturen fryses till januari.", idempotency_key=f"c6-1-{uuid.uuid4()}", status="active", authority="founder", basis="manual")
     db.commit()
 
-    # SWITCH the chat provider through the admin path (run-scoped, restored)
-    provider_registry._PROVIDERS["zai"] = ZAIProvider
-    db.add(ProviderConfig(role="chat", provider="zai", model="glm-4-plus", is_active=True))
-    db.commit()
-    try:
+    # Scoped evaluation identity changes no global provider registration/config.
+    with provider_registry.evaluation_provider_scope(
+        ZAIEvaluationProvider, {"chat":"glm-4-plus","embedding":"bow-eval"}, authorized=True):
         _set_rls_user(db, owner)
         d2 = record_decision(db, owner_id=owner, problem_id=problem.id, decision="C6: arkitekturfrysning förlängs till februari.", idempotency_key=f"c6-2-{uuid.uuid4()}", status="active", authority="founder", basis="manual", supersedes_decision_id=d1.id)
-        db.commit()
-    finally:
-        for role in ("chat", "embedding"):
-            cfg = db.query(ProviderConfig).filter_by(role=role, provider="zai").first()
-            if cfg is not None:
-                db.delete(cfg)
-        provider_registry._PROVIDERS.pop("zai", None)
         db.commit()
     db.refresh(d1)
     from app.db import SessionLocal
@@ -259,7 +250,7 @@ def test_c6_provider_switch_changes_no_cognition(env):
         assert current.decision == d2.decision and d1.status == "superseded", (
             "C6: the provider switch changed NO stored cognition — decisions are provider-independent"
         )
-        assert db.query(ProviderConfig).filter_by(provider="zai", is_active=True).count() == 0, (
+        assert db.query(ProviderConfig).filter_by(provider="zai_eval", is_active=True).count() == 0, (
             "C6: the switch is fully restored — no residual activation"
         )
     finally:

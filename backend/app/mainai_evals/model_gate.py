@@ -3,7 +3,7 @@ model actually does with the production prompt.
 
 Round 10's gate proved the SYSTEM's behavior deterministically (framing, structure,
 retrieval, verdicts). This runner adds the other half: with an approved model active
-through the REAL provider registry (provider_config rows, the admin path — nothing
+through the REAL provider registry (an authorized task-local evaluation scope — nothing
 hardcoded), it drives the production chat path and asserts STRUCTURAL properties of the
 model's actual replies, with repeated trials (majority-of-3) where nondeterminism
 matters:
@@ -39,7 +39,7 @@ from sqlalchemy.orm import Session
 from app.mainai_evals.cognitive_gate import CaseResult, GateRun, ObjectiveAssertion, RubricScore
 from app.providers import registry as provider_registry
 from app.providers.base import ProviderError
-from app.providers.zai_eval_provider import ZAIEvaluationProvider
+from app.providers.zai_eval_provider import ZAIEvaluationProvider, evaluation_observation
 
 _TRIALS = 3  # majority-of-3: one flaky trial must not flip a verdict
 
@@ -73,8 +73,8 @@ class ModelCaseOutcome:
 
 class ModelGateRunner:
     """Runs the real-model cases through the production chat path with the approved
-    provider ACTIVE VIA THE REGISTRY (provider_config row), restoring the prior
-    configuration afterwards. Embedding uses the adapter's deterministic vector so the
+    provider resolved through an authorized task-local registry scope. Global provider
+    registration and configuration remain untouched. Embedding uses the adapter's deterministic vector so the
     corpus-to-prompt mapping is stable across trials."""
 
     def __init__(self, client, db: Session):
@@ -162,7 +162,7 @@ class ModelGateRunner:
         )]
         run = GateRun(
             run_id=uuid.uuid4(), dataset_version="model_gate_r11", provider="zai_eval",
-            model=harness.reported_model or "glm-4-plus", executed_at=datetime.utcnow(),
+            model=evaluation_observation().get("model") or "unobserved", executed_at=datetime.utcnow(),
             case_results=[o.to_case_result() for o in outcomes],
         )
         return run, outcomes

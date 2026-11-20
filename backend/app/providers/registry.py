@@ -1,6 +1,6 @@
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import logging
 import uuid
@@ -58,6 +58,7 @@ class _EvaluationLease:
     provider_class: type
     models: dict[str, str]
     active: bool = True
+    observation: dict = field(default_factory=dict)
 
 
 _evaluation_context: ContextVar[_EvaluationLease | None] = ContextVar("provider_evaluation", default=None)
@@ -85,6 +86,7 @@ def evaluation_provider_scope(provider_class, models: dict[str, str], *, authori
         yield
     finally:
         lease.active = False  # Copied task contexts cannot outlive evaluation authorization.
+        lease.observation.clear()
         _evaluation_context.reset(token)
 
 

@@ -20,6 +20,7 @@ Design contract:
 from __future__ import annotations
 
 import json
+import os
 import hashlib
 import math
 import subprocess
@@ -29,7 +30,6 @@ from pathlib import Path
 from app.config import get_settings
 from app.providers.base import ChatResult, LLMProvider, Message, ProviderError
 
-_MODEL = "zai-cli"
 _DIM = get_settings().embedding_dim
 
 
@@ -37,8 +37,6 @@ class ZAIEvaluationProvider(LLMProvider):
     """Approved-model adapter for evaluation runs (see module docstring)."""
 
     name = "zai_eval"
-    last_system: str | None = None  # for the gate runner's prompt-level assertions
-    last_model: str | None = None  # the model the CLI reports (e.g. glm-4-plus)
 
     def _require_context(self):
         from app.providers.registry import _current_evaluation
@@ -46,12 +44,13 @@ class ZAIEvaluationProvider(LLMProvider):
         if lease is None or lease.provider_class is not type(self):
             raise ProviderError("Evaluation provider requires an active authorized scope.",
                                 category="unsupported", provider_request_may_have_left=False)
+        return lease
 
     def is_configured(self) -> bool:
         return Path("/usr/local/bin/z-ai").exists() or _which_zai() is not None
 
     async def chat(self, messages: list[Message], model: str, *, timeout: float | None = None, **kwargs) -> ChatResult:
-        self._require_context()
+        lease = self._require_context()
         system_text = "\n\n".join(m.content for m in messages if m.role == "system")
         user_text = "\n\n".join(m.content for m in messages if m.role != "system")
         with tempfile.TemporaryDirectory(prefix="zai-gate-") as tmp:
@@ -60,33 +59,42 @@ class ZAIEvaluationProvider(LLMProvider):
             # is ~2MB, far above any assembled prompt this gate produces.
             cmd = ["z-ai", "chat", "-p", user_text, "-s", system_text, "-o", str(out_path)]
             try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout or 180)
+                proc = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=timeout or 180,
+                    # CLI authentication must be independently provisioned; never inherit
+                    # production HTTP provider keys, database credentials or app secrets.
+                    env={key: os.environ[key] for key in
+                         ("PATH","HOME","LANG","LC_ALL","LC_CTYPE","TMPDIR","XDG_CONFIG_HOME") if key in os.environ},
+                )
             except FileNotFoundError as exc:
-                raise ProviderError("unreachable: z-ai CLI not available") from exc
+                raise ProviderError("z-ai CLI not available", category="unreachable", provider_request_may_have_left=False) from exc
             except subprocess.TimeoutExpired as exc:
-                raise ProviderError("unreachable: z-ai CLI timed out") from exc
+                raise ProviderError("z-ai CLI timed out", category="unreachable", provider_request_may_have_left=True) from exc
             if proc.returncode != 0 or not out_path.exists():
                 # Classify honestly: a 429 from the model service is RATE_LIMITED (a
                 # quota condition, retryable later), not "unreachable".
                 stderr = (proc.stderr or "") + (proc.stdout or "")
                 if "429" in stderr or "Too many requests" in stderr:
-                    raise ProviderError("rate_limited: model service quota exhausted — retry later")
-                raise ProviderError("unreachable: z-ai CLI failed (exit %s)" % proc.returncode)
+                    raise ProviderError("Model service quota exhausted.", category="rate_limited", provider_request_may_have_left=True)
+                raise ProviderError("z-ai CLI failed.", category="unreachable", provider_request_may_have_left=True)
             try:
                 payload = json.loads(out_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError as exc:
-                raise ProviderError("unreachable: z-ai CLI returned unparseable output") from exc
+                raise ProviderError("z-ai CLI returned invalid output.", category="unreachable", provider_request_may_have_left=True) from exc
             # The CLI emits OpenAI-shaped JSON: choices[0].message.content + usage.
             try:
                 content = payload["choices"][0]["message"]["content"]
             except (KeyError, IndexError, TypeError) as exc:
-                raise ProviderError("unreachable: z-ai CLI output missing reply content") from exc
+                raise ProviderError("z-ai CLI output missing reply content.", category="unreachable", provider_request_may_have_left=True) from exc
             if not content or not str(content).strip():
-                raise ProviderError("unreachable: z-ai CLI returned an empty reply")
+                raise ProviderError("z-ai CLI returned an empty reply.", category="unreachable", provider_request_may_have_left=True)
             usage = payload.get("usage") or {}
-            reported_model = payload.get("model") or (model or _MODEL)
-            ZAIEvaluationProvider.last_system = system_text
-            ZAIEvaluationProvider.last_model = reported_model
+            reported_model = payload.get("model")
+            if (not isinstance(reported_model, str) or not reported_model.strip() or not isinstance(usage, dict)
+                    or any(type(usage.get(k)) is not int or usage[k] < 0 for k in ("prompt_tokens","completion_tokens"))):
+                raise ProviderError("z-ai CLI identity or usage is unverified.", category="unreachable",
+                                    provider_request_may_have_left=True)
+            lease.observation.update(system=system_text, requested_model=model, model=reported_model)
             return ChatResult(
                 content=str(content), provider=self.name, model=reported_model,
                 raw_usage={"prompt_tokens": usage.get("prompt_tokens", 0), "completion_tokens": usage.get("completion_tokens", 0)},
@@ -111,3 +119,9 @@ def _which_zai() -> str | None:
         if p.exists():
             return str(p)
     return None
+
+
+def evaluation_observation() -> dict:
+    from app.providers.registry import _current_evaluation
+    lease = _current_evaluation()
+    return dict(lease.observation) if lease is not None else {}

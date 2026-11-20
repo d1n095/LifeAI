@@ -1,4 +1,3 @@
-import os
 """Round 12 Phase 3: COGNITIVE CORE IN REAL CONVERSATIONS — acceptance scenarios on the
 actual MainAI answer path (production router, retrieval, framing, persistence), each
 with EXPLICIT expected behavior and OBSERVABLE evidence.
@@ -24,6 +23,7 @@ skip honestly and are reported as environmental limitations, never passes.
 """
 
 import time
+import os
 import uuid
 
 import pytest
@@ -44,7 +44,7 @@ from app.rag.claims import EXTRACTION_VERSION
 from app.rag.evidence_metadata import record_claim_evidence_metadata
 from app.providers import registry as provider_registry
 from app.providers.base import ProviderError
-from app.providers.zai_eval_provider import ZAIEvaluationProvider as ZAIProvider, _which_zai
+from app.providers.zai_eval_provider import ZAIEvaluationProvider as ZAIProvider, _which_zai, evaluation_observation
 from app.request_context import current_user_id as current_user_id_var
 from tests.backend.test_claim_graph_integration import FOUNDER_EMAIL, FOUNDER_PASSWORD, _login
 
@@ -141,7 +141,7 @@ def _doc(env, title, text, meta=None, confidence=ClaimConfidence.likely, contrad
 
 
 def _replay_prompt(env) -> str:
-    return ZAIProvider.last_system or ""
+    return evaluation_observation().get("system", "")
 
 
 def _skip_env(exc: Exception):
