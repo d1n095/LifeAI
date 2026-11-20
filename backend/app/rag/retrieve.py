@@ -16,6 +16,7 @@ async def retrieve_context(
     *,
     project_id: uuid.UUID | None = None,
     document_id: uuid.UUID | None = None,
+    effect_guard: bool = False,
 ) -> list[dict]:
     # Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V2 query-
     # embedding half): owner_id is already this function's own required parameter -- no
@@ -36,6 +37,7 @@ async def retrieve_context(
         owner_id=owner_id,
         purpose="rag_retrieval",
         requested_by="rag.retrieve.retrieve_context",
+        effect_guard=effect_guard,
     )
     # Scope retrieval to the ACTIVE embedding space (model + this query's native dim) so a
     # query embedded with model X can only ever match chunks embedded with model X — no

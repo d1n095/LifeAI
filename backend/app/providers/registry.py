@@ -221,6 +221,7 @@ async def embed_with_policy(
     task_id: uuid.UUID | None = None,
     goal_id: uuid.UUID | None = None,
     job_id: uuid.UUID | None = None,
+    effect_guard: bool = False,
 ) -> list[list[float]]:
     """`provider.embed(texts, model=model)`, gated the same way `chat_with_fallback()` gates
     `.chat()` (Life Vault / External-AI Egress Control, V2 — see
@@ -237,6 +238,14 @@ async def embed_with_policy(
     change landing between the two resolutions could then embed with a provider different from
     the one that was actually verified.
     """
+    # The vector-only adapter contract cannot reconcile paid usage or an uncertain
+    # embedding outcome. Do not repeat an unmetered external effect on chat retry.
+    # Eval adapters require their own active lease and are never production providers.
+    if effect_guard and provider.name != "ollama":
+        lease = _current_evaluation()
+        if lease is None or provider.name != "zai_eval" or not isinstance(provider, lease.provider_class):
+            raise ProviderError("External query embedding requires a metered effect contract.",
+                                category="unsupported", provider_request_may_have_left=False)
     outbound_texts = texts
     if owner_id is not None:
         from app.egress_policy import enforce_egress_policy

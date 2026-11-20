@@ -168,7 +168,7 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
                               reply=assistant_row.content, provider=assistant_row.provider, model=assistant_row.model)
     retrieval_degraded_reason: str | None = None
     try:
-        hits = await retrieve_context(db, user.id, user_message.content, top_k=5)
+        hits = await retrieve_context(db, user.id, user_message.content, top_k=5, effect_guard=True)
     except EgressDeniedError as exc:
         hits = []
         retrieval_degraded_reason = str(exc)

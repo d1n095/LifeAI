@@ -423,7 +423,7 @@ def test_never_egress_marked_retrieved_content_is_denied_before_any_provider_is_
 
     monkeypatch.setattr(OpenAIProvider, "chat", _tracking_chat)
 
-    async def _fake_retrieve_context(db, owner_id, query, top_k=5):
+    async def _fake_retrieve_context(db, owner_id, query, top_k=5, **kwargs):
         return [
             {
                 "document_id": "00000000-0000-0000-0000-000000000001",
@@ -474,7 +474,7 @@ def test_retrying_after_an_egress_denial_is_denied_again_not_silently_bypassed(c
 
     monkeypatch.setattr(OpenAIProvider, "chat", _tracking_chat)
 
-    async def _fake_retrieve_context(db, owner_id, query, top_k=5):
+    async def _fake_retrieve_context(db, owner_id, query, top_k=5, **kwargs):
         return [
             {
                 "document_id": "00000000-0000-0000-0000-000000000001",

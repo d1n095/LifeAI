@@ -142,7 +142,9 @@ def login(client):
 def test_uncertain_chat_outcome_is_durable_and_retry_is_blocked(client, db_session, superuser_db, monkeypatch):
     from app.routers import chat
     from app.providers.openai_provider import OpenAIProvider
-    async def empty(*a, **k): return []
+    async def empty(*a, **k):
+        assert k["effect_guard"] is True
+        return []
     calls = []
     async def timeout(*a, **k):
         calls.append(True)
@@ -384,3 +386,64 @@ def test_proven_pre_effect_retry_uses_new_budget_attempt(client,db_session,monke
     assert len(calls) == 2 and len(store._reservations) == 2
     assert {r[0] for r in store._reservations.values()} == {"released","settled"}
     assert all(value == (3,0) for value in store._local.values())
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_name", ["openai", "zai", "gemini", "unknown", "zai_eval"])
+async def test_guarded_embedding_refuses_unmetered_external_effects(db_session, provider_name):
+    calls = []
+    class External:
+        name = provider_name
+        async def embed(self, *args, **kwargs):
+            calls.append(True)
+            return [[1.0]]
+    with pytest.raises(ProviderError, match="metered effect contract") as error:
+        await registry.embed_with_policy(db_session, External(), ["query"], model="embedding", effect_guard=True)
+    assert error.value.provider_request_may_have_left is False
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_guarded_retrieval_propagates_guard_and_preserves_owner(db_session, monkeypatch):
+    from app.rag import retrieve
+    import uuid
+    owner = uuid.uuid4()
+    captured = []
+    monkeypatch.setattr(retrieve, "resolve_active", lambda *a, **kw: (SimpleNamespace(name="openai"), "embedding"))
+    async def embed(*args, **kwargs):
+        captured.append(kwargs)
+        raise ProviderError("metered effect contract", category="unsupported", provider_request_may_have_left=False)
+    monkeypatch.setattr(retrieve, "embed_with_policy", embed)
+    with pytest.raises(ProviderError):
+        await retrieve.retrieve_context(db_session, owner, "query", effect_guard=True)
+    assert captured[0]["effect_guard"] is True
+    assert captured[0]["owner_id"] == owner
+
+
+@pytest.mark.asyncio
+async def test_guarded_embedding_keeps_local_transport_and_egress_gate(db_session, monkeypatch):
+    import app.egress_policy as egress
+    import uuid
+    calls = []
+    class Local:
+        name = "ollama"
+        async def embed(self, texts, model):
+            calls.append((texts, model))
+            return [[1.0]]
+    owner = uuid.uuid4()
+    def gate(db, **kwargs):
+        assert kwargs["owner_id"] == owner
+        return ["redacted"]
+    monkeypatch.setattr(egress, "enforce_egress_policy", gate)
+    assert await registry.embed_with_policy(db_session, Local(), ["query"], model="nomic", owner_id=owner, effect_guard=True) == [[1.0]]
+    assert calls == [(["redacted"], "nomic")]
+
+@pytest.mark.asyncio
+async def test_guarded_embedding_only_allows_evaluation_with_active_lease(db_session, monkeypatch):
+    monkeypatch.setattr(get_settings(), "environment", "test")
+    async def embed(self, texts, model, **kwargs):
+        return [[1.0]]
+    monkeypatch.setattr(FakeEvaluation, "embed", embed)
+    with registry.evaluation_provider_scope(FakeEvaluation, {"chat":"glm", "embedding":"bow"}, authorized=True):
+        assert await registry.embed_with_policy(db_session, FakeEvaluation(), ["query"], model="bow", effect_guard=True) == [[1.0]]
+    with pytest.raises(ProviderError):
+        await registry.embed_with_policy(db_session, FakeEvaluation(), ["query"], model="bow", effect_guard=True)
