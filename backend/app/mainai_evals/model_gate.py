@@ -37,10 +37,9 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.mainai_evals.cognitive_gate import CaseResult, GateRun, ObjectiveAssertion, RubricScore
-from app.models.provider_config import ProviderConfig
 from app.providers import registry as provider_registry
 from app.providers.base import ProviderError
-from app.providers.zai_provider import ZAIProvider
+from app.providers.zai_eval_provider import ZAIEvaluationProvider
 
 _TRIALS = 3  # majority-of-3: one flaky trial must not flip a verdict
 
@@ -84,31 +83,21 @@ class ModelGateRunner:
         self.captured_replies: list[str] = []
         self._recent: list[float] = []  # request timestamps for rate-limit pacing
 
-    def activate(self) -> None:
-        provider_registry._PROVIDERS["zai"] = ZAIProvider  # scoped registration, restored in deactivate()
-        prior = self.db.query(ProviderConfig).filter_by(role="chat", is_active=True).first()
-        self._prior_chat = (prior.provider, prior.model) if prior else None
-        # BOTH roles go through the admin configuration path: chat -> the approved model,
-        # embedding -> the adapter's deterministic evaluation vector (stable corpus-to-
-        # prompt mapping; retrieval quality itself is the deterministic gate's job).
-        self._config = ProviderConfig(role="chat", provider="zai", model="glm-4-plus", is_active=True)
-        self._embed_config = ProviderConfig(role="embedding", provider="zai", model="bow-eval", is_active=True)
-        self.db.add(self._config)
-        self.db.add(self._embed_config)
-        self.db.commit()
+    def activate(self, *, evaluation_authorized: bool = False) -> None:
+        if getattr(self, "_evaluation_scope", None) is not None:
+            raise RuntimeError("evaluation scope is already active")
+        scope = provider_registry.evaluation_provider_scope(
+            ZAIEvaluationProvider, {"chat": "glm-4-plus", "embedding": "bow-eval"},
+            authorized=evaluation_authorized,
+        )
+        scope.__enter__()
+        self._evaluation_scope = scope
 
     def deactivate(self) -> None:
-        for role in ("chat", "embedding"):
-            cfg = self.db.query(ProviderConfig).filter_by(role=role, provider="zai").first()
-            if cfg is not None:
-                self.db.delete(cfg)
-        if self._prior_chat:
-            row = self.db.query(ProviderConfig).filter_by(role="chat", provider=self._prior_chat[0]).first()
-            if row is not None:
-                row.is_active = True
-                self.db.commit()
-        provider_registry._PROVIDERS.pop("zai", None)
-        self.db.commit()
+        scope = getattr(self, "_evaluation_scope", None)
+        if scope is not None:
+            self._evaluation_scope = None
+            scope.__exit__(None, None, None)
 
     def _ask(self, message: str, conversation_id: str | None = None) -> tuple[str, str | None]:
         payload: dict = {"conversation_id": conversation_id, "message": message}
@@ -172,7 +161,7 @@ class ModelGateRunner:
             "RM-05-fidelity", "RM-06-retention", "RM-07-hypotheses", "RM-08-initiative",
         )]
         run = GateRun(
-            run_id=uuid.uuid4(), dataset_version="model_gate_r11", provider="zai",
+            run_id=uuid.uuid4(), dataset_version="model_gate_r11", provider="zai_eval",
             model=harness.reported_model or "glm-4-plus", executed_at=datetime.utcnow(),
             case_results=[o.to_case_result() for o in outcomes],
         )

@@ -188,7 +188,11 @@ def record_usage(
             {"k": idempotency_key},
         ).first()
         if existing is not None:
-            return _usage_row_by_pk(db, existing[0])
+            existing_row = _usage_row_by_pk(db, existing[0])
+            if (existing_row.user_id != user_id or existing_row.tenant_id != tenant_id
+                    or existing_row.provider != provider or existing_row.model != model or existing_row.role != role):
+                raise ValueError("usage idempotency identity mismatch")
+            return existing_row
 
     row = UsageLog(
         user_id=user_id,
@@ -222,7 +226,11 @@ def record_usage(
             ).first()
             if existing is None:
                 raise
-            return _usage_row_by_pk(db, existing[0])
+            existing_row = _usage_row_by_pk(db, existing[0])
+            if (existing_row.user_id != user_id or existing_row.tenant_id != tenant_id
+                    or existing_row.provider != provider or existing_row.model != model or existing_row.role != role):
+                raise ValueError("usage idempotency identity mismatch")
+            return existing_row
     else:
         db.flush()
 

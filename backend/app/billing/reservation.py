@@ -14,6 +14,7 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
+from app.billing.enforcement import BillingEnforcementUnavailableError
 from app.providers.pricing import estimate_cost
 
 
@@ -63,6 +64,7 @@ class SubjectReservations:
 def reserve_compute(
     db: Session, *, user, limits, estimated_tokens: int, estimated_cost_usd: Decimal,
     settings: Settings | None = None,
+    idempotency_key: str | None = None,
 ):
     """Reserve against the user subject AND (when the user belongs to a tenant) the
     tenant's shared envelope — both must admit, or nothing is charged. Fail-closed and
@@ -91,7 +93,7 @@ def reserve_compute(
             monthly_cost = (tenant.monthly_cost_cap_micros / 1_000_000
                             if tenant.monthly_cost_cap_micros is not None else policy.monthly_cost_usd)
             tenant_reservation = store.reserve(
-                subject_type="tenant", subject_id=str(tenant.id),
+                subject_type="tenant", subject_id=str(tenant.id), idempotency_key=idempotency_key,
                 estimated_tokens=estimated_tokens, estimated_cost_usd=estimated_cost_usd,
                 token_caps=(policy.daily_token_cap, policy.monthly_token_cap),
                 cost_caps_micros=(
@@ -101,7 +103,7 @@ def reserve_compute(
             )
     try:
         user_reservation = store.reserve(
-            subject_type="user", subject_id=str(user.id),
+            subject_type="user", subject_id=str(user.id), idempotency_key=idempotency_key,
             estimated_tokens=estimated_tokens, estimated_cost_usd=estimated_cost_usd,
             token_caps=limits.token_caps(), cost_caps_micros=limits.cost_caps_micros(),
         )
@@ -124,3 +126,56 @@ def release_reservation(reservations) -> None:
     store = _store(settings)
     for res in reservations._each():
         store.release(res)
+
+
+
+
+class BillingPriceUnverifiedError(BillingEnforcementUnavailableError):
+    reservation_outcome_unknown = False
+
+
+class ChatAttemptBudget:
+    """Existing reserve/settle primitives, bound to one actual provider attempt.
+
+    Ambiguous effects retain a HOLD (not fabricated measured spend). The durable chat
+    claim prevents reinvocation; reconciliation requires real external evidence.
+    """
+    def __init__(self, db, *, user, limits, estimated_tokens, source_ref):
+        self.db, self.user, self.limits = db, user, limits
+        self.estimated_tokens = estimated_tokens
+        self.reservation = None
+        self.source_ref = source_ref
+
+    def before(self, provider, model):
+        from app.billing.enforcement import BillingEnforcementUnavailableError
+        from app.providers.catalog import get_model_spec, evaluate_model, ModelSelectionPolicy, ModelSelectionError
+        if self.reservation is not None:
+            raise BillingEnforcementUnavailableError("Previous attempt budget is unresolved.")
+        # Unknown/stale external pricing cannot become an invented admission guarantee.
+        try:
+            spec = get_model_spec(provider, model)
+            if spec.external:
+                ceiling = spec.pricing.input_per_million_usd
+                if ceiling is None or not evaluate_model(spec, ModelSelectionPolicy(
+                    allow_external=True, max_input_price_per_million_usd=ceiling))[0]:
+                    raise BillingPriceUnverifiedError("External price bound is not verified.")
+        except ModelSelectionError:
+            raise BillingPriceUnverifiedError("Provider/model has no verified price bound.") from None
+        self.reservation = reserve_compute(
+            self.db, user=self.user, limits=self.limits, estimated_tokens=self.estimated_tokens,
+            estimated_cost_usd=estimate_reservation_cost(None, self.estimated_tokens, provider=provider, model=model),
+            idempotency_key=f"{self.source_ref}:{provider}:{model}",
+        )
+
+    def succeeded(self, result):
+        usage = result.raw_usage or {}
+        settle_reservation(self.reservation, actual_tokens=usage.get("prompt_tokens", 0)+usage.get("completion_tokens", 0),
+                           actual_cost_usd=estimate_reservation_cost(None, usage.get("prompt_tokens", 0)+usage.get("completion_tokens", 0),
+                                                                    provider=result.provider, model=result.model))
+        self.reservation = None
+
+    def failed(self, error):
+        if getattr(error, "provider_request_may_have_left", None) is False:
+            release_reservation(self.reservation)
+            self.reservation = None
+        # Otherwise deliberately retain the hold. Never label unknown external effects free.

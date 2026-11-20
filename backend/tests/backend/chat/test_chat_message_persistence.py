@@ -42,6 +42,9 @@ def _fake_embed(monkeypatch):
         return [[0.1] * DIM for _ in texts]
 
     monkeypatch.setattr(OpenAIProvider, "embed", _embed)
+    # This suite isolates persistence from transport; dedicated routing tests cover
+    # multi-provider fallback. Never contact an installed/unmocked local runtime.
+    monkeypatch.setattr(get_settings(), "chat_fallback_order", "")
 
 
 def _login(client) -> str:
@@ -80,7 +83,8 @@ def _fake_chat_ok(content: str = "Testsvar."):
 
 
 async def _fake_chat_missing_key(self, messages, model, **kwargs):
-    raise ProviderError("OpenAI API-nyckel saknas.")
+    # This double fails before creating any HTTP request; it is safe to retry.
+    raise ProviderError("OpenAI API-nyckel saknas.", provider_request_may_have_left=False)
 
 
 async def _fake_chat_timeout(self, messages, model, **kwargs):
@@ -130,15 +134,18 @@ def test_provider_fails_before_producing_output_saves_user_message(client, super
     assert saved.status == MessageStatus.succeeded  # the USER message itself always succeeded
 
 
-def test_provider_timeout_is_retryable(client, monkeypatch):
+def test_provider_timeout_blocks_automatic_retry(client, monkeypatch):
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_timeout)
     csrf = _login(client)
     res = client.post("/api/chat", json={"message": "hej"}, headers={"X-CSRF-Token": csrf})
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["assistant_status"] == "failed"
-    assert body["error_category"] == "unreachable"
-    assert body["retryable"] is True
+    assert body["error_category"] == "external_effect_unknown"
+    assert body["retryable"] is False
+
+    retry = client.post(f"/api/chat/messages/{body['user_message_id']}/retry", headers={"X-CSRF-Token":csrf})
+    assert retry.status_code == 409
 
 
 # --- D/E: persistence survives a failure, and reload proves it -------------------------------

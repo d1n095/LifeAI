@@ -133,7 +133,8 @@ def test_production_paths_produce_a_contract_valid_prompt(client, db_session, mo
     db_session.add(source)
     db_session.commit()
     _set_rls_user(db_session, founder.id)
-    db_session.add(DocumentChunk(document_id=source.id, owner_id=founder.id, chunk_index=0, text=f"Studieinnehåll. {INJECTED}", embedding=[0.1] * DIM))
+    db_session.add(DocumentChunk(document_id=source.id, owner_id=founder.id, chunk_index=0, text=f"Studieinnehåll. {INJECTED}", embedding=[0.1] * DIM,
+                                     embedding_model=get_settings().default_embedding_model, embedding_native_dim=DIM))
     db_session.commit()
     from tests.backend.test_claim_graph_integration import _login
 
