@@ -9836,12 +9836,23 @@ remaining R15 findings:
   eight concurrent identical reservations charging once, tenant counter isolation, split
   pricing/settlement, and eval-scope escape.
 
-**Tests:** `tests/security_r15_successor` 54 passed (40 existing + 14 new);
+**Tests (local, no PostgreSQL/Redis):** `tests/security_r15_successor` 54 passed plus the
+Redis-backed store tests skipped for lack of a reachable `REDIS_URL`;
 `tests/security_r15_egress` 13 passed; `ruff`, `compileall`, `git diff --check` and
 `node --test scripts/check-npm-audit.test.js` (6/6) pass.
 
-**Still blocking:** ETAPP 3's PostgreSQL/pgvector + Redis integration run is not possible in
-this environment (no local `postgres`/`redis-server`, and Docker returns permission denied on
-`/var/run/docker.sock`). The DB-backed route/idempotency/recovery tests therefore remain
-unrun, not passing. Exact-head CI and independent acceptance remain external gates. No push,
-merge, deploy, or provider activation; `first_cycle_go=false`.
+**Reproducible DB/Redis verification (added, not yet run):** the new `r15-security-tests`
+GitHub Actions job runs both DB-free suites and the DB/Redis-backed R15 boundaries against
+`pgvector/pgvector:pg16` + `redis:7-alpine`
+(`tests/backend/providers/test_r15_integration_security.py`,
+`chat/test_chat_request_idempotency.py`, `test_financial_correctness.py`,
+`test_billing_engine.py`, `test_agent_orchestration.py`,
+`test_mainai_execution_lesson_conflicts.py`, `mainai/test_egress_policy.py`,
+`mainai/test_provider_crash_before_settle.py`). The same sequence is available to Codex in
+any isolated environment via `backend/scripts/ci/run_r15_security_suite.sh` (add
+`--db-free-only` when no services exist). The job is committed but has not run here.
+
+**Still blocking locally:** this environment has no `postgres`/`redis-server`, and Docker
+returns permission denied on `/var/run/docker.sock`, so the DB/Redis-backed half is **unrun
+locally, not passing**. Exact-head GitHub Actions status and independent acceptance remain
+external gates. No push, merge, deploy, or provider activation; `first_cycle_go=false`.

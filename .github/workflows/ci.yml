@@ -158,6 +158,75 @@ jobs:
       - run: python -m pytest tests/backend/ -v
         working-directory: backend
 
+  # ---------------------------------------------------------------------------------------
+  # R15 security remediation: DB-free policy suites plus the DB/Redis-backed R15
+  # boundaries. The DB-free half is also runnable with no services at all via
+  # backend/scripts/ci/run_r15_security_suite.sh --db-free-only; this job proves the same
+  # code against real PostgreSQL/pgvector and Redis, which local Docker could not provide.
+  # ---------------------------------------------------------------------------------------
+  r15-security-tests:
+    name: Backend — R15 security (Postgres + Redis)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_test
+      APP_DATABASE_URL: postgresql://mainai_app:mainai_app_test_pw@localhost:5432/lifeos_test
+      REDIS_URL: redis://localhost:6379/1
+      SECRET_KEY: ci-test-secret-key
+      FOUNDER_EMAIL: founder@lifeos.local
+      FOUNDER_PASSWORD: TestFounderPassword123!
+      FRONTEND_ORIGINS: http://127.0.0.1:3020
+      PUBLIC_APP_URL: http://127.0.0.1:3020
+      ENABLE_SCHEDULED_CLEANUP: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+        working-directory: backend
+      # These two suites are intentionally DB-free (their own conftest, --confcutdir), so
+      # they also run on a machine with no PostgreSQL/Redis. The Redis-backed store test
+      # inside the successor suite skips when REDIS_URL is unreachable.
+      - name: DB-free R15 policy suites
+        working-directory: backend
+        run: |
+          python -m pytest tests/security_r15_successor -q --confcutdir=tests/security_r15_successor
+          python -m pytest tests/security_r15_egress -q --confcutdir=tests/security_r15_egress
+      # tests/conftest.py creates and drops its own throwaway database (and the restricted
+      # runtime role) from the service container, then applies every Alembic migration.
+      - name: DB/Redis-backed R15 boundaries
+        working-directory: backend
+        run: |
+          python -m pytest \
+            tests/backend/providers/test_r15_integration_security.py \
+            tests/backend/chat/test_chat_request_idempotency.py \
+            tests/backend/test_financial_correctness.py \
+            tests/backend/test_billing_engine.py \
+            tests/backend/test_agent_orchestration.py \
+            tests/backend/test_mainai_execution_lesson_conflicts.py \
+            tests/backend/mainai/test_egress_policy.py \
+            tests/backend/mainai/test_provider_crash_before_settle.py \
+            -q
+
   rls-security-tests:
     name: Backend — RLS & session-security tests
     runs-on: ubuntu-latest
@@ -2619,6 +2688,7 @@ jobs:
       - npm-audit
       - frontend-build
       - backend-tests
+      - r15-security-tests
       - rls-security-tests
       - account-rate-limit-tests
       - migration-check
