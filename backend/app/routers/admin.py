@@ -16,8 +16,8 @@ from app.models.user import User
 from app.providers.catalog import (
     ModelSelectionError,
     ModelSelectionPolicy,
-    get_model_spec,
     model_specs,
+    resolve_model_spec,
 )
 from app.providers.registry import get_provider, provider_names, select_model
 from app.providers.verification import latest_check, verify_now
@@ -193,7 +193,12 @@ async def verify_provider_now(
         raise HTTPException(status_code=400, detail="Okänd leverantör.")
     if payload.model is not None:
         try:
-            spec = get_model_spec(payload.provider, payload.model)
+            spec = resolve_model_spec(
+                payload.provider,
+                payload.model,
+                role=payload.role,
+                allow_custom_local=True,
+            )
         except ModelSelectionError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if payload.role not in spec.capabilities:
@@ -252,6 +257,7 @@ def set_provider_config(
                 allow_external=True,
                 prefer_local=False,
                 require_verified=True,
+                allow_custom_local=True,
             ),
             requested_provider=payload.provider,
             requested_model=payload.model,

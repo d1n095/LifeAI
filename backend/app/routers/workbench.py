@@ -14,7 +14,7 @@ from app.models.user import User
 from app.providers.base import Message, ProviderError
 from app.providers.registry import chat_with_fallback
 from app.rag.ingest import index_document
-from app.rag.retrieve import retrieve_context
+from app.rag.retrieve import GroundingUnavailableError, retrieve_context
 from app.blueprint_readiness import collect_blueprint_readiness
 import logging
 
@@ -83,9 +83,18 @@ async def analyze(
         if doc is None:
             raise HTTPException(status_code=404, detail="Källan hittades inte.")
 
-    hits = await retrieve_context(
-        db, user.id, payload.question, top_k=5, project_id=payload.project_id, document_id=payload.document_id
-    )
+    try:
+        hits = await retrieve_context(
+            db,
+            user.id,
+            payload.question,
+            top_k=5,
+            project_id=payload.project_id,
+            document_id=payload.document_id,
+            effect_guard=True,
+        )
+    except GroundingUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     conflicting_pairs = detect_conflicts(db, user.id, [h["document_id"] for h in hits])
     trust = assess_confidence(hits, conflicting_pairs)
 

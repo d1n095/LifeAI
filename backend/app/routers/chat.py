@@ -45,8 +45,10 @@ from app.billing.chat_attempts import ReconciliationDenied, ReconciliationUnavai
 from app.billing.enforcement import BillingBudgetExceededError, BillingEnforcementUnavailableError
 from app.billing.limits import effective_limits
 from app.billing.reservation import ChatAttemptBudget
+from app.models.provider_config import ProviderConfig
 from app.models.user import User
 from app.providers.base import Message, ProviderError
+from app.providers.catalog import ModelSelectionError, ModelSelectionPolicy
 from app.providers.registry import chat_with_fallback
 from app.providers.verification import classify_provider_exception
 from app.rag.context_status import build_context_status
@@ -109,6 +111,37 @@ _UNRESOLVED_EFFECT_CATEGORIES = {
     "billing_outcome_unknown",
     "external_effect_unresolved",
 }
+
+
+def _verified_chat_policy() -> ModelSelectionPolicy:
+    """Live chat must use an exact, verified external model.
+
+    Local models keep working during rollout even if their exact tag predates the
+    verification table; custom local tags are allowed, while unregistered external models
+    still fail closed (their price and capabilities are not independently verified).
+    """
+
+    return ModelSelectionPolicy(
+        role="chat",
+        allow_external=True,
+        prefer_local=True,
+        require_verified=True,
+        require_verified_local=False,
+        allow_custom_local=True,
+    )
+
+
+def _chat_selection_policy(db: Session) -> ModelSelectionPolicy | None:
+    """Enforce exact-model verification for admin-selected chat models.
+
+    A deployment that has not yet written a ProviderConfig row still uses the settings
+    default, exactly as before; this preserves an existing working local/legacy setup. Once
+    a founder activates a model through Admin -> Providers, that live choice must satisfy the
+    verified exact-model policy. External custom models remain fail-closed.
+    """
+
+    active = db.query(ProviderConfig).filter_by(role="chat", is_active=True).first()
+    return _verified_chat_policy() if active is not None else None
 
 
 def _get_or_create_reply_slot(db: Session, user_message_id: uuid.UUID) -> MessageModel | None:
@@ -429,6 +462,7 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
             owner_id=user.id,
             purpose="chat",
             requested_by="routers.chat._attempt_assistant_reply",
+            selection_policy=_chat_selection_policy(db),
             effect_guard=True,
             max_tokens=1024,
             attempt_observer=attempt_budget,
@@ -443,6 +477,26 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
                                         else "billing_refused")
         db.commit()
         raise HTTPException(status_code=503, detail="Provider budget could not be verified.") from None
+    except ModelSelectionError as exc:
+        # No provider was invoked: the active model could not satisfy exact-model policy.
+        # This is a configuration failure, not a retryable provider outage.
+        assistant_row.status = MessageStatus.failed
+        assistant_row.error_category = "provider_unverified"
+        assistant_row.content = ""
+        db.commit()
+        db.refresh(assistant_row)
+        return ChatMessageOut(
+            conversation_id=conversation.id,
+            user_message_id=user_message.id,
+            assistant_status="failed",
+            assistant_message_id=assistant_row.id,
+            error_category="provider_unverified",
+            error_message=str(exc),
+            retryable=False,
+            context_status=context_status_out,
+            grounding_status=grounding_status,
+            grounding_reason=retrieval_degraded_reason,
+        )
     except (ProviderError, EgressDeniedError) as exc:
         # Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V1): an
         # EgressDeniedError means the gate refused the WHOLE call before any provider was ever

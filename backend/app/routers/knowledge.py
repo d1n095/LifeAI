@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
@@ -6,7 +6,8 @@ from app.db import get_db
 from app.deps import require_founder
 from app.models.company import CompanyInfo
 from app.models.user import User
-from app.rag.retrieve import retrieve_context
+from app.egress_policy import EgressDeniedError
+from app.rag.retrieve import GroundingUnavailableError, retrieve_context
 from app.schemas import CompanyInfoIn, CompanyInfoOut
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"], dependencies=[Depends(require_founder)])
@@ -34,7 +35,17 @@ class SearchQuery(BaseModel):
 
 @router.post("/search")
 async def search_knowledge(payload: SearchQuery, db: Session = Depends(get_db), user: User = Depends(require_founder)):
-    return await retrieve_context(db, user.id, payload.query, top_k=payload.top_k)
+    try:
+        return await retrieve_context(
+            db, user.id, payload.query, top_k=payload.top_k, effect_guard=True
+        )
+    except GroundingUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except EgressDeniedError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="Sökfrågan får inte skickas till extern inbäddning enligt egress-policyn.",
+        ) from exc
 
 
 @router.get("/company", response_model=list[CompanyInfoOut])

@@ -84,6 +84,13 @@ class ModelSelectionPolicy:
     max_input_price_per_million_usd: Decimal | None = None
     max_output_price_per_million_usd: Decimal | None = None
     require_verified: bool = True
+    # Local runtimes can carry model tags the shared catalog cannot enumerate. This permits
+    # only an exact configured local tag; external models still need a catalog entry so an
+    # unknown external price/capability can never be silently admitted.
+    allow_custom_local: bool = False
+    # Rollout compatibility: an already-working local configuration may predate exact-model
+    # verification. External models are always verified when require_verified is set.
+    require_verified_local: bool = True
     estimated_output_tokens: int = 0
     max_pricing_age_days: int = 30
 
@@ -283,6 +290,53 @@ def get_model_spec(provider: str, model_id: str) -> ModelSpec:
         return _BY_KEY[(provider, model_id)]
     except KeyError as exc:
         raise ModelSelectionError(f"unregistered provider/model: {provider}/{model_id}") from exc
+
+
+def custom_local_model_spec(provider: str, model_id: str, role: str) -> ModelSpec:
+    """Describe an exact local model tag that is not in the shared catalog.
+
+    This is metadata only, never a vendor claim: local inference has no provider charge and
+    no catalog-published context limit. Only the local Ollama transport is eligible; an
+    unregistered external model still fails closed because its price and capabilities are
+    not independently verified.
+    """
+
+    if provider != "ollama":
+        raise ModelSelectionError(f"unregistered provider/model: {provider}/{model_id}")
+    if role not in {"chat", "embedding"}:
+        raise ModelSelectionError("unsupported role")
+    model_id = model_id.strip()
+    if not model_id or len(model_id) > 128 or any(ord(c) < 32 for c in model_id):
+        raise ModelSelectionError("invalid local model tag")
+    return ModelSpec(
+        provider=provider,
+        model_id=model_id,
+        version="configured local tag; catalog metadata unavailable",
+        capabilities=frozenset({role}),
+        context_window_tokens=None,
+        locality=DeploymentLocality.local,
+        license_name="model-dependent; verify with the local runtime",
+        license_url=None,
+        pricing=_price("0", "0", source="local inference; no provider charge"),
+        quota=ModelQuota(note="host capacity controlled; no external provider quota"),
+    )
+
+
+def resolve_model_spec(
+    provider: str,
+    model_id: str,
+    *,
+    role: str,
+    allow_custom_local: bool = False,
+) -> ModelSpec:
+    """Return the catalog spec, or an exact local custom spec when policy permits it."""
+
+    try:
+        return get_model_spec(provider, model_id)
+    except ModelSelectionError:
+        if not allow_custom_local:
+            raise
+        return custom_local_model_spec(provider, model_id, role)
 
 
 def evaluate_model(spec: ModelSpec, policy: ModelSelectionPolicy) -> tuple[bool, str]:

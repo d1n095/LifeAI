@@ -15,6 +15,12 @@ export default function AdminPage() {
     return choices[`${provider}:${role}`] ??
       options.find((m) => m.verification_result === "ok")?.model_id ?? options[0]?.model_id ?? "";
   };
+  const customOption = (provider: string, role: string) => {
+    const selected = selectedModel(provider, role);
+    return selected && !candidates(provider, role).some((m) => m.model_id === selected)
+      ? <option value={selected}>{selected}</option>
+      : null;
+  };
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [usage, setUsage] = useState<UsageSummaryRow[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -142,10 +148,21 @@ export default function AdminPage() {
                       disabled={verifying !== null || saving !== null}
                       onChange={(e) => setChoices({...choices, [`${p.name}:chat`]: e.target.value})}
                     >
+                      {customOption(p.name, "chat")}
                       {candidates(p.name, "chat").map((m) => (
                         <option key={m.model_id} value={m.model_id}>{m.model_id}</option>
                       ))}
                     </select>
+                    {p.name === "ollama" && (
+                      <input
+                        aria-label={`Egen modell för ${p.name} chat`}
+                        className="block max-w-48 bg-panel text-sm mb-2"
+                        placeholder="Egen lokal tagg"
+                        value={choices[`${p.name}:chat`] ?? ""}
+                        disabled={verifying !== null || saving !== null}
+                        onChange={(e) => setChoices({...choices, [`${p.name}:chat`]: e.target.value})}
+                      />
+                    )}
                     <VerificationBadge
                       verification={p.chat_verification?.model === selectedModel(p.name, "chat") ? p.chat_verification : null}
                       onVerify={() => verifyNow("chat", p.name)}
@@ -161,10 +178,21 @@ export default function AdminPage() {
                       disabled={verifying !== null || saving !== null}
                       onChange={(e) => setChoices({...choices, [`${p.name}:embedding`]: e.target.value})}
                     >
+                      {customOption(p.name, "embedding")}
                       {candidates(p.name, "embedding").map((m) => (
                         <option key={m.model_id} value={m.model_id}>{m.model_id}</option>
                       ))}
                     </select>
+                    {p.name === "ollama" && (
+                      <input
+                        aria-label={`Egen modell för ${p.name} embedding`}
+                        className="block max-w-48 bg-panel text-sm mb-2"
+                        placeholder="Egen lokal tagg"
+                        value={choices[`${p.name}:embedding`] ?? ""}
+                        disabled={verifying !== null || saving !== null}
+                        onChange={(e) => setChoices({...choices, [`${p.name}:embedding`]: e.target.value})}
+                      />
+                    )}
                     <VerificationBadge
                       verification={p.embedding_verification?.model === selectedModel(p.name, "embedding") ? p.embedding_verification : null}
                       onVerify={() => verifyNow("embedding", p.name)}

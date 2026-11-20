@@ -53,7 +53,7 @@ from app.models.blueprint_draft import BlueprintDraft
 from app.models.user import User
 from app.providers.base import ProviderError
 from app.providers.registry import resolve_active
-from app.rag.retrieve import retrieve_context
+from app.rag.retrieve import GroundingUnavailableError, retrieve_context
 from app.rag.trust import (
     TrustAssessment,
     assess_confidence,
@@ -581,11 +581,18 @@ async def _generate(
     try:
         grounding_query = query or title
         try:
-            hits = await retrieve_context(db, owner_id, grounding_query, top_k=top_k)
+            hits = await retrieve_context(
+                db, owner_id, grounding_query, top_k=top_k, effect_guard=True
+            )
         except EgressDeniedError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Frågan kan inte användas för extern inbäddning enligt egress-policyn.",
+            ) from exc
+        except GroundingUnavailableError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
             ) from exc
 
         grounded = [h for h in hits if h.get("document_id")]

@@ -41,6 +41,7 @@ MATCHING_VECTOR = [0.5] * DIM
 def _fake_model(monkeypatch):
     from app.providers.base import ChatResult, ProviderError
     from app.providers.openai_provider import OpenAIProvider
+    from app.providers.ollama_provider import OllamaProvider
 
     state = {"fail": False, "calls": 0, "messages": []}
 
@@ -61,7 +62,11 @@ def _fake_model(monkeypatch):
         return [MATCHING_VECTOR for _ in texts]
 
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat)
-    monkeypatch.setattr(OpenAIProvider, "embed", _fake_embed)
+    # Blueprint retrieval is guarded like chat: exercise the supported local embedding path
+    # instead of an external provider the effect guard must refuse before any call.
+    monkeypatch.setattr(get_settings(), "default_embedding_provider", "ollama")
+    monkeypatch.setattr(get_settings(), "default_embedding_model", "nomic-embed-text")
+    monkeypatch.setattr(OllamaProvider, "embed", _fake_embed)
     return state
 
 

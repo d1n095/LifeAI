@@ -16,8 +16,8 @@ from app.providers.catalog import (
     ModelSelectionPolicy,
     ModelSpec,
     evaluate_model,
-    get_model_spec,
     model_specs,
+    resolve_model_spec,
 )
 from app.providers.deepseek_provider import DeepSeekProvider
 from app.providers.gemini_provider import GeminiProvider
@@ -125,6 +125,10 @@ def _model_is_freshly_verified(db: Session, spec: ModelSpec, role: str) -> bool:
 
 
 
+def _requires_verification(spec: ModelSpec, policy: ModelSelectionPolicy) -> bool:
+    return policy.require_verified and (spec.external or policy.require_verified_local)
+
+
 def _require_policy_candidate(
     db: Session,
     spec: ModelSpec,
@@ -136,7 +140,7 @@ def _require_policy_candidate(
     provider = get_provider(spec.provider)
     if not provider.is_configured():
         raise ModelSelectionError(f"{spec.provider}/{spec.model_id}: provider is not configured")
-    if policy.require_verified and not _model_is_freshly_verified(db, spec, policy.role):
+    if _requires_verification(spec, policy) and not _model_is_freshly_verified(db, spec, policy.role):
         raise ModelSelectionError(
             f"{spec.provider}/{spec.model_id}: exact model has no fresh successful verification"
         )
@@ -160,7 +164,14 @@ def select_model(
         raise ModelSelectionError("requested_provider and requested_model must be supplied together")
     if requested_provider is not None and requested_model is not None:
         return _require_policy_candidate(
-            db, get_model_spec(requested_provider, requested_model), policy
+            db,
+            resolve_model_spec(
+                requested_provider,
+                requested_model,
+                role=policy.role,
+                allow_custom_local=policy.allow_custom_local,
+            ),
+            policy,
         )
 
     eligible: list[tuple[int, ModelSpec]] = []
@@ -171,7 +182,7 @@ def select_model(
         provider = get_provider(spec.provider)
         if not provider.is_configured():
             continue
-        if policy.require_verified and not _model_is_freshly_verified(db, spec, policy.role):
+        if _requires_verification(spec, policy) and not _model_is_freshly_verified(db, spec, policy.role):
             continue
         eligible.append((index, spec))
 
@@ -390,7 +401,16 @@ async def chat_with_fallback(
         try:
             if selection_policy is not None:
                 # The chain was built earlier; a concurrent verification failure may now exist.
-                _require_policy_candidate(db, get_model_spec(provider.name, model), selection_policy)
+                _require_policy_candidate(
+                    db,
+                    resolve_model_spec(
+                        provider.name,
+                        model,
+                        role=selection_policy.role,
+                        allow_custom_local=selection_policy.allow_custom_local,
+                    ),
+                    selection_policy,
+                )
             outbound_messages = messages
             if owner_id is not None:
                 payload = [{"role": m.role, "content": m.content} for m in messages]

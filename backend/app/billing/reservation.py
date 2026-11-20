@@ -168,7 +168,7 @@ class ChatAttemptBudget:
         self.db.commit()
         if not self.requires_usage:
             return
-        from app.providers.catalog import get_model_spec, evaluate_model, ModelSelectionPolicy, ModelSelectionError
+        from app.providers.catalog import evaluate_model, ModelSelectionPolicy, ModelSelectionError, resolve_model_spec
         if self.reservation is not None:
             raise BillingEnforcementUnavailableError("Previous attempt budget is unresolved.")
         # A reservation needs a real catalog price, not a fabricated snapshot age. The
@@ -179,7 +179,7 @@ class ChatAttemptBudget:
         # max_input_price_per_million_usd path), not as an admission requirement for the
         # model's own declared price.
         try:
-            spec = get_model_spec(provider, model)
+            spec = resolve_model_spec(provider, model, role="chat", allow_custom_local=True)
             if spec.external:
                 if spec.pricing.input_per_million_usd is None:
                     raise BillingPriceUnverifiedError("External price bound is not verified.")
