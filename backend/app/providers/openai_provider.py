@@ -7,6 +7,39 @@ from app.providers.base import ChatResult, LLMProvider, Message, ProviderError, 
 BASE_URL = "https://api.openai.com/v1"
 
 
+def _http_error_category(exc: httpx.HTTPError) -> str:
+    """Classify an OpenAI HTTP failure without exposing its URL or response body."""
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+        status = exc.response.status_code
+        if status == 429:
+            return "rate_limited"
+        if status in (401, 403):
+            return "invalid_key"
+        if status == 404:
+            return "unsupported"
+        if 400 <= status < 500:
+            return "unsupported"
+    return "unreachable"
+
+
+def _request_failed(context: str, exc: httpx.HTTPError) -> ProviderError:
+    return ProviderError(
+        f"OpenAI-anropet misslyckades ({context}).",
+        category=_http_error_category(exc),
+        # The HTTP request was sent. Even a connection error is treated conservatively:
+        # the caller must not retry a possibly-billable external effect automatically.
+        provider_request_may_have_left=True,
+    )
+
+
+def _invalid_response(context: str) -> ProviderError:
+    return ProviderError(
+        f"OpenAI gav ett ogiltigt svar ({context}).",
+        category="unsupported",
+        provider_request_may_have_left=True,
+    )
+
+
 class OpenAIProvider(LLMProvider):
     name = "openai"
 
@@ -30,24 +63,49 @@ class OpenAIProvider(LLMProvider):
         token_limit = chat_token_limit(kwargs)
         if token_limit is not None:
             payload["max_tokens"] = token_limit
-        async with httpx.AsyncClient(timeout=timeout or 60) as client:
-            resp = await client.post(f"{BASE_URL}/chat/completions", headers=self._headers(), json=payload)
-            resp.raise_for_status()
-            data = resp.json()
+        try:
+            async with httpx.AsyncClient(timeout=timeout or 60) as client:
+                resp = await client.post(f"{BASE_URL}/chat/completions", headers=self._headers(), json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.HTTPError as exc:
+            raise _request_failed("chat", exc) from None
+        except (ValueError, TypeError):
+            raise _invalid_response("chat") from None
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            raise _invalid_response("chat shape") from None
+        if not isinstance(content, str):
+            raise _invalid_response("chat content")
         return ChatResult(
-            content=data["choices"][0]["message"]["content"],
+            content=content,
             provider=self.name,
             model=model,
-            raw_usage=data.get("usage", {}),
+            raw_usage=data.get("usage", {}) if isinstance(data, dict) else {},
         )
 
     async def embed(self, texts: list[str], model: str, *, timeout: float | None = None) -> list[list[float]]:
         if not self.is_configured():
             raise ProviderError("OpenAI API-nyckel saknas.")
-        async with httpx.AsyncClient(timeout=timeout or 60) as client:
-            resp = await client.post(
-                f"{BASE_URL}/embeddings", headers=self._headers(), json={"model": model, "input": texts}
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        return [item["embedding"] for item in data["data"]]
+        try:
+            async with httpx.AsyncClient(timeout=timeout or 60) as client:
+                resp = await client.post(
+                    f"{BASE_URL}/embeddings", headers=self._headers(), json={"model": model, "input": texts}
+                )
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.HTTPError as exc:
+            raise _request_failed("embedding", exc) from None
+        except (ValueError, TypeError):
+            raise _invalid_response("embedding") from None
+        try:
+            items = data["data"]
+            if not isinstance(items, list):
+                raise TypeError("data is not a list")
+            vectors = [item["embedding"] for item in items]
+        except (KeyError, IndexError, TypeError):
+            raise _invalid_response("embedding shape") from None
+        if not all(isinstance(vector, list) and vector for vector in vectors):
+            raise _invalid_response("embedding vector")
+        return vectors

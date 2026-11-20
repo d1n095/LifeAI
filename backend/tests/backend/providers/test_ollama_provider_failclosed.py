@@ -45,6 +45,10 @@ def _json(status, body):
     return lambda request: httpx.Response(status, json=body)
 
 
+def _raw(status, content):
+    return lambda request: httpx.Response(status, content=content)
+
+
 def _raise(exc):
     def handler(request):
         raise exc
@@ -113,6 +117,17 @@ async def test_chat_server_error_500_is_unreachable(mock_ollama):
     assert ei.value.category == "unreachable"
 
 
+@pytest.mark.asyncio
+async def test_chat_200_invalid_json_fails_closed(mock_ollama):
+    # A 2xx response with a non-JSON body is still an untrusted-provider failure. It used
+    # to escape as a raw JSONDecodeError, bypassing every caller's ProviderError recovery.
+    mock_ollama(_raw(200, b"<html>not json</html>"))
+    with pytest.raises(ProviderError) as ei:
+        await OllamaProvider().chat([], model="qwen2.5:0.5b")
+    assert ei.value.category == "unsupported"
+    assert "ogiltig" in str(ei.value).lower()
+
+
 # -------------------------------------------------------------------------------------- embed
 
 @pytest.mark.asyncio
@@ -168,3 +183,26 @@ async def test_embed_timeout_fails_closed_as_unreachable(mock_ollama):
     with pytest.raises(ProviderError) as ei:
         await OllamaProvider().embed(["hello"], model="all-minilm")
     assert ei.value.category == "unreachable"
+
+
+@pytest.mark.asyncio
+async def test_embed_200_invalid_json_fails_closed(mock_ollama):
+    mock_ollama(_raw(200, b"not-json"))
+    with pytest.raises(ProviderError) as ei:
+        await OllamaProvider().embed(["hello"], model="all-minilm")
+    assert ei.value.category == "unsupported"
+
+
+@pytest.mark.asyncio
+async def test_embed_legacy_invalid_json_fails_closed(mock_ollama):
+    """An older Ollama server has no /api/embed; its fallback response is still untrusted."""
+
+    def handler(request):
+        if request.url.path.endswith("/api/embed"):
+            return httpx.Response(404, text="404 page not found")
+        return httpx.Response(200, content=b"not-json")
+
+    mock_ollama(handler)
+    with pytest.raises(ProviderError) as ei:
+        await OllamaProvider().embed(["hello"], model="all-minilm")
+    assert ei.value.category == "unsupported"

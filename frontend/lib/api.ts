@@ -223,6 +223,11 @@ export type ConversationMessage = {
   provider: string | null;
   model: string | null;
   created_at: string;
+  // A failed assistant attempt is stored with empty content. These fields let a reloaded
+  // conversation show the failure and offer the same retry the live response offered.
+  status?: "succeeded" | "failed";
+  error_category?: string | null;
+  in_reply_to_id?: string | null;
 };
 
 export type ConversationDetail = ConversationItem & {

@@ -231,6 +231,17 @@ class MessageOut(BaseModel):
     provider: str | None
     model: str | None
     created_at: datetime
+    # A reloaded conversation must preserve the same failure state the live response showed:
+    # a failed assistant row has empty content, so without these fields the UI silently drops
+    # it and the founder cannot see that generation failed or retry it.
+    status: str = "succeeded"
+    error_category: str | None = None
+    in_reply_to_id: uuid.UUID | None = None
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def status_value(cls, value):
+        return getattr(value, "value", value)
 
 
 class ConversationOut(BaseModel):

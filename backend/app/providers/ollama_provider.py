@@ -37,6 +37,23 @@ def _is_numeric_vector(value: object) -> bool:
     )
 
 
+def _decode_json(resp: httpx.Response, *, context: str) -> object:
+    """Decode an untrusted Ollama response without leaking a raw JSON error.
+
+    A 2xx response is not proof of a valid body: an HTML error page or a truncated payload
+    raises ``json.JSONDecodeError`` (a ``ValueError``), which used to escape the provider
+    contract and bypass every caller's ``except ProviderError`` recovery path.
+    """
+    try:
+        return resp.json()
+    except ValueError:
+        raise ProviderError(
+            f"Lokal modell (Ollama) gav ogiltig JSON ({context}).",
+            category="unsupported",
+            provider_request_may_have_left=True,
+        ) from None
+
+
 def _is_missing_embed_route(resp: httpx.Response) -> bool:
     """True only for a 404 that means "this server has no /api/embed" — a plain-text 404.
 
@@ -112,7 +129,7 @@ class OllamaProvider(LLMProvider):
             async with httpx.AsyncClient(timeout=timeout or 120) as client:
                 resp = await client.post(f"{self.settings.ollama_base_url}/api/chat", json=payload)
                 resp.raise_for_status()
-                data = resp.json()
+                data = _decode_json(resp, context="chat")
         except httpx.HTTPError as exc:
             raise ProviderError(
                 f"Lokal modell (Ollama) inte nåbar: {exc}", category=_http_error_category(exc)
@@ -174,7 +191,7 @@ class OllamaProvider(LLMProvider):
                     # instead of rejecting it outright.
                     return await self._embed_legacy(client, texts, model)
                 resp.raise_for_status()
-                data = resp.json()
+                data = _decode_json(resp, context="embed")
         except httpx.HTTPError as exc:
             raise ProviderError(
                 f"Lokal modell (Ollama) inte nåbar: {exc}", category=_http_error_category(exc)
@@ -192,7 +209,7 @@ class OllamaProvider(LLMProvider):
                 json={"model": model, "prompt": text},
             )
             resp.raise_for_status()
-            data = resp.json()
+            data = _decode_json(resp, context="legacy embed")
             # Same trust boundary as chat(): a 200-OK error object or a missing/invalid
             # "embedding" must fail closed, never escape as a raw KeyError/TypeError.
             error_text = _ollama_error_text(data)

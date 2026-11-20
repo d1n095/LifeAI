@@ -8,6 +8,18 @@ from app.models.document_chunk import DocumentChunk
 from app.rag.embedding_space import pad_to_storage
 
 
+def _like_pattern(value: str) -> str:
+    """Build a literal substring pattern, never a LIKE wildcard expression.
+
+    The text channel accepts the founder's raw query. Without escaping, a query containing
+    ``%`` or ``_`` becomes a wildcard and can match every chunk in the owner's library,
+    injecting irrelevant documents into an otherwise exact-term search. Backslash is escaped
+    first because it is the ESCAPE character itself.
+    """
+    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 def upsert_chunks(
     db: Session,
     document_id: uuid.UUID,
@@ -194,11 +206,17 @@ def hybrid_search(
         )
         semantic_rows = db.execute(semantic_stmt).all()
 
-    like_pattern = f"%{query_text}%"
+    like_pattern = _like_pattern(query_text)
     text_stmt = (
         select(DocumentChunk)
         .join(Document, Document.id == DocumentChunk.document_id)
-        .where(*base_filters, or_(DocumentChunk.text.ilike(like_pattern), Document.title.ilike(like_pattern)))
+        .where(
+            *base_filters,
+            or_(
+                DocumentChunk.text.ilike(like_pattern, escape="\\"),
+                Document.title.ilike(like_pattern, escape="\\"),
+            ),
+        )
         .limit(top_k)
     )
     text_rows = db.execute(text_stmt).scalars().all()

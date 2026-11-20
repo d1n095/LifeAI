@@ -166,6 +166,16 @@ def test_reload_confirms_user_message_remains_after_provider_failure(client, mon
     assert len(user_messages) == 1
     assert user_messages[0]["content"] == "Detta meddelande ska överleva ett AI-fel."
 
+    # The failed assistant row is part of the durable transcript. The reload contract must
+    # expose enough to show the failure and retry it, instead of returning only the user
+    # message and letting the UI silently drop the empty assistant row.
+    assistant_messages = [m for m in messages if m["role"] == "assistant"]
+    assert len(assistant_messages) == 1
+    failed = assistant_messages[0]
+    assert failed["status"] == "failed"
+    assert failed["error_category"] == "unreachable"
+    assert failed["in_reply_to_id"] == user_messages[0]["id"]
+
 
 # --- D/F: retry never duplicates, and is idempotent once succeeded ---------------------------
 
