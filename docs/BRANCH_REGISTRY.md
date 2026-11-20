@@ -23,18 +23,20 @@ minnesarkitektur.
 (`test_message_out_contract.py`, `test_vector_store_like_escape.py`), 48 provider-tester PASS,
 R15 `security_r15_successor` 61 passed/5 skipped (Redis saknas), R15 `security_r15_egress`
 13 passed, `ruff` och `py_compile` PASS. De nya testerna reproducerade före fixen rå
-`JSONDecodeError`/`httpx.HTTPStatusError` respektive tappade assistentrader.
+`JSONDecodeError`/`httpx.HTTPStatusError` respektive tappade assistentrader. Efter `npm ci`
+passerar `npx tsc --noEmit`; ESLint rapporterar 0 errors och en befintlig varning i
+`frontend/lib/api.ts:107` (relativ `window.location.href`-navigering, utanför denna diff).
 
 **Blockerare / ej körd:** DB-backade tester (inkl. den utökade
 `test_chat_message_persistence.py`), full Founder Alpha-resa, prestandamätningar och
 Playwright är blockerade av att PostgreSQL/pgvector och Redis inte är tillgängliga lokalt
-(Docker-socket nekas). Frontend `tsc`/ESLint är blockerat av saknad `node_modules`; Chrome
-saknas. Ingen push har gjorts, så exakt-head GitHub Actions är inte verifierad.
+(Docker-socket nekas) samt att Chrome saknas. Ingen push har gjorts, så exakt-head GitHub
+Actions är inte verifierad.
 
 **Beroende och merge-ordning:** bygger på R15 och ska mergas efter R15. Inga ändringar i
 Codex- eller Z-brancher; ingen känd överlappning med deras implementationer. Nästa steg är
-CI-only körning av DB-sviten, `npm ci` + frontendkontroll och en full Founder
-Alpha-journey/performance-körning i isolerad miljö.
+CI-only körning av DB-sviten och en full Founder Alpha-journey/performance-körning i isolerad
+miljö.
 
 ## Blueprint-intelligensbacklogen KLAR: inkrementell dokumentförståelse (2026-11-14)
 
