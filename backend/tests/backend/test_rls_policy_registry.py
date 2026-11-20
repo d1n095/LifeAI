@@ -128,6 +128,33 @@ def test_live_policies_match_policy_definitions_exactly():
     )
 
 
+def test_mainai_job_runtime_privileges_repairs_missing_grants():
+    """A fresh database can legitimately reach startup with no grants on the two mainai_job
+    child tables: Alembic may create them after the broad ensure_app_role grant, and the
+    startup policy used to only REVOKE excess privileges. It must grant the exact allowed set
+    too, otherwise a clean install fails closed with an empty privilege set instead of
+    repairing it. This test reproduces that starting point directly."""
+    from app.rls import apply_mainai_job_runtime_privileges
+
+    with migration_engine.begin() as conn:
+        conn.execute(text("REVOKE ALL PRIVILEGES ON mainai_job_events, mainai_job_proposals FROM mainai_app"))
+
+    apply_mainai_job_runtime_privileges(migration_engine)
+
+    with migration_engine.connect() as conn:
+        assert tuple(
+            conn.execute(
+                text(
+                    "SELECT has_table_privilege('mainai_app','mainai_job_events','SELECT'),"
+                    " has_table_privilege('mainai_app','mainai_job_events','INSERT'),"
+                    " has_table_privilege('mainai_app','mainai_job_proposals','SELECT'),"
+                    " has_table_privilege('mainai_app','mainai_job_proposals','INSERT'),"
+                    " has_table_privilege('mainai_app','mainai_job_proposals','UPDATE')"
+                )
+            ).one()
+        ) == (True, True, True, True, True)
+
+
 def test_worker_module_never_imports_app_main():
     """Founder-reported production incident (VPS hotfix): `app/main.py`'s FastAPI startup
     handler calls `apply_rls()`/`apply_mainai_job_runtime_privileges()` — real, mutating

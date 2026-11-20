@@ -873,6 +873,12 @@ def apply_mainai_job_runtime_privileges(engine: Engine, *, require_complete: boo
             logger.warning(message)
             return
 
+        # Self-healing, not merely narrowing: on a fresh database the migration may have run
+        # after ensure_app_role.py's broad grant, leaving these two tables with NO app-role
+        # privileges at all. Grant the exact allowed set before revoking the excess, so startup
+        # both repairs a missing grant and still removes UPDATE/DELETE/TRUNCATE/etc.
+        conn.execute(text("GRANT SELECT, INSERT ON mainai_job_events TO mainai_app"))
+        conn.execute(text("GRANT SELECT, INSERT, UPDATE ON mainai_job_proposals TO mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON mainai_job_events FROM mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON mainai_job_proposals FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_mainai_job_children() TO mainai_app"))
