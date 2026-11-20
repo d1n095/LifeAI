@@ -6,7 +6,7 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-## Founder Alpha reliability successor — lokal integration verifierad (2026-11-20)
+## Founder Alpha reliability successor — integration, recovery och restore verifierad (2026-11-20)
 
 **Branch:** `claude/founder-alpha-reliability`, bas `6410abe` (R15-leveransen). R15-branchen
 och dess leverans i `delivery/r15/` är orörda. Ingen PR, ingen push, ingen merge och ingen
@@ -14,14 +14,17 @@ deployment har gjorts. `first_cycle_go=false`.
 
 **Commits:** `9b731f4` providerklassificering/felbevarande/LIKE-escape, `0fd8f8d`
 registerpost, `ec33042` frontendstatus, `8c4c3f6` fail-closed vid okänd providerlokalitet,
-`283bf4d` lesson-conflict-testkontrakt, `c2422a8` E2E-worker + full biblioteksresa i CI.
+`283bf4d` lesson-conflict-testkontrakt, `c2422a8` E2E-worker + full biblioteksresa i CI,
+`3dfe4fc`/`27018b0` verifierad lokal integration, `c022788` självläkande jobbgrants,
+`5734d6b` aktuell shell-spec + CI, `93568d0` isolerad backup/restore-acceptans.
 
 **Scope:** provideradaptrarna klassificerar ogiltig JSON, 429, auth-fel, 5xx och felaktiga
 svarsformat som `ProviderError`; en provider som saknar `is_local` behandlas som extern och
 fail-closed; ett omladdat samtal bevarar misslyckade assistentrader; `hybrid_search`
-escap:ar LIKE-jokertecken; E2E-harnesset kör den riktiga durable workern och den fulla
-biblioteksresan ingår nu i CI-jobbet. Inga nya tabeller, migrationer eller parallell
-minnesarkitektur.
+escap:ar LIKE-jokertecken; E2E-harnesset kör den riktiga durable workern; startup-policyn
+reparerar nu saknade `mainai_job_*`-grants på en ren installation; shell-specen testar nu
+aktuell `/library`-yta; och en isolerad backup/restore-resa verifierar checksumma, ACL, RLS
+och API på återställda data. Inga nya tabeller, migrationer eller parallell minnesarkitektur.
 
 **Isolerad testmiljö:** PostgreSQL 16.15 + pgvector 0.6.0 på `127.0.0.1:55432`, Redis 7.0.15
 på `127.0.0.1:56379`, Playwright Chromium 1194 och riktig E2E-backend på `127.0.0.1:8010`.
@@ -40,6 +43,10 @@ produktionscontainer användes.
 | RAG/chat/library/claims | 97 passed, 1 skipped (`zip` saknas) |
 | `test_r15_integration_security.py` | 50 passed |
 | `test_mainai_execution_lesson_conflicts.py` | 11 passed |
+| `test_rls_policy_registry.py` | 5 passed |
+| Dokument/worker/recovery/DB-retry/provider-failclosed/startup | 87 passed, 1 skipped (`zip` saknas) |
+| Founder acceptance-suite | 9 passed, 1 skipped (modellbenet) |
+| Migrationskedja + health | 14 passed |
 | Playwright auth | 3 passed |
 | Playwright Founder Knowledge Studio | 1 passed |
 | Playwright security/model-routing | 6 passed, 1 skipped |
@@ -47,6 +54,7 @@ produktionscontainer användes.
 | Playwright media/upload-kö/mobil/pagination | 11 passed |
 | Playwright rate-limit | 2 passed |
 | Playwright same-origin-proxy | 2 passed |
+| Playwright shell/library | 3 passed |
 
 **Full vertikal resa (Playwright, riktig backend + worker):** import av
 `vertikalt-e2e-test.txt` → validering/lagring → extrahering → pgvector-indexering → synlig i
@@ -54,29 +62,40 @@ biblioteket → hybridsökning → MainAI-chatt med källcitat → öppna exakt 
 samtalet → radera med bekräftelse. Passerade. Den kombinerade E2E-körningen (auth, Founder
 Knowledge Studio, security, model-routing) slutade med **10 passed, 1 skipped**; account-körningen
 separat med **5 passed**; media/upload-kö/mobil/pagination med **11 passed**; rate-limit med
-**2 passed**; same-origin-proxy med **2 passed**. Sammanlagt **30 Playwright passed, 1 skipped**.
-CI-YAML parsar och `py_compile` passerar för de ändrade Python-filerna.
+**2 passed**; same-origin-proxy med **2 passed**; shell/library med **3 passed**. Sammanlagt
+**33 Playwright passed, 1 skipped**.
+
+**Ren installation:** verifierad i ordningen `ensure_app_role` → `alembic upgrade head` →
+`apply_runtime_privileges` → start. Backend blev healthy, shell/library-specen passerade 3/3,
+och den tidigare kraschande startup-policyn reparerar nu själv saknade jobbgrants.
+
+**Backup/restore:** `pg_dump` med bevarade ACL:er, SHA-256-verifiering, restore till ny
+databas, identiska radantal, RLS-kontroll med två riktiga principaler, och API-start på
+återställda data. Login, dokument, konversationer, projektstatus och ett riktigt chatt­svar
+svarade 200. **PASS.**
+
+**Prestanda (lokal mätning):** 10 filer/200 stycken importerade på `0.330 s` (`0.033 s/fil`),
+10 chunkar, hybrid search `top_k=10` på `29.1 ms`, chatt-retrieval `top_k=5` på `11.8 ms`
+med 5 chunkar/10 145 tecken kontext.
 
 **Reparerade defekter:** (1) okänd `is_local` kraschade/klassades fel — nu fail-closed;
 (2) E2E-harnesset saknade worker, så uppladdningar blev liggande `pending`; (3) E2E-faken för
 embedding saknade `timeout`, så `ensure_verified()` pausade varje import som
-`blocked_provider`; (4) två testkontrakt var inaktuella och rättades. Före fixarna
-reproducerades `pending`/`blocked_provider`; efter fixarna passerade hela resan.
+`blocked_provider`; (4) två testkontrakt var inaktuella och rättades; (5) startup-policyn
+återkallade men beviljade inte jobbgrants, vilket stoppade en ren installation — nu självläkande;
+(6) `shell-pages.spec.ts` testade den borttagna `/documents`-ytan — nu `/library` och grön.
 
 **Kvarstående begränsningar:** exakt-head GitHub Actions är inte körd eftersom inget har
 pushats; 10 tester hoppas över eftersom Z.ai-CLI saknas och 1 eftersom `zip` saknas. En
-säkerhetsspec hoppas över när backendens externa origin inte är konfigurerad.
-`shell-pages.spec.ts` är den enda Playwright-spec som inte körts: dess första test förutsätter
-att `/documents` fortfarande har en tom-state och uppladdning, men sidan är avsiktligt en
-redirect till `/library` (verifierat av `library-upload-queue.spec.ts`). Den behöver skrivas om
-innan den kan köras — det är ett testproblem, inte en produktionsdefekt. `ruff` på det
-avsiktliga E2E-skriptet rapporterar
-fortsatt `E402` för imports efter env-setup; det är samma mönster som fanns före ändringen,
-medan `py_compile` och YAML-validering är gröna.
+säkerhetsspec hoppas över när backendens externa origin inte är konfigurerad. Resursgränser
+(CPU/minne/disk) är inte mätta, och hela installationsmatrisen (Ollama saknas, ogiltiga
+DB-uppgifter, avbruten/misslyckad migration) är inte separat körd; startup- och
+migrationstesterna täcker delar av den. `ruff` på det avsiktliga E2E-skriptet rapporterar
+fortsatt `E402` för imports efter env-setup; `py_compile` och YAML-validering är gröna.
 
 **Beroende och merge-ordning:** bygger på R15 och ska mergas efter R15. Inga ändringar i
 Codex- eller Z-brancher; ingen känd överlappning med deras implementationer. Nästa steg är
-godkänd push för exakt-head CI och att skriva om/avveckla den obsoleta shell-specen.
+godkänd push för exakt-head CI, resterande installationsmatris och resursgränsmätning.
 Leveransartefakterna är regenererade mot denna HEAD.
 
 ## Blueprint-intelligensbacklogen KLAR: inkrementell dokumentförståelse (2026-11-14)
