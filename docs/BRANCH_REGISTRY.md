@@ -6,37 +6,70 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
-## Founder Alpha reliability successor — lokal verifiering (2026-11-20)
+## Founder Alpha reliability successor — lokal integration verifierad (2026-11-20)
 
 **Branch:** `claude/founder-alpha-reliability`, bas `6410abe` (R15-leveransen). R15-branchen
-och dess leverans i `delivery/r15/` är orörda. Ingen PR, ingen push och ingen merge har gjorts.
+och dess leverans i `delivery/r15/` är orörda. Ingen PR, ingen push, ingen merge och ingen
+deployment har gjorts. `first_cycle_go=false`.
 
-**Scope (en avgränsad robusthetscommit, `9b731f4`):** provideradaptrarna för Ollama/OpenAI
-klassificerar ogiltig JSON, 429, auth-fel, 5xx och felaktiga svarsformat som `ProviderError`
-och markerar att en extern förfrågan kan ha lämnat systemet; ett omladdat samtal bevarar
-misslyckade assistentrader via `MessageOut.status/error_category/in_reply_to_id` och erbjuder
-endast säker retry; `hybrid_search` escap:ar `%`, `_` och backslash så att en rå söktext inte
-blir en LIKE-jokerteckenfråga. Inga nya tabeller, migrationer eller parallell
+**Commits:** `9b731f4` providerklassificering/felbevarande/LIKE-escape, `0fd8f8d`
+registerpost, `ec33042` frontendstatus, `8c4c3f6` fail-closed vid okänd providerlokalitet,
+`283bf4d` lesson-conflict-testkontrakt, `c2422a8` E2E-worker + full biblioteksresa i CI.
+
+**Scope:** provideradaptrarna klassificerar ogiltig JSON, 429, auth-fel, 5xx och felaktiga
+svarsformat som `ProviderError`; en provider som saknar `is_local` behandlas som extern och
+fail-closed; ett omladdat samtal bevarar misslyckade assistentrader; `hybrid_search`
+escap:ar LIKE-jokertecken; E2E-harnesset kör den riktiga durable workern och den fulla
+biblioteksresan ingår nu i CI-jobbet. Inga nya tabeller, migrationer eller parallell
 minnesarkitektur.
 
-**Teststatus lokalt (DB-fri miljö):** 6 nya kontraktstester PASS
-(`test_message_out_contract.py`, `test_vector_store_like_escape.py`), 48 provider-tester PASS,
-R15 `security_r15_successor` 61 passed/5 skipped (Redis saknas), R15 `security_r15_egress`
-13 passed, `ruff` och `py_compile` PASS. De nya testerna reproducerade före fixen rå
-`JSONDecodeError`/`httpx.HTTPStatusError` respektive tappade assistentrader. Efter `npm ci`
-passerar `npx tsc --noEmit`; ESLint rapporterar 0 errors och en befintlig varning i
-`frontend/lib/api.ts:107` (relativ `window.location.href`-navigering, utanför denna diff).
+**Isolerad testmiljö:** PostgreSQL 16.15 + pgvector 0.6.0 på `127.0.0.1:55432`, Redis 7.0.15
+på `127.0.0.1:56379`, Playwright Chromium 1194 och riktig E2E-backend på `127.0.0.1:8010`.
+Allt kördes projektlokalt under `/tmp`; ingen STRATO-produktionsdatabas eller
+produktionscontainer användes.
 
-**Blockerare / ej körd:** DB-backade tester (inkl. den utökade
-`test_chat_message_persistence.py`), full Founder Alpha-resa, prestandamätningar och
-Playwright är blockerade av att PostgreSQL/pgvector och Redis inte är tillgängliga lokalt
-(Docker-socket nekas) samt att Chrome saknas. Ingen push har gjorts, så exakt-head GitHub
-Actions är inte verifierad.
+**Faktiskt körda resultat:**
+
+| Svit | Resultat |
+| --- | --- |
+| `test_chat_message_persistence.py` | 18 passed |
+| Founder Alpha/Blueprint + cognitive acceptance | 39 passed |
+| Library/RAG/embedding/prestanda | 56 passed |
+| R15 DB/Redis | 136 passed |
+| Recovery/conversation/full cognitive | 24 passed, 10 skipped (Z.ai-CLI saknas) |
+| RAG/chat/library/claims | 97 passed, 1 skipped (`zip` saknas) |
+| `test_r15_integration_security.py` | 50 passed |
+| `test_mainai_execution_lesson_conflicts.py` | 11 passed |
+| Playwright auth | 3 passed |
+| Playwright Founder Knowledge Studio | 1 passed |
+| Playwright security/model-routing | 6 passed, 1 skipped |
+| Playwright account lifecycle | 5 passed |
+
+**Full vertikal resa (Playwright, riktig backend + worker):** import av
+`vertikalt-e2e-test.txt` → validering/lagring → extrahering → pgvector-indexering → synlig i
+biblioteket → hybridsökning → MainAI-chatt med källcitat → öppna exakt källa → fortsätta
+samtalet → radera med bekräftelse. Passerade. Den kombinerade E2E-körningen (auth, Founder
+Knowledge Studio, security, model-routing) slutade med **10 passed, 1 skipped**; account-körningen
+separat med **5 passed**. CI-YAML parsar och `py_compile` passerar för de ändrade Python-filerna.
+
+**Reparerade defekter:** (1) okänd `is_local` kraschade/klassades fel — nu fail-closed;
+(2) E2E-harnesset saknade worker, så uppladdningar blev liggande `pending`; (3) E2E-faken för
+embedding saknade `timeout`, så `ensure_verified()` pausade varje import som
+`blocked_provider`; (4) två testkontrakt var inaktuella och rättades. Före fixarna
+reproducerades `pending`/`blocked_provider`; efter fixarna passerade hela resan.
+
+**Kvarstående begränsningar:** exakt-head GitHub Actions är inte körd eftersom inget har
+pushats; 10 tester hoppas över eftersom Z.ai-CLI saknas och 1 eftersom `zip` saknas. En
+säkerhetsspec hoppas över när backendens externa origin inte är konfigurerad. Övriga
+Playwright-specar (media, upload-kö, mobil workbench, pagination, rate-limit, proxy,
+shell-sidor) är inte körda i denna omgång. `ruff` på det avsiktliga E2E-skriptet rapporterar
+fortsatt `E402` för imports efter env-setup; det är samma mönster som fanns före ändringen,
+medan `py_compile` och YAML-validering är gröna.
 
 **Beroende och merge-ordning:** bygger på R15 och ska mergas efter R15. Inga ändringar i
 Codex- eller Z-brancher; ingen känd överlappning med deras implementationer. Nästa steg är
-CI-only körning av DB-sviten och en full Founder Alpha-journey/performance-körning i isolerad
-miljö.
+Godkänd push för exakt-head CI, resterande Playwright-specar och regenerering av
+leveransartefakterna.
 
 ## Blueprint-intelligensbacklogen KLAR: inkrementell dokumentförståelse (2026-11-14)
 
