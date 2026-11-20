@@ -24,7 +24,7 @@ Guarded chat verifies response provider/model attribution. A mismatch is an unce
 
 ### Retry and accounting
 
-The existing assistant reply slot is a durable dispatch claim (`failed/provider_inflight`) before retrieval/provider work. A user-message row lock serializes both initial and retry races, refreshing cached reply rows after acquiring the lock. Success replays the saved reply. In-flight, uncertain provider or uncertain budget outcomes refuse automatic retry (409). No new table/status is added.
+The existing assistant reply slot is a durable dispatch claim (`failed/provider_inflight:<attempt-id>`) before retrieval/provider work. A user-message row lock serializes both initial and retry races, refreshing cached reply rows after acquiring the lock. Success replays the saved reply. In-flight, uncertain provider or uncertain budget outcomes refuse automatic retry (409). No new table/status is added.
 
 Guarded chat falls back only after explicit `provider_request_may_have_left=False`. Timeouts and ambiguous failures stop the chain. A crash leaves the durable claim in place. Budget reservations occur per actual provider attempt, after egress checks, through existing user/tenant primitives. Unknown/stale external price bounds are refused before invocation rather than priced by a generic fallback.
 
@@ -74,3 +74,5 @@ Additional integration verification exposed two inherited CI setup gaps: R15 con
 All remaining R12 deterministic tests now avoid global `zai` registration/config changes. Their mocked prompt capture stays deterministic; real model-mode suites remain explicitly opt-in and unavailable CLI checks are reported as skips, never cognitive passes. Eval prompt/model observations are lease-local and erased on scope exit rather than retained in class-global variables.
 
 Clean Cloud rerun after ENOSPC recovery: **418 passed** across provider/chat/billing/financial contracts, R15 project/GitHub status and RLS/security suites. Separate eval/consultation follow-up: **65 passed, 12 skipped** (real CLI/model evaluation not authorized/available). These overlap and are not summed. Final CLI credential-environment regression is additionally included before the next CI checkpoint. CLI subprocesses receive only an environment allowlist (PATH/HOME/locale/temp/config path), never HTTP API keys, application secrets or database credentials; CLI credentials must be independently provisioned. Missing model/usage identity in CLI output fails closed rather than assuming the requested alias.
+
+Each safely retried reply receives a fresh durable attempt nonce; the budget key is stable within one attempt but cannot reuse a previously released hold as new admission. Missing/malformed usage on an enforced attempt retains the hold instead of settling it as zero. The nonce, duplicate-claim and malformed-usage regressions cover these transitions explicitly.

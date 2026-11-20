@@ -329,3 +329,49 @@ async def test_eval_cli_never_inherits_http_credentials(monkeypatch):
         result = await ZAIEvaluationProvider().chat([Message("user","safe")],model="glm")
     assert result.provider == "zai_eval" and result.model == "glm"
     assert all(key not in captured["env"] for key in ("OPENAI_API_KEY","ZAI_API_KEY","DATABASE_URL","SECRET_KEY"))
+
+
+@pytest.mark.asyncio
+async def test_malformed_usage_cannot_settle_a_billed_hold_as_free(db_session,monkeypatch):
+    events = []
+    async def reply(*a,**k):
+        return ChatResult("nonempty", "transport", "model", raw_usage={})
+    monkeypatch.setattr(registry,"resolve_chat_chain",lambda *a,**k:[
+        (SimpleNamespace(name="transport",chat=reply,is_configured=lambda:True),"model")])
+    observer = SimpleNamespace(before=lambda *a:events.append("reserved"),
+                               failed=lambda e:events.append("held"),succeeded=lambda r:pytest.fail("settled unknown usage"))
+    with pytest.raises(ProviderError) as error:
+        await registry.chat_with_fallback(db_session,[],effect_guard=True,attempt_observer=observer)
+    assert error.value.category == "external_effect_unknown" and events == ["reserved","held"]
+
+
+def test_proven_pre_effect_retry_uses_new_budget_attempt(client,db_session,monkeypatch):
+    from app.routers import chat
+    from app.providers.ollama_provider import OllamaProvider
+    from app.billing.enforcement import ComputeBudgetStore
+    from app.billing import reservation
+    async def empty(*a,**k): return []
+    calls = []
+    async def invoke(self,messages,model,**kwargs):
+        calls.append(True)
+        if len(calls) == 1:
+            raise ProviderError("not sent",provider_request_may_have_left=False)
+        return ChatResult("ok","ollama",model,raw_usage={"prompt_tokens":1,"completion_tokens":2})
+    db_session.add(ProviderConfig(role="chat",provider="ollama",model="gemma3:4b",is_active=True))
+    db_session.commit()
+    monkeypatch.setattr(get_settings(),"chat_fallback_order","")
+    monkeypatch.setattr(get_settings(),"billing_enforcement_enabled",True)
+    monkeypatch.setattr(chat,"retrieve_context",empty)
+    monkeypatch.setattr(OllamaProvider,"chat",invoke)
+    store = ComputeBudgetStore(redis_url=None)
+    monkeypatch.setattr(reservation,"_store",lambda *a:store)
+    limits = SimpleNamespace(tier="free",token_caps=lambda:(None,None),cost_caps_micros=lambda:(None,None))
+    monkeypatch.setattr(chat,"effective_limits",lambda *a:limits)
+    headers = login(client)
+    first = client.post("/api/chat",json={"message":"safe pre-effect retry"},headers=headers)
+    assert first.status_code == 200 and first.json()["retryable"]
+    retried = client.post(f"/api/chat/messages/{first.json()['user_message_id']}/retry",headers=headers)
+    assert retried.status_code == 200 and retried.json()["assistant_status"] == "succeeded"
+    assert len(calls) == 2 and len(store._reservations) == 2
+    assert {r[0] for r in store._reservations.values()} == {"released","settled"}
+    assert all(value == (3,0) for value in store._local.values())

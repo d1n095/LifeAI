@@ -410,6 +410,16 @@ async def chat_with_fallback(
             if effect_guard and (result.provider != provider.name or result.model != model):
                 raise ProviderError("Provider response identity mismatch.", category="external_effect_unknown",
                                     provider_request_may_have_left=True)
+            if effect_guard and (not isinstance(result.content, str) or not result.content.strip()):
+                raise ProviderError("Provider returned no valid reply.", category="external_effect_unknown",
+                                    provider_request_may_have_left=True)
+            if effect_guard and attempt_observer is not None:
+                usage = result.raw_usage
+                if (not isinstance(usage, dict)
+                        or type(usage.get("prompt_tokens")) is not int or usage["prompt_tokens"] < 0
+                        or type(usage.get("completion_tokens")) is not int or usage["completion_tokens"] <= 0):
+                    raise ProviderError("Provider usage is unverified.", category="external_effect_unknown",
+                                        provider_request_may_have_left=True)
             if attempt_observer is not None:
                 attempt_observer.succeeded(result)
             if len(attempted) > 1:

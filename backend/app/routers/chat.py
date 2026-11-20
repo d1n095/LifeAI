@@ -100,14 +100,15 @@ def _claim_reply_attempt(db, *, conversation, user_message, user):
     if reply is not None and reply.status == MessageStatus.succeeded:
         db.commit()
         return reply
-    if reply is not None and reply.error_category in {"provider_inflight", "external_effect_unknown", "billing_outcome_unknown"}:
+    if reply is not None and (str(reply.error_category).startswith("provider_inflight")
+                              or reply.error_category in {"external_effect_unknown", "billing_outcome_unknown"}):
         db.rollback()
         raise HTTPException(status_code=409, detail="Provider outcome is unresolved; retry is blocked.")
     if reply is None:
         reply = MessageModel(conversation_id=conversation.id, role=MessageRole.assistant,
                              in_reply_to_id=locked.id, content="", status=MessageStatus.failed)
         db.add(reply)
-    reply.error_category = "provider_inflight"
+    reply.error_category = f"provider_inflight:{uuid.uuid4().hex}"
     db.commit()  # Durable before any outbound invocation; rollback cannot erase the claim.
     return reply
 
@@ -308,7 +309,7 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     if get_settings().billing_enforcement_enabled:
         attempt_budget = ChatAttemptBudget(db, user=user, limits=limits,
                                            estimated_tokens=sum(len(m.content.encode("utf-8")) for m in messages) + 1024,
-                                           source_ref=f"chat:{user_message.id}")
+                                           source_ref=f"chat:{user_message.id}:{assistant_row.error_category}")
 
     try:
         result, attempted = await chat_with_fallback(
