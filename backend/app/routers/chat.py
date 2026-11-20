@@ -7,6 +7,8 @@ assistant's response for an already-persisted user message — it creates or upd
 one assistant `MessageModel` row (enforced by migration 0016's partial unique index on
 `in_reply_to_id`), never a second, duplicate reply."""
 
+from base64 import urlsafe_b64encode
+
 import logging
 import uuid
 from datetime import datetime
@@ -100,7 +102,7 @@ def _claim_reply_attempt(db, *, conversation, user_message, user):
     if reply is not None and reply.status == MessageStatus.succeeded:
         db.commit()
         return reply
-    if reply is not None and (str(reply.error_category).startswith("provider_inflight")
+    if reply is not None and (str(reply.error_category).startswith(("provider_inflight", "inflight:"))
                               or reply.error_category in {"external_effect_unknown", "billing_outcome_unknown"}):
         db.rollback()
         raise HTTPException(status_code=409, detail="Provider outcome is unresolved; retry is blocked.")
@@ -108,7 +110,7 @@ def _claim_reply_attempt(db, *, conversation, user_message, user):
         reply = MessageModel(conversation_id=conversation.id, role=MessageRole.assistant,
                              in_reply_to_id=locked.id, content="", status=MessageStatus.failed)
         db.add(reply)
-    reply.error_category = f"provider_inflight:{uuid.uuid4().hex}"
+    reply.error_category = f"inflight:{urlsafe_b64encode(uuid.uuid4().bytes).decode().rstrip('=')}"
     db.commit()  # Durable before any outbound invocation; rollback cannot erase the claim.
     return reply
 
@@ -305,11 +307,10 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     messages.append(Message(role="user", content=user_message.content))
 
     limits = effective_limits(db, user)
-    attempt_budget = None
-    if get_settings().billing_enforcement_enabled:
-        attempt_budget = ChatAttemptBudget(db, user=user, limits=limits,
-                                           estimated_tokens=sum(len(m.content.encode("utf-8")) for m in messages) + 1024,
-                                           source_ref=f"chat:{user_message.id}:{assistant_row.error_category}")
+    attempt_budget = ChatAttemptBudget(db, user=user, limits=limits,
+                                      estimated_tokens=sum(len(m.content.encode("utf-8")) for m in messages) + 1024,
+                                      source_ref=f"chat:{user_message.id}:{assistant_row.error_category}",
+                                      reply_slot=assistant_row, enforce=get_settings().billing_enforcement_enabled)
 
     try:
         result, attempted = await chat_with_fallback(

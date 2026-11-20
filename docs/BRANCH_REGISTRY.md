@@ -9778,3 +9778,5 @@ Imports #463's exact hardening delta from `dbd7680d267ae56b57e4a823c7cb1657f2308
 Scope: eval/HTTP identity isolation, composed verification contracts and retry/accounting boundaries.
 Remote R15 checkpoint still equals the supplied SHA; no newer R15 head was advertised at baseline.
 Independent security acceptance remains external; `first_cycle_go=false`. No deployment or provider activation.
+
+Draft [PR #464](https://github.com/d1n095/LifeAI/pull/464) carries the isolated R15/#463 candidate against the exact transfer checkpoint. #463 stays frozen at `dbd7680d`; Freebuff R15 and Z.ai source heads were rechecked unchanged. Final targeted reply/nonce/intent/accounting regressions pass (48); full exact-head CI and independent acceptance remain separate gates. No merge/deploy/provider activation.

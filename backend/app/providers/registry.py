@@ -413,7 +413,7 @@ async def chat_with_fallback(
             if effect_guard and (not isinstance(result.content, str) or not result.content.strip()):
                 raise ProviderError("Provider returned no valid reply.", category="external_effect_unknown",
                                     provider_request_may_have_left=True)
-            if effect_guard and attempt_observer is not None:
+            if effect_guard and attempt_observer is not None and getattr(attempt_observer, "requires_usage", True):
                 usage = result.raw_usage
                 if (not isinstance(usage, dict)
                         or type(usage.get("prompt_tokens")) is not int or usage["prompt_tokens"] < 0

@@ -140,14 +140,28 @@ class ChatAttemptBudget:
     Ambiguous effects retain a HOLD (not fabricated measured spend). The durable chat
     claim prevents reinvocation; reconciliation requires real external evidence.
     """
-    def __init__(self, db, *, user, limits, estimated_tokens, source_ref):
+    def __init__(self, db, *, user, limits, estimated_tokens, source_ref, reply_slot, enforce):
         self.db, self.user, self.limits = db, user, limits
         self.estimated_tokens = estimated_tokens
         self.reservation = None
         self.source_ref = source_ref
+        self.reply_slot = reply_slot
+        self.requires_usage = enforce
 
     def before(self, provider, model):
+        import json
+        from app.audit import record_audit
         from app.billing.enforcement import BillingEnforcementUnavailableError
+        # Persist intent identity before Redis too: an unknown counter-store outcome
+        # remains attributable even if no provider request is ultimately invoked.
+        self.reply_slot.provider, self.reply_slot.model = provider, model
+        record_audit(self.db, user_id=self.user.id, action="chat_provider_intent", entity_type="message",
+                     entity_id=str(self.reply_slot.id), commit=False,
+                     detail=json.dumps({"source_ref":self.source_ref,"provider":provider,"model":model,
+                                        "tenant_id":str(self.user.tenant_id) if self.user.tenant_id else None}))
+        self.db.commit()
+        if not self.requires_usage:
+            return
         from app.providers.catalog import get_model_spec, evaluate_model, ModelSelectionPolicy, ModelSelectionError
         if self.reservation is not None:
             raise BillingEnforcementUnavailableError("Previous attempt budget is unresolved.")
@@ -168,6 +182,8 @@ class ChatAttemptBudget:
         )
 
     def succeeded(self, result):
+        if not self.requires_usage:
+            return
         usage = result.raw_usage or {}
         settle_reservation(self.reservation, actual_tokens=usage.get("prompt_tokens", 0)+usage.get("completion_tokens", 0),
                            actual_cost_usd=estimate_reservation_cost(None, usage.get("prompt_tokens", 0)+usage.get("completion_tokens", 0),
@@ -175,6 +191,8 @@ class ChatAttemptBudget:
         self.reservation = None
 
     def failed(self, error):
+        if self.reservation is None:
+            return
         if getattr(error, "provider_request_may_have_left", None) is False:
             release_reservation(self.reservation)
             self.reservation = None

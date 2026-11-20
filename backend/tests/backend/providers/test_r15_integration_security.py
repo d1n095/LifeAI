@@ -139,7 +139,7 @@ def login(client):
     return {"X-CSRF-Token":r.json()["csrf_token"]}
 
 
-def test_uncertain_chat_outcome_is_durable_and_retry_is_blocked(client, db_session, monkeypatch):
+def test_uncertain_chat_outcome_is_durable_and_retry_is_blocked(client, db_session, superuser_db, monkeypatch):
     from app.routers import chat
     from app.providers.openai_provider import OpenAIProvider
     async def empty(*a, **k): return []
@@ -163,6 +163,15 @@ def test_uncertain_chat_outcome_is_durable_and_retry_is_blocked(client, db_sessi
     current_user_id.set(str(FOUNDER_USER_ID))
     db_session.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid":str(FOUNDER_USER_ID)})
     assert db_session.query(StoredMessage).filter_by(error_category="external_effect_unknown").count() == 1
+    import json
+    from app.models.audit import AuditLog
+    event = superuser_db.query(AuditLog).filter_by(action="chat_provider_intent").one()
+    detail = json.loads(event.detail)
+    assert detail["provider"] == "openai" and detail["model"] == get_settings().default_llm_model
+    assert detail["source_ref"].startswith(f"chat:{r.json()['user_message_id']}:inflight:")
+    assert event.entity_id == r.json()["assistant_message_id"]
+    saved = superuser_db.get(StoredMessage,r.json()["assistant_message_id"])
+    assert saved.provider == detail["provider"] and saved.model == detail["model"]
 
 
 def test_external_unknown_price_blocks_before_provider_when_enforcement_on(client, monkeypatch):

@@ -24,7 +24,7 @@ Guarded chat verifies response provider/model attribution. A mismatch is an unce
 
 ### Retry and accounting
 
-The existing assistant reply slot is a durable dispatch claim (`failed/provider_inflight:<attempt-id>`) before retrieval/provider work. A user-message row lock serializes both initial and retry races, refreshing cached reply rows after acquiring the lock. Success replays the saved reply. In-flight, uncertain provider or uncertain budget outcomes refuse automatic retry (409). No new table/status is added.
+The existing assistant reply slot is a durable dispatch claim (`failed/inflight:<attempt-id>`) before retrieval/provider work. A user-message row lock serializes both initial and retry races, refreshing cached reply rows after acquiring the lock. Success replays the saved reply. In-flight, uncertain provider or uncertain budget outcomes refuse automatic retry (409). No new table/status is added.
 
 Guarded chat falls back only after explicit `provider_request_may_have_left=False`. Timeouts and ambiguous failures stop the chain. A crash leaves the durable claim in place. Budget reservations occur per actual provider attempt, after egress checks, through existing user/tenant primitives. Unknown/stale external price bounds are refused before invocation rather than priced by a generic fallback.
 
@@ -76,3 +76,9 @@ All remaining R12 deterministic tests now avoid global `zai` registration/config
 Clean Cloud rerun after ENOSPC recovery: **418 passed** across provider/chat/billing/financial contracts, R15 project/GitHub status and RLS/security suites. Separate eval/consultation follow-up: **65 passed, 12 skipped** (real CLI/model evaluation not authorized/available). These overlap and are not summed. Final CLI credential-environment regression is additionally included before the next CI checkpoint. CLI subprocesses receive only an environment allowlist (PATH/HOME/locale/temp/config path), never HTTP API keys, application secrets or database credentials; CLI credentials must be independently provisioned. Missing model/usage identity in CLI output fails closed rather than assuming the requested alias.
 
 Each safely retried reply receives a fresh durable attempt nonce; the budget key is stable within one attempt but cannot reuse a previously released hold as new admission. Missing/malformed usage on an enforced attempt retains the hold instead of settling it as zero. The nonce, duplicate-claim and malformed-usage regressions cover these transitions explicitly.
+
+The durable attempt nonce uses URL-safe encoding of all 128 UUID bits in the existing 32-character error-category field (31 characters including its prefix). The real-PostgreSQL retry/concurrency tests validate this schema boundary; no column widening or migration is introduced.
+
+Before any budget-store call, an existing `AuditLog` intent row durably binds the authenticated owner, tenant snapshot, reply slot, provider/model and full attempt reference. The reply slot also retains provider/model attribution. This permits exact reconciliation after an uncertain Redis/provider outcome even after the public error category changes; the intent is not mislabeled as proof of actual disclosure or measured spend. Disclosure is committed before invocation whether or not billing enforcement is enabled.
+
+Final local reply/claim/intent/accounting regression checkpoint: **48 passed** against real PostgreSQL/Redis, including the full UUID nonce within the existing field width, durable provider/attempt audit attribution and safe retry after a released hold. No real model/CLI was invoked. Full exact-head CI outcomes are tracked in PR #464 and must supersede earlier failed/intermediate runs.
