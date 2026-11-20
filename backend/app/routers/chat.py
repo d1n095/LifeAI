@@ -44,7 +44,7 @@ from app.billing import chat_attempts, record_usage
 from app.billing.chat_attempts import ReconciliationDenied, ReconciliationUnavailable
 from app.billing.enforcement import BillingBudgetExceededError, BillingEnforcementUnavailableError
 from app.billing.limits import effective_limits
-from app.billing.reservation import ChatAttemptBudget
+from app.billing.reservation import ChatAttemptBudget, estimate_prompt_tokens
 from app.models.provider_config import ProviderConfig
 from app.models.user import User
 from app.providers.base import Message, ProviderError
@@ -449,11 +449,23 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     messages.append(Message(role="user", content=user_message.content))
 
     limits = effective_limits(db, user)
-    attempt_budget = ChatAttemptBudget(db, user=user, limits=limits,
-                                      estimated_tokens=sum(len(m.content.encode("utf-8")) for m in messages) + 1024,
-                                      source_ref=f"chat:{user_message.id}:{assistant_row.error_category}",
-                                      reply_slot=assistant_row, user_message_id=user_message.id,
-                                      enforce=get_settings().billing_enforcement_enabled)
+    # Reserve input and output separately: the provider bills them at different rates, and
+    # the request's own output ceiling is the only honest completion estimate available
+    # before the call. The previous byte-count + flat 1024 was priced entirely as output.
+    estimated_prompt_tokens = estimate_prompt_tokens([m.content for m in messages])
+    estimated_completion_tokens = 1024
+    attempt_budget = ChatAttemptBudget(
+        db,
+        user=user,
+        limits=limits,
+        estimated_tokens=estimated_prompt_tokens + estimated_completion_tokens,
+        estimated_prompt_tokens=estimated_prompt_tokens,
+        estimated_completion_tokens=estimated_completion_tokens,
+        source_ref=f"chat:{user_message.id}:{assistant_row.error_category}",
+        reply_slot=assistant_row,
+        user_message_id=user_message.id,
+        enforce=get_settings().billing_enforcement_enabled,
+    )
 
     try:
         result, attempted = await chat_with_fallback(

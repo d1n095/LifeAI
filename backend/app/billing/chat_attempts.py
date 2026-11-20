@@ -415,11 +415,14 @@ def reconcile_attempt(
             )
             _mark_message_failed(db, attempt, "external_effect_unresolved")
         else:  # SETTLE_FROM_USAGE
-            from app.billing.reservation import estimate_reservation_cost
+            from app.billing.reservation import estimate_usage_cost
 
             tokens = prompt + completion
-            cost = estimate_reservation_cost(
-                None, tokens, provider=attempt.provider, model=attempt.model
+            cost = estimate_usage_cost(
+                attempt.provider,
+                attempt.model,
+                prompt_tokens=prompt,
+                completion_tokens=completion,
             )
             _settle_usage(attempt, tokens=tokens, cost_usd=cost)
             mark_settled(

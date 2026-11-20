@@ -9799,7 +9799,7 @@ Branched from exact PR #464 head `86671468a6dd271b61a3f985434130c4bf470ea8`; PR 
 
 **R15-07:** legitimate custom local Ollama tags are supported end to end: the catalog synthesizes a local-only spec with zero provider cost, exact verification is recorded per tag, admin config accepts it, and the admin UI exposes a free-text local-tag field. Unregistered external custom models remain fail-closed because their price/capabilities are not independently verified.
 
-**Still blocking:** R15-08–R15-11, DB-backed route tests, and exact-head CI/independent acceptance. No push, merge, deploy, or provider activation. `first_cycle_go=false`.
+**Still blocking at that point:** R15-08–R15-11 (closed on `security/r15-egress-owner-authorization`, see below), DB-backed route tests, and exact-head CI/independent acceptance. No push, merge, deploy, or provider activation. `first_cycle_go=false`.
 
 ## Egress owner/lease authorization — `security/r15-egress-owner-authorization` (2026-11-20)
 
@@ -9811,3 +9811,37 @@ Branched from `d06c9eaf5574ce99bdbee2b462d1ba462323e378`; no PR opened yet. Clos
 - New DB-free egress regressions: **13 passed**. R15 successor DB-free suite: **40 passed**. DB-backed orchestration/lesson tests remain **BLOCKED** locally because PostgreSQL on `localhost:5433` is not running.
 
 No push, merge, deploy, or provider activation. `first_cycle_go=false`.
+
+### R15-08–R15-11 remediation (same branch, 2026-11-20)
+
+Continues the same isolated branch (no new branch, no PR). Scope is limited to the four
+remaining R15 findings:
+
+- **R15-08:** `estimate_usage_cost()` prices prompt and completion at their own catalog
+  rates; `ChatAttemptBudget` carries `estimated_prompt_tokens`/`estimated_completion_tokens`
+  and prices both the hold and the settlement separately. `estimate_prompt_tokens()` replaces
+  the UTF-8 byte count plus a flat 1024 with a character-based estimate that charges
+  non-ASCII characters individually. Total-only legacy callers remain conservative (priced
+  as output tokens).
+- **R15-09:** `evaluation_provider_scope()` refuses nesting and wildcard/blank model
+  identities, in addition to the existing authorization and environment checks. Regressions
+  prove an active evaluation resolves only the eval provider, never consults `ProviderConfig`,
+  and cannot outlive its scope even through a copied context.
+- **R15-10:** `frontend/scripts/check-npm-audit.js` is GHSA-scoped with written reasons and
+  expiry dates; an expired or malformed entry, or a high/critical finding that cannot be
+  attributed to an advisory, fails closed. All four documented exceptions (brace-expansion,
+  two sharp advisories, picomatch) are now actually in the script. CI push/PR filters include
+  `security/**`, so this branch's own checks run.
+- **R15-11:** DB-free negative regressions cover ambiguous vs proven-pre-egress timeouts,
+  eight concurrent identical reservations charging once, tenant counter isolation, split
+  pricing/settlement, and eval-scope escape.
+
+**Tests:** `tests/security_r15_successor` 54 passed (40 existing + 14 new);
+`tests/security_r15_egress` 13 passed; `ruff`, `compileall`, `git diff --check` and
+`node --test scripts/check-npm-audit.test.js` (6/6) pass.
+
+**Still blocking:** ETAPP 3's PostgreSQL/pgvector + Redis integration run is not possible in
+this environment (no local `postgres`/`redis-server`, and Docker returns permission denied on
+`/var/run/docker.sock`). The DB-backed route/idempotency/recovery tests therefore remain
+unrun, not passing. Exact-head CI and independent acceptance remain external gates. No push,
+merge, deploy, or provider activation; `first_cycle_go=false`.

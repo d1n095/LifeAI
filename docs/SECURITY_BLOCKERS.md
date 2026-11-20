@@ -350,7 +350,8 @@ GitHub Actions-miljön). Utredningen, utan bulk-uppgradering:
   transitiva beroenden (`zod`, `js-yaml`, `source-map-js`, `brace-expansion`-kedjan). Resultat:
   **0 critical, kvarvarande höga fynd härrör från 3 källor i stället för 14.**
 
-**Allowlistat (daterat, ID-specifikt, med motivering i `frontend/scripts/check-npm-audit.js`):**
+**Allowlistat (daterat, GHSA-specifikt, med motivering och utgångsdatum i
+`frontend/scripts/check-npm-audit.js`):**
 
 - `sharp` (`1193725` GHSA-rgj7-g3m4-5g8c, `1241331` GHSA-wq5f-xc86-pv6w): projektet pinnar
   `overrides.sharp` och använder aldrig `next/image` (verifierat: inga importer i `frontend/app`
@@ -358,6 +359,13 @@ GitHub Actions-miljön). Utredningen, utan bulk-uppgradering:
   appen serverar. Tas bort när Next:s egen sharp-rad passerar `0.35.5-rc.1`.
 - `picomatch` (`1247710` GHSA-fc5q-39xc-vjpf): enbart bygg-/lint-verktyg (`tailwindcss` →
   `chokidar`/`anymatch` och eslint-resolverkedjan), aldrig i produktionsbundlen.
+
+**R15-10-härdning (2026-11-20):** dokumentationen och skriptet motsvarar nu varandra — alla
+fyra GHSA-posterna ovan finns i `ALLOWLIST` med `expires` (2027-02-28), skriven motivering och
+både GHSA-id och äldre numeriska `via.source`-id:n. Skriptet vägrar dessutom en utgången post,
+en post utan giltigt GHSA-id/motivering, och ett high/critical-fynd som inte kan attribueras
+till någon advisory alls (tidigare hoppades `via`-objekt utan numeriskt `source` tyst över).
+Ett allowlistat fynd som inte längre rapporteras loggas som en påminnelse att ta bort posten.
 
 **Medvetet INTE gjort:** `npm audit fix --force`. Det drar in `tailwindcss` 4.x och `eslint`
 10.x (major-uppgraderingar som ändrar bygget) och blandar en ren säkerhetsfix med en

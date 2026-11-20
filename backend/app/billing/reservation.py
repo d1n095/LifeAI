@@ -9,6 +9,7 @@ reservation may never be priced at zero merely because pricing is incomplete.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -21,16 +22,77 @@ from app.providers.pricing import estimate_cost
 logger = logging.getLogger(__name__)
 
 
-def estimate_reservation_cost(
-    settings: Settings | None, total_tokens: int, *, provider: str | None = None, model: str | None = None
+def estimate_usage_cost(
+    provider: str | None,
+    model: str | None,
+    *,
+    prompt_tokens: int,
+    completion_tokens: int,
+    settings: Settings | None = None,
 ) -> Decimal:
+    """Price input and output tokens separately through the single price table.
+
+    Providers charge input and output at materially different rates (typically output is
+    3-4x input). Pricing a mixed total as if it were all output overstates the cost and
+    causes false budget stops; pricing it all as input understates the hold. Unknown
+    provider/model combinations keep the existing configured per-1k fallback, applied to
+    the real total — a reservation is never silently priced at zero.
+    """
+    prompt = max(int(prompt_tokens), 0)
+    completion = max(int(completion_tokens), 0)
     settings = settings or get_settings()
     if provider is not None and model is not None:
-        priced = estimate_cost(provider, model, 0, total_tokens)
+        priced = estimate_cost(provider, model, prompt, completion)
         if priced is not None:
             return priced
     fallback = Decimal(str(settings.billing_unknown_cost_fallback_usd_per_1k))
-    return (fallback * Decimal(max(total_tokens, 0)) / 1000).quantize(Decimal("0.000001"))
+    return (fallback * Decimal(prompt + completion) / 1000).quantize(Decimal("0.000001"))
+
+
+def estimate_reservation_cost(
+    settings: Settings | None,
+    total_tokens: int,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+) -> Decimal:
+    if prompt_tokens is not None or completion_tokens is not None:
+        return estimate_usage_cost(
+            provider,
+            model,
+            prompt_tokens=prompt_tokens or 0,
+            completion_tokens=completion_tokens or 0,
+            settings=settings,
+        )
+    # Total-only callers cannot distinguish input from output. Price the total as output
+    # tokens: that is the conservative direction (output is never cheaper than input).
+    return estimate_usage_cost(
+        provider, model, prompt_tokens=0, completion_tokens=total_tokens, settings=settings
+    )
+
+
+def estimate_text_tokens(text: str) -> int:
+    """Conservative token estimate for one text block.
+
+    ASCII averages roughly four characters per token; non-ASCII characters (including the
+    Swedish letters this product uses) are charged as one token each rather than being
+    counted by raw UTF-8 bytes. Byte-counting overestimated ASCII prompts by ~4x and, in
+    combination with pricing the whole total as output, produced false budget refusals.
+    """
+    if not text:
+        return 0
+    ascii_chars = sum(1 for char in text if ord(char) < 128)
+    non_ascii_chars = len(text) - ascii_chars
+    return int(math.ceil(ascii_chars / 4)) + non_ascii_chars
+
+
+def estimate_prompt_tokens(contents, *, per_message_overhead: int = 4) -> int:
+    """Estimate prompt tokens for a message list, including per-message framing overhead."""
+    return sum(
+        estimate_text_tokens(content or "") + per_message_overhead for content in contents
+    )
 
 
 def _store(settings: Settings):
@@ -144,9 +206,20 @@ class ChatAttemptBudget:
     claim prevents reinvocation; reconciliation requires real external evidence.
     """
     def __init__(self, db, *, user, limits, estimated_tokens, source_ref, reply_slot, enforce,
-                 user_message_id=None):
+                 user_message_id=None, estimated_prompt_tokens=None,
+                 estimated_completion_tokens=None):
         self.db, self.user, self.limits = db, user, limits
-        self.estimated_tokens = estimated_tokens
+        if estimated_prompt_tokens is None and estimated_completion_tokens is None:
+            # Legacy total-only callers: keep the previous conservative assumption.
+            self.estimated_prompt_tokens = 0
+            self.estimated_completion_tokens = max(int(estimated_tokens), 0)
+        else:
+            self.estimated_prompt_tokens = max(int(estimated_prompt_tokens or 0), 0)
+            self.estimated_completion_tokens = max(int(estimated_completion_tokens or 0), 0)
+        self.estimated_tokens = max(
+            self.estimated_prompt_tokens + self.estimated_completion_tokens,
+            max(int(estimated_tokens), 0),
+        )
         self.reservation = None
         self.attempt = None
         self.source_ref = source_ref
@@ -194,7 +267,14 @@ class ChatAttemptBudget:
             raise BillingPriceUnverifiedError("Provider/model has no verified price bound.") from None
         self.reservation = reserve_compute(
             self.db, user=self.user, limits=self.limits, estimated_tokens=self.estimated_tokens,
-            estimated_cost_usd=estimate_reservation_cost(None, self.estimated_tokens, provider=provider, model=model),
+            estimated_cost_usd=estimate_reservation_cost(
+                None,
+                self.estimated_tokens,
+                provider=provider,
+                model=model,
+                prompt_tokens=self.estimated_prompt_tokens,
+                completion_tokens=self.estimated_completion_tokens,
+            ),
             idempotency_key=f"{self.source_ref}:{provider}:{model}",
         )
         # Durable attempt identity BEFORE the invocation marker. A crash between this
@@ -285,8 +365,11 @@ class ChatAttemptBudget:
             settle_reservation(
                 self.reservation,
                 actual_tokens=prompt + completion,
-                actual_cost_usd=estimate_reservation_cost(
-                    None, prompt + completion, provider=result.provider, model=result.model
+                actual_cost_usd=estimate_usage_cost(
+                    result.provider,
+                    result.model,
+                    prompt_tokens=prompt,
+                    completion_tokens=completion,
                 ),
             )
         except Exception:

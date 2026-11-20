@@ -83,9 +83,19 @@ def evaluation_provider_scope(provider_class, models: dict[str, str], *, authori
     if not authorized or get_settings().environment not in {"test", "development"}:
         raise ProviderError("Model evaluation is not authorized in this environment.",
                             category="unsupported", provider_request_may_have_left=False)
+    # No nesting: an evaluation scope may never wrap (or be wrapped by) another scope, so
+    # an evaluation identity cannot be silently swapped or re-entered over production.
+    if _evaluation_context.get() is not None:
+        raise ProviderError("An evaluation scope is already active.", category="unsupported",
+                            provider_request_may_have_left=False)
     if provider_class.name != "zai_eval" or set(models) != {"chat", "embedding"}:
         raise ProviderError("Invalid evaluation identity.", category="unsupported",
                             provider_request_may_have_left=False)
+    if any(not isinstance(model, str) or not model.strip() or model.strip() != model
+           or any(char in model for char in "*?")
+           for model in models.values()):
+        raise ProviderError("Evaluation models must be exact, non-empty identifiers.",
+                            category="unsupported", provider_request_may_have_left=False)
     lease = _EvaluationLease(provider_class, dict(models))
     token = _evaluation_context.set(lease)
     try:

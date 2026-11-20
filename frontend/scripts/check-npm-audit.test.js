@@ -22,16 +22,39 @@ function run(report, failed = false) {
   }
   return { exit, messages };
 }
+function report(via, severity = "high") {
+  return { vulnerabilities: { demo: { severity, via } },
+    metadata: { vulnerabilities: { total: 1, high: severity === "high" ? 1 : 0,
+      critical: severity === "critical" ? 1 : 0 } } };
+}
 test("registry error JSON and incomplete reports fail closed", () => {
-  for (const report of [{ error: { code: "ENOTFOUND" } }, {}, { vulnerabilities: {} }]) {
-    const result = run(report, true);
+  for (const bad of [{ error: { code: "ENOTFOUND" } }, {}, { vulnerabilities: {} }]) {
+    const result = run(bad, true);
     assert.equal(result.exit, 1);
     assert.equal(result.messages.some((m) => m.includes("OK.")), false);
   }
 });
 test("unknown high advisory fails even with nonzero npm exit", () => {
-  assert.equal(run({ vulnerabilities: { demo: { severity: "high", via: [{ source: 999999999 }] } },
-    metadata: { vulnerabilities: { total: 1 } } }, true).exit, 1);
+  assert.equal(run(report([{ source: 999999999 }]), true).exit, 1);
+});
+test("an advisory with no numeric source is still attributed and fails", () => {
+  const result = run(report([{ title: "unattributed high finding" }]));
+  assert.equal(result.exit, 1);
+  assert.equal(result.messages.some((m) => m.includes("unattributed")), true);
+});
+test("a high/critical count with no attributable advisory fails closed", () => {
+  const result = run({ vulnerabilities: { demo: { severity: "high", via: ["demo"] } },
+    metadata: { vulnerabilities: { total: 1, high: 1, critical: 0 } } });
+  assert.equal(result.exit, 1);
+  assert.equal(result.messages.some((m) => m.includes("could not be attributed")), true);
+});
+test("allowlisted advisories match by GHSA url and legacy source id", () => {
+  const byGhsa = run(report([{ url: "https://github.com/advisories/GHSA-mh99-v99m-4gvg" }]));
+  assert.equal(byGhsa.exit, 0);
+  assert.equal(byGhsa.messages.some((m) => m.includes("OK.")), true);
+  const bySource = run(report([{ source: 1130588 }]));
+  assert.equal(bySource.exit, 0);
+  assert.equal(bySource.messages.some((m) => m.includes("OK.")), true);
 });
 test("a completed clean scan passes", () => {
   const result = run({ vulnerabilities: {}, metadata: { vulnerabilities: { total: 0 } } });
