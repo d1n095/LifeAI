@@ -8,6 +8,7 @@ Expects the schema to already be migrated (`alembic upgrade head` — see
 .github/workflows/ci.yml and docs/OPERATIONS.md). Deliberately does NOT create tables
 itself; that's the whole point of no longer using Base.metadata.create_all in this app.
 """
+import asyncio
 import json
 import os
 import sys
@@ -66,11 +67,15 @@ async def fake_chat(self, messages, model, **kwargs):
     )
 
 
-async def fake_embed(self, texts, model):
+async def fake_embed(self, texts, model, **kwargs):
     # Must match app/config.py's embedding_dim exactly — pgvector's document_chunks.embedding
     # column is a fixed vector(1536) (see the 0004 migration), unlike Qdrant's old
     # dynamically-sized collection. A shorter fake vector here would raise a dimension
     # mismatch the moment anything actually tried to insert it.
+    #
+    # `**kwargs` is required: ensure_verified() calls embed(..., timeout=...) before an import
+    # is allowed to proceed. A narrower fake made that pre-flight fail with TypeError and
+    # paused every E2E import as blocked_provider.
     return [[0.05] * _EMBEDDING_DIM for _ in texts]
 
 
@@ -117,6 +122,28 @@ retrieve_mod.search = fake_search
 auth_router.send_email = fake_send_email
 
 import uvicorn
+from app.worker import Worker
+
+
+async def _serve() -> None:
+    """Serve the API and run the durable worker in the same E2E process.
+
+    Uploads intentionally only create a pending `knowledge_import_jobs` row; a separate
+    production worker service does the indexing. The browser E2E harness must therefore
+    start that worker too, otherwise every import test can only ever observe `pending`.
+    This is test-only wiring and does not change the production process split.
+    """
+    worker = Worker()
+    worker_task = asyncio.create_task(worker.run())
+    server = uvicorn.Server(
+        uvicorn.Config("app.main:app", host=HOST, port=PORT, log_level="warning")
+    )
+    try:
+        await server.serve()
+    finally:
+        worker.request_shutdown()
+        await worker_task
+
 
 if __name__ == "__main__":
-    uvicorn.run("app.main:app", host=HOST, port=PORT, log_level="warning")
+    asyncio.run(_serve())

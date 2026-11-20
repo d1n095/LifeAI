@@ -513,7 +513,7 @@ jobs:
             curl -sf -o /dev/null http://127.0.0.1:8010/api/health && break
             sleep 1
           done
-      - run: npx playwright test e2e/auth.spec.ts e2e/security.spec.ts e2e/account.spec.ts e2e/model-routing.spec.ts --project=chromium
+      - run: npx playwright test e2e/auth.spec.ts e2e/founder-knowledge-studio.spec.ts e2e/security.spec.ts e2e/account.spec.ts e2e/model-routing.spec.ts --project=chromium
         working-directory: frontend
       - name: Stop backend
         if: always()
