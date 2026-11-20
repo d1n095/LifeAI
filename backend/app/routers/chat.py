@@ -299,7 +299,8 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     # reason as every block above: a status derivation problem must never cost the founder the
     # reply they already earned.
     try:
-        system_content += "\n\n" + format_project_status_instructions(db, owner_id=user.id)
+        system_content += "\n\n" + format_project_status_instructions(
+            db, owner_id=user.id, question="\n".join([m.content for m in history if m.role == MessageRole.user][-2:] + [user_message.content]))
     except Exception:
         logger.warning("project status block failed; reply unaffected", exc_info=True)
     messages = [Message(role="system", content=system_content)]

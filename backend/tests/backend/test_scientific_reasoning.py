@@ -18,6 +18,9 @@ Proven on real PostgreSQL with real stamped metadata and declared edges:
   6. Owner scoping end to end.
 """
 
+from app.config import get_settings as _guard_test_settings
+from app.providers.ollama_provider import OllamaProvider as _LocalQueryEmbedding
+
 import uuid
 
 import pytest
@@ -68,7 +71,7 @@ def _study(db, owner_id, *, topic, meta):
     db.add(source)
     db.commit()
     text = meta.pop("_text", f"Studieuttalande {uuid.uuid4().hex[:8]}.")
-    chunk = DocumentChunk(document_id=source.id, owner_id=owner_id, chunk_index=0, text=text, embedding=_bow_vec_local(text))
+    chunk = DocumentChunk(document_id=source.id, owner_id=owner_id, chunk_index=0, text=text, embedding=_bow_vec_local(text), embedding_model=_guard_test_settings().default_embedding_model, embedding_native_dim=_guard_test_settings().embedding_dim)
     db.add(chunk)
     db.commit()
     claim = KnowledgeClaim(
@@ -180,7 +183,9 @@ def test_science_and_policy_ride_the_chat_prompt(db_session, client, monkeypatch
         captured["system"] = messages[0].content
         return ChatResult(content="Svar.", provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 3})
 
-    monkeypatch.setattr(OpenAIProvider, "embed", _embed)
+    monkeypatch.setattr(_guard_test_settings(), "default_embedding_provider", "ollama")
+
+    monkeypatch.setattr(_LocalQueryEmbedding, "embed", _embed)
     monkeypatch.setattr(OpenAIProvider, "chat", _chat)
     founder = db_session.query(User).filter(User.email == "founder@lifeos.local").first()
     _study(db_session, founder.id, topic="sci_prompt", meta={"study_design": "randomized_trial", "sample_size": 100, "competing_explanations": ["controlled"]})

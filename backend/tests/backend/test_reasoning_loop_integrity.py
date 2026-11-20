@@ -19,6 +19,9 @@ surface treats unverified lessons as hypotheses — never established rules:
      cluster forms (executable invocation proof, not an import proof).
 """
 
+from app.config import get_settings as _guard_test_settings
+from app.providers.ollama_provider import OllamaProvider as _LocalQueryEmbedding
+
 import uuid
 from datetime import datetime
 
@@ -243,7 +246,9 @@ def test_chat_prompt_carries_lesson_feedback_and_changes_with_a_cluster(client, 
 
         return get_settings().embedding_dim
 
-    monkeypatch.setattr(OpenAIProvider, "embed", _embed)
+    monkeypatch.setattr(_guard_test_settings(), "default_embedding_provider", "ollama")
+
+    monkeypatch.setattr(_LocalQueryEmbedding, "embed", _embed)
     monkeypatch.setattr(OpenAIProvider, "chat", _chat)
 
     founder = db_session.query(User).filter(User.email == "founder@lifeos.local").first()

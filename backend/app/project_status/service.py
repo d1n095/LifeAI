@@ -15,6 +15,7 @@ including abandoned ones, agent assignments and work candidates (app/project_sta
 from __future__ import annotations
 
 import uuid
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -22,7 +23,6 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.capability_reality.service import list_capability_records
-from app.config import get_settings
 from app.founder_memory.service import list_current_founder_memory
 from app.github_evidence.service import list_github_evidence_candidates
 from app.github_status.service import dev_status, summary_for_prompt
@@ -459,12 +459,28 @@ def build_project_status(db: Session, *, owner_id: uuid.UUID) -> dict[str, Any]:
     return status
 
 
-def format_project_status_instructions(db: Session, *, owner_id: uuid.UUID) -> str:
+def project_status_relevant(question: str) -> bool:
+    """Select read-only context, never execution authority. Callers include recent turns
+    so short follow-ups retain project context; absent facts never authorize status claims.
+    """
+    text = question.casefold()
+    return bool(re.search(
+        r"\b(projekt\w*|project\w*|status|blueprint|github|git|repo\w*|branch\w*|"
+        r"commit\w*|pull request|pr|ci|kod\w*|code|coding|utveckl\w*|develop\w*|"
+        r"deploy\w*|release\w*|integrat\w*|test\w*|debug\w*|bug\w*|fix\w*|"
+        r"plan\w*|task\w*|goal\w*|mål|arbet\w*|work\w*|agent\w*|"
+        r"nästa|next|fortsätt|continue|block\w*|lifeai|l4tp|founder|alpha|r15|capabilit\w*|förmå\w*)\b", text
+    )) or any(phrase in text for phrase in ("var är vi", "where are we", "vad händer", "what is happening", "hur går det", "kan du", "what can you"))
+
+
+def format_project_status_instructions(db: Session, *, owner_id: uuid.UUID, question: str | None = None) -> str:
     """Compact prompt block so the founder's question "var är vi?" is answered from facts.
 
     Fail-open at the call site (see app/routers/chat.py): if this raises, the reply proceeds
     without it and never invents a status.
     """
+    if question is not None and not project_status_relevant(question):
+        return "PROJEKTSTATUS: inte hämtad för denna fråga. Gör inga påståenden om projektets aktuella status utan registerfakta."
     status = build_project_status(db, owner_id=owner_id)
     blueprint = status["blueprint"]["approved"]
     classes = status["status_classes"]

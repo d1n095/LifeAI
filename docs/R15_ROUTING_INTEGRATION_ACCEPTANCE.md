@@ -90,3 +90,19 @@ A final call-chain check found that query retrieval precedes chat admission: its
 This intentionally limits guarded Founder chat to local query embedding until the shared embedding result contract supplies trustworthy usage, attempt identity and reconciliation semantics. It does not silently substitute an external embedding model or mix embedding spaces. Real paid embedding support remains a release dependency, not a claimed pass. Negative tests assert zero external calls, exact guard/owner propagation and preservation of local redaction.
 
 Query-embedding guard regression: **142 passed** across integration-security, chat and egress suites. Source/context fixtures use a mocked local embedding transport, retain active-space identity, and keep their original grounding, conflict, status and redaction assertions. An initial guard run exposed the obsolete external-embedding fixtures; that interrupted run is not a pass.
+
+## Finding index for the independent reviewer
+
+Risk describes the defect before correction, not independent approval of the patch. Line references identify the corrected boundary in this candidate; the exact parent above preserves the reproducing before-state.
+
+| Risk | Boundary | Reproducible evidence / disposition |
+| --- | --- | --- |
+| High | `providers/registry.py:76`, `mainai_evals/model_gate.py` | Concurrent eval could replace production Z.ai registration/config. Scoped identity, expired copied-context and credential-environment regressions now refuse cross-context use. |
+| High | `routers/chat.py:96`, `providers/registry.py:330` | Concurrent retry or a timeout could reinvoke/fall back after an uncertain effect. Real PostgreSQL reply-slot/concurrency and timeout tests assert one invocation and retry HTTP 409. |
+| High | `billing/enforcement.py:213`, `:315`, `billing/reservation.py:137` | Repeated reserve/finalize or safe retry could reuse/release counters incorrectly. Real Redis and local concurrent replay, wrong-key and fresh-attempt tests verify idempotent transitions. Unknown outcomes remain held. |
+| High | `providers/registry.py:212`, `rag/retrieve.py` | Retrying retrieval could repeat an unmetered external query embedding. Guarded chat refuses it before transport; negative tests assert zero calls and preserve owner-bound local redaction. Full paid embedding support is still unavailable. |
+| Medium | `project_status/service.py:462`, `routers/chat.py` | Unconditional R15 status composition pushed measured chat requests to 98/102 SQL statements beyond the existing limit of 80. Context is now question-relevant, includes two recent user turns, remains owner-scoped, and explicitly forbids status claims when not loaded. The limit and latency assertions are unchanged. |
+
+Older cognitive fixtures also omitted the model/native-dimension identity required by the existing vector filter. Their active-space identities are now stamped and their deterministic query transport is local; grounding, conflict, prompt-fencing, owner isolation and latency assertions remain. The inherited `test_dbg_gate2.py` unconditionally asserted false; it now asserts the two retrieved source identities, actual science/graph prompt blocks and owner-scoped research topics instead of printing diagnostic output. These fixture/artifact repairs are not represented as live cognitive/model evaluation.
+
+Final composed follow-up: **58 passed**, covering all dedicated integration-security cases, both unchanged SQL-budget/latency assertions, scientific composition, the repaired diagnostic regression and recent-user-turn status continuity. The preceding broad cognitive/status/GitHub/integration run had **157 passed, 1 failed** on the unconditional debug assertion; it is not labeled a full pass. Final full-backend and browser acceptance must come from exact-head CI.

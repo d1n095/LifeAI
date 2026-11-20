@@ -447,3 +447,57 @@ async def test_guarded_embedding_only_allows_evaluation_with_active_lease(db_ses
         assert await registry.embed_with_policy(db_session, FakeEvaluation(), ["query"], model="bow", effect_guard=True) == [[1.0]]
     with pytest.raises(ProviderError):
         await registry.embed_with_policy(db_session, FakeEvaluation(), ["query"], model="bow", effect_guard=True)
+
+
+@pytest.mark.parametrize("question", ["Var är vi?", "Vad är nästa steg?", "Review PR 464", "Fortsätt integrationen", "What is the project status?", "Koda nästa uppgift"])
+def test_project_context_keeps_status_questions(question):
+    from app.project_status.service import project_status_relevant
+    assert project_status_relevant(question)
+
+
+@pytest.mark.parametrize("question", ["Hej, vad heter jag?", "Vad vet vi om kaffe och sömn?"])
+def test_unrelated_question_cannot_read_or_invent_project_status(monkeypatch, question):
+    from app.project_status import service
+    import uuid
+    def forbidden(*args, **kwargs):
+        pytest.fail("unrelated question loaded project snapshot")
+    monkeypatch.setattr(service, "build_project_status", forbidden)
+    block = service.format_project_status_instructions(None, owner_id=uuid.uuid4(), question=question)
+    assert "inte hämtad" in block and "utan registerfakta" in block
+
+
+def test_relevant_question_preserves_owner_for_existing_status_composer(monkeypatch):
+    from app.project_status import service
+    import uuid
+    owner = uuid.uuid4()
+    observed = []
+    def stop(db, *, owner_id):
+        observed.append(owner_id)
+        raise RuntimeError("snapshot reached")
+    monkeypatch.setattr(service, "build_project_status", stop)
+    with pytest.raises(RuntimeError, match="snapshot reached"):
+        service.format_project_status_instructions(None, owner_id=owner, question="Projektstatus?")
+    assert observed == [owner]
+
+
+def test_project_status_followup_keeps_recent_user_context(client, monkeypatch):
+    from app.routers import chat
+    from app.providers.openai_provider import OpenAIProvider
+    captured = []
+    async def empty(*args, **kwargs):
+        return []
+    async def reply(self, messages, model, **kwargs):
+        return ChatResult("ok", "openai", model, {"prompt_tokens": 10, "completion_tokens": 1})
+    def status(db, *, owner_id, question):
+        captured.append((owner_id, question))
+        return "REGISTERFAKTA"
+    monkeypatch.setattr(chat, "retrieve_context", empty)
+    monkeypatch.setattr(chat, "format_project_status_instructions", status)
+    monkeypatch.setattr(OpenAIProvider, "chat", reply)
+    headers = login(client)
+    first = client.post("/api/chat", json={"message":"Projektstatus?"}, headers=headers)
+    assert first.status_code == 200 and first.json()["assistant_status"] == "succeeded"
+    second = client.post("/api/chat", json={"message":"Och sedan?", "conversation_id":first.json()["conversation_id"]}, headers=headers)
+    assert second.status_code == 200 and second.json()["assistant_status"] == "succeeded"
+    assert len(captured) == 2 and captured[0][0] == captured[1][0]
+    assert "Projektstatus?" in captured[1][1] and "Och sedan?" in captured[1][1]

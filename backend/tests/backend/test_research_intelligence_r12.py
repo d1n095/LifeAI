@@ -92,11 +92,13 @@ def test_superseded_source_never_rides_as_current(env, monkeypatch):
     # Direct retrieve call: the vector channel needs a query embedding — mock the
     # embedding provider (no real network calls in tests, ever).
     from app.providers.openai_provider import OpenAIProvider
+    from app.providers.ollama_provider import OllamaProvider
 
     async def _embed(self, texts, model, **kwargs):
         return [_bow(t) for t in texts]
 
-    monkeypatch.setattr(OpenAIProvider, "embed", _embed)
+    monkeypatch.setattr(get_settings(), "default_embedding_provider", "ollama")
+    monkeypatch.setattr(OllamaProvider, "embed", _embed)
 
     old, old_claim = _doc(env, "Gammal studie 2010", "Tidigare studie: ämne X har effekt Y.", {"topic": "ri_sup", "study_design": "prospective_cohort", "sample_size": 300, "competing_explanations": ["controlled"]})
     old.active_truth_status = ActiveTruthStatus.superseded
@@ -125,6 +127,7 @@ def test_superseded_source_never_rides_as_current(env, monkeypatch):
     from app.models.user import User
     from app.providers.base import ChatResult
     from app.providers.openai_provider import OpenAIProvider
+    from app.providers.ollama_provider import OllamaProvider
     from tests.backend.test_claim_graph_integration import _login
 
     state = {}

@@ -23,6 +23,9 @@ What is proven on real PostgreSQL/Redis through the real HTTP surface:
   6. Owner isolation end to end: another owner's claims are 404 on every new surface.
 """
 
+from app.config import get_settings as _guard_test_settings
+from app.providers.ollama_provider import OllamaProvider as _LocalQueryEmbedding
+
 import uuid
 
 import pytest
@@ -60,7 +63,7 @@ def _claimed_source(session, owner_id, *, title="Källa", text="Bolaget grundade
     source = Document(title=title, source=DocumentSource.upload, uploaded_by=owner_id, project_id=project_id)
     session.add(source)
     session.commit()
-    chunk = DocumentChunk(document_id=source.id, owner_id=owner_id, chunk_index=0, text=text, embedding=[0.1] * DIM)
+    chunk = DocumentChunk(document_id=source.id, owner_id=owner_id, chunk_index=0, text=text, embedding=[0.1] * DIM, embedding_model=_guard_test_settings().default_embedding_model, embedding_native_dim=DIM)
     session.add(chunk)
     session.commit()
     claim = KnowledgeClaim(
@@ -250,7 +253,9 @@ def test_chat_system_prompt_actually_carries_the_evidence_lines(client, monkeypa
         captured["system"] = messages[0].content
         return ChatResult(content="Svar.", provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 3})
 
-    monkeypatch.setattr(OpenAIProvider, "embed", _embed)
+    monkeypatch.setattr(_guard_test_settings(), "default_embedding_provider", "ollama")
+
+    monkeypatch.setattr(_LocalQueryEmbedding, "embed", _embed)
     monkeypatch.setattr(OpenAIProvider, "chat", _chat)
 
     from app.models.user import User
@@ -290,7 +295,9 @@ def test_workbench_system_prompt_actually_carries_the_evidence_lines(client, mon
         captured["system"] = messages[0].content
         return ChatResult(content="Analys.", provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 3})
 
-    monkeypatch.setattr(OpenAIProvider, "embed", _embed)
+    monkeypatch.setattr(_guard_test_settings(), "default_embedding_provider", "ollama")
+
+    monkeypatch.setattr(_LocalQueryEmbedding, "embed", _embed)
     monkeypatch.setattr(OpenAIProvider, "chat", _chat)
 
     csrf = _login(client)

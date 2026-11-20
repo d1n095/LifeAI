@@ -18,6 +18,9 @@ What is proven here, on real PostgreSQL/Redis through real production call paths
      never switches a model — the provider registry is untouched by comparison.
 """
 
+from app.config import get_settings as _guard_test_settings
+from app.providers.ollama_provider import OllamaProvider as _LocalQueryEmbedding
+
 import json
 import uuid
 from datetime import datetime
@@ -109,7 +112,9 @@ class GateHarness:
                 raw_usage={"prompt_tokens": 5, "completion_tokens": 3},
             )
 
-        self.monkeypatch.setattr(OpenAIProvider, "embed", _embed)
+        self.monkeypatch.setattr(_guard_test_settings(), "default_embedding_provider", "ollama")
+
+        self.monkeypatch.setattr(_LocalQueryEmbedding, "embed", _embed)
         self.monkeypatch.setattr(OpenAIProvider, "chat", _chat)
 
         founder = self.db.query(User).filter(User.email == FOUNDER_EMAIL).first()
@@ -144,7 +149,7 @@ class GateHarness:
         source = Document(title=title, source=DocumentSource.upload, uploaded_by=self.founder_id)
         self.db.add(source)
         self.db.commit()
-        chunk = DocumentChunk(document_id=source.id, owner_id=self.founder_id, chunk_index=0, text=text, embedding=self._bow_vec(text))
+        chunk = DocumentChunk(document_id=source.id, owner_id=self.founder_id, chunk_index=0, text=text, embedding=self._bow_vec(text), embedding_model=_guard_test_settings().default_embedding_model, embedding_native_dim=DIM)
         self.db.add(chunk)
         self.db.commit()
         claim = KnowledgeClaim(
