@@ -23,6 +23,12 @@ from app.config import Settings
 #   validates: short description of what, if anything, enforces correctness (pydantic
 #     validator, startup check in app/main.py, or "none" if nothing currently does).
 CONFIG_MATRIX: dict[str, dict] = {
+    "github_tracked_branch": {"required_in_production": False, "secret": False, "default": None,
+                              "validates": "none — optional read-only snapshot branch; grants no write authority"},
+    "github_status_stale_minutes": {"required_in_production": False, "secret": False, "default": 30,
+                                    "validates": "none — stale snapshot threshold, not evidence of current status"},
+    "local_repo_path": {"required_in_production": False, "secret": False, "default": None,
+                        "validates": "none — operator-provisioned optional read-only git observation path"},
     "environment": {
         "required_in_production": False,
         "secret": False,

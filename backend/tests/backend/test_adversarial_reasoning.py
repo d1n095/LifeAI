@@ -245,7 +245,7 @@ def test_retrieval_never_leaks_across_owners(db_session, client, monkeypatch, ma
     monkeypatch.setattr(_LocalQueryEmbedding, "embed", _fake_embed)
     import asyncio
 
-    hits = asyncio.get_event_loop().run_until_complete(
+    hits = asyncio.run(
         retrieve_context(db_session, founder.id, "Hemligt innehåll", top_k=5)
     )
     assert all(h["title"] != "Hemlig dokument" for h in hits), (

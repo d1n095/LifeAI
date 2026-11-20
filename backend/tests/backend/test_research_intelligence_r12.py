@@ -110,7 +110,7 @@ def test_superseded_source_never_rides_as_current(env, monkeypatch):
     assert source_status == "superseded", "the chain SURFACES the superseded status — provenance, not deletion"
 
     owner = env["owner"].id
-    hits = asyncio.get_event_loop().run_until_complete(
+    hits = asyncio.run(
         retrieve_context(env["db"], owner, "ämne X effekt Y", top_k=10)
     )
     # The retrieval layer LABELS the status (provenance-preserving, not deletion);

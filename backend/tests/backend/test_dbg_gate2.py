@@ -25,7 +25,7 @@ def test_scientific_retrieval_reaches_real_chat_prompt(db_session, client, monke
     # retrieve directly to see hit order
     from app.rag.retrieve import retrieve_context
     import asyncio
-    hits = asyncio.get_event_loop().run_until_complete(retrieve_context(db_session, founder.id, "Vad vet vi om kaffe och puls?", top_k=5))
+    hits = asyncio.run(retrieve_context(db_session, founder.id, "Vad vet vi om kaffe och puls?", top_k=5))
     assert {str(hit["document_id"]) for hit in hits} == {str(first_source.id), str(second_source.id)}
     res = client.post("/api/chat", json={"conversation_id": None, "message": "Vad vet vi om kaffe och puls?"}, headers={"X-CSRF-Token": csrf})
     assert res.status_code == 200 and res.json()["assistant_status"] == "succeeded"
