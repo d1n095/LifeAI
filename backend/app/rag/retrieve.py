@@ -1,5 +1,6 @@
 import uuid
 
+import httpx
 from sqlalchemy.orm import Session
 
 from app.providers.base import ProviderError
@@ -16,6 +17,17 @@ class GroundingUnavailableError(ProviderError):
     and the remedy is configuration (local Ollama embedding, or a metered embedding
     contract), not a retry against another provider. Chat surfaces it as an explicit
     degraded-grounding reason instead of pretending the answer was grounded.
+    """
+
+
+class RetrievalUnavailableError(GroundingUnavailableError):
+    """The embedding transport failed, or returned no usable vector.
+
+    Unlike ``GroundingUnavailableError``'s pre-egress refusal, this failure may have reached
+    the provider, so ``provider_request_may_have_left`` is preserved instead of asserted
+    False. It deliberately subclasses ``GroundingUnavailableError`` so every existing
+    retrieval caller (chat, knowledge, workbench, blueprint) already maps it to an explicit
+    degraded/503 response -- never an unhandled 500 and never silently empty grounding.
     """
 
 
@@ -37,7 +49,18 @@ async def retrieve_context(
     # as each already is for ProviderError/httpx.HTTPError -- see app/routers/chat.py's
     # _attempt_assistant_reply() for the one caller that currently degrades gracefully rather
     # than 500ing.
-    provider, model = resolve_active(db, role="embedding")
+    from app.egress_policy import EgressDeniedError
+
+    try:
+        provider, model = resolve_active(db, role="embedding")
+    except ProviderError as exc:
+        # No embedding provider could be activated. This is a configuration failure before
+        # any outbound call, not an uncertain provider effect.
+        raise RetrievalUnavailableError(
+            "Kunskapssökning är inte tillgänglig: ingen embedding-leverantör kunde aktiveras.",
+            category=exc.category or "unreachable",
+            provider_request_may_have_left=False,
+        ) from None
     try:
         vectors = await embed_with_policy(
             db,
@@ -51,6 +74,10 @@ async def retrieve_context(
             requested_by="rag.retrieve.retrieve_context",
             effect_guard=effect_guard,
         )
+    except EgressDeniedError:
+        # Content denial is a policy decision, not a provider outage; callers map it to
+        # their own explicit 422/degraded response and it must not be retried or masked.
+        raise
     except ProviderError as exc:
         # The guard refused the active provider before any outbound call. Make the cause
         # explicit and actionable; do not let it collapse into a generic "provider down".
@@ -63,7 +90,38 @@ async def retrieve_context(
                 category="unsupported",
                 provider_request_may_have_left=False,
             ) from None
-        raise
+        # A real provider failure (local Ollama down, invalid key, unsupported role, ...).
+        # classify_provider_exception() produces a safe message; never surface a raw
+        # httpx/provider exception that could contain a URL or credential.
+        from app.providers.verification import classify_provider_exception
+
+        outcome = classify_provider_exception(exc)
+        raise RetrievalUnavailableError(
+            f"Kunskapssökning är inte tillgänglig: {outcome.message}",
+            category=exc.category or outcome.result.value,
+            provider_request_may_have_left=exc.provider_request_may_have_left,
+        ) from None
+    except httpx.HTTPError as exc:
+        # A configured-but-invalid key can raise an unwrapped httpx error from embed().
+        # Preserve the explicit degraded contract instead of letting it become a 500.
+        from app.providers.verification import classify_provider_exception
+
+        outcome = classify_provider_exception(exc)
+        raise RetrievalUnavailableError(
+            f"Kunskapssökning är inte tillgänglig: {outcome.message}",
+            category="unreachable",
+            provider_request_may_have_left=True,
+        ) from None
+
+    if not vectors or not vectors[0]:
+        # A provider that returns an empty batch/vector is a real failure, not "zero hits".
+        # Without this guard vectors[0] raised an unhandled IndexError (HTTP 500) in every
+        # caller, losing the explicit degraded-grounding contract entirely.
+        raise RetrievalUnavailableError(
+            "Kunskapssökning är inte tillgänglig: embedding-leverantören returnerade ingen vektor.",
+            category="unreachable",
+            provider_request_may_have_left=True,
+        )
     # Scope retrieval to the ACTIVE embedding space (model + this query's native dim) so a
     # query embedded with model X can only ever match chunks embedded with model X — no
     # silent cross-model mixing (app/rag/embedding_space.py). search() zero-pads the query to

@@ -9834,9 +9834,13 @@ remaining R15 findings:
   `security/**`, so this branch's own checks run.
 - **R15-11:** DB-free negative regressions cover ambiguous vs proven-pre-egress timeouts,
   eight concurrent identical reservations charging once, tenant counter isolation, split
-  pricing/settlement, and eval-scope escape.
+  pricing/settlement, and eval-scope escape. Retrieval transport failures and empty
+  embedding batches/vectors now raise an explicit `RetrievalUnavailableError` (a
+  `GroundingUnavailableError` subclass) instead of escaping as an unhandled 500 or an
+  `IndexError`; chat reports `grounding_status="degraded"` and knowledge/workbench/blueprint
+  return 503 through their existing grounding boundary.
 
-**Tests (local, no PostgreSQL/Redis):** `tests/security_r15_successor` 54 passed plus the
+**Tests (local, no PostgreSQL/Redis):** `tests/security_r15_successor` 61 passed plus five
 Redis-backed store tests skipped for lack of a reachable `REDIS_URL`;
 `tests/security_r15_egress` 13 passed; `ruff`, `compileall`, `git diff --check` and
 `node --test scripts/check-npm-audit.test.js` (6/6) pass.
@@ -9850,7 +9854,8 @@ GitHub Actions job runs both DB-free suites and the DB/Redis-backed R15 boundari
 `test_mainai_execution_lesson_conflicts.py`, `mainai/test_egress_policy.py`,
 `mainai/test_provider_crash_before_settle.py`). The same sequence is available to Codex in
 any isolated environment via `backend/scripts/ci/run_r15_security_suite.sh` (add
-`--db-free-only` when no services exist). The job is committed but has not run here.
+`--db-free-only` when no services exist), including the new
+`test_r15_rag_failure_boundaries.py`. The job is committed but has not run here.
 
 **Still blocking locally:** this environment has no `postgres`/`redis-server`, and Docker
 returns permission denied on `/var/run/docker.sock`, so the DB/Redis-backed half is **unrun

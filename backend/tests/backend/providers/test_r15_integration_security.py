@@ -501,3 +501,65 @@ def test_project_status_followup_keeps_recent_user_context(client, monkeypatch):
     assert second.status_code == 200 and second.json()["assistant_status"] == "succeeded"
     assert len(captured) == 2 and captured[0][0] == captured[1][0]
     assert "Projektstatus?" in captured[1][1] and "Och sedan?" in captured[1][1]
+
+
+def test_knowledge_search_surfaces_embedding_transport_failure(client, monkeypatch):
+    """An unwrapped httpx failure from embed() must be a 503, never an unhandled 500."""
+    import httpx
+
+    from app.rag import retrieve
+
+    async def fail(*args, **kwargs):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(
+        retrieve,
+        "resolve_active",
+        lambda *a, **k: (SimpleNamespace(name="ollama", is_local=True), "nomic-embed-text"),
+    )
+    monkeypatch.setattr(retrieve, "embed_with_policy", fail)
+
+    response = client.post(
+        "/api/knowledge/search", json={"query": "fraga"}, headers=login(client)
+    )
+
+    assert response.status_code == 503, response.text
+    assert "Kunskapssökning" in response.json()["detail"]
+
+
+def test_chat_surfaces_degraded_grounding_on_embedding_transport_failure(client, monkeypatch):
+    """Chat still answers, but explicitly reports degraded grounding instead of silence."""
+    import httpx
+
+    from app.providers.openai_provider import OpenAIProvider
+    from app.rag import retrieve
+
+    async def fail(*args, **kwargs):
+        raise httpx.ConnectError("connection refused")
+
+    async def reply(self, messages, model, **kwargs):
+        return ChatResult(
+            "Svar.",
+            "openai",
+            model,
+            raw_usage={"prompt_tokens": 5, "completion_tokens": 2},
+        )
+
+    monkeypatch.setattr(
+        retrieve,
+        "resolve_active",
+        lambda *a, **k: (SimpleNamespace(name="ollama", is_local=True), "nomic-embed-text"),
+    )
+    monkeypatch.setattr(retrieve, "embed_with_policy", fail)
+    monkeypatch.setattr(OpenAIProvider, "chat", reply)
+    monkeypatch.setattr(get_settings(), "chat_fallback_order", "")
+
+    response = client.post("/api/chat", json={"message": "fraga"}, headers=login(client))
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["assistant_status"] == "succeeded"
+    assert body["grounding_status"] == "degraded"
+    assert "Kunskapssökning" in body["grounding_reason"]
+    assert body["sources"] == []
+    assert body["context_status"]["reason"] == "search_provider_unavailable"

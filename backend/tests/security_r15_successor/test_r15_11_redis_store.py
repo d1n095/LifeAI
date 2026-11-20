@@ -15,6 +15,7 @@ from decimal import Decimal
 
 import pytest
 
+from app.billing.chat_attempts import reservations_from_record, serialize_reservations
 from app.billing.enforcement import BillingEnforcementUnavailableError, ComputeBudgetStore
 from app.config import get_settings
 
@@ -132,3 +133,57 @@ def test_tenant_subjects_do_not_share_redis_counters(redis_url):
 
     assert remaining(tenant_a)["day"] == (600, 990_000)
     assert remaining(tenant_b)["day"] == (900, 990_000)
+
+
+def test_reservation_releases_after_process_restart(redis_url):
+    """The durable reservation identity survives losing the in-process object."""
+    store = _store(redis_url)
+    subject = f"r15-redis-restart-release-{uuid.uuid4().hex}"
+    reservation = store.reserve(
+        subject_type="user",
+        subject_id=subject,
+        estimated_tokens=100,
+        estimated_cost_usd=Decimal("0.01"),
+    )
+    record = serialize_reservations([reservation])
+
+    # A new process has no in-memory knowledge of the reservation; Redis does.
+    restarted = _store(redis_url)
+    restored = reservations_from_record(record)
+    assert len(restored) == 1
+    restarted.release(restored[0])
+
+    assert _remaining(restarted, subject)["day"] == (1000, 1_000_000)
+    assert _remaining(restarted, subject)["month"] == (1000, 1_000_000)
+
+    # A duplicate release is an idempotent no-op, never a double refund or an error.
+    restarted.release(restored[0])
+    assert _remaining(restarted, subject)["day"] == (1000, 1_000_000)
+
+
+def test_reservation_settles_after_process_restart(redis_url):
+    """A completed-but-unsettled attempt can still be reconciled from durable identity."""
+    store = _store(redis_url)
+    subject = f"r15-redis-restart-settle-{uuid.uuid4().hex}"
+    reservation = store.reserve(
+        subject_type="user",
+        subject_id=subject,
+        estimated_tokens=100,
+        estimated_cost_usd=Decimal("0.01"),
+    )
+    record = serialize_reservations([reservation])
+
+    restarted = _store(redis_url)
+    restored = reservations_from_record(record)
+    restarted.settle(
+        restored[0], actual_tokens=40, actual_cost_usd=Decimal("0.004")
+    )
+
+    assert _remaining(restarted, subject)["day"] == (960, 996_000)
+    assert _remaining(restarted, subject)["month"] == (960, 996_000)
+
+    # Replayed settlement of the same identity stays a no-op.
+    restarted.settle(
+        restored[0], actual_tokens=40, actual_cost_usd=Decimal("0.004")
+    )
+    assert _remaining(restarted, subject)["day"] == (960, 996_000)
