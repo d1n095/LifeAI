@@ -110,8 +110,8 @@ async def test_ambiguous_failure_never_falls_back_or_releases_hold(db_session, m
         calls.append("second")
         return ChatResult("unexpected", "second", "model")
     monkeypatch.setattr(registry, "resolve_chat_chain", lambda *a, **k: [
-        (SimpleNamespace(name="first", chat=first, is_configured=lambda:True), "model"),
-        (SimpleNamespace(name="second", chat=second, is_configured=lambda:True), "model")])
+        (SimpleNamespace(name="first", chat=first, is_configured=lambda:True, is_local=True), "model"),
+        (SimpleNamespace(name="second", chat=second, is_configured=lambda:True, is_local=True), "model")])
     observer = SimpleNamespace(before=lambda *a: events.append("reserved"),
                                failed=lambda e: events.append("held"), succeeded=lambda r: events.append("settled"))
     with pytest.raises(ProviderError) as error:
@@ -128,7 +128,7 @@ async def test_proven_pre_effect_failure_can_fall_back(db_session, monkeypatch):
     async def second(*args, **kwargs):
         return ChatResult("ok", "second", "m")
     monkeypatch.setattr(registry, "resolve_chat_chain", lambda *a, **k: [
-        (SimpleNamespace(name="first", chat=first, is_configured=lambda:True), "m"), (SimpleNamespace(name="second", chat=second, is_configured=lambda:True), "m")])
+        (SimpleNamespace(name="first", chat=first, is_configured=lambda:True, is_local=True), "m"), (SimpleNamespace(name="second", chat=second, is_configured=lambda:True, is_local=True), "m")])
     result, attempts = await registry.chat_with_fallback(db_session, [], effect_guard=True)
     assert result.content == "ok" and attempts == ["first", "second"]
 
@@ -179,6 +179,7 @@ def test_uncertain_chat_outcome_is_durable_and_retry_is_blocked(client, db_sessi
 def test_external_unknown_price_blocks_before_provider_when_enforcement_on(client, monkeypatch):
     from app.routers import chat
     from app.providers.openai_provider import OpenAIProvider
+    from app.providers.openrouter_provider import OpenRouterProvider
     async def empty(*a, **k): return []
     calls = []
     async def forbidden(*a, **k):
@@ -186,9 +187,17 @@ def test_external_unknown_price_blocks_before_provider_when_enforcement_on(clien
         raise AssertionError("provider invoked")
     monkeypatch.setattr(chat, "retrieve_context", empty)
     monkeypatch.setattr(OpenAIProvider, "chat", forbidden)
+    monkeypatch.setattr(OpenRouterProvider, "chat", forbidden)
+    # OpenRouter's gateway price is route-dependent and deliberately unknown in the catalog;
+    # gpt-4o-mini has a known price and therefore correctly passes the admission check.
+    monkeypatch.setattr(get_settings(), "default_llm_provider", "openrouter")
+    monkeypatch.setattr(get_settings(), "default_llm_model", "openrouter/auto")
+    monkeypatch.setattr(get_settings(), "openrouter_api_key", "test-openrouter-key")
+    monkeypatch.setattr(get_settings(), "chat_fallback_order", "")
     monkeypatch.setattr(get_settings(), "billing_enforcement_enabled", True)
     r = client.post("/api/chat", json={"message":"price-bound"}, headers=login(client))
-    assert r.status_code == 503 and calls == []
+    assert r.status_code == 503, r.text
+    assert calls == []
 
 
 def test_concurrent_reply_claim_refreshes_cached_failed_reply(db_session, make_verified_user):
@@ -315,8 +324,9 @@ def test_evaluation_observations_are_scoped_and_erased(monkeypatch):
         lease = registry._current_evaluation()
         lease.observation["system"] = "owner-private"
         assert Context().run(evaluation_observation) == {}
-        with registry.evaluation_provider_scope(FakeEvaluation,{"chat":"other","embedding":"bow"},authorized=True):
-            assert evaluation_observation() == {}
+        with pytest.raises(ProviderError, match="already active"):
+            with registry.evaluation_provider_scope(FakeEvaluation,{"chat":"other","embedding":"bow"},authorized=True):
+                pytest.fail("nested evaluation scope was accepted")
         assert evaluation_observation()["system"] == "owner-private"
     assert lease.observation == {} and evaluation_observation() == {}
 
@@ -348,7 +358,7 @@ async def test_malformed_usage_cannot_settle_a_billed_hold_as_free(db_session,mo
     async def reply(*a,**k):
         return ChatResult("nonempty", "transport", "model", raw_usage={})
     monkeypatch.setattr(registry,"resolve_chat_chain",lambda *a,**k:[
-        (SimpleNamespace(name="transport",chat=reply,is_configured=lambda:True),"model")])
+        (SimpleNamespace(name="transport",chat=reply,is_configured=lambda:True,is_local=True),"model")])
     observer = SimpleNamespace(before=lambda *a:events.append("reserved"),
                                failed=lambda e:events.append("held"),succeeded=lambda r:pytest.fail("settled unknown usage"))
     with pytest.raises(ProviderError) as error:
@@ -426,6 +436,7 @@ async def test_guarded_embedding_keeps_local_transport_and_egress_gate(db_sessio
     calls = []
     class Local:
         name = "ollama"
+        is_local = True
         async def embed(self, texts, model):
             calls.append((texts, model))
             return [[1.0]]

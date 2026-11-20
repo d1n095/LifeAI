@@ -268,7 +268,9 @@ async def embed_with_policy(
     # The vector-only adapter contract cannot reconcile paid usage or an uncertain
     # embedding outcome. Do not repeat an unmetered external effect on chat retry.
     # Eval adapters require their own active lease and are never production providers.
-    if effect_guard and not provider.is_local:
+    # A transport that does not declare locality is treated as external (fail closed),
+    # never as local merely because the attribute is absent.
+    if effect_guard and not getattr(provider, "is_local", False):
         lease = _current_evaluation()
         if lease is None or provider.name != "zai_eval" or not isinstance(provider, lease.provider_class):
             raise ProviderError("External query embedding requires a metered effect contract.",
@@ -418,7 +420,9 @@ async def chat_with_fallback(
     # running state, expiry) immediately before any provider call.
     from app.egress_policy.service import resolve_egress_owner
 
-    if any(not provider.is_local for provider, _model in chain) or worker_lease is not None:
+    # A transport that does not declare locality is treated as external (fail closed),
+    # never as local merely because the attribute is absent.
+    if any(not getattr(provider, "is_local", False) for provider, _model in chain) or worker_lease is not None:
         owner_id = resolve_egress_owner(
             db, owner_id=owner_id, worker_lease=worker_lease
         )
