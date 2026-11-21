@@ -12,6 +12,7 @@ terminal status; missing evidence is BLOCKED, not PASS. It checks:
   * Playwright JSON has expected tests and zero unexpected failures;
   * recovery evidence is PASS;
   * performance evidence is PASS and contains real measurements;
+  * the optional F01-F24 program matrix is PASS; a BLOCKED workstream blocks the gate;
   * known limitations are printed with the result.
 
 Exit codes: 0 PASS, 2 FAIL, 3 BLOCKED.
@@ -169,6 +170,29 @@ def _check_playwright(path: str, checks: list[dict]) -> None:
     checks.append({"check": "real browser E2E", "status": "PASS" if ok else "FAIL", "stats": stats})
 
 
+def _check_program(path: str, checks: list[dict]) -> None:
+    if not path:
+        return
+    data = _load_json(path, "F01-F24 program matrix", checks)
+    if data is None:
+        return
+    status = data.get("status")
+    if status not in {"PASS", "FAIL", "BLOCKED"}:
+        status = "FAIL"
+    checks.append(
+        {
+            "check": "F01-F24 program matrix",
+            "status": status,
+            "summary": data.get("summary") or {},
+            "blocked": [
+                entry.get("workstream")
+                for entry in data.get("workstreams") or []
+                if entry.get("status") == "BLOCKED"
+            ],
+        }
+    )
+
+
 def _write_evidence(out_dir: Path, checks: list[dict], status: str, head: str, limitations: list[str]) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -197,6 +221,7 @@ def main() -> int:
     parser.add_argument("--recovery-evidence", default="")
     parser.add_argument("--playwright-json", default="")
     parser.add_argument("--pytest-junit", default="")
+    parser.add_argument("--program-evidence", default="")
     parser.add_argument("--out-dir", default="docs/evidence/founder-alpha/qa-gate")
     parser.add_argument("--known-limitation", action="append", default=[])
     args = parser.parse_args()
@@ -210,6 +235,7 @@ def main() -> int:
     _check_recovery(_load_json(args.recovery_evidence, "recovery evidence", checks), checks)
     _check_junit(args.pytest_junit, checks)
     _check_playwright(args.playwright_json, checks)
+    _check_program(args.program_evidence, checks)
 
     limitations = args.known_limitation or [
         "Z.ai CLI-dependent tests are not run in this environment.",
