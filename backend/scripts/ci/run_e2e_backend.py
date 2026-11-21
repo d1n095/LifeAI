@@ -9,11 +9,8 @@ Expects the schema to already be migrated (`alembic upgrade head` — see
 itself; that's the whole point of no longer using Base.metadata.create_all in this app.
 """
 import asyncio
-import hashlib
 import json
-import math
 import os
-import re
 import sys
 
 # Was `dirname(dirname(...))` (two levels) when this file lived at backend/scripts/ directly;
@@ -22,6 +19,8 @@ import sys
 # like before the move, not a functional change, just preserving the same target after the move.
 BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, BACKEND_ROOT)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fake_embedding import text_embedding  # noqa: E402
 
 EMAIL_LOG_PATH = os.environ.get("E2E_EMAIL_LOG_PATH", os.path.join(BACKEND_ROOT, "e2e_test_emails.jsonl"))
 HOST = os.environ.get("E2E_BACKEND_HOST", "127.0.0.1")
@@ -168,28 +167,6 @@ async def fake_stream_chat(self, messages, model, **kwargs):
     )
 
 
-def _fake_embedding(text: str) -> list[float]:
-    """Deterministic, text-sensitive stand-in for a real embedding model.
-
-    The previous constant vector made every document identical under cosine distance. Once
-    the founder library had more than top_k test documents, pgvector's tie order was
-    arbitrary and the newest uploaded source could not be cited reliably. Hashing tokens
-    into the same fixed-width space preserves the real DB/RLS/pgvector path while making a
-    query that shares a unique marker rank that marker's document above unrelated sources.
-    Test-only: never imported by production code.
-    """
-    vector = [0.0] * _EMBEDDING_DIM
-    for token in re.findall(r"[a-z0-9]+", text.lower()):
-        digest = hashlib.sha256(token.encode()).digest()
-        index = int.from_bytes(digest[:4], "big") % _EMBEDDING_DIM
-        vector[index] += 1.0 if digest[4] & 1 else -1.0
-    norm = math.sqrt(sum(value * value for value in vector))
-    if norm == 0:
-        vector[0] = 1.0
-        return vector
-    return [value / norm for value in vector]
-
-
 async def fake_embed(self, texts, model, **kwargs):
     # Must match app/config.py's embedding_dim exactly — pgvector's document_chunks.embedding
     # column is a fixed vector(1536) (see the 0004 migration), unlike Qdrant's old
@@ -199,7 +176,7 @@ async def fake_embed(self, texts, model, **kwargs):
     # `**kwargs` is required: ensure_verified() calls embed(..., timeout=...) before an import
     # is allowed to proceed. A narrower fake made that pre-flight fail with TypeError and
     # paused every E2E import as blocked_provider.
-    return [_fake_embedding(text) for text in texts]
+    return [text_embedding(text, _EMBEDDING_DIM) for text in texts]
 
 
 _real_search = vector_store.search

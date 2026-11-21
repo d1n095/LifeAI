@@ -47,3 +47,27 @@ def test_ollama_untagged_model_accepts_only_latest_tag():
     assert mod.model_installed("qwen2.5:0.5b", {"qwen2.5:0.5b"}) is True
     assert mod.model_installed("qwen2.5:0.5b", {"qwen2.5:7b"}) is False
     assert mod.model_installed("all-minilm", {"nomic-embed-text:latest"}) is False
+
+
+def test_fake_embedding_ranks_marker_source_above_unrelated_source():
+    mod = _load(
+        "fake_embedding_contract",
+        ROOT / "backend" / "scripts" / "ci" / "fake_embedding.py",
+    )
+    marker = "V6LAB-KNOWLEDGE-abc123def456"
+    query = mod.text_embedding(f"Var namns {marker}? Svara kort och citera kallan.", 1536)
+    own = mod.text_embedding(
+        f"LifeAI V6 isolated acceptance source. {marker} ar en unik markor.",
+        1536,
+    )
+    unrelated = mod.text_embedding(
+        "LifeAI V6 isolated acceptance source. En helt annan markor for ett annat dokument.",
+        1536,
+    )
+    assert len(query) == 1536
+    assert query == mod.text_embedding(
+        f"Var namns {marker}? Svara kort och citera kallan.", 1536
+    )
+    own_similarity = sum(left * right for left, right in zip(query, own))
+    unrelated_similarity = sum(left * right for left, right in zip(query, unrelated))
+    assert own_similarity > unrelated_similarity
