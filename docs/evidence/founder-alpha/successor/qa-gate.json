@@ -1,13 +1,13 @@
 {
-  "generated_at": "2026-11-21T14:00:41.381967+00:00",
-  "commit": "0db06d528942dec26d3217128ba1443c09fbf1f3",
+  "generated_at": "2026-11-21T14:52:49.243307+00:00",
+  "commit": "6a3d3d389f8a85b53a80d2c223cd711454da5eb3",
   "status": "BLOCKED",
   "checks": [
     {
       "check": "exact commit SHA",
       "status": "PASS",
-      "actual": "0db06d528942dec26d3217128ba1443c09fbf1f3",
-      "expected": "0db06d528942dec26d3217128ba1443c09fbf1f3"
+      "actual": "6a3d3d389f8a85b53a80d2c223cd711454da5eb3",
+      "expected": "6a3d3d389f8a85b53a80d2c223cd711454da5eb3"
     },
     {
       "check": "tracked tree clean",
@@ -58,7 +58,7 @@
     {
       "check": "backend tests",
       "status": "PASS",
-      "tests": 522,
+      "tests": 527,
       "failures": 0,
       "errors": 0,
       "skipped": 2

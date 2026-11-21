@@ -46,7 +46,7 @@ mot riktig backend/worker, inklusive import → indexering → sökning → käl
 öppna källa → fortsätta → radering, mobil layout och felåterhämtning. F13 **6/6 PASS**:
 rollback, en exakt deadlock `40P01`, låstimeout `55P03`, statement/commit-timeout `57014`,
 dödad backend med återanslutning och samtidiga commits. F18 recovery-matris **PASS**.
-F01–F24: **21 PASS, 0 FAIL, 3 BLOCKED**. QA-grinden körs mot evidens-HEAD ovanpå `4814a1d` med ren
+F01–F24: **21 PASS, 0 FAIL, 3 BLOCKED**. QA-grinden körde mot exakt `6a3d3d389f8a85b53a80d2c223cd711454da5eb3` med ren
 tracked tree, Alembic `0091`, PostgreSQL/Redis nåbara, installmatris 12/0/0, resursprobe
 PASS, 527 backendtester och 12/12 browser-E2E; resultatet är **BLOCKED** (exit 3), inte PASS.
 

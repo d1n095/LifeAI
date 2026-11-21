@@ -2,7 +2,7 @@
 
 **Kodkandidat:** `4814a1d5e10974b490af0fb41f3fc2c08ca43e8b`
 **Branch:** `claude/founder-alpha-fullstack-qa` (bas `6ececab`)
-**QA-grind:** **BLOCKED** — 21 PASS, 0 FAIL, 3 BLOCKED, 0 SKIP
+**QA-grind:** **BLOCKED** — 21 PASS, 0 FAIL, 3 BLOCKED, 0 SKIP vid `6a3d3d389f8a85b53a80d2c223cd711454da5eb3`
 **Ingen push, PR, merge eller deployment har gjorts.** `first_cycle_go=false`.
 
 ## Vad som verifierades och ändrades
