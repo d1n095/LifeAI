@@ -350,6 +350,13 @@ def test_registry_planning_fallback_forwards_owner(monkeypatch):
         return ChatResult("ok", "openai", "gpt-test", {}), ["openai"]
 
     monkeypatch.setattr(registry, "chat_with_fallback", fake_chat)
+    # This test is specifically about the fallback path. The adapter normally resolves
+    # the active provider in its constructor (the V6 fix for the spend-retry loop); model
+    # "no active provider configured" here so the constructor leaves provider_name unset
+    # and propose() really exercises chat_with_fallback instead of the explicit branch.
+    monkeypatch.setattr(
+        registry, "resolve_active", lambda _db, role: (_FakeProvider(name=None), None)
+    )
     adapter = RegistryPlanningAdapter(_FakeDB(), owner_id=owner_id)
 
     response = asyncio.run(

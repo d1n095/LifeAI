@@ -6,6 +6,28 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## LifeAI V8 — säker delivery- och staging-integrationspipeline (2026-11-21)
+
+**Branch:** `freebuff/v8-integration-pipeline-8917f0c`, bas V7
+`8917f0ca4f5a64e57a8eda623d57763145bd9cde`. Ingen PR/push/merge är gjord; GitHub write-access
+saknas. Exakt V8-commit, bundle och manifest finns i `delivery/v8-integration/`.
+
+**Scope:** oberoende infrastruktur för att importera agentbundles säkert, verifiera
+SHA-256/ancestry/provenance, analysera konflikter och migrationer, bygga ett immutable
+staging-manifest samt köra exact-SHA staging och rollback. Den resolverar inga konflikter och
+rör inte R15/integrationens säkerhetsinterface; Claude äger den faktiska R15-försoningen.
+
+**Faktiska resultat:** V8-regressioner **11 passed**; R15 egress **13 passed**; V4/V6/V7
+importeras **PASS**; V6+V7 avvisas som överlappande leverans; V7 vs integration har **9
+textuella konflikter** och migrationshuvuden `0079`/`0092`; V7 staging hittade en riktig
+egress-testdefekt som rättats i V8; rollback **PASS** med oförändrad DB-revision och rena
+refs/worktrees. Frontend, Docker, Playwright och Ollama är fortsatt BLOCKED i miljön.
+
+**Merge:** efter V7 och efter att R15/integrationen är stabil. Branchen är oberoende som
+verktygsleverans, men får inte användas för att automatiskt lösa de nio konflikterna. Kör
+`scripts/integration/staging_build.py` på en miljö med frontend-deps och verifiera om V8 efter
+att V7:ans konflikter har hanterats av rätt ägare.
+
 ## LifeAI V7 — portabelt testlab och recovery-hardening (2026-11-21)
 
 **Branch:** `freebuff/v7-testlab-5619020`, bas
