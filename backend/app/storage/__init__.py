@@ -22,5 +22,16 @@ def get_storage() -> StorageBackend:
     if _storage is None:
         from app.config import get_settings
 
-        _storage = LocalFilesystemStorage(get_settings().storage_root)
+        try:
+            _storage = LocalFilesystemStorage(get_settings().storage_root)
+        except OSError as exc:
+            # A misconfigured or unwritable STORAGE_ROOT used to escape as a raw OSError from
+            # a request handler, producing an opaque 500 (observed: PermissionError on the
+            # production default /var/lib/lifeai while running locally). It is a dependency
+            # being unavailable, never a bug in the request — report it as such, and never
+            # include the filesystem path or the OS error text in the message a caller sees.
+            raise StorageError(
+                "Lagringsutrymmet är inte tillgängligt. Kontrollera att STORAGE_ROOT pekar på "
+                "en katalog som applikationen får skriva till."
+            ) from exc
     return _storage

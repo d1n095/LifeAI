@@ -33,6 +33,8 @@ from datetime import datetime
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.db_clock import db_now_expr
+
 from app.account.erasure import attempt_storage_deletion_task, claim_storage_deletion_tasks
 from app.agent_coordination.service import expire_stale_active_leases
 from app.config import get_settings
@@ -582,7 +584,11 @@ class Worker:
                 MainAIJob.job_type == "task_execution",
                 MainAIJob.status == MainAIJobStatus.running,
                 MainAIJob.lease_expires_at.isnot(None),
-                MainAIJob.lease_expires_at < now,
+                # M4: the lease was authored by Postgres, so it is judged by Postgres. With the
+                # app's own clock here instead, a container running ahead of the database sees
+                # a live lease as expired and this tick takes over a genuinely running
+                # privileged attempt -- duplicate execution. See app/db_clock.py.
+                MainAIJob.lease_expires_at < db_now_expr(),
             )
             .order_by(MainAIJob.lease_expires_at.asc())
             .limit(self._MAX_AUTO_RECOVERY_SCANS_PER_TICK)

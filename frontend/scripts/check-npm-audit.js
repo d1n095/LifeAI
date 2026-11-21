@@ -23,6 +23,17 @@ const ALLOWLISTED_ADVISORY_SOURCES = new Set([
   1124334,
   1130588,
   1130591,
+  // --- 2026-11-18 (PR: CI readiness) — see docs/SECURITY_BLOCKERS.md §5. ---------------
+  // sharp (GHSA-rgj7-g3m4-5g8c, GHSA-wq5f-xc86-pv6w): the project pins
+  // `overrides.sharp` and never calls `next/image`, so the vulnerable libheif/librsvg image
+  // decoders are not reachable from any route the app serves. Remove once Next's own optional
+  // sharp dependency line moves past 0.35.5-rc.1.
+  1193725,
+  1241331,
+  // picomatch (GHSA-fc5q-39xc-vjpf) — dev/build tooling only (tailwindcss -> chokidar ->
+  // anymatch/readdirp and the eslint resolver chain). Never shipped in the production bundle;
+  // no runtime route parses globs. Remove when tailwind/eslint release a patched transitive.
+  1247710,
 ]);
 
 function runAudit() {

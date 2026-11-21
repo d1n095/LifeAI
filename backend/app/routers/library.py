@@ -25,6 +25,8 @@ from app.models.user import User
 from app.egress_policy import EgressDeniedError
 from app.providers.registry import embed_with_policy, resolve_active
 from app.providers.verification import classify_provider_exception
+from app.rag.embedding_space import native_dim_of
+from app.rag.query_embedding import prepare_embedding_query
 from app.rag.library_import import maybe_purge_blob
 from app.rag.trust import assess_claim_confidence
 from app.rag.vector_store import hybrid_search
@@ -146,12 +148,14 @@ async def import_package(
         if db.query(Project).filter_by(id=project_id).first() is None:
             raise HTTPException(status_code=404, detail="Projektet hittades inte.")
 
-    storage = get_storage()
-
     def _read_chunk() -> bytes:
         return file.file.read(1 << 20)
 
     try:
+        # Constructing the backend is I/O too (it creates the root directory), so it belongs
+        # inside this failure boundary: a bad STORAGE_ROOT must be a clear "dependency
+        # unavailable", not an unhandled PermissionError/500.
+        storage = get_storage()
         # The whole streaming write (chunk reads from the incoming multipart body AND writes
         # to the destination temp file) runs in a worker thread — run_in_threadpool, not a
         # bare call — so this sync I/O never blocks the event loop other requests share.
@@ -159,7 +163,10 @@ async def import_package(
     except StorageSizeLimitExceeded:
         raise HTTPException(status_code=413, detail=f"Filen är för stor (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB).")
     except StorageError as exc:
-        raise HTTPException(status_code=500, detail=f"Kunde inte lagra filen: {exc}")
+        # 503, not 500: the request was valid and the application is fine — a dependency
+        # (the storage volume) is unavailable. The message from StorageError is already safe
+        # to show and contains no path or OS detail.
+        raise HTTPException(status_code=503, detail=f"Kunde inte lagra filen: {exc}")
 
     if blob.size_bytes == 0:
         # Pass 30 (a fourth founder review round): a bare `storage.delete()` here used to
@@ -610,19 +617,28 @@ async def search_library(
     # tells the client exactly what happened via semantic_search_available/degraded_reason
     # rather than pretending semantic search ran and just found nothing.
     vector: list[float] | None = None
+    active_model: str | None = None
+    active_native_dim: int | None = None
     degraded_reason: str | None = None
     try:
         provider, model = resolve_active(db, role="embedding")
         vectors = await embed_with_policy(
             db,
             provider,
-            [query.query],
+            # Query channel only: the prefix makes instruction-aware local embedding models
+            # rank correctly (app/rag/query_embedding.py). hybrid_search() below still gets the
+            # RAW query for its independent text-match channel.
+            [prepare_embedding_query(query.query)],
             model=model,
             owner_id=user.id,
             purpose="rag_query",
             requested_by="routers.library.search_library",
         )
         vector = vectors[0]
+        # Carry the active embedding space so the semantic channel only ranks chunks embedded
+        # with this same model/dim (app/rag/embedding_space.py); the text channel is unaffected.
+        active_model = model
+        active_native_dim = native_dim_of(vectors)
     except EgressDeniedError as exc:
         # Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V2 query-
         # embedding half): a policy refusal, not a provider outage -- str(exc) is safe to show
@@ -642,6 +658,8 @@ async def search_library(
         project_id=query.project_id,
         classification=query.classification,
         active_truth_status=query.active_truth_status,
+        embedding_model=active_model,
+        embedding_native_dim=active_native_dim,
     )
     return LibrarySearchResponseOut(
         results=results,

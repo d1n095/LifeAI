@@ -1,0 +1,21 @@
+# Review boundaries for the Founder Alpha.
+#
+# These paths decide whether the security controls are enforced at all, so a change to any of them
+# must be reviewed by the founder — never by the agent that wrote it. This file is itself one of
+# the paths it protects (see .github/CODEOWNERS below).
+#
+# Enforcement note, stated honestly: GitHub only applies CODEOWNERS when branch protection (or a
+# ruleset) requires "Require a review from Code Owners". Both rulesets and branch protection need
+# repository administration, so this file is prepared and correct but NOT yet enforced — see
+# docs/SECURITY_CONTROLS.md for the exact one-time administrator action. Without that setting this
+# is a request for review, not a control; the enforced part today is
+# security/POLICY_LOCK.json + backend/scripts/security/verify_policy_lock.py, which fails the
+# Security job whenever one of these files changes without a reviewed lock update.
+
+/.github/ @d1n095
+/.github/CODEOWNERS @d1n095
+/.semgrep/ @d1n095
+/.gitleaks.toml @d1n095
+/security/ @d1n095
+/backend/scripts/security/ @d1n095
+/backend/tests/security/ @d1n095

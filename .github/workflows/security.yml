@@ -1,0 +1,191 @@
+# Security — the mandatory pre-start control set (Founder Alpha, Guardian foundation).
+#
+# Every job here answers one question the private start depends on, and the last job (`gate`) is
+# fail-closed: a control that did not run successfully — failed, cancelled, skipped — fails the
+# gate. There is no `continue-on-error` anywhere in this file, deliberately: a security check that
+# cannot fail the build is decoration.
+#
+# What each control actually proves, stated precisely:
+#   semgrep         static analysis of this repository's real risk classes (command injection, eval,
+#                   SQL interpolation, unsafe deserialization, JWT/TLS verification) using the
+#                   reviewed rule set in .semgrep/rules.yaml. It cannot prove the absence of
+#                   malicious code; review + runtime isolation + capability limits are the rest.
+#   gitleaks        secret detection over the working tree. Placeholders are allowlisted by value,
+#                   never by blanket path, so a real key pasted into a test is still caught.
+#   osv-scanner     known-vulnerability scan of the dependency manifests (supply chain).
+#   policy-integrity tamper resistance: security/POLICY_LOCK.json must match every control file,
+#                   and security/agent_capabilities.json must match the real runtime contract.
+#   provenance      measures the reviewed tree and re-verifies the measurement (integrity of what
+#                   will actually be executed).
+#   codeql          prepared but requires GitHub Advanced Security on a private repository — see
+#                   docs/SECURITY_CONTROLS.md for the exact administrator action. It is NOT claimed
+#                   as enforced; when `vars.CODEQL_ENABLED == 'true'` it runs and fails closed.
+
+name: Security
+
+on:
+  push:
+    branches: [main, "claude/**", "cursor/**", "codex/**", "freebuff/**"]
+  pull_request:
+    branches: [main, "claude/**", "cursor/**", "codex/**"]
+  schedule:
+    - cron: "0 4 * * 1"  # weekly, so a new advisory is caught without a push
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  SEMGREP_VERSION: "1.186.0"
+  GITLEAKS_VERSION: "8.28.0"
+  OSV_SCANNER_VERSION: "1.9.1"
+
+jobs:
+  semgrep:
+    name: SAST — Semgrep
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install "semgrep==${{ env.SEMGREP_VERSION }}"
+      - name: Semgrep (fails on findings at ERROR severity)
+        run: |
+          set -o pipefail
+          semgrep --validate --config .semgrep/rules.yaml
+          semgrep --config .semgrep/rules.yaml --severity ERROR --error --metrics off \
+            --json --output semgrep-results.json .
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: semgrep-results
+          path: semgrep-results.json
+          if-no-files-found: warn
+
+  gitleaks:
+    name: Secrets — gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install gitleaks
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+      - name: Scan the working tree
+        run: |
+          gitleaks dir . --config .gitleaks.toml --redact --no-banner --exit-code 1 \
+            --report-format json --report-path gitleaks-results.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gitleaks-results
+          path: gitleaks-results.json
+          if-no-files-found: warn
+
+  osv-scanner:
+    name: Supply chain — OSV-Scanner
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OSV-Scanner
+        run: |
+          curl -sSfL "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64" \
+            -o /usr/local/bin/osv-scanner
+          chmod +x /usr/local/bin/osv-scanner
+          osv-scanner --version
+      - name: Scan dependency manifests
+        run: |
+          set -o pipefail
+          osv-scanner -r --skip-git --config osv-scanner.toml . | tee osv-results.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: osv-results
+          path: osv-results.txt
+          if-no-files-found: warn
+
+  policy-integrity:
+    name: Policy integrity — controls and capabilities
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Security controls are unmodified and fully covered
+        run: python backend/scripts/security/verify_policy_lock.py --repo-root .
+      - name: Agent capabilities match the runtime contract
+        run: python backend/scripts/security/verify_agent_capabilities.py --repo-root .
+
+  provenance:
+    name: Provenance — reviewed source matches the artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Measure the reviewed tree
+        run: python backend/scripts/security/build_provenance.py create --root backend/app --out provenance.json --label "${{ github.sha }}"
+      - name: Verify the measurement against the same tree
+        run: python backend/scripts/security/build_provenance.py verify --root backend/app --manifest provenance.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: provenance
+          path: provenance.json
+          if-no-files-found: error
+
+  codeql:
+    name: SAST — CodeQL (requires GHAS)
+    # Private repositories need GitHub Advanced Security for CodeQL upload. Until an administrator
+    # enables it and sets the repository variable CODEQL_ENABLED=true, this job is skipped and the
+    # gate below reports that CodeQL is not enforced. Documented, not pretended.
+    if: ${{ vars.CODEQL_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: python, javascript-typescript
+      - uses: github/codeql-action/analyze@v3
+
+  gate:
+    name: Security — gate (fail closed)
+    needs: [semgrep, gitleaks, osv-scanner, policy-integrity, provenance]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every mandatory control must have succeeded
+        run: |
+          failed=0
+          check() {
+            name="$1"; result="$2"
+            echo "$name: $result"
+            case "$result" in
+              success) ;;
+              *) echo "::error::security control '$name' did not succeed ($result)"; failed=1 ;;
+            esac
+          }
+          check semgrep          "${{ needs.semgrep.result }}"
+          check gitleaks         "${{ needs.gitleaks.result }}"
+          check osv-scanner      "${{ needs.osv-scanner.result }}"
+          check policy-integrity "${{ needs.policy-integrity.result }}"
+          check provenance       "${{ needs.provenance.result }}"
+          echo "codeql (optional, requires GHAS): ${{ vars.CODEQL_ENABLED == 'true' && 'enabled' || 'NOT ENFORCED' }}"
+          exit "$failed"

@@ -100,10 +100,46 @@ async def verify_provider(provider: LLMProvider, model: str, role: str, *, timeo
         return classify_provider_exception(exc)
 
 
-def _default_verification_model(provider: LLMProvider, role: str) -> str:
+# Providers that run ON THIS MACHINE. Their pre-flight check has a different budget: the
+# first call after an idle period or a runtime restart loads model weights into memory, which
+# routinely exceeds what a hosted API ever needs (see local_verification_timeout_seconds).
+LOCAL_PROVIDER_NAMES = frozenset({"ollama"})
+
+
+def verification_timeout_seconds(provider: LLMProvider) -> float:
+    """The pre-flight budget appropriate to this provider's runtime.
+
+    Cloud providers keep the short, fail-fast timeout (an unreachable API must never hang an
+    import); local runtimes get the longer one, because a spurious `unreachable` verdict on a
+    cold model load is the single most likely false negative in a local-first deployment.
+    """
+    settings = get_settings()
+    if provider.name in LOCAL_PROVIDER_NAMES:
+        return settings.local_verification_timeout_seconds
+    return settings.provider_verification_timeout_seconds
+
+
+def _default_verification_model(provider: LLMProvider, role: str, db: Session | None = None) -> str:
     from app.providers.registry import DEFAULT_CHAT_MODELS
 
     settings = get_settings()
+    if db is not None:
+        # On a local runtime the set of installed models is whatever the founder actually
+        # pulled — there is no canonical "nomic-embed-text" to assume. Reusing the model this
+        # provider last verified OK against is the only evidence-based default available; a
+        # check that failed is not evidence of anything and is deliberately ignored.
+        last_ok = (
+            db.query(ProviderVerificationCheck)
+            .filter(
+                ProviderVerificationCheck.provider_name == provider.name,
+                ProviderVerificationCheck.role == role,
+                ProviderVerificationCheck.result == VerificationResult.ok,
+            )
+            .order_by(ProviderVerificationCheck.checked_at.desc())
+            .first()
+        )
+        if last_ok is not None and last_ok.model:
+            return last_ok.model
     if role == "chat":
         return DEFAULT_CHAT_MODELS.get(provider.name, settings.default_llm_model)
     if provider.name == settings.default_embedding_provider:
@@ -141,7 +177,7 @@ async def ensure_verified(db: Session, role: str, *, checked_by: str = "system")
     if cached is not None:
         return Outcome(cached.result, cached.message)
 
-    outcome = await verify_provider(provider, model, role, timeout=settings.provider_verification_timeout_seconds)
+    outcome = await verify_provider(provider, model, role, timeout=verification_timeout_seconds(provider))
     db.add(
         ProviderVerificationCheck(
             id=uuid.uuid4(),
@@ -165,10 +201,9 @@ async def verify_now(db: Session, provider_name: str, role: str, *, checked_by: 
     provider before switching to it)."""
     from app.providers.registry import get_provider
 
-    settings = get_settings()
     provider = get_provider(provider_name)
-    model = _default_verification_model(provider, role)
-    outcome = await verify_provider(provider, model, role, timeout=settings.provider_verification_timeout_seconds)
+    model = _default_verification_model(provider, role, db)
+    outcome = await verify_provider(provider, model, role, timeout=verification_timeout_seconds(provider))
     db.add(
         ProviderVerificationCheck(
             id=uuid.uuid4(),

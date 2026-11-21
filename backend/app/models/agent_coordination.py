@@ -125,6 +125,41 @@ class CoordinationAgent(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class SystemActivationAuthorization(Base):
+    """Founder directive 2026-11-14 ("Resolve execution authority and security gaps"), Priority
+    2: "An environment variable alone must not constitute production activation authority."
+    This table is the durable, auditable EVIDENCE a real external-provider activation requires
+    -- `app.agent_coordination.activation_gate.require_system_activation_authority()` requires
+    BOTH this evidence AND `first_cycle_go`'s own env var; neither alone is sufficient.
+
+    Deliberately NOT owner-scoped/RLS-protected -- same reasoning as `CoordinationAgent` just
+    above: whether the whole system is authorized to activate is founder-wide state, not
+    per-owner data.
+
+    DELIBERATELY NO application code anywhere creates or revokes a row here -- `mainai_app`
+    (the restricted runtime role every request/worker uses) holds ONLY `SELECT` on this table
+    (see migration's own REVOKE and `app/rls.py`'s boot-time verification of that exact fact).
+    This mirrors `activation_gate.py`'s own "no set_* function exists, on purpose" discipline
+    one layer further down, at the database layer: the only way a row here is ever created is
+    an out-of-band, reviewed action against the migration/admin connection, outside the running
+    application entirely -- exactly matching this directive's own framing of `first_cycle_go`
+    as "the founder's own external release decision," never something this codebase grants
+    itself. `status='active'` NEVER means "ever flip it live-in-process" -- transitioning to
+    `revoked` or letting `expires_at` lapse is the same kind of out-of-band action."""
+
+    __tablename__ = "system_activation_authorizations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    authorized_by: Mapped[str] = mapped_column(String(64))
+    reason: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="active")
+    authorized_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    revoked_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class ParallelExplorationGroup(Base):
     """Groups multiple independent WORK ASSIGNMENTS solving the SAME canonical problem in
     ISOLATED branches/worktrees -- the explicit, non-accidental form of "two builders on the

@@ -1,0 +1,151 @@
+rules:
+  # Hand-written rules for the risk classes this codebase actually has: it spawns real
+  # subprocesses (git, pytest, ruff, rg), builds SQL with SQLAlchemy `text()`, verifies JWTs, and
+  # parses YAML/pickle-adjacent content. Each rule is high-signal on purpose — a scanner that
+  # floods the founder with noise gets switched off, which is worse than a narrow one that is
+  # actually enforced.
+  - id: mainai-python-subprocess-shell-true
+    languages: [python]
+    severity: ERROR
+    message: >-
+      subprocess with shell=True makes every interpolated value shell syntax. This project's
+      subprocess calls (git, pytest, ruff, rg) are argv lists, never shell strings — see
+      app/mainai_execution/verify.py's _run_pytest and worktree.py's _run_git.
+    pattern-either:
+      - pattern: subprocess.$FUNC(..., shell=True, ...)
+      - pattern: subprocess.$FUNC(..., shell=True)
+    metadata:
+      category: security
+      confidence: HIGH
+      cwe: ["CWE-78: OS Command Injection"]
+
+  - id: mainai-python-os-system
+    languages: [python]
+    severity: ERROR
+    message: os.system() runs a shell command line and cannot be argv-escaped.
+    pattern-either:
+      - pattern: os.system(...)
+      - pattern: os.popen(...)
+    metadata:
+      category: security
+      confidence: HIGH
+      cwe: ["CWE-78: OS Command Injection"]
+
+  - id: mainai-python-eval-exec
+    languages: [python]
+    severity: ERROR
+    message: eval()/exec() execute arbitrary code. AI-generated or stored content must never reach them.
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: exec(...)
+      - pattern: compile(..., ..., "exec", ...)
+    metadata:
+      category: security
+      confidence: HIGH
+
+  - id: mainai-sql-text-interpolation
+    languages: [python]
+    severity: ERROR
+    message: >-
+      An f-string or %-format passed to a SQL execution target defeats bound parameters. Every
+      query in this project binds values (`text("... :name ...")` + params); DDL built from a
+      literal list is the only sanctioned exception and is marked explicitly.
+    patterns:
+      - pattern-either:
+          - pattern: text(f"...")
+          - pattern: text("..." % ...)
+          - pattern: text("..." + ...)
+          - pattern: $DB.execute(f"...")
+          - pattern: $DB.execute(text("..." + ...))
+    # Scope, stated precisely: every exclusion below is DDL built from FIXED identifier lists
+    # defined in the same module (table names, role names, migration statements) and executed over
+    # an admin/migration connection -- never a request value, a model output, or a job parameter.
+    # Each was reviewed when this rule was added; app/**'s runtime query surface stays fully
+    # covered, which is where an injected value could actually arrive. A new DDL builder belongs
+    # in one of these reviewed modules or needs its own reviewed exclusion -- it is not silently
+    # covered by this one.
+    paths:
+      exclude:
+        - "*/alembic/versions/*"
+        - "backend/app/rls.py"
+        - "backend/scripts/security/*"
+        - "backend/scripts/ops/db_recovery.py"
+    metadata:
+      category: security
+      confidence: MEDIUM
+      cwe: ["CWE-89: SQL Injection"]
+
+  - id: mainai-yaml-load-without-safe-loader
+    languages: [python]
+    severity: ERROR
+    message: yaml.load() without SafeLoader can construct arbitrary Python objects.
+    patterns:
+      - pattern: yaml.load(...)
+      - pattern-not: yaml.load(..., Loader=..., ...)
+    metadata:
+      category: security
+      confidence: HIGH
+      cwe: ["CWE-502: Deserialization of Untrusted Data"]
+
+  - id: mainai-pickle-deserialization
+    languages: [python]
+    severity: ERROR
+    message: pickle executes code during deserialization; never use it on untrusted bytes.
+    pattern-either:
+      - pattern: pickle.loads(...)
+      - pattern: pickle.load(...)
+    metadata:
+      category: security
+      confidence: HIGH
+      cwe: ["CWE-502: Deserialization of Untrusted Data"]
+
+  - id: mainai-jwt-signature-disabled
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Decoding a JWT with verify_signature disabled accepts forged tokens. This project's session
+      tokens are verified with the pinned algorithm in app/auth.py.
+    pattern-either:
+      - pattern: 'jwt.decode(..., options={"verify_signature": False}, ...)'
+      - pattern: jwt.decode(..., verify=False, ...)
+    metadata:
+      category: security
+      confidence: HIGH
+      cwe: ["CWE-347: Improper Verification of Cryptographic Signature"]
+
+  - id: mainai-tls-verification-disabled
+    languages: [python]
+    severity: ERROR
+    message: verify=False disables TLS certificate validation for that request.
+    pattern-either:
+      - pattern: requests.$M(..., verify=False, ...)
+      - pattern: httpx.$M(..., verify=False, ...)
+    metadata:
+      category: security
+      confidence: HIGH
+      cwe: ["CWE-295: Improper Certificate Validation"]
+
+  - id: mainai-world-writable-path
+    languages: [python]
+    severity: WARNING
+    message: >-
+      A world-writable path lets any local process replace code or data this service later
+      trusts. Isolated worktrees are created 0o700 (see proposal_worktree.py / worktree.py).
+    pattern-either:
+      - pattern: os.chmod(..., 0o777)
+      - pattern: $P.chmod(0o777)
+      - pattern: os.chmod(..., 0o666)
+    metadata:
+      category: security
+      confidence: MEDIUM
+      cwe: ["CWE-732: Incorrect Permission Assignment for Critical Resource"]
+
+  - id: mainai-tempfile-mktemp
+    languages: [python]
+    severity: WARNING
+    message: tempfile.mktemp() is racy (name reserved, file not created); use mkdtemp/mkstemp.
+    pattern: tempfile.mktemp(...)
+    metadata:
+      category: security
+      confidence: HIGH
+      cwe: ["CWE-377: Insecure Temporary File"]

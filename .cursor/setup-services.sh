@@ -109,20 +109,15 @@ if ! sudo -u postgres psql -v ON_ERROR_STOP=1 -v db_name="$LIFEOS_DB" \
   sudo -u postgres createdb -O lifeos "$LIFEOS_DB"
 fi
 
-echo "--> Granting the restricted runtime role (SELECT/INSERT/UPDATE/DELETE only — never TRUNCATE)"
-sudo -u postgres psql -v ON_ERROR_STOP=1 -d "$LIFEOS_DB" <<'SQL'
-GRANT USAGE ON SCHEMA public TO mainai_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO mainai_app;
-GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO mainai_app;
-ALTER DEFAULT PRIVILEGES FOR ROLE lifeos IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO mainai_app;
-ALTER DEFAULT PRIVILEGES FOR ROLE lifeos IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO mainai_app;
-SQL
-
-echo "--> Applying migrations (alembic upgrade head) + runtime privilege policy"
+echo "--> Bootstrapping the runtime role, migrations and the boot contract"
 cd "$REPO/backend"
 # shellcheck disable=SC1091
 . .venv/bin/activate
-alembic upgrade head
-python scripts/security/apply_runtime_privileges.py
+# One command, in the same order the container boot path uses (ensure_app_role ->
+# alembic upgrade head -> apply_runtime_privileges), plus a verification step. This replaced a
+# hand-written GRANT block here that skipped ensure_app_role.py — the missing
+# ALTER DEFAULT PRIVILEGES left tables created by the migration unreadable to mainai_app, and
+# the API refused to start on a freshly migrated database (docs/FOUNDER_ALPHA_READINESS.md).
+python scripts/setup/bootstrap_database.py
 
 echo "--> Database ready."

@@ -1,0 +1,42 @@
+# Secret detection for LifeAI (gitleaks).
+#
+# The default ruleset is kept (`useDefault = true`) and extended with allowlists for the values
+# this repository deliberately contains. Every allowlist entry is a *placeholder*, never a real
+# credential: the test suite needs a deterministic SECRET_KEY/JWT password, and the compose files
+# need an obvious "change me" value. Anything else that looks like a credential is a finding.
+#
+# Deliberate scope note: CI scans the working tree (`gitleaks dir`), so a secret that only exists
+# in old history is not caught here. Full-history scanning is a separate, advisory run — blocking
+# on history would make the check unpassable for a repository that has already shipped, which is
+# exactly how a security gate gets disabled instead of fixed.
+
+title = "LifeAI secret scanning"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Placeholders and test fixtures, not secrets."
+regexTarget = "match"
+regexes = [
+  # Test/CI configuration values (backend/tests/conftest.py, .github/workflows/*.yml).
+  '''ci-test-secret-key''',
+  '''test-secret-key-for-pytest''',
+  '''test-secret-key''',
+  '''fake-key-for-tests''',
+  '''TestFounderPassword123''',
+  '''mainai_app_test_pw''',
+  '''change-me-in-production''',
+  # Documentation of the var-name-only convention.
+  '''<your-''',
+  '''REDACTED''',
+]
+
+paths = [
+  # Test fixtures and their documentation legitimately contain dummy credentials by design; the
+  # regexes above still catch a REAL key pasted into them.
+  '''backend/tests/.*''',
+  '''docs/.*''',
+  '''frontend/.*\.test\.tsx?''',
+  '''\.github/workflows/.*''',
+]
