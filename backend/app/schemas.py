@@ -576,6 +576,9 @@ class WorkspaceIn(BaseModel):
 
 
 class WorkspaceUpdate(BaseModel):
+    # Optional compare-and-set guard. A stale value returns 409 instead of overwriting a
+    # newer workspace edit; omitted keeps the existing last-write-wins compatibility path.
+    expected_version: int | None = Field(default=None, ge=1)
     name: str | None = Field(default=None, min_length=1, max_length=256)
     description: str | None = Field(default=None, max_length=20_000)
     purpose: str | None = Field(default=None, max_length=20_000)
@@ -609,6 +612,7 @@ class WorkspaceUpdate(BaseModel):
 class WorkspaceOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
+    version: int = 1
     name: str
     description: str | None = None
     purpose: str | None = None
@@ -628,6 +632,51 @@ class WorkspaceActivityOut(BaseModel):
     summary: str
     detail: dict = Field(default_factory=dict)
     created_at: datetime
+
+
+class WorkspaceSyncIn(BaseModel):
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def valid_idempotency_key(cls, value: str) -> str:
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9._~:-]{1,128}", value):
+            raise ValueError(
+                "idempotency_key måste vara 1–128 tecken och endast A-Z, a-z, 0-9, . _ ~ : -."
+            )
+        return value
+
+
+class WorkspaceSyncItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    entity_type: str
+    entity_id: uuid.UUID
+    entity_version: int
+    content_hash: str
+    status: str
+    error: str | None = None
+    processed_at: datetime | None = None
+    created_at: datetime
+
+
+class WorkspaceSyncRunOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    status: str
+    snapshot_hash: str
+    snapshot_version: int
+    progress_current: int
+    progress_total: int
+    attempt: int
+    error_category: str | None = None
+    result: dict = Field(default_factory=dict)
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    heartbeat_at: datetime | None = None
+    items: list[WorkspaceSyncItemOut] = Field(default_factory=list)
 
 
 class WorkspaceDecisionIn(BaseModel):
@@ -1312,11 +1361,14 @@ class MainAIGoalCreateIn(BaseModel):
     original_instruction: str
     risk_level: str = "low"
     approval_policy: str = "standard_repo_work"
+    # Optional Life Workspace association; ownership is verified by the router before use.
+    project_id: uuid.UUID | None = None
 
 
 class MainAIGoalOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
+    project_id: uuid.UUID | None = None
     title: str
     status: str
     risk_level: str
@@ -1447,6 +1499,29 @@ class MainAITaskWaitOut(BaseModel):
     evidence: dict
     created_at: datetime
     resolved_at: datetime | None = None
+
+
+class WorkspaceSupervisedTaskOut(BaseModel):
+    """One real MainAI task associated with a workspace, with its durable evidence.
+
+    This is a read composition over the existing execution tables. It never creates or
+    executes work, and it never widens the founder-only owner boundary.
+    """
+
+    goal: MainAIGoalOut
+    task: MainAITaskOut
+    events: list[MainAITaskEventOut] = Field(default_factory=list)
+    checkpoints: list[MainAICheckpointOut] = Field(default_factory=list)
+    waits: list[MainAITaskWaitOut] = Field(default_factory=list)
+    recovery_records: list[MainAIRecoveryRecordOut] = Field(default_factory=list)
+    job: MainAIJobOut | None = None
+    approval_granted: bool = False
+    verification_evidence: list[dict] = Field(default_factory=list)
+
+
+class WorkspaceSupervisedOut(BaseModel):
+    goals: list[MainAIGoalOut] = Field(default_factory=list)
+    tasks: list[WorkspaceSupervisedTaskOut] = Field(default_factory=list)
 
 
 class EngineeringLessonOut(BaseModel):

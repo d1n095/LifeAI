@@ -253,6 +253,7 @@ export type DocumentItem = {
 
 export type ProjectItem = {
   id: string;
+  version?: number;
   name: string;
   description: string | null;
   purpose?: string | null;
@@ -502,6 +503,59 @@ export type WorkspaceDetail = ProjectItem & {
   activities: WorkspaceActivity[];
   decisions: WorkspaceDecision[];
   context: WorkspaceContext;
+};
+
+export type WorkspaceSyncItem = {
+  id: string;
+  entity_type: string;
+  entity_id: string;
+  entity_version: number;
+  content_hash: string;
+  status: "pending" | "applied" | "skipped" | "failed";
+  error: string | null;
+  processed_at: string | null;
+  created_at: string;
+};
+
+export type WorkspaceSyncRun = {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled" | "stale";
+  snapshot_hash: string;
+  snapshot_version: number;
+  progress_current: number;
+  progress_total: number;
+  attempt: number;
+  error_category: string | null;
+  result: Record<string, unknown>;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  heartbeat_at: string | null;
+  items: WorkspaceSyncItem[];
+};
+
+export type WorkspaceSupervisedTask = {
+  goal: MainAIGoal;
+  task: MainAITask;
+  events: MainAITaskEvent[];
+  checkpoints: MainAICheckpoint[];
+  waits: MainAITaskWait[];
+  recovery_records: {
+    id: string;
+    classification: string | null;
+    status: string;
+    blocker: string | null;
+    manual_review_required: boolean;
+    created_at: string;
+  }[];
+  job: MainAIJob | null;
+  approval_granted: boolean;
+  verification_evidence: { event_type: string; detail: Record<string, unknown>; created_at: string }[];
+};
+
+export type WorkspaceSupervised = {
+  goals: MainAIGoal[];
+  tasks: WorkspaceSupervisedTask[];
 };
 
 export type ProviderVerification = {
@@ -1204,8 +1258,15 @@ export const api = {
     status?: string;
     settings?: Record<string, unknown>;
   }) => request<ProjectItem>("/api/workspaces", { method: "POST", body: JSON.stringify(payload) }),
-  updateWorkspace: (id: string, payload: Partial<ProjectItem> & { goals?: string[]; purpose?: string | null }) =>
-    request<ProjectItem>(`/api/workspaces/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  updateWorkspace: (
+    id: string,
+    payload: Partial<ProjectItem> & {
+      goals?: string[];
+      purpose?: string | null;
+      settings?: Record<string, unknown>;
+      expected_version?: number;
+    }
+  ) => request<ProjectItem>(`/api/workspaces/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   archiveWorkspace: (id: string) => request<ProjectItem>(`/api/workspaces/${id}/archive`, { method: "POST" }),
   restoreWorkspace: (id: string) => request<ProjectItem>(`/api/workspaces/${id}/restore`, { method: "POST" }),
   deleteWorkspace: (id: string) => request(`/api/workspaces/${id}`, { method: "DELETE" }),
@@ -1228,6 +1289,17 @@ export const api = {
   ) => request<WorkspaceDecision>(`/api/workspaces/${id}/decisions`, { method: "POST", body: JSON.stringify(payload) }),
   workspaceContext: (id: string, query?: string) =>
     request<WorkspaceContext>(`/api/workspaces/${id}/context${query ? `?q=${encodeURIComponent(query)}` : ""}`),
+  workspaceSupervised: (id: string) =>
+    request<WorkspaceSupervised>(`/api/workspaces/${id}/supervised-tasks`),
+  workspaceSyncRuns: (id: string, limit = 20) =>
+    request<WorkspaceSyncRun[]>(`/api/workspaces/${id}/sync?limit=${limit}`),
+  startWorkspaceSync: (id: string, idempotencyKey: string) =>
+    request<WorkspaceSyncRun>(`/api/workspaces/${id}/sync`, {
+      method: "POST",
+      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    }),
+  retryWorkspaceSync: (id: string, runId: string) =>
+    request<WorkspaceSyncRun>(`/api/workspaces/${id}/sync/${runId}/retry`, { method: "POST" }),
 
   listTasks: () => request<TaskItem[]>("/api/projects/tasks"),
   createTask: (payload: Partial<TaskItem>) =>

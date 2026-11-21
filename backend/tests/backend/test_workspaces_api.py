@@ -6,13 +6,25 @@ production rather than a mocked repository.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.config import get_settings
 from app.models.conversation import Conversation
 from app.models.document import Document, DocumentSource
+from app.models.mainai_execution import (
+    MainAICheckpoint,
+    MainAIGoal,
+    MainAIGoalRiskLevel,
+    MainAIPlan,
+    MainAIPlanStatus,
+    MainAITask,
+    MainAITaskEvent,
+    MainAITaskEventType,
+    MainAITaskStatus,
+)
 from app.models.project import Project
 from app.models.user import User
+from app.models.workspace import WorkspaceSyncRun, WorkspaceSyncStatus
 from app.providers.base import ChatResult
 from app.providers.openai_provider import OpenAIProvider
 
@@ -258,3 +270,291 @@ def test_chat_binds_new_conversation_to_workspace_and_scopes_retrieval(
         headers=headers,
     )
     assert conflict.status_code == 409, conflict.text
+
+
+def test_workspace_pagination_and_optimistic_version_conflict(client):
+    csrf = _login(client)
+    headers = _headers(csrf)
+    created_ids = []
+    for index in range(3):
+        response = client.post(
+            "/api/workspaces",
+            json={"name": f"Pagination {index}", "status": "active"},
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+        created_ids.append(response.json()["id"])
+
+    first_page = client.get("/api/workspaces?limit=2&offset=0").json()
+    second_page = client.get("/api/workspaces?limit=2&offset=2").json()
+    assert len(first_page) == 2
+    assert len(second_page) == 1
+    assert {item["id"] for item in first_page}.isdisjoint({item["id"] for item in second_page})
+    assert {item["id"] for item in first_page + second_page} == set(created_ids)
+
+    workspace = client.get(f"/api/workspaces/{created_ids[0]}").json()
+    version = workspace["version"]
+    updated = client.patch(
+        f"/api/workspaces/{created_ids[0]}",
+        json={"name": "Pagination uppdaterad", "expected_version": version},
+        headers=headers,
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["version"] == version + 1
+
+    stale = client.patch(
+        f"/api/workspaces/{created_ids[0]}",
+        json={"name": "Ska inte skrivas", "expected_version": version},
+        headers=headers,
+    )
+    assert stale.status_code == 409, stale.text
+    assert client.get(f"/api/workspaces/{created_ids[0]}").json()["name"] == "Pagination uppdaterad"
+
+
+def test_workspace_sync_is_idempotent_and_skips_unchanged_entities(client, superuser_db):
+    csrf = _login(client)
+    headers = _headers(csrf)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Sync workspace", "status": "active"},
+        headers=headers,
+    ).json()
+    founder_id = _founder_id(superuser_db)
+    source = _make_document(superuser_db, owner_id=founder_id, title="Sync-källa")
+    assert client.post(
+        f"/api/workspaces/{workspace['id']}/documents/{source.id}", headers=headers
+    ).status_code == 200
+
+    key = uuid.uuid4().hex
+    first = client.post(
+        f"/api/workspaces/{workspace['id']}/sync",
+        json={"idempotency_key": key},
+        headers=headers,
+    )
+    assert first.status_code == 200, first.text
+    run = first.json()
+    assert run["status"] == "completed"
+    assert run["progress_total"] >= 2
+    assert run["progress_current"] == run["progress_total"]
+    assert any(item["entity_type"] == "document" for item in run["items"])
+
+    replay = client.post(
+        f"/api/workspaces/{workspace['id']}/sync",
+        json={"idempotency_key": key},
+        headers=headers,
+    )
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["id"] == run["id"]
+    assert len(client.get(f"/api/workspaces/{workspace['id']}/sync").json()) == 1
+
+    unchanged = client.post(
+        f"/api/workspaces/{workspace['id']}/sync",
+        json={"idempotency_key": uuid.uuid4().hex},
+        headers=headers,
+    )
+    assert unchanged.status_code == 200, unchanged.text
+    assert unchanged.json()["status"] == "completed"
+    assert unchanged.json()["result"]["unchanged"] is True
+    assert all(item["status"] == "skipped" for item in unchanged.json()["items"])
+
+
+def test_workspace_sync_failure_retry_and_stale_rejection(client, monkeypatch):
+    import app.routers.workspaces as workspace_router
+
+    csrf = _login(client)
+    headers = _headers(csrf)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Sync retry", "status": "active"},
+        headers=headers,
+    ).json()
+
+    original = workspace_router._apply_sync_entity
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("simulated sync failure")
+
+    monkeypatch.setattr(workspace_router, "_apply_sync_entity", fail)
+    failed = client.post(
+        f"/api/workspaces/{workspace['id']}/sync",
+        json={"idempotency_key": uuid.uuid4().hex},
+        headers=headers,
+    )
+    assert failed.status_code == 200, failed.text
+    failed_run = failed.json()
+    assert failed_run["status"] == "failed"
+    assert failed_run["error_category"] == "sync_failed"
+
+    monkeypatch.setattr(workspace_router, "_apply_sync_entity", original)
+    retried = client.post(
+        f"/api/workspaces/{workspace['id']}/sync/{failed_run['id']}/retry",
+        headers=headers,
+    )
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["status"] == "completed"
+    assert retried.json()["attempt"] == 2
+
+    # A failed snapshot cannot be replayed after the workspace changes.
+    monkeypatch.setattr(workspace_router, "_apply_sync_entity", fail)
+    stale_failed = client.post(
+        f"/api/workspaces/{workspace['id']}/sync",
+        json={"idempotency_key": uuid.uuid4().hex},
+        headers=headers,
+    ).json()
+    monkeypatch.setattr(workspace_router, "_apply_sync_entity", original)
+    assert stale_failed["status"] == "failed"
+
+    changed = client.patch(
+        f"/api/workspaces/{workspace['id']}",
+        json={"name": "Sync retry changed"},
+        headers=headers,
+    )
+    assert changed.status_code == 200, changed.text
+    stale_retry = client.post(
+        f"/api/workspaces/{workspace['id']}/sync/{stale_failed['id']}/retry",
+        headers=headers,
+    )
+    assert stale_retry.status_code == 409, stale_retry.text
+
+
+def test_workspace_sync_reconciles_interrupted_run(client, superuser_db):
+    csrf = _login(client)
+    headers = _headers(csrf)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Sync interrupted", "status": "active"},
+        headers=headers,
+    ).json()
+    founder_id = _founder_id(superuser_db)
+    interrupted = WorkspaceSyncRun(
+        project_id=uuid.UUID(workspace["id"]),
+        owner_id=founder_id,
+        idempotency_key="interrupted-run",
+        status=WorkspaceSyncStatus.running,
+        snapshot_hash="0" * 64,
+        snapshot_version=1,
+        progress_total=1,
+        started_at=datetime.utcnow() - timedelta(minutes=30),
+        heartbeat_at=datetime.utcnow() - timedelta(minutes=30),
+    )
+    superuser_db.add(interrupted)
+    superuser_db.commit()
+
+    new_run = client.post(
+        f"/api/workspaces/{workspace['id']}/sync",
+        json={"idempotency_key": uuid.uuid4().hex},
+        headers=headers,
+    )
+    assert new_run.status_code == 200, new_run.text
+    assert new_run.json()["status"] == "completed"
+    superuser_db.refresh(interrupted)
+    assert interrupted.status == WorkspaceSyncStatus.failed
+    assert interrupted.error_category == "interrupted"
+
+
+def test_workspace_supervised_tasks_include_real_evidence_and_owner_scope(
+    client, superuser_db, make_verified_user
+):
+    csrf = _login(client)
+    headers = _headers(csrf)
+    workspace = client.post(
+        "/api/workspaces",
+        json={"name": "Supervised workspace", "status": "active"},
+        headers=headers,
+    ).json()
+    goal = client.post(
+        "/api/mainai/execution/goals",
+        json={
+            "title": "Granska workspace",
+            "original_instruction": "Granska workspace.",
+            "project_id": workspace["id"],
+        },
+        headers=headers,
+    )
+    assert goal.status_code == 201, goal.text
+    goal_body = goal.json()
+    assert goal_body["project_id"] == workspace["id"]
+
+    founder_id = _founder_id(superuser_db)
+    plan = MainAIPlan(
+        goal_id=uuid.UUID(goal_body["id"]),
+        owner_id=founder_id,
+        version=1,
+        status=MainAIPlanStatus.active,
+        rationale="testplan",
+        created_by="founder",
+    )
+    superuser_db.add(plan)
+    superuser_db.flush()
+    task = MainAITask(
+        goal_id=uuid.UUID(goal_body["id"]),
+        plan_id=plan.id,
+        owner_id=founder_id,
+        description="Granska källorna",
+        task_type="read_only_audit",
+        status=MainAITaskStatus.ready,
+        priority=1,
+        risk_level=MainAIGoalRiskLevel.low,
+        approval_required=True,
+        verification_plan=[{"kind": "targeted_tests", "target": "tests/backend"}],
+        attempts=0,
+        max_attempts=3,
+    )
+    superuser_db.add(task)
+    superuser_db.flush()
+    superuser_db.add(
+        MainAITaskEvent(
+            task_id=task.id,
+            owner_id=founder_id,
+            event_type=MainAITaskEventType.verification_passed,
+            detail={"targeted_tests": "passed"},
+        )
+    )
+    superuser_db.add(
+        MainAICheckpoint(
+            goal_id=uuid.UUID(goal_body["id"]),
+            task_id=task.id,
+            owner_id=founder_id,
+            plan_version=1,
+            executor_state={"step": "verified"},
+            test_status="passed",
+            ci_status="not_run",
+        )
+    )
+    superuser_db.commit()
+
+    supervised = client.get(f"/api/workspaces/{workspace['id']}/supervised-tasks")
+    assert supervised.status_code == 200, supervised.text
+    body = supervised.json()
+    assert [item["id"] for item in body["goals"]] == [goal_body["id"]]
+    assert len(body["tasks"]) == 1
+    assert body["tasks"][0]["task"]["id"] == str(task.id)
+    assert body["tasks"][0]["verification_evidence"][0]["event_type"] == "verification_passed"
+    assert body["tasks"][0]["checkpoints"][0]["test_status"] == "passed"
+
+    approved = client.post(
+        f"/api/mainai/execution/tasks/{task.id}/approve", headers=headers
+    )
+    assert approved.status_code == 200, approved.text
+    approved_body = client.get(f"/api/workspaces/{workspace['id']}/supervised-tasks").json()
+    assert approved_body["tasks"][0]["approval_granted"] is True
+
+    cancelled = client.post(f"/api/mainai/execution/tasks/{task.id}/cancel", headers=headers)
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["status"] == "cancelled"
+
+    other_user, _ = make_verified_user(email="workspace-supervised-other@example.com")
+    foreign_goal = MainAIGoal(
+        owner_id=other_user.id,
+        project_id=uuid.UUID(workspace["id"]),
+        title="Annan ägares goal",
+        original_instruction="Ska inte synas",
+        status="pending",
+        risk_level=MainAIGoalRiskLevel.low,
+        approval_policy="standard_repo_work",
+        created_by="other",
+    )
+    superuser_db.add(foreign_goal)
+    superuser_db.commit()
+    scoped = client.get(f"/api/workspaces/{workspace['id']}/supervised-tasks").json()
+    assert all(item["id"] != str(foreign_goal.id) for item in scoped["goals"])

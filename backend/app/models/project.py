@@ -47,6 +47,8 @@ class Project(Base):
     goals: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     settings: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     status: Mapped[ProjectStatus] = mapped_column(Enum(ProjectStatus), default=ProjectStatus.idea)
+    # Monotonic workspace version used for optimistic metadata updates and sync snapshots.
+    version: Mapped[int] = mapped_column(default=1)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_activity_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

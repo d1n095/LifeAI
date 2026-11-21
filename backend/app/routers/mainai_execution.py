@@ -45,6 +45,7 @@ from app.models.mainai_execution import (
 from app.models.mainai_job import MainAIJob
 from app.models.mainai_recovery import AUTO_SALVAGEABLE_CLASSIFICATIONS, MainAIRecoveryRecord, MainAIRecoveryStatus
 from app.models.mainai_wait import MainAITaskWait
+from app.models.project import Project
 from app.models.user import User
 from app.schemas import (
     EngineeringLessonOut,
@@ -96,6 +97,19 @@ def create_goal(request: Request, payload: MainAIGoalCreateIn, db: Session = Dep
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Invalid risk_level '{payload.risk_level}'.") from exc
 
+    if payload.project_id is not None:
+        project = (
+            db.query(Project)
+            .filter(
+                Project.id == payload.project_id,
+                Project.created_by == user.id,
+                Project.deleted_at.is_(None),
+            )
+            .first()
+        )
+        if project is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace hittades inte.")
+
     goal = planner.create_goal(
         db,
         owner_id=user.id,
@@ -105,6 +119,8 @@ def create_goal(request: Request, payload: MainAIGoalCreateIn, db: Session = Dep
         risk_level=risk_level,
         approval_policy=payload.approval_policy,
     )
+    if payload.project_id is not None:
+        goal.project_id = payload.project_id
     db.commit()
     return goal
 

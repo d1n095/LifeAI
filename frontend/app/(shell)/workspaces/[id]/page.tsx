@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import {
@@ -8,7 +8,10 @@ import {
   ChatSource,
   ConversationItem,
   KnowledgeSourceItem,
+  newClientMessageId,
   WorkspaceDetail,
+  WorkspaceSupervised,
+  WorkspaceSyncRun,
 } from "@/lib/api";
 
 type ChatEntry = {
@@ -33,6 +36,17 @@ const SOURCE_STATUS_LABELS: Record<string, string> = {
   cancelled: "Avbruten",
 };
 
+const SYNC_STATUS_LABELS: Record<string, string> = {
+  queued: "Köad",
+  running: "Pågår",
+  completed: "Klar",
+  failed: "Misslyckades",
+  cancelled: "Avbruten",
+  stale: "Inaktuell",
+};
+
+const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "cancelled"]);
+
 export default function WorkspaceDetailPage() {
   const params = useParams<{ id: string }>();
   const workspaceId = params.id;
@@ -53,23 +67,21 @@ export default function WorkspaceDetailPage() {
   const [chatEntries, setChatEntries] = useState<ChatEntry[]>([]);
   const [message, setMessage] = useState("");
   const [sending, setSending] = useState(false);
+  const [streamingText, setStreamingText] = useState("");
+  const abortRef = useRef<AbortController | null>(null);
 
-  async function refresh() {
-    try {
-      setError(null);
-      const detail = await api.getWorkspace(workspaceId);
-      setWorkspace(detail);
-      setConversations(detail.conversations);
-      if (!conversationId && detail.conversations[0]) {
-        setConversationId(detail.conversations[0].id);
-        await loadConversation(detail.conversations[0].id);
-      }
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
-    }
-  }
+  const [supervised, setSupervised] = useState<WorkspaceSupervised>({ goals: [], tasks: [] });
+  const [supervisedError, setSupervisedError] = useState<string | null>(null);
+  const [syncRuns, setSyncRuns] = useState<WorkspaceSyncRun[]>([]);
+  const [syncing, setSyncing] = useState(false);
+
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [editName, setEditName] = useState("");
+  const [editPurpose, setEditPurpose] = useState("");
+  const [editGoals, setEditGoals] = useState("");
+  const [editStatus, setEditStatus] = useState("active");
+  const [editSettings, setEditSettings] = useState("{}");
 
   async function loadConversation(id: string) {
     try {
@@ -88,10 +100,68 @@ export default function WorkspaceDetailPage() {
     }
   }
 
+  async function refresh() {
+    try {
+      setError(null);
+      const detail = await api.getWorkspace(workspaceId);
+      setWorkspace(detail);
+      setConversations(detail.conversations);
+      if (!editing) {
+        setEditName(detail.name);
+        setEditPurpose(detail.purpose ?? "");
+        setEditGoals((detail.goals ?? []).join("\n"));
+        setEditStatus(detail.status);
+        setEditSettings(JSON.stringify(detail.settings ?? {}, null, 2));
+      }
+      // A workspace switch must never keep the previous workspace's conversation open.
+      const active = detail.conversations.find((item) => item.id === conversationId);
+      if (!active) {
+        if (detail.conversations[0]) {
+          await loadConversation(detail.conversations[0].id);
+        } else {
+          setConversationId(undefined);
+          setChatEntries([]);
+        }
+      }
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function refreshSupervised() {
+    try {
+      setSupervised(await api.workspaceSupervised(workspaceId));
+      setSupervisedError(null);
+    } catch (e: any) {
+      setSupervisedError(e.message);
+    }
+  }
+
+  async function refreshSyncRuns() {
+    try {
+      setSyncRuns(await api.workspaceSyncRuns(workspaceId));
+    } catch {
+      // The main workspace error boundary already reports an unavailable workspace.
+      setSyncRuns([]);
+    }
+  }
+
   useEffect(() => {
     // Documented fetch-on-mount pattern used throughout the shell.
     // eslint-disable-next-line react-hooks/set-state-in-effect
+    setWorkspace(null);
+    setConversations([]);
+    setConversationId(undefined);
+    setChatEntries([]);
+    setStreamingText("");
+    setSupervised({ goals: [], tasks: [] });
+    setSyncRuns([]);
+    setLoading(true);
     refresh();
+    refreshSupervised();
+    refreshSyncRuns();
     api.listLibrary().then(setLibrary).catch(() => setLibrary([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
@@ -102,6 +172,7 @@ export default function WorkspaceDetailPage() {
     try {
       await action();
       await refresh();
+      await refreshSupervised();
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -142,7 +213,96 @@ export default function WorkspaceDetailPage() {
     });
   }
 
+  async function saveWorkspace() {
+    if (!workspace || saving) return;
+    const name = editName.trim();
+    if (!name) {
+      setError("Workspace-namnet får inte vara tomt.");
+      return;
+    }
+    let settings: Record<string, unknown>;
+    try {
+      const parsed = editSettings.trim() ? JSON.parse(editSettings) : {};
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("not an object");
+      }
+      settings = parsed as Record<string, unknown>;
+    } catch {
+      setError("Inställningarna måste vara ett giltigt JSON-objekt.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await api.updateWorkspace(workspace.id, {
+        name,
+        purpose: editPurpose.trim() || null,
+        goals: editGoals
+          .split(/[\n,]+/)
+          .map((goal) => goal.trim())
+          .filter(Boolean),
+        status: editStatus,
+        settings,
+        expected_version: workspace.version,
+      });
+      setEditing(false);
+      await refresh();
+    } catch (e: any) {
+      setError(e.message);
+      if (e?.status === 409) {
+        setEditing(false);
+        await refresh();
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function startSync() {
+    if (!workspace || syncing) return;
+    setSyncing(true);
+    setError(null);
+    try {
+      await api.startWorkspaceSync(workspace.id, newClientMessageId());
+      await refreshSyncRuns();
+      await refresh();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  async function retrySync(runId: string) {
+    if (!workspace || syncing) return;
+    setSyncing(true);
+    setError(null);
+    try {
+      await api.retryWorkspaceSync(workspace.id, runId);
+      await refreshSyncRuns();
+    } catch (e: any) {
+      setError(e.message);
+      await refreshSyncRuns();
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  async function supervisedAction(action: (id: string) => Promise<unknown>, taskId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await action(taskId);
+      await refreshSupervised();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function startConversation() {
+    if (sending) return;
     await run(async () => {
       const conversation = await api.createWorkspaceConversation(workspaceId);
       setConversationId(conversation.id);
@@ -156,6 +316,7 @@ export default function WorkspaceDetailPage() {
     setSending(true);
     setError(null);
     setMessage("");
+    setStreamingText("");
     setChatEntries((entries) => [...entries, { role: "user", content: text }]);
     try {
       let activeConversationId = conversationId;
@@ -164,7 +325,28 @@ export default function WorkspaceDetailPage() {
         activeConversationId = conversation.id;
         setConversationId(conversation.id);
       }
-      const response = await api.sendChat(text, activeConversationId, undefined, workspaceId);
+      const controller = new AbortController();
+      abortRef.current = controller;
+      const response = await api.streamChat(
+        text,
+        activeConversationId,
+        newClientMessageId(),
+        {
+          signal: controller.signal,
+          onEvent: (event) => {
+            if (event.type === "start") {
+              if (event.conversation_id !== activeConversationId) {
+                activeConversationId = event.conversation_id;
+                setConversationId(event.conversation_id);
+              }
+            } else if (event.type === "delta") {
+              setStreamingText((previous) => previous + event.text);
+            }
+          },
+        },
+        workspaceId
+      );
+      setStreamingText("");
       setChatEntries((entries) => [
         ...entries,
         {
@@ -178,14 +360,28 @@ export default function WorkspaceDetailPage() {
       ]);
       await refresh();
     } catch (e: any) {
-      setError(e.message);
-      setChatEntries((entries) => [
-        ...entries,
-        { role: "assistant", content: "Svaret kunde inte hämtas. Meddelandet kan ändå vara sparat." },
-      ]);
+      setStreamingText("");
+      if (e?.name === "AbortError") {
+        setChatEntries((entries) => [
+          ...entries,
+          { role: "assistant", content: "Genereringen avbröts. Ditt meddelande finns sparat." },
+        ]);
+        await refresh();
+      } else {
+        setError(e.message);
+        setChatEntries((entries) => [
+          ...entries,
+          { role: "assistant", content: "Svaret kunde inte hämtas. Meddelandet kan ändå vara sparat." },
+        ]);
+      }
     } finally {
+      abortRef.current = null;
       setSending(false);
     }
+  }
+
+  function stopStreaming() {
+    abortRef.current?.abort();
   }
 
   if (loading) {
@@ -214,6 +410,7 @@ export default function WorkspaceDetailPage() {
   const attachedIds = new Set(workspace.sources.map((source) => source.id));
   const attachable = library.filter((source) => !attachedIds.has(source.id));
   const openTasks = workspace.tasks.filter((task) => task.status !== "done");
+  const latestSync = syncRuns[0];
 
   return (
     <div className="space-y-6">
@@ -228,9 +425,24 @@ export default function WorkspaceDetailPage() {
               {workspace.purpose || workspace.description || "Inget syfte formulerat ännu."}
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setEditing((value) => !value)}
+              className="rounded-lg border border-border px-3 py-1.5 text-xs text-white/60 hover:text-white"
+            >
+              {editing ? "Stäng redigering" : "Redigera"}
+            </button>
+            <button
+              type="button"
+              disabled={syncing}
+              onClick={startSync}
+              className="rounded-lg border border-border px-3 py-1.5 text-xs text-white/60 hover:text-white disabled:opacity-50"
+            >
+              {syncing ? "Synkar…" : "Synka workspace"}
+            </button>
             <span className="rounded-full border border-border px-3 py-1 text-xs text-white/60">
-              {workspace.archived_at ? "arkiverad" : workspace.status}
+              {workspace.archived_at ? "arkiverad" : workspace.status} · v{workspace.version ?? 1}
             </span>
             <button
               type="button"
@@ -257,6 +469,13 @@ export default function WorkspaceDetailPage() {
             ))}
           </ul>
         )}
+        {latestSync && (
+          <p role="status" className="mt-3 text-xs text-white/40">
+            Senaste synk: {SYNC_STATUS_LABELS[latestSync.status] ?? latestSync.status} ·{" "}
+            {latestSync.progress_current}/{latestSync.progress_total} entiteter · försök{" "}
+            {latestSync.attempt}
+          </p>
+        )}
       </div>
 
       {error && (
@@ -265,12 +484,232 @@ export default function WorkspaceDetailPage() {
         </div>
       )}
 
+      {editing && (
+        <section aria-labelledby="workspace-settings" className="rounded-xl border border-border bg-panel p-4">
+          <h2 id="workspace-settings" className="text-sm font-medium text-white/70">
+            Workspace-inställningar
+          </h2>
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
+            <div>
+              <label htmlFor="workspace-edit-name" className="mb-1 block text-xs text-white/40">
+                Workspace-namn
+              </label>
+              <input
+                id="workspace-edit-name"
+                value={editName}
+                onChange={(event) => setEditName(event.target.value)}
+                className="w-full rounded-lg border border-border bg-base px-3 py-2 text-sm outline-none focus:border-accent"
+              />
+            </div>
+            <div>
+              <label htmlFor="workspace-edit-status" className="mb-1 block text-xs text-white/40">
+                Status
+              </label>
+              <select
+                id="workspace-edit-status"
+                value={editStatus}
+                onChange={(event) => setEditStatus(event.target.value)}
+                className="w-full rounded-lg border border-border bg-base px-3 py-2 text-sm"
+              >
+                <option value="idea">Idé</option>
+                <option value="active">Aktiv</option>
+                <option value="paused">Pausad</option>
+                <option value="done">Klar</option>
+              </select>
+            </div>
+            <div className="md:col-span-2">
+              <label htmlFor="workspace-edit-purpose" className="mb-1 block text-xs text-white/40">
+                Syfte
+              </label>
+              <textarea
+                id="workspace-edit-purpose"
+                value={editPurpose}
+                onChange={(event) => setEditPurpose(event.target.value)}
+                rows={2}
+                className="w-full resize-none rounded-lg border border-border bg-base px-3 py-2 text-sm outline-none focus:border-accent"
+              />
+            </div>
+            <div>
+              <label htmlFor="workspace-edit-goals" className="mb-1 block text-xs text-white/40">
+                Mål (ett per rad)
+              </label>
+              <textarea
+                id="workspace-edit-goals"
+                value={editGoals}
+                onChange={(event) => setEditGoals(event.target.value)}
+                rows={4}
+                className="w-full resize-none rounded-lg border border-border bg-base px-3 py-2 text-sm outline-none focus:border-accent"
+              />
+            </div>
+            <div>
+              <label htmlFor="workspace-edit-settings" className="mb-1 block text-xs text-white/40">
+                Inställningar (JSON)
+              </label>
+              <textarea
+                id="workspace-edit-settings"
+                value={editSettings}
+                onChange={(event) => setEditSettings(event.target.value)}
+                rows={4}
+                spellCheck={false}
+                className="w-full resize-none rounded-lg border border-border bg-base px-3 py-2 font-mono text-xs outline-none focus:border-accent"
+              />
+            </div>
+          </div>
+          <div className="mt-3 flex gap-2">
+            <button
+              type="button"
+              onClick={saveWorkspace}
+              disabled={saving}
+              className="rounded-lg bg-accent px-3 py-2 text-sm disabled:opacity-50"
+            >
+              {saving ? "Sparar…" : "Spara workspace"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditing(false)}
+              className="rounded-lg border border-border px-3 py-2 text-sm text-white/60 hover:text-white"
+            >
+              Avbryt
+            </button>
+          </div>
+        </section>
+      )}
+
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <Stat label="Källor" value={workspace.sources.length} />
         <Stat label="Öppna uppgifter" value={openTasks.length} total={workspace.tasks.length} />
         <Stat label="Samtal" value={workspace.conversations.length} />
         <Stat label="Beslut" value={workspace.decisions.length} />
       </div>
+
+      <section aria-labelledby="workspace-supervised" className="rounded-xl border border-border bg-panel p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 id="workspace-supervised" className="text-sm font-medium text-white/70">
+              Superviserade MainAI-uppgifter
+            </h2>
+            <p className="mt-1 text-xs text-white/35">
+              Riktiga goals och tasks från MainAI:s exekveringsloop. Här visas state och evidens;
+              körningen sker i den befintliga motorn.
+            </p>
+          </div>
+          <span className="rounded-full border border-border px-2 py-0.5 text-xs text-white/40">
+            {supervised.tasks.length} tasks · {supervised.goals.length} goals
+          </span>
+        </div>
+
+        {supervisedError && (
+          <div role="alert" className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
+            {supervisedError}
+          </div>
+        )}
+
+        {supervised.tasks.length === 0 ? (
+          <p className="mt-3 text-sm text-white/30">
+            Inga superviserade MainAI-uppgifter är kopplade till det här workspaceet ännu.
+          </p>
+        ) : (
+          <div className="mt-3 space-y-3">
+            {supervised.tasks.map((item) => {
+              const terminal = TERMINAL_TASK_STATUSES.has(item.task.status);
+              return (
+                <article key={item.task.id} className="rounded-lg border border-border/60 p-3 text-sm">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-white/85">{item.task.description}</div>
+                      <div className="mt-1 text-xs text-white/40">
+                        {item.goal.title} · {item.task.task_type} · risk {item.task.risk_level}
+                      </div>
+                    </div>
+                    <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-xs text-white/50">
+                      {item.task.status}
+                    </span>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-3 text-xs text-white/40">
+                    <span>liveness: {item.task.liveness}</span>
+                    <span>
+                      försök {item.task.attempts}/{item.task.max_attempts}
+                    </span>
+                    {item.job && <span>jobb: {item.job.status}</span>}
+                    {item.task.approval_required && (
+                      <span>{item.approval_granted ? "godkänd" : "väntar på godkännande"}</span>
+                    )}
+                  </div>
+                  {item.task.blocker_reason && (
+                    <p className="mt-2 rounded-lg border border-amber-500/20 bg-amber-500/5 p-2 text-xs text-amber-200">
+                      Blockerare: {item.task.blocker_reason}
+                    </p>
+                  )}
+                  {item.checkpoints[0] && (
+                    <p className="mt-2 text-xs text-white/40">
+                      Senaste checkpoint: test {item.checkpoints[0].test_status ?? "okänt"} · CI{" "}
+                      {item.checkpoints[0].ci_status ?? "okänt"}
+                    </p>
+                  )}
+                  <div className="mt-2 flex flex-wrap gap-3 text-xs">
+                    <details className="min-w-0">
+                      <summary className="cursor-pointer text-white/50 hover:text-white">
+                        Historik ({item.events.length})
+                      </summary>
+                      <ul className="mt-1 space-y-1 text-white/40">
+                        {item.events.slice(0, 12).map((event) => (
+                          <li key={event.id}>
+                            {event.event_type} · {new Date(event.created_at).toLocaleString("sv-SE")}
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                    <details className="min-w-0">
+                      <summary className="cursor-pointer text-white/50 hover:text-white">
+                        Verifiering ({item.verification_evidence.length})
+                      </summary>
+                      <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-base/70 p-2 text-[11px] text-white/50">
+                        {JSON.stringify(item.verification_evidence, null, 2)}
+                      </pre>
+                    </details>
+                    {item.waits.length > 0 && (
+                      <details>
+                        <summary className="cursor-pointer text-white/50 hover:text-white">
+                          Externa väntor ({item.waits.length})
+                        </summary>
+                        <ul className="mt-1 space-y-1 text-white/40">
+                          {item.waits.map((wait) => (
+                            <li key={wait.id}>
+                              {wait.source_type}: {wait.status} ({wait.poll_count} polls)
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
+                    )}
+                  </div>
+                  {!terminal && (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {item.task.approval_required && !item.approval_granted && (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => supervisedAction(api.mainaiExecutionApproveTask, item.task.id)}
+                          className="rounded-lg bg-accent px-3 py-1.5 text-xs disabled:opacity-50"
+                        >
+                          Godkänn
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => supervisedAction(api.mainaiExecutionCancelTask, item.task.id)}
+                        className="rounded-lg border border-border px-3 py-1.5 text-xs text-white/60 hover:text-white disabled:opacity-50"
+                      >
+                        Avbryt
+                      </button>
+                    </div>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
 
       <div className="grid gap-6 lg:grid-cols-2">
         <section aria-labelledby="workspace-knowledge" className="rounded-xl border border-border bg-panel p-4">
@@ -385,7 +824,7 @@ export default function WorkspaceDetailPage() {
           <button
             type="button"
             onClick={startConversation}
-            disabled={busy}
+            disabled={busy || sending}
             className="rounded-lg border border-border px-3 py-1.5 text-xs text-white/60 hover:text-white disabled:opacity-50"
           >
             Nytt samtal
@@ -412,7 +851,7 @@ export default function WorkspaceDetailPage() {
         )}
 
         <div className="mt-4 max-h-80 space-y-3 overflow-y-auto rounded-lg border border-border/60 bg-base/50 p-3" aria-live="polite">
-          {chatEntries.length === 0 && (
+          {chatEntries.length === 0 && !streamingText && (
             <p className="text-sm text-white/30">Ställ en fråga om projektet för att börja.</p>
           )}
           {chatEntries.map((entry, index) => (
@@ -438,7 +877,14 @@ export default function WorkspaceDetailPage() {
               )}
             </div>
           ))}
-          {sending && <div className="text-xs text-white/35">MainAI svarar…</div>}
+          {streamingText && (
+            <div className="text-left">
+              <div className="inline-block max-w-[90%] whitespace-pre-wrap rounded-lg bg-panel px-3 py-2 text-sm text-white/80">
+                {streamingText}
+              </div>
+            </div>
+          )}
+          {sending && !streamingText && <div className="text-xs text-white/35">MainAI svarar…</div>}
         </div>
 
         <div className="mt-3 flex gap-2">
@@ -459,14 +905,24 @@ export default function WorkspaceDetailPage() {
             placeholder="Fråga MainAI om det här projektet…"
             className="min-w-0 flex-1 resize-none rounded-lg border border-border bg-base px-3 py-2 text-sm outline-none focus:border-accent"
           />
-          <button
-            type="button"
-            onClick={sendMessage}
-            disabled={sending || !message.trim()}
-            className="self-end rounded-lg bg-accent px-4 py-2 text-sm disabled:opacity-50"
-          >
-            {sending ? "Skickar…" : "Skicka"}
-          </button>
+          {sending ? (
+            <button
+              type="button"
+              onClick={stopStreaming}
+              className="self-end rounded-lg border border-border px-4 py-2 text-sm text-white/70 hover:text-white"
+            >
+              Stoppa
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={sendMessage}
+              disabled={!message.trim()}
+              className="self-end rounded-lg bg-accent px-4 py-2 text-sm disabled:opacity-50"
+            >
+              Skicka
+            </button>
+          )}
         </div>
       </section>
 
@@ -535,6 +991,36 @@ export default function WorkspaceDetailPage() {
             ))}
             {workspace.activities.length === 0 && <li className="text-sm text-white/30">Ingen aktivitet ännu.</li>}
           </ul>
+
+          <div className="mt-4 rounded-lg border border-border/60 p-3">
+            <h3 className="text-xs font-medium uppercase tracking-wide text-white/50">
+              Synkronisering
+            </h3>
+            {syncRuns.length === 0 ? (
+              <p className="mt-2 text-xs text-white/35">Ingen synk har körts ännu.</p>
+            ) : (
+              <ul className="mt-2 space-y-2">
+                {syncRuns.slice(0, 5).map((run) => (
+                  <li key={run.id} className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <span className="text-white/55">
+                      {SYNC_STATUS_LABELS[run.status] ?? run.status} · {run.progress_current}/
+                      {run.progress_total} · försök {run.attempt}
+                    </span>
+                    {(run.status === "failed" || run.status === "stale") && (
+                      <button
+                        type="button"
+                        onClick={() => retrySync(run.id)}
+                        disabled={syncing}
+                        className="text-accent2 hover:underline disabled:opacity-50"
+                      >
+                        Försök igen
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
 
           {workspace.context.uncertainties.length > 0 && (
             <div className="mt-4 rounded-lg border border-amber-500/20 bg-amber-500/5 p-3">
