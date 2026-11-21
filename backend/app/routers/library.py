@@ -10,6 +10,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
+from app.audit import record_audit
 from app.config import get_settings
 from app.db import get_db
 from app.deps import require_founder
@@ -21,7 +22,7 @@ from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_claim import KnowledgeClaim
 from app.models.knowledge_version import KnowledgeVersion
 from app.models.media_url_import import MediaUrlImport
-from app.models.source_relationship import SourceRelationship
+from app.models.source_relationship import RelationshipType, SourceRelationship
 from app.models.user import User
 from app.egress_policy import EgressDeniedError
 from app.providers.registry import embed_with_policy, resolve_active
@@ -38,7 +39,7 @@ from app.rag.claim_graph import (
 )
 from app.rag.intellectual_adversary import review_conclusion
 from app.rag.epistemics import cross_domain_claim_overlaps, second_order_consequences
-from app.rag.library_import import maybe_purge_blob
+from app.rag.library_import import EXTRACTION_VERSION, maybe_purge_blob
 from app.rag.epistemics import classify_claim
 from app.rag.evidence_metadata import (
     ClaimNotFoundError,
@@ -57,6 +58,7 @@ from app.storage.references import (
     acquire_storage_key_lock,
     delete_if_unreferenced,
     get_storage_cleanup_ops_status,
+    retain_pending_rejected_upload_cleanup_tasks,
 )
 from app.schemas import (
     ClaimEvidenceMetadataIn,
@@ -76,6 +78,7 @@ from app.schemas import (
     OpsStatusOut,
     SourceRelationshipIn,
     SourceRelationshipOut,
+    SourceReplacementOut,
 )
 
 logger = logging.getLogger(__name__)
@@ -433,6 +436,231 @@ def get_source(source_id: uuid.UUID, db: Session = Depends(get_db), user: User =
             for c in all_chunks
         ]
     return detail
+
+
+@router.post("/{source_id}/replace", response_model=SourceReplacementOut)
+@limiter.limit(f"{settings.rate_limit_library_import_per_minute}/minute")
+async def replace_source(
+    source_id: uuid.UUID,
+    request: Request,
+    file: UploadFile,
+    confirm: bool = False,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Replace a Library source with new bytes as a new, explicit version.
+
+    `Document.storage_key` is immutable once set (migration 0037's Source Vault invariant),
+    so replacement cannot overwrite the old row's original. Instead this creates a new
+    Document with the next `version_number`, a new durable ImportJob, and a `supersedes`
+    edge back to the old source. The old row, its KnowledgeVersion history, claims and
+    original blob stay intact for provenance, but its `active_truth_status` becomes
+    `superseded` and app/rag/vector_store.py excludes every `supersedes` target from both
+    retrieval channels — the obsolete content is not searchable as current truth.
+
+    The new Document is pre-created in `original_stored` exactly like
+    /api/documents/upload, so the existing worker claim/resume path indexes it without a
+    second queue. A KnowledgeVersion is created immediately with the next version number;
+    _resume_incomplete_document therefore reuses that version instead of resetting it to 1.
+    """
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Ersättning kräver explicit bekräftelse (confirm=true).",
+        )
+
+    # Same lock ordering as import: the owner-erasure lock precedes every durable write so a
+    # concurrent account erasure can never inventory past a blob this request is about to
+    # create. Re-check the owner after acquiring it, before writing any bytes.
+    acquire_owner_erasure_lock(db, user.id)
+    if db.query(User).filter_by(id=user.id).first() is None:
+        raise HTTPException(status_code=401, detail="Kontot finns inte längre.")
+
+    old_document = (
+        _visible_document_query(db, user.id)
+        .filter(Document.id == source_id)
+        .with_for_update()
+        .first()
+    )
+    if old_document is None:
+        raise HTTPException(status_code=404, detail="Källan hittades inte.")
+
+    already_replaced = (
+        db.query(SourceRelationship.id)
+        .filter(
+            SourceRelationship.owner_id == user.id,
+            SourceRelationship.to_source_id == source_id,
+            SourceRelationship.relationship_type == RelationshipType.supersedes,
+        )
+        .first()
+    )
+    if already_replaced is not None:
+        raise HTTPException(status_code=409, detail="Källan är redan ersatt av en nyare version.")
+
+    storage = get_storage()
+    peek = file.file.read(1)
+    if not peek:
+        raise HTTPException(status_code=400, detail="Filen är tom.")
+    try:
+        file.file.seek(0)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Kunde inte läsa filen: {exc}") from exc
+
+    def _read_chunk() -> bytes:
+        return file.file.read(1 << 20)
+
+    try:
+        blob = await run_in_threadpool(storage.write_stream, _read_chunk, max_bytes=MAX_UPLOAD_BYTES)
+    except StorageSizeLimitExceeded:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Filen är för stor (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB).",
+        )
+    except StorageError as exc:
+        raise HTTPException(status_code=500, detail=f"Kunde inte lagra filen: {exc}") from exc
+
+    if blob.size_bytes == 0:
+        delete_if_unreferenced(db, storage, blob.storage_key)
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Filen är tom.")
+
+    checksum = blob.sha256
+    if old_document.checksum == checksum:
+        # No-op replacement: the same bytes cannot become a new version. The blob is shared
+        # with the still-live old source, so delete_if_unreferenced leaves it in place.
+        delete_if_unreferenced(db, storage, blob.storage_key)
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Den nya filen är identisk med nuvarande version; ingen ersättning skapades.",
+        )
+
+    duplicate = (
+        db.query(Document.id)
+        .filter(
+            Document.uploaded_by == user.id,
+            Document.checksum == checksum,
+            Document.deleted_at.is_(None),
+            Document.id != old_document.id,
+        )
+        .first()
+    )
+    if duplicate is not None:
+        # The worker's file-level idempotency check would treat this as a duplicate and never
+        # index the pre-created replacement row, leaving it stuck at original_stored. Refuse
+        # explicitly instead of manufacturing a source that can never become searchable.
+        delete_if_unreferenced(db, storage, blob.storage_key)
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Innehållet finns redan som en annan källa i biblioteket; ersättningen skapades inte.",
+        )
+
+    acquire_storage_key_lock(db, blob.storage_key)
+    if not storage.exists(blob.storage_key):
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Uppladdningen kolliderade med en samtidig radering av en identisk fil. Försök igen.",
+        )
+
+    client_ip = request.client.host if request and request.client else None
+    try:
+        job = ImportJob(
+            owner_id=user.id,
+            project_id=old_document.project_id,
+            status=ImportJobStatus.pending,
+            source_filename=file.filename or old_document.original_filename,
+            source_checksum=checksum,
+            source_storage_key=blob.storage_key,
+            source_size_bytes=blob.size_bytes,
+            source_media_type=file.content_type or old_document.media_type,
+        )
+        db.add(job)
+        db.flush()
+
+        new_document = Document(
+            title=old_document.title,
+            category=old_document.category,
+            uploaded_by=user.id,
+            original_filename=file.filename or old_document.original_filename,
+            checksum=checksum,
+            media_type=file.content_type or old_document.media_type,
+            storage_key=blob.storage_key,
+            size_bytes=blob.size_bytes,
+            import_job_id=job.id,
+            status=IndexStatus.original_stored,
+            stored_at=datetime.utcnow(),
+            project_id=old_document.project_id,
+            classification=old_document.classification,
+            active_truth_status=ActiveTruthStatus.active,
+            version_number=(old_document.version_number or 1) + 1,
+            imported_at=datetime.utcnow(),
+        )
+        db.add(new_document)
+        db.flush()
+
+        version = KnowledgeVersion(
+            source_id=new_document.id,
+            owner_id=user.id,
+            version_number=new_document.version_number,
+            checksum=checksum,
+            extraction_version=EXTRACTION_VERSION,
+            raw_metadata={
+                "original_filename": new_document.original_filename,
+                "size_bytes": blob.size_bytes,
+                "media_type": new_document.media_type,
+                "replaced_source_id": str(old_document.id),
+            },
+        )
+        db.add(version)
+
+        old_document.active_truth_status = ActiveTruthStatus.superseded
+        db.add(old_document)
+
+        db.add(
+            SourceRelationship(
+                owner_id=user.id,
+                from_source_id=new_document.id,
+                to_source_id=old_document.id,
+                relationship_type=RelationshipType.supersedes,
+                note=f"Ersätter version {old_document.version_number}.",
+            )
+        )
+
+        # Same atomicity as purge_source: the audit row joins this transaction, so the
+        # replacement and its audit trail either both commit or neither does.
+        record_audit(
+            db,
+            user_id=user.id,
+            action="source_replaced",
+            entity_type="document",
+            entity_id=str(new_document.id),
+            detail=(
+                f"superseded_source_id={old_document.id} "
+                f"old_version={old_document.version_number} "
+                f"new_version={new_document.version_number}"
+            ),
+            ip_address=client_ip,
+            commit=False,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        delete_if_unreferenced(db, storage, blob.storage_key)
+        raise
+
+    # The reference is durable now; release any stale rejected-upload cleanup task for this
+    # content-addressed key exactly like the upload path does.
+    retain_pending_rejected_upload_cleanup_tasks(blob.storage_key)
+    db.refresh(new_document)
+    db.refresh(job)
+    return SourceReplacementOut(
+        source=KnowledgeSourceOut.model_validate(new_document),
+        job=ImportJobOut.model_validate(job),
+        superseded_source_id=old_document.id,
+        version_number=new_document.version_number,
+    )
 
 
 def _document_is_media_source(document: Document) -> bool:

@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
+from app.models.source_relationship import RelationshipType, SourceRelationship
 from app.rag.embedding_space import pad_to_storage
 
 
@@ -18,6 +19,21 @@ def _like_pattern(value: str) -> str:
     """
     escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"%{escaped}%"
+
+
+def _superseded_source_ids(owner_id: uuid.UUID):
+    """Sources that an explicit `supersedes` edge has replaced.
+
+    This is deliberately narrower than filtering on `active_truth_status == superseded`: a
+    source manually marked historical/superseded must still be retrievable with the Trust
+    Engine's explicit warning (app/rag/trust.py). Only a replacement recorded by the actual
+    replacement flow creates the edge, and that source's old chunks must stop competing with
+    its successor in both the semantic and text channels.
+    """
+    return select(SourceRelationship.to_source_id).where(
+        SourceRelationship.owner_id == owner_id,
+        SourceRelationship.relationship_type == RelationshipType.supersedes,
+    )
 
 
 def upsert_chunks(
@@ -129,7 +145,11 @@ def search(
     stmt = (
         select(DocumentChunk, distance.label("distance"))
         .join(Document, Document.id == DocumentChunk.document_id)
-        .where(DocumentChunk.owner_id == owner_id, Document.deleted_at.is_(None))
+        .where(
+            DocumentChunk.owner_id == owner_id,
+            Document.deleted_at.is_(None),
+            Document.id.not_in(_superseded_source_ids(owner_id)),
+        )
     )
     # Active-embedding-space guard: when the caller names the active (model, native_dim), only
     # chunks stamped with that exact space are comparable — a zero-padded 768-d vector and a
@@ -177,7 +197,11 @@ def hybrid_search(
     zero vector, which would return meaningless cosine-distance "matches". The text-match
     channel needs no embedding at all, so it keeps returning real results either way.
     """
-    base_filters = [DocumentChunk.owner_id == owner_id, Document.deleted_at.is_(None)]
+    base_filters = [
+        DocumentChunk.owner_id == owner_id,
+        Document.deleted_at.is_(None),
+        Document.id.not_in(_superseded_source_ids(owner_id)),
+    ]
     if project_id is not None:
         base_filters.append(Document.project_id == project_id)
     if classification is not None:

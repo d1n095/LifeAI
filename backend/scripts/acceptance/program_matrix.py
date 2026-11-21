@@ -211,20 +211,41 @@ def build(args: argparse.Namespace) -> dict:
     f10_status, f10_stats = _junit_status(junit, ("test_project_memory", "test_memory_work_linkage"))
     entries.append(_entry("F10", f10_status, f10_stats, "Memory persistence, update, deletion and owner isolation."))
 
-    f11_status, f11_stats = _junit_status(
+    # F11 has two independent requirements: recovering a crash-window version and replacing
+    # a source with an explicit next version. Requiring BOTH prevents the matrix from going
+    # green on crash-safety alone (the previous state) or on replacement alone.
+    f11_resume_status, f11_resume_stats = _junit_status(
         version_junit, ("test_resume_recreates_missing_version", "test_resume_claim_extraction_crash")
     )
-    if f11_status == "PASS":
+    f11_replace_status, f11_replace_stats = _junit_status(
+        version_junit,
+        (
+            "test_replace_source_creates_next_version",
+            "test_replace_identical_bytes",
+            "test_replace_with_content_already_owned",
+        ),
+    )
+    f11_stats = {"crash_safe_resume": f11_resume_stats, "explicit_replacement": f11_replace_stats}
+    if "FAIL" in (f11_resume_status, f11_replace_status):
+        entries.append(_entry("F11", "FAIL", f11_stats, "A version/replacement test failed."))
+    elif f11_resume_status == "PASS" and f11_replace_status == "PASS":
+        entries.append(
+            _entry(
+                "F11",
+                "PASS",
+                f11_stats,
+                "Crash-safe version recreation plus explicit replacement, next version and retrieval invalidation.",
+            )
+        )
+    else:
         entries.append(
             _entry(
                 "F11",
                 "BLOCKED",
                 f11_stats,
-                "Crash-safe version/storage recreation is fixed and tested; replacement/version-change API is not implemented.",
+                "Requires both crash-safe resume and explicit replacement evidence.",
             )
         )
-    else:
-        entries.append(_entry("F11", f11_status, f11_stats, "Version recovery evidence."))
 
     if any("founder-knowledge-studio" in f for f in playwright):
         entries.append(_entry("F12", "PASS", sorted(playwright), "Knowledge Studio browser evidence present."))

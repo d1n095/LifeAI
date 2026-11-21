@@ -358,6 +358,15 @@ export type ImportJobItem = {
   last_failure_transient: boolean | null;
 };
 
+// Explicit source replacement (F11): the old source remains readable for provenance, but its
+// active_truth_status becomes superseded and the new source continues the version numbering.
+export type SourceReplacement = {
+  source: KnowledgeSourceItem;
+  job: ImportJobItem;
+  superseded_source_id: string;
+  version_number: number;
+};
+
 export type LibrarySearchHit = {
   document_id: string;
   title: string;
@@ -1003,6 +1012,14 @@ export const api = {
   getLibraryMediaUrl: (id: string) => `${API_URL}/api/library/${id}/media`,
   deleteLibrarySource: (id: string) =>
     request(`/api/library/${id}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) }),
+  replaceLibrarySource: (id: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return request<SourceReplacement>(`/api/library/${id}/replace?confirm=true`, {
+      method: "POST",
+      body: form,
+    });
+  },
   createSourceRelationship: (sourceId: string, toSourceId: string, relationshipType: string, note?: string) =>
     request<SourceRelationshipItem>(`/api/library/${sourceId}/relationships`, {
       method: "POST",

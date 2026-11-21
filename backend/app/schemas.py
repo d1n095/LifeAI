@@ -656,6 +656,21 @@ class ImportJobOut(BaseModel):
     last_failure_transient: bool | None
 
 
+class SourceReplacementOut(BaseModel):
+    """Result of replacing a Library source with new bytes.
+
+    The old source is kept for provenance (its versions, claims and original blob), but its
+    `active_truth_status` becomes `superseded` and a `supersedes` edge from the new source
+    makes it unreachable through both retrieval channels. The new source starts a fresh
+    import job and continues the source's version numbering.
+    """
+
+    source: KnowledgeSourceOut
+    job: ImportJobOut
+    superseded_source_id: uuid.UUID
+    version_number: int
+
+
 class OpsStatusOut(BaseModel):
     """Life Library durable-worker package (DEL 6): founder-only operational status —
     aggregated counts/booleans/timestamps only, deliberately never a private filesystem path
