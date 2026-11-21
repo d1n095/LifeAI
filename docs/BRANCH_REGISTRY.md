@@ -15,8 +15,9 @@ deployment har gjorts. `first_cycle_go=false`. Den tidigare leveransen
 **Commits:** `87bede8` crash-säker version/lagring vid resume, `d620642` recovery-matris,
 F01–F24-matris, JUnit-sammanslagning och BLOCKED-propagering i QA-grinden, `b898a02`
 testkontrakt för planner/egress, `2771905` F05-matchning av JUnit-classnames, `c527543`
-riktig PostgreSQL-felinjektion för F13. Dokumentationscommiten med denna post och evidensen
-ligger ovanpå `c527543`.
+riktig PostgreSQL-felinjektion för F13, `35d65a9` explicit ersättning/versionsbyte med
+F11-tester och Knowledge Studio-UI. Dokumentationscommiten med denna post och evidensen
+ligger ovanpå `35d65a9`.
 
 **Scope:** En verklig crash-window-bugg i `app/rag/library_import.py` är reparerad: en
 `Document`-rad som committats före `KnowledgeVersion`/`storage_key` kunde återupptas som
@@ -25,31 +26,33 @@ permanent. Resume återskapar nu båda delarna, verifierar checksumman och behå
 version. Därutöver: körbar recovery-matris för giltig/korrupt/partiell restore, F01–F24-matris
 som härleder PASS/FAIL/BLOCKED/SKIP från terminal evidens, JUnit-merge för avgränsade
  testsviter, F13-felinjektion mot riktig PostgreSQL, samt rättade testkontrakt för den nya
-`owner_id`-signaturen. Ingen ny produktarkitektur eller parallell minnesväg har införts.
+`owner_id`-signaturen. Explicit dokumentersättning är nu implementerad: nästa version,
+durabelt ImportJob, `supersedes`-relation och sökexkludering av ersatta mål, med bevarad
+historik/original. Ingen ny produktarkitektur eller parallell minnesväg har införts.
 
-**Faktiska resultat:** samlad backend-JUnit **511 tester, 0 failures, 0 errors, 2 skips**
-(`zip` och live OpenAI). F13 **6/6 PASS**: rollback, en exakt deadlock `40P01`, låstimeout
-`55P03`, statement/commit-timeout `57014`, dödad backend med återanslutning och samtidiga
-commits. F18 recovery-matris **PASS**. F01–F24: **16 PASS, 0 FAIL, 8 BLOCKED**. QA-grinden
-körde mot exakt `c527543` med ren tracked tree, Alembic `0091`, PostgreSQL/Redis nåbara,
-installmatris 12/0/0, resursprobe PASS och 3/3 Playwright-resiliens; resultatet är
-**BLOCKED** (exit 3), inte PASS.
+**Faktiska resultat:** samlad backend-JUnit **516 tester, 0 failures, 0 errors, 2 skips**
+(`zip` och live OpenAI). F11 **PASS**: 5 ersättningstester och 2 crash-resume-tester. F13
+**6/6 PASS**: rollback, en exakt deadlock `40P01`, låstimeout `55P03`, statement/
+commit-timeout `57014`, dödad backend med återanslutning och samtidiga commits. F18
+recovery-matris **PASS**. F01–F24: **17 PASS, 0 FAIL, 7 BLOCKED**. QA-grinden körde mot
+exakt `35d65a9` med ren tracked tree, Alembic `0091`, PostgreSQL/Redis nåbara, installmatris
+12/0/0, resursprobe PASS och 3/3 Playwright-resiliens; resultatet är **BLOCKED** (exit 3),
+inte PASS.
 
 **Kvarstående blockerare:** F04 (Ollama saknas), F09 (dedikerat RAG-kvalitetsdataset),
-F11 (ersättnings-/versionsbytes-API; endast crash-säker recreation är klar), F12
-(Knowledge Studio E2E), F19 (full founder-resa), F21 (mobil/a11y), F23 (fyra timmars soak)
-och F24 (grinden ärver dessa). `pg_stat_statements`, `zip`, Z.ai-CLI, exakt-head GitHub
+F12 (Knowledge Studio E2E), F19 (full founder-resa), F21 (mobil/a11y), F23 (fyra timmars
+soak) och F24 (grinden ärver dessa). `pg_stat_statements`, `zip`, Z.ai-CLI, exakt-head GitHub
 Actions och resursutmattning är fortsatt kända begränsningar.
 
 **Evidens:** `docs/evidence/founder-alpha/successor/` (`program-tests.xml`,
-`recovery-matrix.json`, `postgres-faults.json`, `version-resume.xml`, `program-matrix.json`,
-`qa-gate.json`, `qa-gate.md` och `README.md` med reproducerbara kommandon).
+`recovery-matrix.json`, `postgres-faults.json`, `version-resume.xml`,
+`version-replace.xml`, `program-matrix.json`, `qa-gate.json`, `qa-gate.md` och `README.md`
+med reproducerbara kommandon).
 
 **Merge:** efter R15 och den tidigare reliability-leveransen. Inga ändringar i Codex- eller
-Z-brancher; ingen känd överlappning. Nästa genomförbara steg är F11:s
-ersättnings-/versionsbytes-API, därefter F09-dataset och full Playwright-resa när frontend,
-backend och worker kan köras tillsammans. F23 kräver en riktig fyratimmarskörning i en
-resursmässigt tillräcklig isolerad miljö.
+Z-brancher; ingen känd överlappning. Nästa genomförbara steg är F09-dataset och full
+Playwright-resa när frontend, backend och worker kan köras tillsammans. F23 kräver en riktig
+fyratimmarskörning i en resursmässigt tillräcklig isolerad miljö.
 
 ## Founder Alpha system reliability QA — PASS vid `216f290` (2026-11-21)
 

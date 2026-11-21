@@ -137,17 +137,29 @@
     {
       "workstream": "F11",
       "title": "Dokumentversioner",
-      "status": "BLOCKED",
+      "status": "PASS",
       "evidence": {
-        "tests": 2,
-        "failed": 0,
-        "skipped": 0,
-        "needles": [
-          "test_resume_recreates_missing_version",
-          "test_resume_claim_extraction_crash"
-        ]
+        "crash_safe_resume": {
+          "tests": 2,
+          "failed": 0,
+          "skipped": 0,
+          "needles": [
+            "test_resume_recreates_missing_version",
+            "test_resume_claim_extraction_crash"
+          ]
+        },
+        "explicit_replacement": {
+          "tests": 3,
+          "failed": 0,
+          "skipped": 0,
+          "needles": [
+            "test_replace_source_creates_next_version",
+            "test_replace_identical_bytes",
+            "test_replace_with_content_already_owned"
+          ]
+        }
       },
-      "note": "Crash-safe version/storage recreation is fixed and tested; replacement/version-change API is not implemented."
+      "note": "Crash-safe version recreation plus explicit replacement, next version and retrieval invalidation."
     },
     {
       "workstream": "F12",
@@ -407,17 +419,17 @@
       "title": "Fullständig QA- och integrationsgrind",
       "status": "BLOCKED",
       "evidence": {
-        "pass": 16,
+        "pass": 17,
         "fail": 0,
-        "blocked": 7
+        "blocked": 6
       },
       "note": "The matrix itself is the gate input; overall status is the worst workstream status."
     }
   ],
   "summary": {
-    "PASS": 16,
+    "PASS": 17,
     "FAIL": 0,
-    "BLOCKED": 8,
+    "BLOCKED": 7,
     "SKIP": 0
   }
 }

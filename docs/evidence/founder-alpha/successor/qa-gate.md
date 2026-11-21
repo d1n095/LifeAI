@@ -1,8 +1,8 @@
 # Founder Alpha QA gate — BLOCKED
 
-Commit: `c527543cc33722dcc6bea7b7c04606723dff803b`
+Commit: `35d65a9e3942995596e9c693f6ee041c517ed02a`
 
-- **PASS** — exact commit SHA: `"c527543cc33722dcc6bea7b7c04606723dff803b"`
+- **PASS** — exact commit SHA: `"35d65a9e3942995596e9c693f6ee041c517ed02a"`
 - **PASS** — tracked tree clean: `"clean"`
 - **PASS** — PostgreSQL reachable: `""`
 - **PASS** — Redis reachable: `""`

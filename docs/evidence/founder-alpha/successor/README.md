@@ -1,8 +1,8 @@
 # Founder Alpha successor — QA-evidens (2026-11-21)
 
-**Kandidat:** `c527543cc33722dcc6bea7b7c04606723dff803b`
+**Kandidat:** `35d65a9e3942995596e9c693f6ee041c517ed02a`
 **Branch:** `claude/founder-alpha-fullstack-qa` (bas `6ececab`)
-**QA-grind:** **BLOCKED** — 16 PASS, 0 FAIL, 8 BLOCKED, 0 SKIP
+**QA-grind:** **BLOCKED** — 17 PASS, 0 FAIL, 7 BLOCKED, 0 SKIP
 **Ingen push, PR, merge eller deployment har gjorts.** `first_cycle_go=false`.
 
 ## Vad som verifierades och ändrades
@@ -13,6 +13,13 @@
   `content_checksum` mot `Document.checksum`, behåller exakt en version och
   använder den riktiga uppladdningsgränsen. Regressionstest reproducerar det
   exakta kraschens fönster.
+- **Explicit dokumentersättning (F11/F22):** en ny fil skapar nästa
+  `Document`-version, ett nytt durabelt `ImportJob` och en `supersedes`-relation.
+  Den gamla källan, dess `KnowledgeVersion`-historik, claims och original finns
+  kvar, men markeras `superseded` och utesluts från både semantisk och textuell
+  sökning. Identiskt innehåll, innehåll som redan finns som annan källa och en
+  redan ersatt källa avvisas explicit. Knowledge Studio-detaljsidan har ett
+  bekräftat ersättningsflöde.
 - **Recovery-matris (F18):** giltig restore gav identiska radantal; korrupt
   dump avvisades av checksumman och `pg_restore`; partiell dump avvisades;
   källan förblev oförändrad och nåbar.
@@ -31,17 +38,19 @@
 
 | Svit | Resultat |
 | --- | --- |
-| Samlad backend-JUnit | **511 tester, 0 failures, 0 errors, 2 skips** |
+| Samlad backend-JUnit | **516 tester, 0 failures, 0 errors, 2 skips** |
 | Health/startup/OpenAPI/config | **48 passed** |
 | Auth/session | **11 passed** |
 | Providers | **228 passed** |
 | Chat-historik | **18 passed** |
 | Bibliotek/RAG/uppladdning | **81 passed, 1 skipped** (`zip` saknas) |
+| Explicit ersättning/version | **5 passed** |
+| Crash-säker version-resume | **2 passed** |
 | Worker/recovery/minne/lease/Redis | **88 passed** |
 | OpenAI consult | **35 passed, 1 skipped** (live-test kräver nyckel/nätverk) |
 | F13 PostgreSQL-faults | **6/6 PASS** |
 | F18 recovery-matris | **PASS** |
-| F01–F24 | **16 PASS, 0 FAIL, 8 BLOCKED** |
+| F01–F24 | **17 PASS, 0 FAIL, 7 BLOCKED** |
 | QA-grind | **BLOCKED** (exit 3) |
 
 ## Reproducerbara kommandon
@@ -76,10 +85,15 @@ pytest tests/backend/jobs/test_worker.py \
   tests/security_r15_successor/test_r15_11_redis_store.py \
   --junitxml=/tmp/sub-f.xml -q
 pytest tests/backend/test_openai_consult.py --junitxml=/tmp/sub-g.xml -q
+pytest tests/backend/rag/test_library_replace.py --junitxml=/tmp/replace-tests.xml -q
+pytest tests/backend/rag/test_library_import.py -k "resume" --junitxml=/tmp/version-resume.xml -q
+
+python scripts/acceptance/merge_junit.py --out /tmp/version-replace.xml \
+  /tmp/version-resume.xml /tmp/replace-tests.xml
 
 python scripts/acceptance/merge_junit.py --out /tmp/program-tests.xml \
   /tmp/sub-a.xml /tmp/sub-b.xml /tmp/sub-c.xml /tmp/sub-d.xml \
-  /tmp/sub-e.xml /tmp/sub-f.xml /tmp/sub-g.xml
+  /tmp/sub-e.xml /tmp/sub-f.xml /tmp/sub-g.xml /tmp/replace-tests.xml
 
 python scripts/acceptance/recovery_matrix.py \
   --source-url "postgresql://postgres@127.0.0.1:55432/lifeos_e2e" \
@@ -96,7 +110,7 @@ python scripts/acceptance/program_matrix.py \
   --recovery-evidence ../docs/evidence/founder-alpha/recovery.json \
   --recovery-matrix /tmp/recovery-matrix.json \
   --pytest-junit /tmp/program-tests.xml \
-  --version-junit /tmp/version-resume.xml \
+  --version-junit /tmp/version-replace.xml \
   --playwright-json ../docs/evidence/founder-alpha/playwright-resilience.json \
   --postgres-fault-evidence /tmp/postgres-faults.json \
   --out /tmp/program-matrix.json
@@ -121,8 +135,6 @@ python scripts/acceptance/qa_gate.py \
 - **F09:** Dedikerat RAG-kvalitetsdataset med relevanta, irrelevanta,
   motstridiga och inaktuella dokument saknas. Mekaniktesterna är gröna, men
   de bevisar inte den fyra klasserna.
-- **F11:** Crash-säker version recreation är fixad och testad, men API för
-  ersättning/versionsbyte med indexinvalidering är inte implementerat.
 - **F12:** Knowledge Studio har inget fullständigt Playwright-JSON mot riktig
   backend i denna miljö.
 - **F19:** Full Playwright-resa för grundaren (login, chat, dokument, minne,

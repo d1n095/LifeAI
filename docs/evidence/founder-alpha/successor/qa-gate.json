@@ -1,13 +1,13 @@
 {
-  "generated_at": "2026-11-21T12:56:13.804952+00:00",
-  "commit": "c527543cc33722dcc6bea7b7c04606723dff803b",
+  "generated_at": "2026-11-21T13:29:48.916636+00:00",
+  "commit": "35d65a9e3942995596e9c693f6ee041c517ed02a",
   "status": "BLOCKED",
   "checks": [
     {
       "check": "exact commit SHA",
       "status": "PASS",
-      "actual": "c527543cc33722dcc6bea7b7c04606723dff803b",
-      "expected": "c527543cc33722dcc6bea7b7c04606723dff803b"
+      "actual": "35d65a9e3942995596e9c693f6ee041c517ed02a",
+      "expected": "35d65a9e3942995596e9c693f6ee041c517ed02a"
     },
     {
       "check": "tracked tree clean",
@@ -58,7 +58,7 @@
     {
       "check": "backend tests",
       "status": "PASS",
-      "tests": 511,
+      "tests": 516,
       "failures": 0,
       "errors": 0,
       "skipped": 2
@@ -79,15 +79,14 @@
       "check": "F01-F24 program matrix",
       "status": "BLOCKED",
       "summary": {
-        "PASS": 16,
+        "PASS": 17,
         "FAIL": 0,
-        "BLOCKED": 8,
+        "BLOCKED": 7,
         "SKIP": 0
       },
       "blocked": [
         "F04",
         "F09",
-        "F11",
         "F12",
         "F19",
         "F21",

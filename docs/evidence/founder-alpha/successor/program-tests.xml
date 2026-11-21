@@ -1,5 +1,5 @@
 <?xml version='1.0' encoding='utf-8'?>
-<testsuites tests="511" failures="0" errors="0" skipped="2" time="619.948">
+<testsuites tests="516" failures="0" errors="0" skipped="2" time="636.791">
   <testsuite name="pytest" errors="0" failures="0" skipped="0" tests="48" time="67.484" timestamp="2026-11-21T12:28:15.868678+00:00" hostname="ubuntu">
     <testcase classname="tests.backend.test_health" name="test_health_reports_alive_when_heartbeat_is_present" time="20.904" />
     <testcase classname="tests.backend.test_health" name="test_health_reports_unknown_when_heartbeat_is_absent_without_503" time="1.324" />
@@ -528,5 +528,12 @@
     <testcase classname="tests.backend.test_openai_consult" name="test_live_responses_api_roundtrip" time="1.031">
       <skipped type="pytest.skip" message="live OpenAI roundtrip requires OPENAI_CONSULT_LIVE_TEST=1, a real key, an outbound network and a reachable database (egress disclosure ledger)">/home/lifeai-agent/work/LifeAI/backend/tests/backend/test_openai_consult.py:500: live OpenAI roundtrip requires OPENAI_CONSULT_LIVE_TEST=1, a real key, an outbound network and a reachable database (egress disclosure ledger)</skipped>
     </testcase>
+  </testsuite>
+  <testsuite name="pytest" errors="0" failures="0" skipped="0" tests="5" time="16.843" timestamp="2026-11-21T13:28:45.282310+00:00" hostname="ubuntu">
+    <testcase classname="tests.backend.rag.test_library_replace" name="test_replace_source_creates_next_version_and_invalidates_old_retrieval" time="9.109" />
+    <testcase classname="tests.backend.rag.test_library_replace" name="test_replace_requires_explicit_confirmation" time="1.971" />
+    <testcase classname="tests.backend.rag.test_library_replace" name="test_replace_identical_bytes_is_refused_without_creating_a_version" time="1.788" />
+    <testcase classname="tests.backend.rag.test_library_replace" name="test_replace_with_content_already_owned_by_another_source_is_refused" time="1.613" />
+    <testcase classname="tests.backend.rag.test_library_replace" name="test_replace_route_requires_founder" time="2.285" />
   </testsuite>
 </testsuites>
