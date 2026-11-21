@@ -178,7 +178,9 @@ def build(args: argparse.Namespace) -> dict:
             )
         )
 
-    f05_status, f05_stats = _junit_status(junit, ("providers/", "test_model_gate", "test_local_first_routing"))
+    f05_status, f05_stats = _junit_status(
+        junit, ("providers.", "providers/", "test_model_gate", "test_local_first_routing")
+    )
     entries.append(_entry("F05", f05_status, f05_stats, "Provider selection, fallback and safe errors."))
 
     f06_status, f06_stats = _junit_status(junit, ("test_chat_message_persistence",))
