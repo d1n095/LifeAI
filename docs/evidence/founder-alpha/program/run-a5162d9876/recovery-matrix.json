@@ -1,0 +1,107 @@
+{
+  "status": "PASS",
+  "source_database": "lifeos_program_a5162d9876",
+  "checks": [
+    {
+      "check": "valid dump created",
+      "status": "PASS",
+      "detail": "ok"
+    },
+    {
+      "check": "valid dump has a readable TOC",
+      "status": "PASS",
+      "detail": "ok"
+    },
+    {
+      "check": "valid dump restores",
+      "status": "PASS",
+      "detail": "ok"
+    },
+    {
+      "check": "valid restore row counts match",
+      "status": "PASS",
+      "detail": {
+        "source": {
+          "users": 1,
+          "conversations": 2,
+          "messages": 4,
+          "documents": 1,
+          "document_chunks": 1,
+          "knowledge_import_jobs": 1,
+          "memory_source_units": 5
+        },
+        "restored": {
+          "users": 1,
+          "conversations": 2,
+          "messages": 4,
+          "documents": 1,
+          "document_chunks": 1,
+          "knowledge_import_jobs": 1,
+          "memory_source_units": 5
+        }
+      }
+    },
+    {
+      "check": "corrupt dump checksum differs",
+      "status": "PASS",
+      "detail": "c1560287727109274ff83e3df0e5045838e696dbc478f66fe56480578d5361fa"
+    },
+    {
+      "check": "corrupt dump is rejected",
+      "status": "PASS",
+      "detail": {
+        "list_exit": 1,
+        "restore_exit": 1,
+        "restore_error": "pg_restore: error: input file does not appear to be a valid archive\n"
+      }
+    },
+    {
+      "check": "partial dump is rejected",
+      "status": "PASS",
+      "detail": {
+        "list_exit": 1,
+        "restore_exit": 1,
+        "restore_error": "pg_restore: error: could not read from input file: end of file\n"
+      }
+    },
+    {
+      "check": "source database unchanged",
+      "status": "PASS",
+      "detail": {
+        "before": {
+          "users": 1,
+          "conversations": 2,
+          "messages": 4,
+          "documents": 1,
+          "document_chunks": 1,
+          "knowledge_import_jobs": 1,
+          "memory_source_units": 5
+        },
+        "after": {
+          "users": 1,
+          "conversations": 2,
+          "messages": 4,
+          "documents": 1,
+          "document_chunks": 1,
+          "knowledge_import_jobs": 1,
+          "memory_source_units": 5
+        }
+      }
+    }
+  ],
+  "checksum_sha256": "2347dff8374ae683b090126f340eae2b40803c87dc60145c95c418d0281011b7",
+  "valid_restore_counts": {
+    "users": 1,
+    "conversations": 2,
+    "messages": 4,
+    "documents": 1,
+    "document_chunks": 1,
+    "knowledge_import_jobs": 1,
+    "memory_source_units": 5
+  },
+  "scratch_databases": [
+    "lifeos_recovery_matrix_valid_0344cf99_restore",
+    "lifeos_recovery_matrix_corrupt_89d8ec6b_restore",
+    "lifeos_recovery_matrix_partial_031eea17_restore"
+  ]
+}

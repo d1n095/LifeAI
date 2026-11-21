@@ -1,0 +1,198 @@
+{
+  "generated_at": "2026-11-21T22:12:14.739562+00:00",
+  "commit": "6601fac3b83d29e6ac755affc2eac3abe1912d2c",
+  "status": "PASS",
+  "provider_mode": "fake",
+  "environment": {
+    "base_url": "http://127.0.0.1:48711",
+    "frontend_url": "http://127.0.0.1:13000",
+    "database_url": "postgresql://postgres@127.0.0.1:55432/lifeos_program_a5162d9876",
+    "redis_url": "redis://@127.0.0.1:56379/14"
+  },
+  "steps": [
+    {
+      "step": "authentication",
+      "status": "PASS",
+      "detail": "founder authenticated with session + CSRF",
+      "data": {
+        "user_id": "00000000-0000-0000-0000-000000000001",
+        "email": "founder@lifeos.local"
+      },
+      "at": "2026-11-21T22:12:07.672972+00:00"
+    },
+    {
+      "step": "unauthorized_routes",
+      "status": "PASS",
+      "detail": "all protected routes rejected anonymous callers",
+      "data": {
+        "library": 401,
+        "execution_goals": 401,
+        "agent_tasks": 401,
+        "incidents": 401
+      },
+      "at": "2026-11-21T22:12:07.540304+00:00"
+    },
+    {
+      "step": "streaming_chat",
+      "status": "PASS",
+      "detail": "SSE start/done received; reply length 167; provider=openai",
+      "data": {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "latency_ms": 896.38
+      },
+      "at": "2026-11-21T22:12:08.569452+00:00"
+    },
+    {
+      "step": "streaming_delivery",
+      "status": "PASS",
+      "detail": "3 SSE delta(s) reached the client before done",
+      "data": {
+        "deltas": 3
+      },
+      "at": "2026-11-21T22:12:08.569494+00:00"
+    },
+    {
+      "step": "conversation_history",
+      "status": "PASS",
+      "detail": "reopened 2 persisted message(s)",
+      "data": {
+        "messages": 2
+      },
+      "at": "2026-11-21T22:12:08.580126+00:00"
+    },
+    {
+      "step": "document_ingestion",
+      "status": "PASS",
+      "detail": "job=completed, source=indexed, chunks=1",
+      "data": {
+        "job_id": "f17f90cb-572d-4ea7-a07f-a0f0038c5be2",
+        "source_id": "01ca9093-5b65-4b5d-ac29-08c4f7cc3573"
+      },
+      "at": "2026-11-21T22:12:10.834169+00:00"
+    },
+    {
+      "step": "pgvector_retrieval",
+      "status": "PASS",
+      "detail": "assistant=succeeded, sources=1, cited_uploaded_source=True",
+      "data": {
+        "sources": 1,
+        "cited": true
+      },
+      "at": "2026-11-21T22:12:10.891540+00:00"
+    },
+    {
+      "step": "supervised_task",
+      "status": "PASS",
+      "detail": "goal/plan created task 107121c3-840f-4150-bb0f-abdf927a75b6 (read_only_audit), approval_required=True",
+      "data": {
+        "goal_id": "a87f261a-4695-46f4-af05-2efd41947327",
+        "task_id": "107121c3-840f-4150-bb0f-abdf927a75b6"
+      },
+      "at": "2026-11-21T22:12:10.964466+00:00"
+    },
+    {
+      "step": "approval_authorization",
+      "status": "PASS",
+      "detail": "explicit founder scope + provider-spend authorization and task approval recorded",
+      "data": {
+        "envelope_id": "7e6ddb92-6d5b-408f-9404-970371645634",
+        "provider_spend_authorization_id": "2146d481-eeea-46e0-a7b8-f30eb8a36e86"
+      },
+      "at": "2026-11-21T22:12:11.081976+00:00"
+    },
+    {
+      "step": "approved_execution",
+      "status": "PASS",
+      "detail": "approved isolated read-only task completed with 6 event(s)",
+      "data": {
+        "status": "completed"
+      },
+      "at": "2026-11-21T22:12:12.642486+00:00"
+    },
+    {
+      "step": "active_operation_cancel",
+      "status": "PASS",
+      "detail": "durable job cancel status=cancelled, events=['created', 'cancel_requested', 'claimed', 'phase_changed', 'progress_updated', 'cancel_acknowledged', 'cancelled']",
+      "data": {
+        "job_id": "976c09f2-be46-493f-af96-6b2b2bb7c1cb",
+        "status": "cancelled",
+        "events": [
+          "created",
+          "cancel_requested",
+          "claimed",
+          "phase_changed",
+          "progress_updated",
+          "cancel_acknowledged",
+          "cancelled"
+        ]
+      },
+      "at": "2026-11-21T22:12:14.726066+00:00"
+    },
+    {
+      "step": "evidence_and_audit",
+      "status": "PASS",
+      "detail": "conversation_persisted=True, task_events=6, audit_rows=12",
+      "data": {
+        "conversation_persisted": true,
+        "task_events": [
+          "completed",
+          "verification_passed",
+          "dispatched",
+          "approval_granted",
+          "ready",
+          "created"
+        ],
+        "audit_rows": 12
+      },
+      "at": "2026-11-21T22:12:14.739520+00:00"
+    }
+  ],
+  "artifacts": {
+    "conversation_id": "cbeb9da3-4e6c-493c-9229-7d2b02223e5b",
+    "stream_user_message_id": "9208dfe0-659f-41df-913c-74bd4a1d3b41",
+    "stream_assistant_message_id": "f7541103-f4f2-4e0b-8fb1-bd6daa762c0c",
+    "provider": "openai",
+    "model": "gpt-4o-mini",
+    "stream_latency_ms": 896.38,
+    "stream_delta_count": 3,
+    "stream_text": "Hej! Detta ar ett riktigt svar fran den simulerade AI-motorn under E2E-testet. Kostnadsloggning, Trust Engine och konversationshistorik gar via de riktiga API-vagarna.",
+    "import_job_id": "f17f90cb-572d-4ea7-a07f-a0f0038c5be2",
+    "source_id": "01ca9093-5b65-4b5d-ac29-08c4f7cc3573",
+    "source_status": "indexed",
+    "source_chunk_count": 1,
+    "source_marker": "V6LAB-KNOWLEDGE-06756fedab5e",
+    "source_filename": "v6-testlab-f6c2d7f4.txt",
+    "retrieval_sources": 1,
+    "retrieval_cited_source": true,
+    "goal_id": "a87f261a-4695-46f4-af05-2efd41947327",
+    "task_id": "107121c3-840f-4150-bb0f-abdf927a75b6",
+    "task_type": "read_only_audit",
+    "approval_required": true,
+    "envelope_id": "7e6ddb92-6d5b-408f-9404-970371645634",
+    "provider_spend_authorization_id": "2146d481-eeea-46e0-a7b8-f30eb8a36e86",
+    "task_status": "completed",
+    "task_events": [
+      "completed",
+      "verification_passed",
+      "dispatched",
+      "approval_granted",
+      "ready",
+      "created"
+    ],
+    "cancelled_job_id": "976c09f2-be46-493f-af96-6b2b2bb7c1cb",
+    "cancelled_job_status": "cancelled",
+    "cancelled_job_events": [
+      "created",
+      "cancel_requested",
+      "claimed",
+      "phase_changed",
+      "progress_updated",
+      "cancel_acknowledged",
+      "cancelled"
+    ],
+    "audit_rows": 12
+  },
+  "failures": [],
+  "blockers": []
+}

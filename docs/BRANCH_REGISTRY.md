@@ -6,6 +6,36 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Founder Alpha Engineering Program — verifierad, endurance BLOCKED (2026-11-21)
+
+**Branch:** `freebuff/founder-alpha-engineering-program`, bas V9
+`6b3848d96e99926d2d2175f03582f86c0947e906`. Kandidatens kod-SHA är
+`6601fac3b83d29e6ac755affc2eac3abe1912d2c`; dokumentationscommiten ovanpå den är
+transfer-HEAD. Ingen PR/push/merge/deploy är gjord; GitHub write-access saknas fortfarande.
+`first_cycle_go=false`.
+
+**Scope:** en körbar programrunner ovanpå befintliga V5–V9-verktyg, distinkta
+liveness/readiness-endpoints, riktig founderresa, restart-/recovery-/backup-/upgrade-kedja,
+resursprov, kort soak, security-regressioner och en riktig browseracceptans. Inga nya
+migrationer, ingen parallell motor och inga ändringar i R15/Security Kernel/RAG-isolation.
+
+**Faktiska resultat:** programrunnern **31 PASS, 0 FAIL, 1 BLOCKED**; founderresan **12/12**;
+backendtester **59 passed**; installationsmatris **12/12**; Playwright projektdetalj **1
+expected, 0 unexpected**; backup/restore och recovery **PASS**; migration
+`0092 -> 0091 -> 0092` **PASS**; resursprobe **PASS**; frontend lint/build **PASS**. Den enda
+BLOCKED-punkten är 24-timmars endurance; den 20-sekunders soak som kördes har noll
+requestfel men får aldrig kallas F23 PASS.
+
+**Riktiga fixar:** `/api/health/live` skiljer processliveness från `/api/health/ready`s
+fail-closed dependency-check; resurs-/soak-harnessen använder en icke-placeholder-nyckel så
+den deterministiska providern faktiskt väljs; browserbenet kör en separat backend med
+`COOKIE_SECURE=true` så Chromium accepterar sessionen på localhost; programrunnern stoppar
+huvudbackenden innan egna worker-prober för att undvika jobbkonkurrens.
+
+**Merge:** efter V9 och efter att Claude hanterat V7/R15-integrationen. Oberoende av
+Z.ai:s Security Kernel-arbete. Detaljer, evidens och reproducerbara kommandon finns i
+`docs/FOUNDER_ALPHA_ENGINEERING_PROGRAM.md`.
+
 ## LifeAI V9 — Founder Alpha funktionell completion (2026-11-21)
 
 **Branch:** `freebuff/v9-founder-alpha-functional-8dafd2f`, bas V8

@@ -3,6 +3,24 @@
 These commands run against an isolated local PostgreSQL/Redis/Chromium environment. They never
 touch STRATO or production. `first_cycle_go=false`.
 
+## Founder Alpha program runner
+
+`founder_alpha_program.py` is the single executable orchestration over the tools below. It
+creates a disposable database, applies the real install order, starts the real API+worker,
+runs the 12-step journey, restart/recovery/backup/upgrade/resource/soak/security checks and
+the real browser project-detail journey, then drops its databases. The summary is fail-closed:
+a short soak and a browser launch failure are BLOCKED, never PASS.
+
+```bash
+cd backend
+export LD_LIBRARY_PATH=/tmp/lifeai-testenv/root/usr/lib/x86_64-linux-gnu:/tmp/lifeai-testenv/root/usr/lib
+python scripts/acceptance/founder_alpha_program.py \
+  --admin-url postgresql://postgres@127.0.0.1:55432/postgres \
+  --redis-url redis://127.0.0.1:56379/14 \
+  --pg-bin /tmp/lifeai-testenv/root/usr/lib/postgresql/16/bin \
+  --out-dir ../docs/evidence/founder-alpha/program
+```
+
 ## Important: pytest owns `DATABASE_URL`
 
 `backend/tests/conftest.py` has a session-scoped autouse fixture that **drops and recreates**
