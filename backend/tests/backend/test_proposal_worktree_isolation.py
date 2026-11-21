@@ -272,6 +272,81 @@ async def test_an_accepted_proposal_also_leaves_the_shared_checkout_untouched(
 
 
 @pytest.mark.asyncio
+async def test_an_accepted_proposals_checkout_is_removed_once_the_goal_finalizes(
+    db_session, superuser_db, owner_id, monkeypatch, tmp_path
+):
+    """PI-1d cleanup requirement (merge reconciliation finding): before this fix, nothing ever
+    called `remove_isolated_proposal_checkout()` on the SUCCESS path at all -- only
+    `_propose_repo_edit()`'s own write-failure handler did. A completed proposal's isolated
+    checkout would accumulate under `/tmp` forever. `final_report.py`'s `record_final_report()`
+    (invoked automatically by `run_task_execution_job()`'s own finalization, exercised here end
+    to end, not called directly) now removes it once the owning GOAL -- not just this one task
+    -- is confirmed genuinely terminal, via the task's own durable `proposal_worktree_path`
+    record."""
+    shared = _shared_checkout(tmp_path)
+
+    task = await _run_proposal(
+        db_session, superuser_db, owner_id, monkeypatch, shared,
+        _proposal(("README.md", "ACCEPTED CONTENT\n")),
+        _passing_verification,
+    )
+    assert task.status == MainAITaskStatus.completed
+
+    completed_event = superuser_db.execute(
+        sa_text("SELECT detail FROM mainai_task_events WHERE task_id = :id AND event_type = 'completed'"),
+        {"id": str(task.id)},
+    ).scalar_one()
+    checkout_path = Path(completed_event["work_result"]["proposal_worktree_path"])
+    assert checkout_path.exists(), "sanity: the checkout really was created for this attempt"
+    assert not checkout_path.parent.exists(), "the whole per-attempt checkout directory must be gone once the goal is terminal"
+
+
+@pytest.mark.asyncio
+async def test_a_real_crash_right_after_the_proposal_write_never_touches_the_shared_checkout(
+    db_session, superuser_db, owner_id, monkeypatch, tmp_path
+):
+    """PI-1d, the directive-required crash-simulation proof (ported from PR #469, which built
+    it against the since-discarded copy-based isolation mechanism): a genuine process crash
+    (an uncaught exception escaping `run_task_execution_job()` entirely, simulating a killed
+    worker) happening AFTER `_propose_repo_edit()` has already written the proposed content into
+    its isolated checkout must still never have touched the shared checkout -- recovery of a
+    crashed proposal-mode attempt is "the shared tree was never at risk in the first place", not
+    "something to roll back"."""
+    from app.mainai_execution import execution_job
+
+    shared = _shared_checkout(tmp_path)
+    real_renew = execution_job.renew_mainai_job_lease
+    call_count = {"n": 0}
+
+    def _renew_then_crash_on_second_call(*args, **kwargs):
+        call_count["n"] += 1
+        real_renew(*args, **kwargs)  # the real lease-renewal write happens first, every time
+        if call_count["n"] == 2:
+            # Call #1 is the dispatch-time renewal, BEFORE _propose_repo_edit() ever runs --
+            # crashing there would prove nothing about a crash mid-proposal, since the
+            # checkout wouldn't exist yet. Call #2 is the renewal immediately after
+            # _propose_repo_edit() has already run and written into its isolated checkout,
+            # right before the work_result checkpoint commits -- exactly the crash point this
+            # test needs.
+            raise RuntimeError("simulated process crash right after the work_result checkpoint's own lease check")
+
+    monkeypatch.setattr(execution_job, "renew_mainai_job_lease", _renew_then_crash_on_second_call)
+
+    with pytest.raises(RuntimeError, match="simulated process crash"):
+        await _run_proposal(
+            db_session, superuser_db, owner_id, monkeypatch, shared,
+            _proposal(("README.md", "PROPOSED CONTENT\n")),
+            _passing_verification,
+        )
+    db_session.rollback()
+
+    assert (shared / "README.md").read_text(encoding="utf-8") == "ORIGINAL CONTENT\n", (
+        "a crash mid-proposal must never have touched the shared checkout"
+    )
+    assert _git(["status", "--porcelain"], shared).stdout.strip() == ""
+
+
+@pytest.mark.asyncio
 async def test_when_isolation_cannot_be_built_pi1d_rollback_still_protects_the_checkout(
     db_session, superuser_db, owner_id, monkeypatch, tmp_path
 ):
