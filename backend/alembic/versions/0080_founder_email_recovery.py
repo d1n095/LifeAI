@@ -4,17 +4,17 @@ One table backing the secure founder account recovery flow (app/founder_recovery
 a pending email-change request with a single-use, hashed verification token. The row is
 owner-scoped (user_id FK) and carries no secrets — only the SHA-256 token hash.
 
-NOTE FOR MIGRATION RECONCILIATION: the founder-alpha composition lanes number their
-migrations 0069..0079 in a DISJOINT history. This revision (0069, down_revision=0068)
-belongs to the Z.AI consultation lane lineage and must be renumbered/re-chained by the
-composition tooling when the lanes merge — it adds one independent table and conflicts
-with nothing.
+Reconciliation note (R15 staging merge, 2026-11-21): originally authored as revision 0069
+(down_revision=0068) in the Z.AI consultation lane's own disjoint numbering. Renumbered to
+0080 and re-chained onto 0079 ("audit_log becomes append-only") here, per this file's own
+prior note that the composition tooling must do so when the lanes merge — it adds one
+independent table (`founder_email_change_requests`) and conflicts with nothing 0079 does.
 """
 
 from alembic import op
 
 revision = "0080"
-down_revision = "0078"
+down_revision = "0079"
 branch_labels = None
 depends_on = None
 
