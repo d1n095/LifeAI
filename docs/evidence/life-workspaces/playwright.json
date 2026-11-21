@@ -2,7 +2,7 @@
   "config": {
     "configFile": "/home/lifeai-agent/work/LifeAI/frontend/playwright.config.ts",
     "rootDir": "/home/lifeai-agent/work/LifeAI/frontend/e2e",
-    "forbidOnly": true,
+    "forbidOnly": false,
     "fullyParallel": false,
     "globalSetup": null,
     "globalTeardown": null,
@@ -28,7 +28,7 @@
       {
         "outputDir": "/home/lifeai-agent/work/LifeAI/frontend/test-results",
         "repeatEach": 1,
-        "retries": 1,
+        "retries": 0,
         "metadata": {
           "actualWorkers": 1
         },
@@ -79,12 +79,12 @@
                       "workerIndex": 0,
                       "parallelIndex": 0,
                       "status": "passed",
-                      "duration": 9468,
+                      "duration": 11041,
                       "errors": [],
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2026-11-21T23:10:28.883Z",
+                      "startTime": "2026-11-21T23:33:20.908Z",
                       "annotations": [],
                       "attachments": []
                     }
@@ -96,6 +96,40 @@
               "file": "workspaces.spec.ts",
               "line": 9,
               "column": 7
+            },
+            {
+              "title": "a transient create failure is shown and recovers on retry",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 3047,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-11-21T23:33:32.360Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "0b3020e30ee1e091bcf5-87a7bb4dd80d6b8f9e2a",
+              "file": "workspaces.spec.ts",
+              "line": 82,
+              "column": 7
             }
           ]
         }
@@ -104,9 +138,9 @@
   ],
   "errors": [],
   "stats": {
-    "startTime": "2026-11-21T23:10:26.855Z",
-    "duration": 12040.85,
-    "expected": 1,
+    "startTime": "2026-11-21T23:33:18.803Z",
+    "duration": 16801.420000000002,
+    "expected": 2,
     "skipped": 0,
     "unexpected": 0,
     "flaky": 0

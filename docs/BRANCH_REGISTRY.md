@@ -9,37 +9,44 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 ## Life Workspaces — persistent project-centered founder experience (2026-11-21)
 
 **Branch:** `freebuff/life-workspaces`, bas `04c82c3aa4ea411835c48561f6c03cef4bb87999`
-(Founder Alpha-programmet). Kodcheckpoint `a26a23d395147af21b17b43ae6734c788d398478`.
+(Founder Alpha-programmet). Kodcheckpoint `83c87049646cf2a52bc1baeb0527776b99fe5a85`.
 Ingen PR/push/merge/deploy är gjord. `first_cycle_go=false`.
 
 **Scope:** bygger vidare på befintliga `projects`, `documents`, `tasks`, `conversations`,
-retrieval och MainAI-chatt. Lägger till workspace-metadata (syfte/mål/settings), arkiv och
-soft-delete-retention, owner-scopad aktivitet/beslut/membership samt `conversations.project_id`.
-Ingen ny projektmodell, chattmotor, kunskapsdatabas, execution-motor eller auktorisering.
+`mainai_goals`/`mainai_tasks`, retrieval och MainAI-chatt. Lägger till workspace-metadata
+(syfte/mål/settings), arkiv och soft-delete-retention, owner-scopad aktivitet/beslut/membership,
+`conversations.project_id`, optimistisk `projects.version`, en idempotent sync-ledger med
+stale/interruption-recovery samt en valfri `mainai_goals.project_id`-länk. Ingen ny
+projektmodell, chattmotor, kunskapsdatabas, execution-motor eller auktorisering.
 
-**Migration:** `0093_life_workspaces` (down_revision `0092`). Additiv; rör inte Security
-Kernel/R15-lanen. Claude äger integrationsreconciliation.
+**Migrationer:** `0093_life_workspaces` och `0094_workspace_sync_and_supervised_goals`
+(down_revision `0092` respektive `0093`). Additiva; rör inte Security Kernel/R15-lanen. Claude
+äger integrationsreconciliation.
 
 **API:** `/api/workspaces` med create/list/detail/update/archive/restore/soft-delete,
- dokumentassociation, tasks, conversations, activity, decisions och bounded context. Alla
-träffar är founder-only och filtrerade på `created_by`; främmande workspace eller dokument ger
-404. Chatt med `project_id` binder konversationen och skickar `project_id` till retrieval; ett
-försök att återanvända en konversation i ett annat workspace ger 409.
+dokumentassociation, tasks, conversations, activity, decisions, bounded context,
+supervised MainAI-tasks och sync runs. Alla träffar är founder-only och filtrerade på
+`created_by`; främmande workspace eller dokument ger 404. `PATCH` med stale
+`expected_version` ger 409. Chatt med `project_id` binder konversationen och skickar
+`project_id` till retrieval; återanvändning i ett annat workspace ger 409. Sync med samma
+idempotency key replayar samma run, unchanged entities blir `skipped`, failed runs kan retryas,
+och stale/interrupted runs fail-closed.
 
-**Frontend:** `/workspaces` och `/workspaces/[id]` med skapa, mål, källor, uppgifter, beslut,
-aktivitet, osäker kunskap, arkiv/återställning och workspace-scopat MainAI-samtal. Sidebar har
-en `Workspaces`-post. Inga exempeldata i produktionsvyer.
+**Frontend:** `/workspaces` och `/workspaces/[id]` med skapa, mål, versionerad
+settings-redigering, källor, uppgifter, beslut, aktivitet, sync-historik/retry, superviserade
+MainAI-tasks med evidens samt workspace-scopat strömmande MainAI-samtal med stop-knapp.
+Sidebar har en `Workspaces`-post. Inga exempeldata i produktionsvyer.
 
-**Verifiering:** `tests/backend/test_workspaces_api.py` (4 tester) plus befintliga
-`test_projects_detail.py` och `test_chat_request_idempotency.py` gav **10 passed** mot riktig
-PostgreSQL/runtime-roll; frontend lint **0 errors** (en befintlig varning) och build **PASS**
-med båda workspace-rutterna. Browserresan `frontend/e2e/workspaces.spec.ts` gav **PASS**
-(1 expected, 0 unexpected, 0 flaky) i isolerad Chromium-miljö med deterministisk E2E-provider:
-skapa workspace med mål, uppgift, beslut, workspace-chatt, reload med bevarat samtal samt
-arkiv/återställning.
+**Verifiering:** `tests/backend/test_workspaces_api.py` plus befintliga
+`test_projects_detail.py` och `test_chat_request_idempotency.py` gav **15 passed** mot riktig
+PostgreSQL/runtime-roll. MainAI execution API/planner-regression gav **58 passed**. Frontend
+lint **0 errors** (en befintlig varning) och build **PASS** med båda workspace-rutterna.
+Browser `frontend/e2e/workspaces.spec.ts` gav **2 expected, 0 unexpected, 0 flaky**: persistent
+workspace med streamad chatt, reload, versionerad settings, sync och arkiv/återställning, samt
+en transient create-failure som visas och återhämtas på retry.
 
-**Merge:** efter V9/Founder Alpha och efter att Claude hanterat V7/R15. Migrationen är oberoende
-men måste placeras efter `0092` i den samlade sekvensen. Detaljer finns i
+**Merge:** efter V9/Founder Alpha och efter att Claude hanterat V7/R15. Migrationerna är
+oberoende men måste placeras efter `0092` i den samlade sekvensen. Detaljer finns i
 `docs/LIFE_WORKSPACES.md`.
 
 ## Founder Alpha Engineering Program — verifierad, endurance BLOCKED (2026-11-21)
