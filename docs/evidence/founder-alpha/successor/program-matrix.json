@@ -1,0 +1,423 @@
+{
+  "status": "BLOCKED",
+  "workstreams": [
+    {
+      "workstream": "F01",
+      "title": "Komplett installation",
+      "status": "PASS",
+      "evidence": {
+        "PASS": 12,
+        "FAIL": 0,
+        "BLOCKED": 0
+      },
+      "note": "12 real-service install/failure scenarios; no FAIL/BLOCKED."
+    },
+    {
+      "workstream": "F02",
+      "title": "Systemuppstart",
+      "status": "PASS",
+      "evidence": {
+        "tests": 32,
+        "failed": 0,
+        "skipped": 0,
+        "needles": [
+          "test_health",
+          "test_startup_checks"
+        ]
+      },
+      "note": "Health/readiness and startup checks."
+    },
+    {
+      "workstream": "F03",
+      "title": "Autentiseringens användarflöde",
+      "status": "PASS",
+      "evidence": {
+        "tests": 11,
+        "failed": 0,
+        "skipped": 0,
+        "needles": [
+          "test_session_auth",
+          "test_auth_concurrency"
+        ]
+      },
+      "note": "Login/logout, rotation, revocation and password reset."
+    },
+    {
+      "workstream": "F04",
+      "title": "Komplett AI-konversation",
+      "status": "BLOCKED",
+      "evidence": "no Ollama evidence",
+      "note": "Ollama is not installed in this environment; the provider currently uses stream=false."
+    },
+    {
+      "workstream": "F05",
+      "title": "Modellval och providerfel",
+      "status": "PASS",
+      "evidence": {
+        "tests": 228,
+        "failed": 0,
+        "skipped": 0,
+        "needles": [
+          "providers.",
+          "providers/",
+          "test_model_gate",
+          "test_local_first_routing"
+        ]
+      },
+      "note": "Provider selection, fallback and safe errors."
+    },
+    {
+      "workstream": "F06",
+      "title": "Konversationshistorik",
+      "status": "PASS",
+      "evidence": {
+        "tests": 18,
+        "failed": 0,
+        "skipped": 0,
+        "needles": [
+          "test_chat_message_persistence"
+        ]
+      },
+      "note": "Persisted message ordering and reload state."
+    },
+    {
+      "workstream": "F07",
+      "title": "Dokumentuppladdning",
+      "status": "PASS",
+      "evidence": {
+        "tests": 82,
+        "failed": 0,
+        "skipped": 1,
+        "needles": [
+          "test_library_import",
+          "test_library_routes",
+          "test_documents_upload_durable_delivery"
+        ]
+      },
+      "note": "Upload, duplicates, ZIP, corrupt/oversized files."
+    },
+    {
+      "workstream": "F08",
+      "title": "Indexering och embeddings",
+      "status": "PASS",
+      "evidence": {
+        "tests": 50,
+        "failed": 0,
+        "skipped": 1,
+        "needles": [
+          "test_library_import",
+          "test_worker",
+          "test_documents_upload_durable_delivery"
+        ]
+      },
+      "note": "Chunking, embeddings, retry and durable resume."
+    },
+    {
+      "workstream": "F09",
+      "title": "RAG-kvalitet",
+      "status": "BLOCKED",
+      "evidence": "no dedicated RAG quality evidence",
+      "note": "Existing RAG tests prove mechanics, not the full four-class quality dataset."
+    },
+    {
+      "workstream": "F10",
+      "title": "Persistent minne",
+      "status": "PASS",
+      "evidence": {
+        "tests": 58,
+        "failed": 0,
+        "skipped": 0,
+        "needles": [
+          "test_project_memory",
+          "test_memory_work_linkage"
+        ]
+      },
+      "note": "Memory persistence, update, deletion and owner isolation."
+    },
+    {
+      "workstream": "F11",
+      "title": "Dokumentversioner",
+      "status": "BLOCKED",
+      "evidence": {
+        "tests": 2,
+        "failed": 0,
+        "skipped": 0,
+        "needles": [
+          "test_resume_recreates_missing_version",
+          "test_resume_claim_extraction_crash"
+        ]
+      },
+      "note": "Crash-safe version/storage recreation is fixed and tested; replacement/version-change API is not implemented."
+    },
+    {
+      "workstream": "F12",
+      "title": "Knowledge Studio",
+      "status": "BLOCKED",
+      "evidence": "no Knowledge Studio Playwright JSON",
+      "note": "Run the real E2E suite."
+    },
+    {
+      "workstream": "F13",
+      "title": "PostgreSQL-felinjektion",
+      "status": "PASS",
+      "evidence": {
+        "status": "PASS",
+        "generated_at": "2026-11-21T12:55:59.077942+00:00",
+        "database": "127.0.0.1:55432/lifeos_gate",
+        "checks": [
+          {
+            "check": "transaction rollback",
+            "status": "PASS",
+            "detail": "rows after rollback=0"
+          },
+          {
+            "check": "concurrent deadlock",
+            "status": "PASS",
+            "detail": "deadlocks=1 other_errors=[] alive=[False, False]"
+          },
+          {
+            "check": "lock timeout",
+            "status": "PASS",
+            "detail": "sqlstate=55P03 type=LockNotAvailable"
+          },
+          {
+            "check": "statement/commit timeout",
+            "status": "PASS",
+            "detail": "sqlstate=57014 type=QueryCanceled"
+          },
+          {
+            "check": "lost connection and reconnect",
+            "status": "PASS",
+            "detail": "terminated=True error=OperationalError reconnect=1"
+          },
+          {
+            "check": "concurrent writes",
+            "status": "PASS",
+            "detail": "rows=2 errors=[]"
+          }
+        ]
+      },
+      "note": "PostgreSQL fault-injection evidence."
+    },
+    {
+      "workstream": "F14",
+      "title": "Redis- och köfel",
+      "status": "PASS",
+      "evidence": {
+        "tests": 9,
+        "failed": 0,
+        "skipped": 0,
+        "needles": [
+          "redis",
+          "test_job_lock",
+          "test_worker_heartbeat"
+        ]
+      },
+      "note": "Redis reconnection, locks and duplicate-job behavior."
+    },
+    {
+      "workstream": "F15",
+      "title": "Worker-krascher",
+      "status": "PASS",
+      "evidence": {
+        "tests": 16,
+        "failed": 0,
+        "skipped": 0,
+        "needles": [
+          "takeover",
+          "test_mainai_execution_recovery",
+          "test_worker_live_lease"
+        ]
+      },
+      "note": "Worker crash/takeover and duplicate-effect guards."
+    },
+    {
+      "workstream": "F16",
+      "title": "Backend-krascher",
+      "status": "PASS",
+      "evidence": {
+        "tests": 32,
+        "failed": 0,
+        "skipped": 0,
+        "needles": [
+          "test_startup_checks",
+          "test_health"
+        ]
+      },
+      "note": "Startup/restart and install restart scenarios."
+    },
+    {
+      "workstream": "F17",
+      "title": "AI-providerfel",
+      "status": "PASS",
+      "evidence": {
+        "tests": 86,
+        "failed": 0,
+        "skipped": 1,
+        "needles": [
+          "provider_failclosed",
+          "test_provider_verification",
+          "test_openai_consult"
+        ]
+      },
+      "note": "Timeout, rate limit, 5xx, malformed payload and retries."
+    },
+    {
+      "workstream": "F18",
+      "title": "Backup och disaster recovery",
+      "status": "PASS",
+      "evidence": {
+        "backup_restore": "PASS",
+        "recovery_matrix": "PASS"
+      },
+      "note": "Valid restore plus corrupt/partial rejection and source-integrity checks."
+    },
+    {
+      "workstream": "F19",
+      "title": "Full Playwright E2E",
+      "status": "BLOCKED",
+      "evidence": [
+        "founder-alpha-resilience.spec.ts"
+      ],
+      "note": "Full E2E JSON missing."
+    },
+    {
+      "workstream": "F20",
+      "title": "Frontend/API-kontrakt",
+      "status": "PASS",
+      "evidence": {
+        "tests": 16,
+        "failed": 0,
+        "skipped": 0,
+        "needles": [
+          "test_openapi_schema",
+          "test_config_contract"
+        ]
+      },
+      "note": "OpenAPI schema and frontend/API contract checks."
+    },
+    {
+      "workstream": "F21",
+      "title": "Tillgänglighet och mobil",
+      "status": "BLOCKED",
+      "evidence": "no mobile/a11y Playwright JSON",
+      "note": "Run the browser suite."
+    },
+    {
+      "workstream": "F22",
+      "title": "Prestanda och lasttest",
+      "status": "PASS",
+      "evidence": {
+        "generated_at": "2026-11-21T01:32:09.886389+00:00",
+        "commit": "5e803c8ff16b7da8d9b1a3c2f120dbfa4786d836",
+        "environment": {
+          "database_url": "postgresql://postgres@127.0.0.1:55432/lifeos_e2e",
+          "redis_url": "redis://@127.0.0.1:56379/15",
+          "port": 46883,
+          "python": "3.12.3"
+        },
+        "status": "PASS",
+        "blockers": [],
+        "startup_latency_s": 3.801,
+        "health_latency_ms": {
+          "p50": 29.33,
+          "p95": 37.82,
+          "max": 46.68
+        },
+        "login_latency_ms": 152.57,
+        "login_status": 200,
+        "api_latency_ms": {
+          "/api/documents": 11.1,
+          "/api/conversations": 8.68,
+          "/api/mainai/project-status": 59.75
+        },
+        "api_status": {
+          "/api/documents": 200,
+          "/api/conversations": 200,
+          "/api/mainai/project-status": 200
+        },
+        "chat_latency_ms": 97.55,
+        "chat_status": 200,
+        "chat_reply_chars": 167,
+        "concurrency": {
+          "requests": 40,
+          "workers": 10,
+          "statuses": [
+            200
+          ],
+          "p50_ms": 229.44,
+          "p95_ms": 506.9
+        },
+        "memory": {
+          "rss_before_mb": 186.3,
+          "rss_after_mb": 186.6,
+          "delta_mb": 0.3,
+          "repeated_reads": 100,
+          "note": "RSS delta is an observation, not proof of a leak; GC/allocator behavior varies.",
+          "process_tree_rss_mb": 186.6
+        },
+        "cpu": {
+          "window_s": 3.68,
+          "process_tree_cpu_seconds": 3.71,
+          "process_tree_cpu_percent": 100.8
+        },
+        "database": {
+          "status": "PASS",
+          "database": "lifeos_e2e",
+          "size_bytes": 20872215,
+          "connections": 6,
+          "tables": {
+            "users": 2,
+            "documents": 1,
+            "document_chunks": 1,
+            "conversations": 3,
+            "messages": 6,
+            "memory_source_units": 7
+          },
+          "queues": {
+            "knowledge_import_jobs": {
+              "completed": 1
+            },
+            "mainai_jobs": {}
+          },
+          "slow_query_stats": {
+            "status": "BLOCKED",
+            "reason": "pg_stat_statements not installed"
+          }
+        },
+        "disk": {
+          "free_bytes": 79150456832,
+          "total_bytes": 92487929856,
+          "storage_root": "/tmp/lifeai-resource-probe-j_zq3a6o/storage",
+          "storage_root_bytes": 0
+        },
+        "log_path": "/tmp/lifeai-resource-probe-j_zq3a6o/backend.log"
+      },
+      "note": "Measured normal load; pg_stat_statements slow-query stats remain BLOCKED."
+    },
+    {
+      "workstream": "F23",
+      "title": "Långvarig stabilitetstestning",
+      "status": "BLOCKED",
+      "evidence": "no four-hour soak evidence",
+      "note": "A short smoke is not a substitute for the required four-hour active soak."
+    },
+    {
+      "workstream": "F24",
+      "title": "Fullständig QA- och integrationsgrind",
+      "status": "BLOCKED",
+      "evidence": {
+        "pass": 16,
+        "fail": 0,
+        "blocked": 7
+      },
+      "note": "The matrix itself is the gate input; overall status is the worst workstream status."
+    }
+  ],
+  "summary": {
+    "PASS": 16,
+    "FAIL": 0,
+    "BLOCKED": 8,
+    "SKIP": 0
+  }
+}

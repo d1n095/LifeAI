@@ -6,6 +6,51 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Founder Alpha full-stack QA successor — BLOCKED (2026-11-21)
+
+**Branch:** `claude/founder-alpha-fullstack-qa`, bas `6ececab`. Ingen PR, push, merge eller
+deployment har gjorts. `first_cycle_go=false`. Den tidigare leveransen
+`delivery/founder-alpha-reliability/` och dess `SHA256SUMS` är orörda.
+
+**Commits:** `87bede8` crash-säker version/lagring vid resume, `d620642` recovery-matris,
+F01–F24-matris, JUnit-sammanslagning och BLOCKED-propagering i QA-grinden, `b898a02`
+testkontrakt för planner/egress, `2771905` F05-matchning av JUnit-classnames, `c527543`
+riktig PostgreSQL-felinjektion för F13. Dokumentationscommiten med denna post och evidensen
+ligger ovanpå `c527543`.
+
+**Scope:** En verklig crash-window-bugg i `app/rag/library_import.py` är reparerad: en
+`Document`-rad som committats före `KnowledgeVersion`/`storage_key` kunde återupptas som
+"indexed" utan version och utan sparat original, vilket också stoppade claim-extraktion
+permanent. Resume återskapar nu båda delarna, verifierar checksumman och behåller exakt en
+version. Därutöver: körbar recovery-matris för giltig/korrupt/partiell restore, F01–F24-matris
+som härleder PASS/FAIL/BLOCKED/SKIP från terminal evidens, JUnit-merge för avgränsade
+ testsviter, F13-felinjektion mot riktig PostgreSQL, samt rättade testkontrakt för den nya
+`owner_id`-signaturen. Ingen ny produktarkitektur eller parallell minnesväg har införts.
+
+**Faktiska resultat:** samlad backend-JUnit **511 tester, 0 failures, 0 errors, 2 skips**
+(`zip` och live OpenAI). F13 **6/6 PASS**: rollback, en exakt deadlock `40P01`, låstimeout
+`55P03`, statement/commit-timeout `57014`, dödad backend med återanslutning och samtidiga
+commits. F18 recovery-matris **PASS**. F01–F24: **16 PASS, 0 FAIL, 8 BLOCKED**. QA-grinden
+körde mot exakt `c527543` med ren tracked tree, Alembic `0091`, PostgreSQL/Redis nåbara,
+installmatris 12/0/0, resursprobe PASS och 3/3 Playwright-resiliens; resultatet är
+**BLOCKED** (exit 3), inte PASS.
+
+**Kvarstående blockerare:** F04 (Ollama saknas), F09 (dedikerat RAG-kvalitetsdataset),
+F11 (ersättnings-/versionsbytes-API; endast crash-säker recreation är klar), F12
+(Knowledge Studio E2E), F19 (full founder-resa), F21 (mobil/a11y), F23 (fyra timmars soak)
+och F24 (grinden ärver dessa). `pg_stat_statements`, `zip`, Z.ai-CLI, exakt-head GitHub
+Actions och resursutmattning är fortsatt kända begränsningar.
+
+**Evidens:** `docs/evidence/founder-alpha/successor/` (`program-tests.xml`,
+`recovery-matrix.json`, `postgres-faults.json`, `version-resume.xml`, `program-matrix.json`,
+`qa-gate.json`, `qa-gate.md` och `README.md` med reproducerbara kommandon).
+
+**Merge:** efter R15 och den tidigare reliability-leveransen. Inga ändringar i Codex- eller
+Z-brancher; ingen känd överlappning. Nästa genomförbara steg är F11:s
+ersättnings-/versionsbytes-API, därefter F09-dataset och full Playwright-resa när frontend,
+backend och worker kan köras tillsammans. F23 kräver en riktig fyratimmarskörning i en
+resursmässigt tillräcklig isolerad miljö.
+
 ## Founder Alpha system reliability QA — PASS vid `216f290` (2026-11-21)
 
 **Branch:** `claude/founder-alpha-reliability`. QA-grinden passerade vid `216f290`; en

@@ -1,0 +1,37 @@
+{
+  "status": "PASS",
+  "generated_at": "2026-11-21T12:55:59.077942+00:00",
+  "database": "127.0.0.1:55432/lifeos_gate",
+  "checks": [
+    {
+      "check": "transaction rollback",
+      "status": "PASS",
+      "detail": "rows after rollback=0"
+    },
+    {
+      "check": "concurrent deadlock",
+      "status": "PASS",
+      "detail": "deadlocks=1 other_errors=[] alive=[False, False]"
+    },
+    {
+      "check": "lock timeout",
+      "status": "PASS",
+      "detail": "sqlstate=55P03 type=LockNotAvailable"
+    },
+    {
+      "check": "statement/commit timeout",
+      "status": "PASS",
+      "detail": "sqlstate=57014 type=QueryCanceled"
+    },
+    {
+      "check": "lost connection and reconnect",
+      "status": "PASS",
+      "detail": "terminated=True error=OperationalError reconnect=1"
+    },
+    {
+      "check": "concurrent writes",
+      "status": "PASS",
+      "detail": "rows=2 errors=[]"
+    }
+  ]
+}
