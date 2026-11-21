@@ -1,0 +1,35 @@
+{
+  "branch": "freebuff/life-workspaces",
+  "code_sha": "a26a23d395147af21b17b43ae6734c788d398478",
+  "migration": "0093_life_workspaces",
+  "migration_dependency": "0092",
+  "backend_tests": {
+    "passed": 10,
+    "failed": 0,
+    "command": "pytest tests/backend/test_workspaces_api.py tests/backend/test_projects_detail.py tests/backend/chat/test_chat_request_idempotency.py"
+  },
+  "frontend_lint": {
+    "verdict": "PASS",
+    "errors": 0,
+    "warnings": 1,
+    "warning_note": "pre-existing next/no-location-assign-relative-destination in lib/api.ts"
+  },
+  "frontend_build": {
+    "verdict": "PASS",
+    "workspace_routes": ["/workspaces", "/workspaces/[id]"]
+  },
+  "browser": {
+    "spec": "frontend/e2e/workspaces.spec.ts",
+    "expected": 1,
+    "unexpected": 0,
+    "flaky": 0,
+    "verdict": "PASS"
+  },
+  "first_cycle_go": false,
+  "production_changes": false,
+  "notes": [
+    "Browser uses the existing deterministic E2E provider, not a real external model.",
+    "Workspace context is bounded and owner-scoped; it grants no execution authority.",
+    "Claude owns V7/R15 and migration reconciliation; this migration is additive and follows 0092."
+  ]
+}

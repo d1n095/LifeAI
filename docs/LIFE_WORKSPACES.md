@@ -1,8 +1,11 @@
 # Life Workspaces
 
 **Branch:** `freebuff/life-workspaces`  
+**Code checkpoint:** `a26a23d395147af21b17b43ae6734c788d398478`  
 **Migration:** `0093_life_workspaces` (depends on `0092`)  
 **Status:** implemented and verified in the isolated test environment; no production deployment or shared-branch merge. `first_cycle_go=false`.
+
+Exact-SHA evidence: `docs/evidence/life-workspaces/`.
 
 ## What a workspace is
 

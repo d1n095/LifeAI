@@ -9,7 +9,8 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 ## Life Workspaces — persistent project-centered founder experience (2026-11-21)
 
 **Branch:** `freebuff/life-workspaces`, bas `04c82c3aa4ea411835c48561f6c03cef4bb87999`
-(Founder Alpha-programmet). Ingen PR/push/merge/deploy är gjord. `first_cycle_go=false`.
+(Founder Alpha-programmet). Kodcheckpoint `a26a23d395147af21b17b43ae6734c788d398478`.
+Ingen PR/push/merge/deploy är gjord. `first_cycle_go=false`.
 
 **Scope:** bygger vidare på befintliga `projects`, `documents`, `tasks`, `conversations`,
 retrieval och MainAI-chatt. Lägger till workspace-metadata (syfte/mål/settings), arkiv och
