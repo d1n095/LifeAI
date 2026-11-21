@@ -30,6 +30,7 @@ what "close the stub gap" means in V0.1: the capability is real and independentl
 that it defaults to pushing to a live repo."""
 
 import logging
+import shutil
 import subprocess
 import uuid
 from datetime import datetime, timedelta
@@ -120,6 +121,74 @@ def _backend_root() -> Path:
     return _repo_root() / "backend"
 
 
+# Founder directive ("RESUME LIFEAI FIRST-CYCLE REMEDIATION" / "FOUNDER DECISION — EGRESS
+# AUTHORIZATION & FIRST-CYCLE INTEGRATION"), finding PI-1d: proposal mode (github_write_enabled
+# off) used to write AI-proposed content directly onto _repo_root() -- the actual checkout this
+# backend process itself runs from. A hallucinated or malformed proposal, a crash mid-write, or
+# simply two proposal-mode attempts racing on the SAME shared tree could corrupt the live
+# process's own source on disk, with no isolation and no automatic revert (the old
+# `previous_contents` capture was never actually used to restore anything). Mirrors
+# worktree.py's WORKTREE_ROOT convention (a fixed, predictable /tmp path, not tempfile.
+# gettempdir()) but deliberately lighter-weight than a real git worktree: proposal mode never
+# commits or pushes anything, so there is no branch/commit identity to track -- just a
+# disposable, per-TASK (not per-job: a retry of the same task reuses/recreates the identical
+# path, see _create_proposal_workspace()'s own docstring for why that matters for recovery)
+# filesystem sandbox.
+PROPOSAL_WORKSPACE_ROOT = Path("/tmp/mainai-proposal-workspaces")
+
+
+def _proposal_workspace_path(task_id: uuid.UUID) -> Path:
+    """Pure, deterministic -- keyed ONLY by task_id, never by job_id or a random token. This is
+    what makes the whole scheme crash-safe without needing a durable DB pointer to find an
+    orphan: if a process is killed between _create_proposal_workspace() creating this directory
+    and the work_result checkpoint that would otherwise record its path, a later retry (a new
+    job for the SAME task, after the dead job is reclaimed) calls _create_proposal_workspace()
+    again for the SAME task_id and finds -- and removes -- the exact same orphaned directory
+    before recreating it fresh. No separate reaper/sweep process is needed for the ordinary
+    crash-and-retry case."""
+    return PROPOSAL_WORKSPACE_ROOT / str(task_id)
+
+
+def _create_proposal_workspace(task_id: uuid.UUID) -> Path:
+    """A disposable, isolated COPY of the real repository tree (never the tree itself) for one
+    proposal-mode repo_edit attempt to write into. Always removes any stale leftover at this
+    exact path first (idempotent — a retried attempt, or a crash-then-retry, gets a genuinely
+    fresh copy, never a mix of an old attempt's edits and a new AI response). `symlinks=True`:
+    a symlink already present in the real repo tree (e.g. the existing symlink-escape hardening
+    test's fixture) is copied AS A SYMLINK, not resolved and flattened into a real directory --
+    preserving the exact same escape surface _handle_repo_edit()'s own resolve()-based
+    confinement check is already proven (by that existing test) to catch; silently flattening it
+    via copytree's default `symlinks=False` would have hidden a real attack surface behind a
+    test that still happens to pass for the wrong reason."""
+    workspace = _proposal_workspace_path(task_id)
+    if workspace.exists():
+        shutil.rmtree(workspace, ignore_errors=True)
+    workspace.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(
+        _repo_root(), workspace, symlinks=True,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache", ".git", "node_modules", ".venv"),
+    )
+    workspace.chmod(0o700)
+    return workspace
+
+
+def _cleanup_proposal_workspace(task_id: uuid.UUID) -> None:
+    """Called from every terminal finalization path (_finalize_task_outcome() -- completed,
+    retryable_failed, and permanently failed; _finalize_cancelled_task() -- cancelled). Cheap,
+    unconditional, and safe to call for ANY task regardless of task_type or whether a workspace
+    was ever created for it: _proposal_workspace_path() is pure path arithmetic, and rmtree is a
+    guarded no-op when nothing exists there. Deliberately NOT gated on
+    `task.task_type == "repo_edit"` or on github_write_enabled -- the whole point is that this
+    is safe and correct to call unconditionally, so no caller has to reason about whether a
+    workspace exists before cleaning it up.
+
+    Calling this on `retryable_failed` (not actually terminal -- the task WILL be retried) is
+    intentional, not a missed case: _create_proposal_workspace() recreates fully fresh on the
+    next attempt anyway, so there is no benefit to keeping a failed attempt's workspace around
+    between retries, and real benefit (bounded disk usage) to removing it promptly."""
+    shutil.rmtree(_proposal_workspace_path(task_id), ignore_errors=True)
+
+
 class TaskExecutionError(Exception):
     """Raised by a task_type handler for a genuine execution failure (provider error,
     malformed AI response, filesystem error) -- distinct from a verification FAILURE (which is
@@ -192,29 +261,34 @@ def _parse_code_agent_response(raw: str) -> dict:
 
 
 async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
-    """github_write_enabled is off (or GitHub isn't configured): the ORIGINAL V0.1 proposal-only
-    model, completely unchanged -- writes to the single shared local checkout this backend
-    process itself runs from, purely so real local verification (verify_task()) can still run
-    against real content, never touching the network or creating any isolated per-attempt
-    state. Kept as a separate function (not a branch inside _handle_repo_edit()) specifically so
-    the extensive existing path-traversal/symlink-escape hardening tests targeting this exact
-    behavior (test_run_task_execution_job_repo_edit_with_an_absolute_ai_proposed_path_..., et
-    al.) keep exercising the identical code, unchanged."""
+    """github_write_enabled is off (or GitHub isn't configured): writes into a disposable,
+    isolated COPY of the repo (see _create_proposal_workspace()) -- NEVER into _repo_root()
+    itself, the single shared checkout this backend process runs from (founder directive,
+    independent-review finding PI-1d: the original V0.1 behavior mutated that live checkout
+    directly, with no isolation and no automatic revert). Real local verification
+    (verify_task()) still runs against real content -- just the disposable copy's content, not
+    the live tree's. Kept as a separate function (not a branch inside _handle_repo_edit())
+    specifically so the extensive existing path-traversal/symlink-escape hardening tests
+    targeting this exact confinement logic (test_run_task_execution_job_repo_edit_with_an_
+    absolute_ai_proposed_path_..., et al.) keep exercising the identical checks, now against the
+    workspace root instead of the real repo root -- the confinement logic itself is unchanged,
+    only what it confines writes to has moved."""
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=task.description)]
     result, _attempted = await chat_with_fallback(db, messages)
     parsed = _parse_code_agent_response(result.content)
 
-    repo_root = _repo_root().resolve()
+    workspace_root = _create_proposal_workspace(task.id).resolve()
     previous_contents: dict[str, str | None] = {}
     for file in parsed["files"]:
         # Defense in depth beyond _validate_repo_edit_file_path()'s absolute/'..' rejection --
-        # resolves symlinks too, so a pre-existing symlink inside the repo tree pointing outside
-        # it (a separate, lower-likelihood attack surface -- would require a malicious symlink
-        # already merged into the repo, not just a malicious AI response) still can't be used to
-        # escape repo_root via a syntactically clean relative path.
-        abs_path = (repo_root / file["path"]).resolve()
-        if abs_path != repo_root and repo_root not in abs_path.parents:
-            raise TaskExecutionError(f"Refusing to write outside the repo root: {file['path']!r} resolved to {abs_path}.")
+        # resolves symlinks too, so a pre-existing symlink inside the copied tree pointing
+        # outside the WORKSPACE (never mind the real repo) still can't be used to escape via a
+        # syntactically clean relative path. _create_proposal_workspace() preserves symlinks
+        # as symlinks when copying (symlinks=True) specifically so this check still has a real
+        # escape surface to catch, rather than copytree silently flattening it away.
+        abs_path = (workspace_root / file["path"]).resolve()
+        if abs_path != workspace_root and workspace_root not in abs_path.parents:
+            raise TaskExecutionError(f"Refusing to write outside the proposal workspace: {file['path']!r} resolved to {abs_path}.")
         previous_contents[file["path"]] = abs_path.read_text() if abs_path.exists() else None
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         abs_path.write_text(file["content"])
@@ -225,6 +299,13 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
         "previous_contents": previous_contents,
         "provider": result.provider,
         "model": result.model,
+        # Threaded to _handle_open_pr()'s _find_repo_edit_branch() lookup (via the completed
+        # event's own work_result -- the only durable record of this value) so a sibling
+        # run_tests task, and this SAME task's own verify_task() call in
+        # run_task_execution_job(), know to verify against this disposable copy rather than
+        # falling back to _backend_root() -- the actual PI-1d gap this whole mechanism exists
+        # to close.
+        "proposal_workspace": str(workspace_root),
     }
 
 
@@ -380,12 +461,23 @@ def _run_pytest(target: str, *, cwd: Path, timeout_seconds: int = 300) -> dict:
     return {"target": target, "returncode": result.returncode, "passed": result.returncode == 0, "stdout_tail": result.stdout[-4000:], "stderr_tail": result.stderr[-2000:]}
 
 
-def _handle_run_tests(task: MainAITask) -> dict:
+def _handle_run_tests(db: Session, task: MainAITask, *, goal: MainAIGoal) -> dict:
+    """PI-1d: a run_tests task whose goal already has a completed repo_edit sibling must run
+    its real pytest subprocess against THAT sibling's own edits -- never silently against
+    _backend_root() (the shared checkout), which never received a proposal-mode sibling's edits
+    at all once _propose_repo_edit() writes into its own disposable workspace instead. Checks
+    `proposal_workspace` first (set only by _propose_repo_edit(), the github_write_enabled=False
+    path) and falls back to `_backend_root()` only when no repo_edit sibling exists in this goal
+    at all (e.g. a standalone run_tests-only goal) -- unchanged from before this fix in that
+    case."""
     targets = [step["target"] for step in task.verification_plan if step.get("kind") == "targeted_tests" and step.get("target")]
     if not targets:
         raise TaskExecutionError("run_tests task has no 'targeted_tests' entries in its verification_plan to run.")
+    edit_info = _find_repo_edit_branch(db, goal_id=goal.id)
+    workspace_path = edit_info.get("proposal_workspace") if edit_info else None
+    cwd = Path(workspace_path) / "backend" if workspace_path else _backend_root()
     try:
-        results = [_run_pytest(target, cwd=_backend_root()) for target in targets]
+        results = [_run_pytest(target, cwd=cwd) for target in targets]
     except VerificationStepError as exc:
         raise TaskExecutionError(str(exc)) from exc
     return {"results": results}
@@ -551,7 +643,7 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
                     db.rollback()
                     return
             elif task.task_type == "run_tests":
-                work_result = _handle_run_tests(task)
+                work_result = _handle_run_tests(db, task, goal=goal)
             elif task.task_type == "open_pr":
                 work_result = await _handle_open_pr(db, task, goal)
             else:
@@ -612,10 +704,19 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             # worktree's own backend/ subdirectory -- the exact same repo layout as
             # _backend_root(), just at a different, per-attempt path -- never against the
             # shared checkout, which never received these edits at all once worktree.py is
-            # wired into the live path. Proposal mode (no worktree_path in work_result) keeps
-            # verifying against the shared checkout, unchanged from V0.1.
+            # wired into the live path. PI-1d: proposal mode is the SAME shape now -- its edits
+            # live inside _propose_repo_edit()'s own disposable `proposal_workspace`, never the
+            # shared checkout either, once that fix lands. Only a repo_edit task with NEITHER
+            # (should not be structurally reachable, but never assumed) falls back to
+            # _backend_root(), unchanged from V0.1.
             worktree_path = work_result.get("worktree_path") if task.task_type == "repo_edit" else None
-            verify_cwd = str(Path(worktree_path) / "backend") if worktree_path else str(_backend_root())
+            workspace_path = work_result.get("proposal_workspace") if task.task_type == "repo_edit" else None
+            if worktree_path:
+                verify_cwd = str(Path(worktree_path) / "backend")
+            elif workspace_path:
+                verify_cwd = str(Path(workspace_path) / "backend")
+            else:
+                verify_cwd = str(_backend_root())
             verification = verify_task(task, cwd=verify_cwd)
 
         if verification_checkpoint is None and verification.passed:
@@ -805,7 +906,17 @@ def _finalize_task_outcome(
     After a successful `completed` (or cooperative cancel), the canonical `record_final_report`
     path runs so a fully successful terminal graph closes the MainAIGoal. Permanent `failed`
     outcomes defer goal close to the worker finalize tick so auto-replan can still claim an
-    ACTIVE goal — see `_rollup_goal_after_task_boundary`."""
+    ACTIVE goal — see `_rollup_goal_after_task_boundary`.
+
+    PI-1d: this task's own disposable proposal workspace (if any) is deliberately NOT cleaned
+    up here. A repo_edit task reaching ITS OWN `completed` here does not mean the GOAL is
+    done -- a sibling `run_tests` task (a separate task, dispatched later) still needs this
+    exact workspace to verify against (see _handle_run_tests()'s `proposal_workspace` lookup).
+    Cleaning up at this task-level granularity deletes the workspace out from under that
+    still-pending sibling. See final_report.py's record_final_report() instead: it cleans up
+    every repo_edit task's workspace under a goal at the one point that's actually safe --
+    once the WHOLE goal has reached a genuinely terminal state and nothing under it can ever
+    dispatch another task that might still need it."""
     db.add(
         MainAITaskEvent(
             task_id=task.id,
@@ -883,7 +994,13 @@ def _finalize_cancelled_task(db: Session, task: MainAITask, *, reason: str) -> N
     failure: it must never count against `task.attempts`, schedule a `next_retry_at`, or record
     a `verification_failed` event that didn't actually happen. Records `cancelling` (the
     in-flight acknowledgment) then `cancelled` (the durable terminal event), matching
-    MainAIJobEventType's own cancel_requested -> cancel_acknowledged -> cancelled shape."""
+    MainAIJobEventType's own cancel_requested -> cancel_acknowledged -> cancelled shape.
+
+    PI-1d: same reasoning as _finalize_task_outcome() above -- this task's own disposable
+    proposal workspace (if any) is NOT cleaned up here either, for the identical reason: this
+    could be a DIFFERENT task in the goal being cancelled while a repo_edit sibling's own
+    workspace is still needed by a not-yet-run run_tests task. Cleanup happens once at the
+    goal's own terminal close (final_report.py's record_final_report())."""
     db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.cancelling, detail={"reason": reason}))
     task.status = MainAITaskStatus.cancelled
     task.completed_at = datetime.utcnow()
