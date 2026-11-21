@@ -4,7 +4,9 @@ Candidate code SHA: `6601fac3b83d29e6ac755affc2eac3abe1912d2c`
 Base: V9 `6b3848d96e99926d2d2175f03582f86c0947e906`
 
 The program summary is **BLOCKED** overall because the required 24-hour endurance run was
-not possible. All other 31 checks passed.
+not possible. All other 31 program checks passed. The broader Workstream 3 fault matrix is
+not claimed as PASS: backend restart and backup/recovery ran, while worker-only kill,
+Redis/PostgreSQL restart, host restart and interrupted ingestion/streaming did not.
 
 - `program-summary.json` / `program-summary.md` — 32 checks: 31 PASS, 0 FAIL, 1 BLOCKED.
 - `run-a5162d9876/founder-journey.json` — 12/12 founder journey.

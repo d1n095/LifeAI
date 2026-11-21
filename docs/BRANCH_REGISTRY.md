@@ -22,9 +22,12 @@ migrationer, ingen parallell motor och inga ändringar i R15/Security Kernel/RAG
 **Faktiska resultat:** programrunnern **31 PASS, 0 FAIL, 1 BLOCKED**; founderresan **12/12**;
 backendtester **59 passed**; installationsmatris **12/12**; Playwright projektdetalj **1
 expected, 0 unexpected**; backup/restore och recovery **PASS**; migration
-`0092 -> 0091 -> 0092` **PASS**; resursprobe **PASS**; frontend lint/build **PASS**. Den enda
-BLOCKED-punkten är 24-timmars endurance; den 20-sekunders soak som kördes har noll
-requestfel men får aldrig kallas F23 PASS.
+`0092 -> 0091 -> 0092` **PASS**; resursprobe **PASS**; frontend lint/build **PASS**. I
+programrunnern är endast 24-timmars endurance BLOCKED; den 20-sekunders soak som kördes har
+noll requestfel men får aldrig kallas F23 PASS. Därutöver är den bredare Workstream
+3-matrisen **PARTIAL/BLOCKED**: backend-restart och backup/recovery kördes, men worker-only
+kill, Redis/PostgreSQL-restart, host-restart och avbruten ingestion/streaming kördes inte och
+påstås därför inte vara PASS.
 
 **Riktiga fixar:** `/api/health/live` skiljer processliveness från `/api/health/ready`s
 fail-closed dependency-check; resurs-/soak-harnessen använder en icke-placeholder-nyckel så

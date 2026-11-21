@@ -3,9 +3,11 @@
 **Branch:** `freebuff/founder-alpha-engineering-program`
 **Base:** V9 `6b3848d96e99926d2d2175f03582f86c0947e906`
 **Candidate code SHA:** `6601fac3b83d29e6ac755affc2eac3abe1912d2c`
-**Status:** all executable workstreams implemented and verified; overall result **BLOCKED** only
-because the required 24-hour endurance run was not possible in this environment.
-`first_cycle_go=false`.
+**Status:** all nine workstreams have implementations or verified existing equivalents. The
+overall result is **BLOCKED**: the 24-hour endurance run was not possible, and several
+destructive Workstream 3 fault cases (worker-only termination, Redis/PostgreSQL restart,
+host restart, interrupted ingestion/streaming) were not executed. The program runner itself
+reports **31 PASS, 0 FAIL, 1 BLOCKED**. `first_cycle_go=false`.
 
 ## What this program adds
 
@@ -68,13 +70,13 @@ No authorization, RLS, Security Kernel, migration chain or production data was c
 | --- | --- | --- |
 | 1. Reproducible environment | Fresh disposable DB, pgvector, real migrations `0092`, runtime grants, seeded founder, API+worker, teardown | **PASS** |
 | 2. Real application lifecycle | 12/12 founder journey: auth, SSE, persistence, ingestion, cited retrieval, project task, approval/envelope, execution, cancel, audit | **PASS** |
-| 3. Persistent state and restart | Backend restart preserved conversation, indexed source and task events; recovery matrix valid/corrupt/partial restores | **PASS** |
+| 3. Persistent state and restart | Backend restart preserved conversation, indexed source and task events; recovery matrix valid/corrupt/partial restores. Worker-only kill, Redis/PostgreSQL restart, host restart and interrupted ingestion/streaming were not executed | **PARTIAL / BLOCKED** |
 | 4. Operational reliability | `/live`, `/ready`, fail-closed startup, 59 security/health/startup/db-retry tests, resource and queue samples | **PASS** |
 | 5. Capacity and endurance | Resource probe PASS; 20-second soak had no request failures but is **BLOCKED** for the 24-hour requirement | **BLOCKED** |
 | 6. Upgrade, migration and recovery | `0092 -> 0091 -> 0092` rollback/re-upgrade; backup/restore into disposable DB and API verification; install matrix **12/12** | **PASS** |
 | 7. Browser and API acceptance | Playwright project-detail journey: **1 expected, 0 unexpected, 0 flaky**; frontend lint/build PASS | **PASS** |
 | 8. Security preservation | Anonymous routes 401, wrong password 401, missing CSRF 403, logout invalidates access, RLS/security/startup regressions 59 passed | **PASS** |
-| 9. Release rehearsal | Exact-SHA clean-tree run, fresh install, founder acceptance, restart, recovery, upgrade, backup/restore, security regressions, browser | **PASS** (with the workstream-5 endurance blocker) |
+| 9. Release rehearsal | Exact-SHA clean-tree run, fresh install, founder acceptance, backend restart, recovery, upgrade, backup/restore, security regressions, browser | **PASS for the executed rehearsal** (endurance and host-restart cases remain BLOCKED) |
 
 ## Exact measured results
 
@@ -90,6 +92,7 @@ No authorization, RLS, Security Kernel, migration chain or production data was c
 | Migration rollback/re-upgrade | **PASS**: `0092 -> 0091 -> 0092` |
 | Resource probe | **PASS**; documents 14.74 ms, conversations 9.73 ms, project status 85.71 ms |
 | Short soak | **BLOCKED** for endurance; 20 s, zero request failures, F23 cannot be claimed below 24 h |
+| Broader fault matrix | **BLOCKED**: backend restart and backup recovery ran; worker-only kill, Redis/PostgreSQL restart, host restart and interrupted ingestion/streaming did not |
 | Frontend lint | **PASS**, 0 errors, 1 pre-existing `window.location.href` warning |
 | Frontend production build | **PASS**; `/projects/[id]` dynamic route generated |
 
@@ -132,6 +135,10 @@ A real 24-hour endurance run is the only way to turn workstream 5 from **BLOCKED
 
 - **24-hour endurance:** not run. The local environment cannot supply a persistent isolated
   host for 24 hours, so F23 remains BLOCKED. The 20-second soak is only a smoke.
+- **Broader fault matrix:** backend restart and backup/recovery were executed; worker-only
+  termination, Redis interruption/restart, PostgreSQL restart, host restart and interrupted
+  ingestion/streaming were not executed in this environment. Existing V5/V6 fault tools are
+  present but were not claimed as PASS without a run.
 - **Real Ollama:** unavailable. The journey uses the existing deterministic E2E provider;
   real local-model acceptance is not claimed.
 - **Docker:** daemon access is denied, so the Compose lab and Docker fault injection were not
