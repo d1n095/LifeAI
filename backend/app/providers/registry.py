@@ -24,6 +24,12 @@ _PROVIDERS: dict[str, type[LLMProvider]] = {
     "ollama": OllamaProvider,
 }
 
+# Founder directive (Task #60, requirement 8): the only providers this codebase can genuinely
+# call without content leaving this deployment's own network. Every other entry in _PROVIDERS
+# is a real external API call. Enforced in chat_with_fallback() below via
+# `settings.local_only_mode` -- never changes behavior for a non-local-only deployment.
+_LOCAL_PROVIDERS: frozenset[str] = frozenset({"ollama"})
+
 # Reasonable default chat model per provider, used only when falling back to a provider that
 # has no explicit admin-configured model (the primary provider's own model comes from
 # ProviderConfig / settings, never from here).
@@ -150,6 +156,8 @@ async def chat_with_fallback(
     task_id: uuid.UUID | None = None,
     goal_id: uuid.UUID | None = None,
     job_id: uuid.UUID | None = None,
+    lease_worker_id: str | None = None,
+    lease_generation: int | None = None,
     **kwargs,
 ) -> tuple[ChatResult, list[str]]:
     """Try the primary chat provider, then fall back through CHAT_FALLBACK_ORDER on failure.
@@ -166,6 +174,35 @@ async def chat_with_fallback(
     ledger row per real attempt. `owner_id` is optional and defaults to None (gate skipped,
     unchanged legacy behavior) so existing callers migrate incrementally -- see the threat
     model's V1/V4 blocker list for which callers still need to pass it.
+
+    Founder directive ("RESUME LIFEAI FIRST-CYCLE REMEDIATION" -> "FOUNDER DECISION -- EGRESS
+    AUTHORIZATION & FIRST-CYCLE INTEGRATION", Task #60): two ADDITIONAL, independent central
+    checks, both evaluated BEFORE any provider is ever attempted (zero provider calls on
+    denial), neither bypassable by a caller that simply omits them where they don't apply:
+
+    1. LOCAL_ONLY_MODE (requirement 8): when `settings.local_only_mode` is True, the chain is
+       filtered down to local-only providers (`_LOCAL_PROVIDERS`) before anything is attempted.
+       An empty resulting chain raises `ProviderError` immediately -- a local provider's own
+       failure must surface as an error, NEVER silently escalate to a real external provider.
+       No `owner_id`/authorization context can override this; it is evaluated unconditionally,
+       even when `owner_id` is None, because this is a deployment-wide network posture, not a
+       per-call egress decision the Life Vault gate already owns.
+    2. Worker-lease verification (requirement 2): `job_id` already exists as a plain
+       attribution field for the disclosure ledger. When a caller ALSO supplies
+       `lease_worker_id`/`lease_generation` alongside `job_id`, this function re-verifies
+       (`app.jobs.mainai_job_lease.verify_active_lease()`, a read-only check, performed fresh
+       against the CURRENT row -- never trusting an in-memory job object that may be stale)
+       that the exact (job_id, worker_id, lease_generation) triple is still the job's genuinely
+       active lease, right now, immediately before the first provider attempt. A lease that
+       expired or was reclaimed between dispatch and this call -- otherwise invisible, since
+       the caller's own in-memory `MainAIJob` object would not reflect it -- denies the whole
+       call (`EgressDeniedError`, same hard-stop semantics as a Life Vault denial) rather than
+       let a dead job's claimed identity still reach a real provider. Supplying only one of
+       `lease_worker_id`/`lease_generation` without `job_id` (or vice versa) is an incomplete
+       lease assertion and is ALSO treated as a denial -- never silently ignored as "not
+       asked for." Omitting all three preserves prior behavior exactly (no lease check at all)
+       for call sites that are not job-backed (e.g. a live, synchronously-authenticated request
+       with no `mainai_jobs` row behind it at all).
     """
     # Deferred import: app/providers/verification.py imports resolve_active from this module,
     # so importing it at module load time would be a circular import. classify_provider_exception
@@ -183,30 +220,69 @@ async def chat_with_fallback(
     # into app.development_operator.service) from ever becoming a load-time dependency of this
     # already-central module.
     from app.egress_policy import EgressDeniedError, enforce_egress_policy
+    from app.jobs.mainai_job_lease import verify_active_lease
+
+    settings = get_settings()
+
+    lease_fields_given = [job_id is not None, lease_worker_id is not None, lease_generation is not None]
+    if any(lease_fields_given) and not all(lease_fields_given):
+        raise EgressDeniedError(
+            "incomplete worker-lease assertion: job_id/lease_worker_id/lease_generation must be given "
+            "all together or not at all -- refusing to guess which ones were meant."
+        )
+    if all(lease_fields_given):
+        if not verify_active_lease(db, job_id=job_id, worker_id=lease_worker_id, lease_generation=lease_generation):
+            raise EgressDeniedError(
+                f"worker lease for job {job_id} (worker={lease_worker_id!r}, generation={lease_generation}) "
+                "is no longer active -- reclaimed, expired, or never existed. Refusing egress under a dead "
+                "job's claimed identity."
+            )
 
     chain = resolve_chat_chain(db)
+    if settings.local_only_mode:
+        chain = [(provider, model) for provider, model in chain if provider.name in _LOCAL_PROVIDERS]
+        if not chain:
+            raise ProviderError(
+                "LOCAL_ONLY_MODE is enabled and no local provider is configured/reachable -- refusing to "
+                "fall back to an external provider.",
+                category="local_only_mode_no_local_provider",
+            )
     attempted: list[str] = []
     last_error: Exception | None = None
 
     for provider, model in chain:
         attempted.append(provider.name)
+        outbound_messages = messages
+        if owner_id is not None:
+            # Hardening finding (Task #60 security-acceptance testing): this step is a policy/
+            # authorization decision, NOT a provider-connectivity concern -- so it is
+            # DELIBERATELY outside the `except Exception` below that classifies ordinary
+            # provider failures for fallback. Before this fix, an exception raised HERE (e.g. a
+            # real FK violation from a non-existent owner_id, or a real RLS denial from a
+            # cross-tenant owner_id under the wrong session context -- neither of which is an
+            # `EgressDeniedError`, both of which are genuine database-level denials) was
+            # silently swallowed by that generic handler and misclassified as "this provider is
+            # unreachable, try the next one" -- which is both misleading (masks a real
+            # authorization failure as a connectivity blip) and, with more than one provider
+            # configured, would have RETRIED the identical doomed write against every remaining
+            # provider in the chain. Any exception here -- EgressDeniedError or otherwise --
+            # now aborts the WHOLE call immediately; it is never provider-specific and no other
+            # provider in the chain would succeed where this one didn't.
+            payload = [{"role": m.role, "content": m.content} for m in messages]
+            redacted = enforce_egress_policy(
+                db,
+                owner_id=owner_id,
+                provider=provider.name,
+                model=model,
+                purpose=purpose or "chat",
+                requested_by=requested_by or "providers.registry.chat_with_fallback",
+                payload=payload,
+                task_id=task_id,
+                goal_id=goal_id,
+                job_id=job_id,
+            )
+            outbound_messages = [Message(role=m["role"], content=m["content"]) for m in redacted]
         try:
-            outbound_messages = messages
-            if owner_id is not None:
-                payload = [{"role": m.role, "content": m.content} for m in messages]
-                redacted = enforce_egress_policy(
-                    db,
-                    owner_id=owner_id,
-                    provider=provider.name,
-                    model=model,
-                    purpose=purpose or "chat",
-                    requested_by=requested_by or "providers.registry.chat_with_fallback",
-                    payload=payload,
-                    task_id=task_id,
-                    goal_id=goal_id,
-                    job_id=job_id,
-                )
-                outbound_messages = [Message(role=m["role"], content=m["content"]) for m in redacted]
             result = await provider.chat(outbound_messages, model=model, **kwargs)
             if len(attempted) > 1:
                 logger.warning(
@@ -216,12 +292,7 @@ async def chat_with_fallback(
                     attempted,
                 )
             return result, attempted
-        except EgressDeniedError:
-            # A denial is about the CONTENT, not this specific provider -- every other
-            # provider in the chain would deny identically. Never treated as a per-provider
-            # failure to fall back from; abort the whole call immediately.
-            raise
-        except Exception as exc:  # noqa: BLE001 - any provider failure should trigger fallback, not just ProviderError
+        except Exception as exc:  # noqa: BLE001 - any REAL provider-call failure should trigger fallback, not just ProviderError
             safe = classify_provider_exception(exc)
             logger.warning("Chat provider %s failed (%s): %s", provider.name, safe.result.value, safe.message)
             last_error = exc

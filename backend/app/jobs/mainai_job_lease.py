@@ -176,6 +176,33 @@ def renew_mainai_job_lease(db: Session, job_id: uuid.UUID, worker_id: str, lease
         raise JobLeaseLostError(job_id, worker_id, lease_generation)
 
 
+def verify_active_lease(db: Session, *, job_id: uuid.UUID, worker_id: str, lease_generation: int) -> bool:
+    """Founder directive ("RESUME LIFEAI FIRST-CYCLE REMEDIATION" -> "FOUNDER DECISION --
+    EGRESS AUTHORIZATION & FIRST-CYCLE INTEGRATION", Task #60, requirement 2): "a valid worker
+    lease proves the right to execute a specific authorized task." A PURE, READ-ONLY check --
+    unlike every other function in this module, it never mutates the row -- so a caller (the
+    egress gate, app/providers/registry.py's `chat_with_fallback()`) can verify a lease is
+    still genuinely held WITHOUT itself claiming/renewing/superseding anything. Exists because
+    nothing in this module previously answered "is this lease still active right now" without
+    also changing the row -- every existing primitive is a claim or a mutation.
+
+    Returns True only if `job_id` is currently `status = 'running'`, `locked_by = worker_id`,
+    `lease_generation = lease_generation` (exact match, same fencing-token discipline
+    `renew_mainai_job_lease()` already enforces), AND `lease_expires_at` has not passed. A job
+    that was reclaimed by a different worker, reached a different lease_generation (even the
+    SAME worker_id, after a crash+reclaim), or genuinely expired all return False -- the caller
+    must treat False as "do not proceed," never retry blindly."""
+    row = db.execute(
+        text("""
+            SELECT 1 FROM mainai_jobs
+            WHERE id = :job_id AND locked_by = :worker_id AND lease_generation = :lease_generation
+                AND status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at > now()
+        """),
+        {"job_id": str(job_id), "worker_id": worker_id, "lease_generation": lease_generation},
+    ).first()
+    return row is not None
+
+
 class JobNotSupersedableError(Exception):
     """Raised by mark_job_superseded() when the target job is not actually a dead, expired-
     lease `running` job -- superseding a job that is still genuinely alive (or already
