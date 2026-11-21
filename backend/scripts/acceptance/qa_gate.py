@@ -146,10 +146,13 @@ def _check_junit(path: str, checks: list[dict]) -> None:
     except Exception as exc:
         checks.append({"check": "backend test evidence", "status": "FAIL", "detail": f"invalid JUnit: {exc}"})
         return
-    tests = int(root.attrib.get("tests", 0))
-    failures = int(root.attrib.get("failures", 0))
-    errors = int(root.attrib.get("errors", 0))
-    skipped = int(root.attrib.get("skipped", 0))
+    # pytest emits <testsuites><testsuite .../></testsuites>, so the totals live on the
+    # child suites, not the root. A single-suite file puts them on the root instead.
+    suites = root.findall("testsuite") if root.tag == "testsuites" else [root]
+    tests = sum(int(suite.attrib.get("tests", 0)) for suite in suites)
+    failures = sum(int(suite.attrib.get("failures", 0)) for suite in suites)
+    errors = sum(int(suite.attrib.get("errors", 0)) for suite in suites)
+    skipped = sum(int(suite.attrib.get("skipped", 0)) for suite in suites)
     ok = tests > 0 and failures == 0 and errors == 0
     checks.append({"check": "backend tests", "status": "PASS" if ok else "FAIL", "tests": tests, "failures": failures, "errors": errors, "skipped": skipped})
 
