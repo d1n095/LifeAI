@@ -35,7 +35,7 @@ from app.db import get_db
 from app.deps import require_founder
 from app.egress_policy import EgressDeniedError
 from app.founder_memory_signals import record_candidate_signal
-from app.incidents.service import record_incident
+from app.incidents.service import record_incident, record_incident_standalone
 from app.limiter import limiter
 from app.mainai_runtime_contract import build_answer_response, sanitize_unverified_execution_claims
 from app.models.conversation import (
@@ -107,7 +107,7 @@ settings = get_settings()
 # Which of app/providers/base.py's ProviderError.category values a founder can reasonably
 # expect to work by simply trying again (transient), vs. ones that need a real config change
 # first (a bad/missing key, or a provider that structurally doesn't support this role).
-_RETRYABLE_ERROR_CATEGORIES = {"unreachable", "rate_limited"}
+_RETRYABLE_ERROR_CATEGORIES = {"unreachable", "rate_limited", "circuit_open"}
 
 # A retry must never turn an unresolved external effect into a second billable call. These
 # categories are terminal until an evidence-backed reconciliation closes the attempt.
@@ -857,12 +857,15 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-def _mark_stream_interrupted(db: Session, *, user_message_id: uuid.UUID) -> None:
+def _mark_stream_interrupted(
+    db: Session, *, user_message_id: uuid.UUID, owner_id: uuid.UUID | None = None
+) -> None:
     """Persist an honest terminal state after a disconnect/cancel.
 
     If the provider was never selected, the attempt is safely retryable. If a provider name
     was already written, the external effect is unknown; the reply is marked unresolved so a
-    blind retry cannot double-charge it.
+    blind retry cannot double-charge it. An unresolved external effect is also recorded as an
+    incident, but only safe structured fields are stored.
     """
 
     try:
@@ -875,13 +878,53 @@ def _mark_stream_interrupted(db: Session, *, user_message_id: uuid.UUID) -> None
         )
         if reply is None or reply.status == MessageStatus.succeeded:
             return
+        provider = reply.provider
+        model = reply.model
+        category = "external_effect_unresolved" if provider else "cancelled"
         reply.status = MessageStatus.failed
-        reply.error_category = "external_effect_unresolved" if reply.provider else "cancelled"
+        reply.error_category = category
         reply.content = ""
         db.commit()
+        if owner_id is not None and provider:
+            record_incident_standalone(
+                owner_id=owner_id,
+                error_code="chat_stream_interrupted",
+                component="chat.stream",
+                severity="high",
+                summary="Chattström avbröts efter att provider-anropet börjat",
+                correlation_id=str(user_message_id),
+                app_version="0.1.0",
+                details={
+                    "provider": provider,
+                    "model": model,
+                    "external_effect_state": "unknown",
+                    "streaming": True,
+                },
+            )
     except Exception:
         logger.exception("chat stream: could not persist interrupted reply for %s", user_message_id)
         db.rollback()
+
+
+def _mark_stream_interrupted_standalone(*, user_message_id: uuid.UUID, owner_id: uuid.UUID) -> None:
+    """Mark an interrupted stream in a session owned by the background task.
+
+    The request-scoped session may already be closed by FastAPI when the SSE generator's
+    finally block runs. Reusing it here would either lose the update or raise inside the
+    cleanup path; a fresh session with the same RLS identity is the durable, owner-scoped
+    equivalent.
+    """
+
+    from app.db import SessionLocal
+    from app.request_context import current_user_id
+
+    session = SessionLocal()
+    token = current_user_id.set(str(owner_id))
+    try:
+        _mark_stream_interrupted(session, user_message_id=user_message_id, owner_id=owner_id)
+    finally:
+        session.close()
+        current_user_id.reset(token)
 
 
 async def _stream_saved_response(out: ChatMessageOut):
@@ -918,7 +961,7 @@ async def _stream_existing_claim(
 
     reply = _get_or_create_reply_slot(db, user_message.id)
     if reply is None:
-        return _stream_new_turn(request, db, conversation=conversation, user_message=user_message, user=user)
+        return _stream_new_turn(request, conversation=conversation, user_message=user_message, user=user)
     if str(reply.error_category or "").startswith(("provider_inflight", "inflight:")) or (
         reply.error_category in _UNRESOLVED_EFFECT_CATEGORIES
     ):
@@ -952,25 +995,55 @@ async def _stream_existing_claim(
 
 
 def _stream_new_turn(
-    request: Request, db: Session, *, conversation: Conversation, user_message: MessageModel, user: User
+    request: Request, *, conversation: Conversation, user_message: MessageModel, user: User
 ):
     observer = _StreamObserver()
+    conversation_id = conversation.id
+    user_message_id = user_message.id
+    owner_id = user.id
 
     async def run_attempt() -> None:
+        # The request-scoped dependency session is closed by FastAPI as soon as the
+        # StreamingResponse is returned. A background task must therefore own a fresh
+        # session; otherwise its first post-return write can see a detached reply row
+        # (reproduced as "Instance '<Message>' is not persistent within this Session").
+        from app.db import SessionLocal
+        from app.request_context import current_user_id
+
+        session = SessionLocal()
+        token = current_user_id.set(str(owner_id))
         try:
+            conversation_row = session.get(Conversation, conversation_id)
+            user_message_row = session.get(MessageModel, user_message_id)
+            user_row = session.get(User, owner_id)
+            if conversation_row is None or user_message_row is None or user_row is None:
+                raise RuntimeError("streaming turn disappeared before the attempt started")
             out = await _attempt_assistant_reply(
-                db,
-                conversation=conversation,
-                user_message=user_message,
-                user=user,
+                session,
+                conversation=conversation_row,
+                user_message=user_message_row,
+                user=user_row,
                 stream_observer=observer,
             )
             await observer.queue.put(("done", out))
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("chat stream: unexpected attempt failure for %s", user_message.id)
+            logger.exception("chat stream: unexpected attempt failure for %s", user_message_id)
+            record_incident_standalone(
+                owner_id=owner_id,
+                error_code="chat_stream_unexpected",
+                component="chat.stream",
+                severity="high",
+                summary="Oväntat fel i chattströmmen",
+                correlation_id=str(user_message_id),
+                app_version="0.1.0",
+                details={"failure_class": "unexpected", "streaming": True},
+            )
             await observer.queue.put(("error", None))
+        finally:
+            session.close()
+            current_user_id.reset(token)
 
     task = asyncio.create_task(run_attempt())
 
@@ -1003,7 +1076,9 @@ def _stream_new_turn(
                     yield _sse("done", payload.model_dump(mode="json"))
                     break
                 else:
-                    _mark_stream_interrupted(db, user_message_id=user_message.id)
+                    _mark_stream_interrupted_standalone(
+                        user_message_id=user_message_id, owner_id=owner_id
+                    )
                     yield _sse(
                         "error",
                         {
@@ -1026,7 +1101,9 @@ def _stream_new_turn(
                 except asyncio.CancelledError:
                     finished = True
                 if finished:
-                    _mark_stream_interrupted(db, user_message_id=user_message.id)
+                    _mark_stream_interrupted_standalone(
+                        user_message_id=user_message_id, owner_id=owner_id
+                    )
 
     return StreamingResponse(
         generate(),
@@ -1058,7 +1135,7 @@ async def chat_stream(
             request, db, claim=existing_claim, payload=payload, user=user
         )
     assert conversation is not None and user_message is not None
-    return _stream_new_turn(request, db, conversation=conversation, user_message=user_message, user=user)
+    return _stream_new_turn(request, conversation=conversation, user_message=user_message, user=user)
 
 
 @router.post("/messages/{message_id}/retry", response_model=ChatMessageOut)

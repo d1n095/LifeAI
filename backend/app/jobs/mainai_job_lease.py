@@ -41,12 +41,14 @@ _CLAIM_SQL = text("""
         lease_generation = lease_generation + 1,
         lease_expires_at = now() + make_interval(secs => :lease_seconds),
         last_heartbeat_at = now(),
-        started_at = COALESCE(started_at, now())
+        started_at = COALESCE(started_at, now()),
+        retry_count = COALESCE(retry_count, 0) + CASE WHEN status = 'running' THEN 1 ELSE 0 END
     WHERE id = (
         SELECT id FROM mainai_jobs
         WHERE status = ANY(:claimable_statuses)
            OR (
                 status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < now()
+                AND COALESCE(retry_count, 0) < COALESCE(max_retries, 3)
                 -- V0.2 (migration 0034): task_execution is the one job type with real,
                 -- semi-irreversible external side effects (local git commits, GitHub pushes
                 -- -- see app/mainai_execution/worktree.py) -- a dead one must never be

@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.deps import require_founder
+from app.incidents.health import health_summary
 from app.incidents.service import (
     STATUSES,
     acknowledge_incident,
@@ -25,6 +26,29 @@ from app.incidents.service import (
 from app.models.user import User
 
 router = APIRouter(prefix="/api/incidents", tags=["incidents"], dependencies=[Depends(require_founder)])
+
+
+class IncidentComponentHealthOut(BaseModel):
+    component: str
+    state: str
+    open: int
+    recovered: int
+    last_seen_at: datetime | None
+
+
+class RuntimeHealthOut(BaseModel):
+    state: str
+    open_incidents: int
+    critical_open: int
+    high_open: int
+    medium_open: int
+    low_open: int
+    recovered_incidents: int
+    stalled_jobs: int
+    stalled_imports: int
+    worker_heartbeat: str
+    components: list[IncidentComponentHealthOut]
+    checked_at: datetime
 
 
 class IncidentOut(BaseModel):
@@ -58,6 +82,14 @@ def list_runtime_incidents(
     if status is not None and status not in STATUSES:
         raise HTTPException(status_code=422, detail="Okänd incidentstatus.")
     return list_incidents(db, owner_id=user.id, status=status, limit=limit)
+
+
+@router.get("/health", response_model=RuntimeHealthOut)
+def runtime_health(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    return health_summary(db, owner_id=user.id)
 
 
 @router.get("/{incident_id}", response_model=IncidentOut)

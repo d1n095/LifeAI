@@ -6,6 +6,34 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## LifeAI V5 — production reliability/self-healing, F23 kvarstår (2026-11-21)
+
+**Branch:** `freebuff/v5-reliability-2265a0e`, bas `2265a0e5d62d678bb762f520dbf5848a66020387`
+(V4 Founder Alpha). Ingen PR, push, merge eller deployment har gjorts eftersom GitHub-credentials
+saknas i miljön; en verifierad bundle/patch är transferartefakten. `first_cycle_go=false`.
+
+**Scope:** aktiv runtime-health-sweep för utgångna jobbleasar (säker återköning endast av
+idempotenta interna jobbtyper, aldrig `task_execution`), retry-räkning och lease-fencing,
+Redis-baserad provider-circuit-breaker med fail-open, ägarscopad
+`GET /api/incidents/health`, health-banner i incidents-UI, samt en riktig fix för
+streamingförsöket som tidigare använde request-sessionen efter att FastAPI stängt den.
+Ingen migration och ingen parallell observability-/jobbmotor infördes.
+
+**Faktiska resultat:** V5 reliability/fault-injection **23 passed**; fokuserad
+streaming/incident/jobs-regression **32 passed**; security/R15 + MainAI recovery **158 passed**;
+frontend production build **PASS**; riktig PostgreSQL-faultmatris **6/6 PASS**; soak-harnessens
+8-sekundersvalidering hade **noll requestfel** men är **F23 BLOCKED** eftersom den är kortare än
+fyra timmar. F23 är alltså inte körd; F24 ärver blockeringen. Exakt-head CI och GitHub PR är
+blockerade av samma credential-brist. Riktig Ollama/pgvector-acceptans kördes inte om i denna
+sandbox och behandlas inte som ett fel.
+
+**Evidens:** `docs/V5_RELIABILITY.md`, `backend/tests/backend/test_v5_reliability.py`,
+`backend/tests/backend/test_v5_fault_injection.py`, `backend/scripts/acceptance/v5_soak.py` och
+`delivery/founder-alpha-v5-reliability/` (bundle, patch, SHA256SUMS, test-/soak-/DB-fault-evidence).
+
+**Merge:** efter R15/integration. Ingen semantisk konfliktlösning mot PR #467; Claude äger den
+integrationen. Inga ändringar i Claude-, Codex- eller Z-brancher.
+
 ## Founder Alpha functional completion v3 — verifierad, F04/F23/F24 kvarstår (2026-11-21)
 
 **Branch:** `claude/founder-alpha-fullstack-qa`, kodcommit `59184c937947dece75a46e11ab600d2690c5a3c6`,

@@ -44,7 +44,11 @@ def _client() -> redis.Redis | None:
     # call: this runs on EVERY worker poll cycle, and the old per-call client churned one
     # TCP connection per tick (300 calls → 304 server connections, see
     # app/redis_client.py's docstring) until long soak runs degraded.
-    return get_redis_client()
+    try:
+        return get_redis_client()
+    except Exception:  # noqa: BLE001 - a heartbeat must never crash the poll loop
+        logger.warning("Kunde inte skapa Redis-klient för worker-heartbeat.")
+        return None
 
 
 def record_worker_heartbeat(worker_id: str, *, ttl_seconds: int) -> None:
@@ -54,7 +58,10 @@ def record_worker_heartbeat(worker_id: str, *, ttl_seconds: int) -> None:
     cleanup job needed. Never raises: a heartbeat write failing must not crash the poll loop
     (which already guards its own iteration with a try/except) — this is defense in depth
     specifically scoped to Redis being unavailable."""
-    client = _client()
+    try:
+        client = _client()
+    except Exception:  # noqa: BLE001 - a heartbeat must never crash the poll loop
+        client = None
     if client is None:
         return
     try:
@@ -73,7 +80,10 @@ def worker_process_alive() -> bool | None:
     ImportJob.last_heartbeat_at) — that fallback is what's actually able to say "unreachable"
     with any confidence; this module only ever narrows false negatives (an idle-but-healthy
     worker wrongly reported as down), it never invents a false positive on its own."""
-    client = _client()
+    try:
+        client = _client()
+    except Exception:  # noqa: BLE001 - a status check must never crash the caller
+        client = None
     if client is None:
         return None
     try:

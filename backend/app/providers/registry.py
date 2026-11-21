@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.models.provider_config import ProviderConfig
 from app.providers.anthropic_provider import AnthropicProvider
+from app.providers import circuit_breaker
 from app.providers.base import ChatResult, LLMProvider, Message, ProviderError
 from app.providers.catalog import (
     ModelSelectionError,
@@ -458,6 +459,14 @@ async def chat_with_fallback(
     for provider, model in chain:
         attempted.append(provider.name)
         invoked = False
+        if circuit_breaker.is_open(provider.name, model):
+            logger.warning("Chat provider %s/%s circuit is open; skipping", provider.name, model)
+            last_error = ProviderError(
+                "Provider circuit is open after repeated failures.",
+                category="circuit_open",
+                provider_request_may_have_left=False,
+            )
+            continue
         try:
             if selection_policy is not None:
                 # The chain was built earlier; a concurrent verification failure may now exist.
@@ -516,6 +525,7 @@ async def chat_with_fallback(
                                         provider_request_may_have_left=True)
             if attempt_observer is not None:
                 attempt_observer.succeeded(result)
+            circuit_breaker.record_success(provider.name, model)
             if len(attempted) > 1:
                 logger.warning(
                     "Chat fallback engaged: %s failed over to %s (attempted: %s)",
@@ -536,6 +546,8 @@ async def chat_with_fallback(
             # never make denied content eligible for another provider.
             if getattr(exc, "is_egress_denial", False):
                 raise
+            if invoked:
+                circuit_breaker.record_failure(provider.name, model)
             if attempt_observer is not None:
                 if not invoked:
                     # Budget/config refusal is authoritative; do not route around it.
@@ -551,7 +563,7 @@ async def chat_with_fallback(
             last_error = exc
 
     outcome = classify_provider_exception(last_error) if last_error is not None else None
-    category = outcome.result.value if outcome else "unreachable"
+    category = getattr(last_error, "category", None) or (outcome.result.value if outcome else "unreachable")
     safe_detail = outcome.message if outcome else "Okänt fel inträffade."
     raise ProviderError(
         f"Alla konfigurerade leverantörer misslyckades ({', '.join(attempted)}). {safe_detail}",
@@ -605,6 +617,14 @@ async def stream_chat_with_fallback(
         emitted = False
         parts: list[str] = []
         usage: dict = {}
+        if circuit_breaker.is_open(provider.name, model):
+            logger.warning("Chat stream provider %s/%s circuit is open; skipping", provider.name, model)
+            last_error = ProviderError(
+                "Provider circuit is open after repeated failures.",
+                category="circuit_open",
+                provider_request_may_have_left=False,
+            )
+            continue
         try:
             if selection_policy is not None:
                 _require_policy_candidate(
@@ -676,6 +696,7 @@ async def stream_chat_with_fallback(
             result = ChatResult(content=content, provider=provider.name, model=model, raw_usage=usage)
             if attempt_observer is not None:
                 attempt_observer.succeeded(result)
+            circuit_breaker.record_success(provider.name, model)
             if len(attempted) > 1:
                 logger.warning(
                     "Chat stream fallback engaged: %s failed over to %s (attempted: %s)",
@@ -699,6 +720,8 @@ async def stream_chat_with_fallback(
         except Exception as exc:  # noqa: BLE001 - provider failure must follow the same fail-closed rules
             if getattr(exc, "is_egress_denial", False):
                 raise
+            if invoked:
+                circuit_breaker.record_failure(provider.name, model)
             if attempt_observer is not None:
                 if not invoked:
                     raise
@@ -720,7 +743,7 @@ async def stream_chat_with_fallback(
             last_error = exc
 
     outcome = classify_provider_exception(last_error) if last_error is not None else None
-    category = outcome.result.value if outcome else "unreachable"
+    category = getattr(last_error, "category", None) or (outcome.result.value if outcome else "unreachable")
     safe_detail = outcome.message if outcome else "Okänt fel inträffade."
     raise ProviderError(
         f"Alla konfigurerade leverantörer misslyckades ({', '.join(attempted)}). {safe_detail}",

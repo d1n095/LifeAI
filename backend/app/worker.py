@@ -41,6 +41,7 @@ from app.development_supervisor.production_entry import eligible_authorized_goal
 from app.jobs.handlers.corpus_review import run_corpus_review_job
 from app.jobs.handlers.message_sequence_backfill import MESSAGE_SEQUENCE_BACKFILL_JOB_TYPE, run_message_sequence_backfill_job
 from app.jobs.handlers.message_source_backfill import MESSAGE_SOURCE_BACKFILL_JOB_TYPE, run_message_source_backfill_job
+from app.incidents.health import sweep_runtime_health
 from app.jobs.heartbeat import record_worker_heartbeat
 from app.jobs.lease import claim_next_job
 from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job
@@ -780,6 +781,30 @@ class Worker:
             db.rollback()
             logger.exception("Worker %s: failed to expire stale agent scope leases.", self.worker_id)
 
+    def _sweep_runtime_health(self, db: Session) -> None:
+        """Detect expired leases/queues and safely recover bounded internal jobs.
+
+        This is the active detection half that was missing from V4: the lease claim path
+        already reclaimed expired work passively, but no durable incident was created when
+        a job actually stalled. The sweep is bounded and never requeues task_execution.
+        """
+        try:
+            result = sweep_runtime_health(db, worker_id=self.worker_id)
+            db.commit()
+            if result.requeued or result.failed_exhausted or result.incidents or result.errors:
+                logger.warning(
+                    "Worker %s: runtime health sweep scanned=%d requeued=%d failed=%d incidents=%d errors=%s",
+                    self.worker_id,
+                    result.scanned,
+                    result.requeued,
+                    result.failed_exhausted,
+                    result.incidents,
+                    result.errors,
+                )
+        except Exception:
+            db.rollback()
+            logger.exception("Worker %s: runtime health sweep failed.", self.worker_id)
+
     # Bounded per-tick fan-out: how many eligible authorized goals this worker attempts a
     # Supervisor call for per poll cycle -- matches the same small, deliberately conservative
     # batch-size precedent as _MAX_CI_WAITS_PER_TICK above, not an unbounded scan.
@@ -835,6 +860,7 @@ class Worker:
             self._finalize_mainai_execution_goals(claim_db)
             await self._resolve_engineering_lesson_conflicts(claim_db)
             self._expire_stale_agent_scope_leases(claim_db)
+            self._sweep_runtime_health(claim_db)
             await self._advance_authorized_supervisor_goals(claim_db)
             # Reconcile again after Supervisor/Driver may have completed the last task in
             # this same tick. Primary rollup is now inside `_finalize_task_outcome`; this

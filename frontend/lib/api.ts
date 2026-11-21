@@ -458,6 +458,29 @@ export type ModelCatalog = {
   metadata_note: string;
 };
 
+export type RuntimeHealthComponent = {
+  component: string;
+  state: "healthy" | "recovered" | "degraded" | "blocked";
+  open: number;
+  recovered: number;
+  last_seen_at: string | null;
+};
+
+export type RuntimeHealth = {
+  state: "healthy" | "recovered" | "degraded" | "blocked";
+  open_incidents: number;
+  critical_open: number;
+  high_open: number;
+  medium_open: number;
+  low_open: number;
+  recovered_incidents: number;
+  stalled_jobs: number;
+  stalled_imports: number;
+  worker_heartbeat: "alive" | "unknown";
+  components: RuntimeHealthComponent[];
+  checked_at: string;
+};
+
 export type RuntimeIncident = {
   id: string;
   error_code: string;
@@ -1119,6 +1142,7 @@ export const api = {
   providerStatus: () => request<ProviderStatus[]>("/api/admin/providers/status"),
   listIncidents: (status?: string) =>
     request<RuntimeIncident[]>(`/api/incidents${status ? `?status=${encodeURIComponent(status)}` : ""}`),
+  incidentHealth: () => request<RuntimeHealth>("/api/incidents/health"),
   acknowledgeIncident: (id: string) =>
     request<RuntimeIncident>(`/api/incidents/${id}/acknowledge`, { method: "POST" }),
   resolveIncident: (id: string) =>

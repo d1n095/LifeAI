@@ -1,13 +1,27 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { api, RuntimeIncident } from "@/lib/api";
+import { api, RuntimeHealth, RuntimeIncident } from "@/lib/api";
 
 const SEVERITY_STYLE: Record<RuntimeIncident["severity"], string> = {
   low: "border-sky-500/30 bg-sky-500/10 text-sky-200",
   medium: "border-amber-500/30 bg-amber-500/10 text-amber-200",
   high: "border-orange-500/30 bg-orange-500/10 text-orange-200",
   critical: "border-red-500/40 bg-red-500/15 text-red-200",
+};
+
+const HEALTH_STYLE: Record<RuntimeHealth["state"], string> = {
+  healthy: "border-emerald-500/30 bg-emerald-500/10 text-emerald-200",
+  recovered: "border-sky-500/30 bg-sky-500/10 text-sky-200",
+  degraded: "border-amber-500/30 bg-amber-500/10 text-amber-200",
+  blocked: "border-red-500/40 bg-red-500/15 text-red-200",
+};
+
+const HEALTH_LABEL: Record<RuntimeHealth["state"], string> = {
+  healthy: "Frisk",
+  recovered: "Återställd",
+  degraded: "Degraderad",
+  blocked: "Blockerad",
 };
 
 function formatTime(value: string) {
@@ -20,6 +34,7 @@ function formatTime(value: string) {
 
 export default function IncidentsPage() {
   const [incidents, setIncidents] = useState<RuntimeIncident[]>([]);
+  const [health, setHealth] = useState<RuntimeHealth | null>(null);
   const [status, setStatus] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -28,7 +43,12 @@ export default function IncidentsPage() {
     setLoading(true);
     setError(null);
     try {
-      setIncidents(await api.listIncidents(nextStatus || undefined));
+      const [items, nextHealth] = await Promise.all([
+        api.listIncidents(nextStatus || undefined),
+        api.incidentHealth().catch(() => null),
+      ]);
+      setIncidents(items);
+      setHealth(nextHealth);
     } catch (e: any) {
       setError(e?.message ?? "Kunde inte läsa incidenthistoriken.");
     } finally {
@@ -66,6 +86,32 @@ export default function IncidentsPage() {
           till någon extern tjänst.
         </p>
       </div>
+
+      {health && (
+        <section
+          className={`mb-4 rounded-xl border px-4 py-3 ${HEALTH_STYLE[health.state]}`}
+          aria-live="polite"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm font-medium">
+              Systemstatus: {HEALTH_LABEL[health.state]}
+            </div>
+            <div className="text-[11px] opacity-80">
+              {health.open_incidents} öppna · {health.stalled_jobs} stillastående jobb · worker:{" "}
+              {health.worker_heartbeat === "alive" ? "aktiv" : "okänd"}
+            </div>
+          </div>
+          <p className="mt-1 text-xs opacity-75">
+            {health.state === "blocked"
+              ? "Kritiska incidenter kräver ägarens granskning innan arbete fortsätter."
+              : health.state === "degraded"
+                ? "Tjänsten fungerar delvis; granska de öppna incidenterna."
+                : health.state === "recovered"
+                  ? "Tidigare incidenter är lösta och inga nya är öppna."
+                  : "Inga öppna incidenter och inga stillastående jobb har upptäckts."}
+          </p>
+        </section>
+      )}
 
       <div className="mb-4 flex flex-wrap gap-2" aria-label="Filtrera incidenter">
         {[
