@@ -175,7 +175,12 @@ async def test_unsupported_zai_options_are_not_silently_dropped(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_policy_rechecks_verification_after_chain_snapshot(db_session, monkeypatch):
+async def test_policy_rechecks_verification_after_chain_snapshot(db_session, make_verified_user, monkeypatch):
+    from app.request_context import current_user_id
+
+    user, _ = make_verified_user()
+    current_user_id.set(str(user.id))
+    db_session.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user.id)})
     check(db_session)
     original = registry.resolve_chat_chain
     def snapshot(*args, **kwargs):
@@ -191,7 +196,7 @@ async def test_policy_rechecks_verification_after_chain_snapshot(db_session, mon
     monkeypatch.setattr(OpenAIProvider, "chat", no_call)
     with pytest.raises(ProviderError):
         await registry.chat_with_fallback(db_session, [Message("user", "safe")],
-            selection_policy=ModelSelectionPolicy(allow_external=True), owner_id=uuid.uuid4())
+            selection_policy=ModelSelectionPolicy(allow_external=True), owner_id=user.id)
     assert called == []
 
 
