@@ -6,6 +6,40 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## LifeAI V6 — isolerat Founder Alpha-integrationstestlab (2026-11-21)
+
+**Branch:** `freebuff/v6-testlab-10bbfea`, bas
+`10bbfea3c43a0d81fa1fe5324a72e8ca945c4798` (V5 reliability). Ingen PR, push, merge eller
+deployment har gjorts eftersom GitHub-credentials saknas i miljön; en verifierad bundle/patch
+är transferartefakten. `first_cycle_go=false`.
+
+**Scope:** ett separat Compose-lab (`lifeai-v6-testlab`) med backend, worker, frontend,
+PostgreSQL+pgvector, Redis och Ollama på loopback-portar och egna volymer; en 12-stegs
+founder-journey; Playwright-frontendresa; fault-injection/soak-runner; provider-egress-probe;
+samt en fail-closed release gate. Inga produktionsvolymer, hemligheter eller deployment
+refereras. Labbet återanvänder befintliga testmekanismer och PR #443:s flöden i stället för att
+återimplementera dem.
+
+**Faktiska resultat:** founder-journey **12/12 PASS** vid bas-SHA `10bbfea` med deterministisk
+fake-provider (integrationsbevis, inte riktig lokal-AI-evidens). Provider-planning-fixen har
+regressionstest **1 passed**. En 8-sekunders reliability-körning gav PASS för duplicate job
+delivery, browser/SSE-disconnection och authorization invalidation, men är **F23 BLOCKED**
+eftersom fyra timmar krävs. Playwright är **BLOCKED** av saknad `libatk-1.0.so.0` och Docker-
+daemonen av permission-denied; Ollama saknas lokalt. Därför rejectar gaten kandidaten och
+F23/F24 är inte PASS.
+
+**Riktig fix:** `RegistryPlanningAdapter` defaultar nu till aktiv chat-provider/model när båda
+utelämnas, vilket stoppar den heta `PROVIDER_SPEND_NOT_AUTHORIZED`-loopen. Regressionstest:
+`backend/tests/backend/mainai/test_provider_assisted_planning.py::test_registry_adapter_defaults_to_active_chat_provider`.
+
+**Evidens:** `docs/V6_TEST_LAB.md`, `docker-compose.testlab.yml`, `scripts/testlab/testlab.py`,
+`backend/scripts/acceptance/v6_*.py`, `frontend/e2e/founder-journey-v6.spec.ts` och
+`delivery/v6-testlab/` (bundle, patch, SHA256SUMS och exakt-SHA-evidens).
+
+**Merge:** efter R15/integration; oberoende av V5 men kan kollidera i
+`backend/scripts/ci/run_e2e_backend.py` och provider-planning. Claude äger R15/integration och
+PR #468/#469; denna branch rör dem inte.
+
 ## LifeAI V5 — production reliability/self-healing, F23 kvarstår (2026-11-21)
 
 **Branch:** `freebuff/v5-reliability-2265a0e`, bas `2265a0e5d62d678bb762f520dbf5848a66020387`

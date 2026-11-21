@@ -43,6 +43,72 @@ get_settings().default_embedding_model = "nomic-embed-text"
 
 
 async def fake_chat(self, messages, model, **kwargs):
+    # V6 test lab: the planner is a real API path (POST /goals/{id}/plan). The deterministic
+    # E2E provider must return a valid plan so the founder-journey acceptance can exercise the
+    # approval -> envelope -> execution chain without depending on a model's JSON formatting.
+    # This branch is test-only and is never imported by production code.
+    if messages and messages[0].role == "system" and messages[0].content.startswith("Du är MainAI:s planerare"):
+        return ChatResult(
+            content=json.dumps(
+                {
+                    "tasks": [
+                        {
+                            "description": "Perform one isolated read-only audit; change no files.",
+                            "task_type": "read_only_audit",
+                            "depends_on": [],
+                            "risk_level": "low",
+                            "approval_required": True,
+                            "verification_plan": [],
+                        }
+                    ]
+                }
+            ),
+            provider="openai",
+            model=model,
+            raw_usage={"prompt_tokens": 60, "completion_tokens": 20},
+        )
+
+    # V6 test lab: the production Supervisor uses provider-assisted planning for an ordinary
+    # candidate=None task. Return a valid Safe Planner envelope for the exact read-only scope
+    # the acceptance authorized, so the real Supervisor -> Safe Planner -> Driver chain runs
+    # instead of parsing a generic conversational reply. Test-only; never imported by app code.
+    if messages and messages[0].role == "system" and messages[0].content.startswith(
+        "You are a planning specialist"
+    ):
+        return ChatResult(
+            content=json.dumps(
+                {
+                    "candidate": {
+                        "interpretation": "Read the authorized README as a bounded read-only audit.",
+                        "requested_outcome": "A read-only inspection with no file changes.",
+                        "rationale": "The active envelope authorizes read_file on README.md.",
+                        "facts": ["Only README.md is inside the authorized path scope."],
+                        "assumptions": [],
+                        "unknowns": [],
+                        "exclusions": ["No writes, commands, network calls, merges or deploys."],
+                        "steps": [
+                            {
+                                "step_id": "inspect-readme",
+                                "purpose": "Read the authorized README as the isolated audit.",
+                                "expected_result": "The README content is read without mutation.",
+                                "capability": "read_file",
+                                "arguments": {"path": "README.md"},
+                                "required_risk": "READ_ONLY",
+                            }
+                        ],
+                    },
+                    "clarification_required": False,
+                    "clarification_question": None,
+                    "capability_gaps": [],
+                    "useful_components": [],
+                    "confidence": 0.9,
+                }
+            ),
+            provider="openai",
+            model=model,
+            raw_usage={"prompt_tokens": 90, "completion_tokens": 45},
+        )
+
     # STEG 14: without this branch, EVERY claim extraction call during E2E (app/rag/claims.py's
     # extract_claims_for_document, which runs automatically after every successful import)
     # silently produced zero claims — the generic conversational reply below has no `[...]`

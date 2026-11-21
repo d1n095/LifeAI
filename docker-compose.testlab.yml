@@ -1,0 +1,157 @@
+# LifeAI V6 integration test lab — isolated, disposable, never production.
+#
+# Deliberately a separate Compose project and separate named volumes. It reuses the real
+# backend/frontend Dockerfiles and backend/db-init role provisioning; it does not reuse any
+# production volume, secret, database, or the production compose project.
+#
+#   docker compose -p lifeai-v6-testlab -f docker-compose.testlab.yml up -d --build
+#
+# Ports are bound to 127.0.0.1 only. Tear down with `down -v`.
+name: lifeai-v6-testlab
+
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql://lifeai:lifeai_testlab@postgres:5432/lifeai_testlab
+  APP_DATABASE_URL: postgresql://mainai_app:mainai_app_testlab@postgres:5432/lifeai_testlab
+  MAINAI_APP_PASSWORD: mainai_app_testlab
+  REDIS_URL: redis://redis:6379/0
+  SECRET_KEY: lifeai-v6-testlab-not-a-production-secret
+  FOUNDER_EMAIL: founder@lifeos.local
+  FOUNDER_PASSWORD: TestFounderPassword123!
+  ENVIRONMENT: test
+  COOKIE_SECURE: "false"
+  PUBLIC_APP_URL: http://127.0.0.1:13000
+  FRONTEND_ORIGINS: http://127.0.0.1:13000,http://localhost:13000
+  STORAGE_ROOT: /data/storage
+  OLLAMA_BASE_URL: http://ollama:11434
+  DEFAULT_LLM_PROVIDER: ollama
+  DEFAULT_LLM_MODEL: ${OLLAMA_CHAT_MODEL:-qwen2.5:0.5b}
+  DEFAULT_EMBEDDING_PROVIDER: ollama
+  DEFAULT_EMBEDDING_MODEL: ${OLLAMA_EMBED_MODEL:-all-minilm}
+  CHAT_FALLBACK_ORDER: ollama
+  ENABLE_SCHEDULED_CLEANUP: "false"
+  WORKER_POLL_INTERVAL_SECONDS: "1"
+  WORKER_LEASE_SECONDS: "30"
+  RATE_LIMIT_CHAT_PER_MINUTE: "100000"
+  RATE_LIMIT_DEFAULT_PER_MINUTE: "100000"
+  RATE_LIMIT_LOGIN_PER_MINUTE: "100000"
+  RATE_LIMIT_LIBRARY_IMPORT_PER_MINUTE: "100000"
+  # No paid provider keys are reachable from the test lab. The only model transport is the
+  # local Ollama service on the private Compose network.
+  OPENAI_API_KEY: ""
+  ANTHROPIC_API_KEY: ""
+  GEMINI_API_KEY: ""
+  ZAI_API_KEY: ""
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: "no"
+    environment:
+      POSTGRES_USER: lifeai
+      POSTGRES_PASSWORD: lifeai_testlab
+      POSTGRES_DB: lifeai_testlab
+      MAINAI_APP_PASSWORD: mainai_app_testlab
+    volumes:
+      - testlab_postgres:/var/lib/postgresql/data
+      - ./backend/db-init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:55433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lifeai -d lifeai_testlab"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    restart: "no"
+    command: ["redis-server", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:56380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: "no"
+    volumes:
+      - testlab_ollama:/root/.ollama
+    ports:
+      - "127.0.0.1:11435:11434"
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  backend:
+    build: ./backend
+    restart: "no"
+    environment:
+      <<: *backend-env
+      RUN_MIGRATIONS: "true"
+      RUN_PRIVILEGE_BOOT: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:18000:8000"
+    volumes:
+      - testlab_storage:/data/storage
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/health >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  worker:
+    build: ./backend
+    restart: "no"
+    command: ["python", "-m", "app.worker"]
+    environment:
+      <<: *backend-env
+      RUN_MIGRATIONS: "false"
+      RUN_PRIVILEGE_BOOT: "false"
+      WORKER_ID: lifeai-v6-testlab-worker
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - testlab_storage:/data/storage
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ""
+    restart: "no"
+    environment:
+      INTERNAL_API_URL: http://backend:8000
+      NEXT_TELEMETRY_DISABLED: "1"
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:13000:3000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+volumes:
+  testlab_postgres:
+  testlab_redis:
+  testlab_ollama:
+  testlab_storage:

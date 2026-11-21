@@ -119,6 +119,18 @@ class RegistryPlanningAdapter:
     ):
         self.db = db
         self.owner_id = owner_id
+        if provider_name is None and model is None:
+            # plan_with_provider() must reserve provider spend against an explicit
+            # provider+model before it invokes anything. The default adapter previously
+            # left both unset, so every ordinary Supervisor planning call parked as
+            # PROVIDER_SPEND_NOT_AUTHORIZED forever even with a live founder grant. Resolve
+            # the same active chat provider the canonical fallback chain would use; callers
+            # that pass an explicit provider/model keep full control.
+            from app.providers.registry import resolve_active
+
+            active_provider, active_model = resolve_active(db, role="chat")
+            provider_name = active_provider.name
+            model = active_model
         self.provider_name = provider_name
         self.model = model
         self.task_id = task_id

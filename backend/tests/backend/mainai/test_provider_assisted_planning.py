@@ -32,6 +32,30 @@ from tests.backend.mainai.test_development_operator import _git
 from tests.backend.mainai.test_safe_planner import _scope
 
 
+def test_registry_adapter_defaults_to_active_chat_provider(monkeypatch):
+    """A default adapter must declare provider/model so spend can be reserved."""
+    from types import SimpleNamespace
+
+    from app.provider_planning.service import RegistryPlanningAdapter
+
+    monkeypatch.setattr(
+        "app.providers.registry.resolve_active",
+        lambda db, role: (SimpleNamespace(name="openai"), "gpt-4o-mini"),
+    )
+    adapter = RegistryPlanningAdapter(object(), owner_id=uuid.uuid4())
+    assert adapter.provider_name == "openai"
+    assert adapter.model == "gpt-4o-mini"
+
+    explicit = RegistryPlanningAdapter(
+        object(),
+        owner_id=uuid.uuid4(),
+        provider_name="fake-local",
+        model="planner-v2",
+    )
+    assert explicit.provider_name == "fake-local"
+    assert explicit.model == "planner-v2"
+
+
 COMPLEX_REQUEST = (
     "Inspect the calculator module, determine what is missing for multiplication support, "
     "update the implementation safely and add a focused test."
