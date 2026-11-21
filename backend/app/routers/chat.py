@@ -158,15 +158,21 @@ def _get_chat_request_claim(
     )
 
 
-def _replay_chat_request(
+async def _replay_chat_request(
     db: Session, *, claim: ChatRequestClaim, payload: ChatMessageIn, user: User
 ) -> ChatMessageOut:
-    """Replay an already-claimed client send without invoking any provider.
+    """Replay an already-claimed client send, or recover it after a crash.
 
-    A retry with the same client_message_id either returns the original reply, returns the
+    A retry with the same client_message_id normally returns the original reply, returns the
     original failed contract, or gets 409 while the first attempt is unresolved. This is
     deliberately fail-closed: a crash between the durable claim and the provider call must
     not turn a retry into a second billable call.
+
+    The one exception is a claim with NO assistant reply row at all. The reply row is created
+    by ``_claim_reply_attempt()`` as the very first step of the shared attempt path, so its
+    absence proves the original process died before it could claim the provider attempt. In
+    that case we re-enter that same path instead of returning a permanent 409; the user-message
+    row lock there still ensures concurrent duplicates cannot produce a second provider call.
     """
     conversation = db.get(Conversation, claim.conversation_id)
     user_message = db.get(MessageModel, claim.user_message_id)
@@ -185,9 +191,13 @@ def _replay_chat_request(
 
     reply = _get_or_create_reply_slot(db, user_message.id)
     if reply is None:
-        raise HTTPException(
-            status_code=409,
-            detail="Förfrågan pågår fortfarande; försök igen senare.",
+        # The durable claim and user message exist, but the original request never reached
+        # the reply-slot claim. That is a recoverable crash window, not an in-flight request:
+        # re-enter the single shared attempt path, which row-locks the user message before
+        # creating the reply slot. A concurrent duplicate can therefore only lose the race,
+        # never invoke a second provider call.
+        return await _attempt_assistant_reply(
+            db, conversation=conversation, user_message=user_message, user=user
         )
     if str(reply.error_category or "").startswith(("provider_inflight", "inflight:")) or (
         reply.error_category in _UNRESOLVED_EFFECT_CATEGORIES
@@ -677,7 +687,7 @@ async def chat(
             db, owner_id=user.id, client_message_id=payload.client_message_id
         )
         if existing_claim is not None:
-            return _replay_chat_request(db, claim=existing_claim, payload=payload, user=user)
+            return await _replay_chat_request(db, claim=existing_claim, payload=payload, user=user)
 
     conversation = None
     if payload.conversation_id:
@@ -733,7 +743,7 @@ async def chat(
                     status_code=409,
                     detail="Förfrågan kunde inte idempotenssäkras.",
                 ) from None
-            return _replay_chat_request(db, claim=existing_claim, payload=payload, user=user)
+            return await _replay_chat_request(db, claim=existing_claim, payload=payload, user=user)
     db.refresh(user_message)
     _capture_message_source(db, message=user_message, conversation=conversation)
 

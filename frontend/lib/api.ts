@@ -13,7 +13,7 @@ const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 // One opaque key per logical send. A caller that retries the same send must pass the same
 // key explicitly; the default keeps ordinary UI sends covered without exposing message text.
-function newClientMessageId(): string {
+export function newClientMessageId(): string {
   const cryptoApi = globalThis.crypto as { randomUUID?: () => string } | undefined;
   if (cryptoApi && typeof cryptoApi.randomUUID === "function") {
     return cryptoApi.randomUUID();

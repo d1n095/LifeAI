@@ -2,10 +2,24 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { api, ChatResponse, ChatSource, Confidence, ContextStatus, ConversationItem } from "@/lib/api";
+import {
+  api,
+  ChatResponse,
+  ChatSource,
+  Confidence,
+  ContextStatus,
+  ConversationItem,
+  newClientMessageId,
+} from "@/lib/api";
 import { useVoice } from "@/lib/useVoice";
 import Orb, { OrbState } from "@/components/Orb";
 import ConfidenceBadge from "@/components/ConfidenceBadge";
+
+type FailedSend = {
+  message: string;
+  clientMessageId: string;
+  conversationId?: string;
+};
 
 type ChatEntry = {
   role: "user" | "assistant";
@@ -85,6 +99,11 @@ export default function ChatPage() {
   const [showErrorPulse, setShowErrorPulse] = useState(false);
   const [readAloud, setReadAloud] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  // A request-level failure (network drop, proxy timeout) is different from an assistant
+  // failure: the server may already have durably saved the message and even generated the
+  // reply. Keep the exact idempotency key so "Försök igen" resumes the same logical send
+  // instead of creating a second message/provider call.
+  const [failedSend, setFailedSend] = useState<FailedSend | null>(null);
 
   const voice = useVoice();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -139,7 +158,27 @@ export default function ChatPage() {
           userMessageId: m.role === "user" ? m.id : m.in_reply_to_id ?? undefined,
         });
       }
+      // A crash can leave the durable user message without any assistant row at all.
+      // The live request never returned, so the normal failed-assistant entry above does
+      // not exist. Surface the recoverable failure on the trailing user message so the
+      // founder can retry the exact saved message instead of retyping it (which would
+      // create a duplicate).
+      const last = detail.messages[detail.messages.length - 1];
+      const hasReply = detail.messages.some(
+        (m) => m.role === "assistant" && m.in_reply_to_id === last?.id
+      );
+      if (last?.role === "user" && !hasReply) {
+        restored.push({
+          role: "assistant",
+          content: "",
+          failed: true,
+          errorMessage: "AI-svaret saknas efter ett avbrott. Ditt meddelande finns sparat.",
+          retryable: true,
+          userMessageId: last.id,
+        });
+      }
       setEntries(restored);
+      setFailedSend(null);
     } catch (e: any) {
       setError(e.message);
     }
@@ -148,6 +187,7 @@ export default function ChatPage() {
   function startNewConversation() {
     setConversationId(undefined);
     setEntries([]);
+    setFailedSend(null);
     setHistoryOpen(false);
   }
 
@@ -163,37 +203,67 @@ export default function ChatPage() {
     setTimeout(() => setShowErrorPulse(false), 1600);
   }
 
+  function applyChatResponse(res: ChatResponse, message: string) {
+    setConversationId(res.conversation_id);
+    // The user's message is ALWAYS saved by this point (backend commits it before ever
+    // calling a provider) — attach the real id to the optimistic bubble we already
+    // rendered, then append the assistant's reply (or its failure) as its own entry. A
+    // failed assistant_status never means the message above it was lost.
+    setEntries((prev) => {
+      const next = [...prev];
+      for (let i = next.length - 1; i >= 0; i--) {
+        if (next[i].role === "user" && next[i].content === message && !next[i].userMessageId) {
+          next[i] = { ...next[i], userMessageId: res.user_message_id };
+          break;
+        }
+      }
+      next.push(buildAssistantEntry(res));
+      return next;
+    });
+    if (res.assistant_status === "succeeded" && res.reply && readAloud) voice.speak(res.reply);
+    if (res.assistant_status === "failed") flashError();
+    refreshConversations();
+  }
+
   async function send(message: string) {
     if (!message.trim() || loading) return;
+    const clientMessageId = newClientMessageId();
+    setFailedSend(null);
     setEntries((prev) => [...prev, { role: "user", content: message }]);
     setInput("");
     setLoading(true);
     setError(null);
     try {
-      const res = await api.sendChat(message, conversationId);
-      setConversationId(res.conversation_id);
-      // The user's message is ALWAYS saved by this point (backend commits it before ever
-      // calling a provider) — attach the real id to the optimistic bubble we already
-      // rendered, then append the assistant's reply (or its failure) as its own entry. A
-      // failed assistant_status never means the message above it was lost.
-      setEntries((prev) => {
-        const next = [...prev];
-        for (let i = next.length - 1; i >= 0; i--) {
-          if (next[i].role === "user" && next[i].content === message && !next[i].userMessageId) {
-            next[i] = { ...next[i], userMessageId: res.user_message_id };
-            break;
-          }
-        }
-        next.push(buildAssistantEntry(res));
-        return next;
-      });
-      if (res.assistant_status === "succeeded" && res.reply && readAloud) voice.speak(res.reply);
-      if (res.assistant_status === "failed") flashError();
-      refreshConversations();
+      const res = await api.sendChat(message, conversationId, clientMessageId);
+      applyChatResponse(res, message);
     } catch (e: any) {
-      // A real request-level failure (network down, session expired, rate-limited) — distinct
-      // from assistant_status:"failed": here the request itself never completed, so we can't
-      // even promise the message reached the server. Still shown clearly, never silently.
+      // A real request-level failure (network down, proxy timeout, session expired) is
+      // distinct from assistant_status:"failed": the response never reached the browser,
+      // so the server may still have completed the send. Preserve the key and let the
+      // founder resume the SAME logical send; never silently resend with a new one.
+      setFailedSend({ message, clientMessageId, conversationId });
+      setError(e.message);
+      flashError();
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function retryFailedSend() {
+    if (!failedSend || loading) return;
+    const pending = failedSend;
+    setFailedSend(null);
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await api.sendChat(
+        pending.message,
+        pending.conversationId,
+        pending.clientMessageId
+      );
+      applyChatResponse(res, pending.message);
+    } catch (e: any) {
+      setFailedSend(pending);
       setError(e.message);
       flashError();
     } finally {
@@ -451,7 +521,17 @@ export default function ChatPage() {
           )}
           {error && (
             <div role="alert" className="text-red-300 text-sm">
-              Fel: {error}
+              <div>Fel: {error}</div>
+              {failedSend && (
+                <button
+                  type="button"
+                  onClick={retryFailedSend}
+                  disabled={loading}
+                  className="mt-2 rounded border border-red-500/30 px-3 py-1 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-30"
+                >
+                  Försök igen
+                </button>
+              )}
             </div>
           )}
         </div>

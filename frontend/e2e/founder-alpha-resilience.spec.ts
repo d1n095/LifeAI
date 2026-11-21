@@ -40,6 +40,73 @@ test.describe("Founder Alpha resilience", () => {
     await expect(page.locator("text=God kväll")).toBeVisible({ timeout: 5000 }).catch(() => {});
   });
 
+  test("a dropped chat response resumes the same send without duplicating it", async ({ page }) => {
+    const message = `E2E-idempotens-${Date.now()}`;
+    let firstChatRequest = true;
+    let firstBody: { user_message_id: string; assistant_message_id: string } | null = null;
+    let secondBody: { user_message_id: string; assistant_message_id: string } | null = null;
+
+    // Let the FIRST request reach the real backend and persist its reply, then abort the
+    // response before the browser can read it. The UI must retry with the same
+    // client_message_id, so the backend replays the durable reply instead of creating a
+    // second user message or a second provider call.
+    await page.route("**/api/chat", async (route) => {
+      if (firstChatRequest) {
+        firstChatRequest = false;
+        const response = await route.fetch();
+        firstBody = await response.json();
+        await route.abort("failed");
+        return;
+      }
+      const response = await route.fetch();
+      secondBody = await response.json();
+      await route.fulfill({ response });
+    });
+
+    await page.goto(`${FRONTEND_URL}/chat`, { waitUntil: "networkidle" });
+    await page.getByLabel("Meddelande till MainAI").fill(message);
+    await page.getByRole("button", { name: "Skicka" }).click();
+
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Kunde inte nå servern" })
+    ).toBeVisible({ timeout: 10000 });
+
+    await page.getByRole("button", { name: "Försök igen" }).click();
+    await expect(page.locator("text=MainAI skriver…")).toHaveCount(0, { timeout: 10000 });
+    // Scope to the chat transcript: the same text also appears as the conversation's title in
+    // the history sidebar, which is not a second message.
+    await expect(
+      page.locator('div[aria-live="polite"]').getByText(message, { exact: true })
+    ).toHaveCount(1);
+    expect(firstBody).not.toBeNull();
+    expect(secondBody).not.toBeNull();
+    expect(secondBody!.user_message_id).toBe(firstBody!.user_message_id);
+    expect(secondBody!.assistant_message_id).toBe(firstBody!.assistant_message_id);
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Kunde inte nå servern" })
+    ).toHaveCount(0);
+  });
+
+  test("chat is fully keyboard-operable and sends with Enter", async ({ page }) => {
+    const message = `E2E-tangentbord-${Date.now()}`;
+    await page.goto(`${FRONTEND_URL}/chat`, { waitUntil: "networkidle" });
+
+    const input = page.getByLabel("Meddelande till MainAI");
+    const send = page.getByRole("button", { name: "Skicka" });
+    await input.focus();
+    await page.keyboard.press("Tab");
+    await expect(send).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(input).toBeFocused();
+
+    await page.keyboard.type(message);
+    await page.keyboard.press("Enter");
+    await expect(
+      page.locator('div[aria-live="polite"]').getByText(message, { exact: true })
+    ).toHaveCount(1);
+    await expect(page.locator("text=MainAI skriver…")).toHaveCount(0, { timeout: 10000 });
+  });
+
   test("a project and an assignment can be created through the current UI", async ({ page }) => {
     const suffix = String(Date.now());
     const project = `E2E-resiliens-projekt-${suffix}`;
