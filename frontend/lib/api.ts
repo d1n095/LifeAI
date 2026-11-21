@@ -442,6 +442,14 @@ export type TaskItem = {
   created_at: string;
 };
 
+// A project and only its own tasks/sources. The backend filters both collections by project
+// id and owner; this type exists so the UI cannot accidentally render a global library list
+// as if it were project-scoped.
+export type ProjectDetail = ProjectItem & {
+  tasks: TaskItem[];
+  sources: KnowledgeSourceItem[];
+};
+
 export type ProviderVerification = {
   model: string | null;
   result: "ok" | "invalid_key" | "unreachable" | "rate_limited" | "unsupported" | "not_configured";
@@ -1123,6 +1131,7 @@ export const api = {
   deleteDocument: (id: string) => request(`/api/documents/${id}`, { method: "DELETE" }),
 
   listProjects: () => request<ProjectItem[]>("/api/projects"),
+  getProject: (id: string) => request<ProjectDetail>(`/api/projects/${id}`),
   createProject: (payload: Partial<ProjectItem>) =>
     request<ProjectItem>("/api/projects", { method: "POST", body: JSON.stringify(payload) }),
 

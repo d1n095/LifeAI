@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { api, ProjectItem, TaskItem } from "@/lib/api";
 
 export default function ProjectsPage() {
@@ -8,6 +9,9 @@ export default function ProjectsPage() {
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [newProject, setNewProject] = useState("");
   const [newTask, setNewTask] = useState("");
+  // Without this, every task was created with project_id=NULL, so the project detail page
+  // could never show the work that actually belonged to a project.
+  const [taskProjectId, setTaskProjectId] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   async function refresh() {
@@ -45,7 +49,12 @@ export default function ProjectsPage() {
   async function addTask() {
     if (!newTask.trim()) return;
     try {
-      await api.createTask({ title: newTask.trim(), status: "todo", priority: "medium" });
+      await api.createTask({
+        title: newTask.trim(),
+        status: "todo",
+        priority: "medium",
+        project_id: taskProjectId || null,
+      });
       setNewTask("");
       await refresh();
     } catch (e: any) {
@@ -95,9 +104,11 @@ export default function ProjectsPage() {
           </div>
           <div className="space-y-2">
             {projects.map((p) => (
-              <div key={p.id} className="flex justify-between text-sm border-b border-border/60 py-2 last:border-0">
-                <span>{p.name}</span>
-                <span className="text-white/40">{p.status}</span>
+              <div key={p.id} className="flex justify-between gap-3 text-sm border-b border-border/60 py-2 last:border-0">
+                <Link href={`/projects/${p.id}`} className="text-white/90 hover:text-accent hover:underline">
+                  {p.name}
+                </Link>
+                <span className="shrink-0 text-white/40">{p.status}</span>
               </div>
             ))}
             {projects.length === 0 && <div className="text-white/30 text-sm">Inga projekt ännu.</div>}
@@ -106,21 +117,39 @@ export default function ProjectsPage() {
 
         <div className="rounded-xl border border-border bg-panel p-4">
           <div className="text-sm font-medium mb-3">Uppgifter</div>
-          <div className="flex gap-2 mb-4">
-            <label htmlFor="new-task" className="sr-only">
-              Ny uppgiftstitel
+          <div className="flex flex-col gap-2 mb-4">
+            <div className="flex gap-2">
+              <label htmlFor="new-task" className="sr-only">
+                Ny uppgiftstitel
+              </label>
+              <input
+                id="new-task"
+                value={newTask}
+                onChange={(e) => setNewTask(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && addTask()}
+                placeholder="Ny uppgift…"
+                className="flex-1 rounded-lg border border-border bg-base px-3 py-2 text-sm outline-none focus:border-accent"
+              />
+              <button onClick={addTask} className="rounded-lg bg-accent px-3 py-2 text-sm">
+                Lägg till
+              </button>
+            </div>
+            <label htmlFor="task-project" className="sr-only">
+              Projekt för uppgiften
             </label>
-            <input
-              id="new-task"
-              value={newTask}
-              onChange={(e) => setNewTask(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && addTask()}
-              placeholder="Ny uppgift…"
-              className="flex-1 rounded-lg border border-border bg-base px-3 py-2 text-sm outline-none focus:border-accent"
-            />
-            <button onClick={addTask} className="rounded-lg bg-accent px-3 py-2 text-sm">
-              Lägg till
-            </button>
+            <select
+              id="task-project"
+              value={taskProjectId}
+              onChange={(e) => setTaskProjectId(e.target.value)}
+              className="rounded-lg border border-border bg-base px-3 py-2 text-sm"
+            >
+              <option value="">Inget projekt</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
           </div>
           <div className="space-y-2">
             {tasks.map((t) => (

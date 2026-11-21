@@ -518,6 +518,15 @@ class KnowledgeSourceOut(BaseModel):
     transcript_provider: str | None = None
 
 
+class ProjectDetailOut(ProjectOut):
+    """A project and the two scoped collections the founder actually needs to inspect it:
+    its own tasks and its own non-deleted knowledge sources. Both lists are filtered by the
+    project id server-side; the frontend never derives project membership from a global list."""
+
+    tasks: list[TaskOut] = []
+    sources: list[KnowledgeSourceOut] = []
+
+
 class KnowledgeClaimOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID

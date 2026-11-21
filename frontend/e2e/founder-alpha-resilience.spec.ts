@@ -164,4 +164,24 @@ test.describe("Founder Alpha resilience", () => {
     await page.getByRole("button", { name: "Lägg till" }).nth(1).click();
     await expect(page.locator("text=" + task)).toBeVisible({ timeout: 5000 });
   });
+
+  test("project detail is reachable from the list and shows only the project's own task", async ({ page }) => {
+    const suffix = String(Date.now());
+    const project = `E2E-projektdetalj-${suffix}`;
+    const task = `E2E-projektuppgift-${suffix}`;
+
+    await page.goto(`${FRONTEND_URL}/projects`, { waitUntil: "networkidle" });
+    await page.getByLabel("Nytt projektnamn").fill(project);
+    await page.getByRole("button", { name: "Lägg till" }).first().click();
+
+    await page.getByLabel("Ny uppgiftstitel").fill(task);
+    await page.getByLabel("Projekt för uppgiften").selectOption({ label: project });
+    await page.getByRole("button", { name: "Lägg till" }).nth(1).click();
+
+    await page.getByRole("link", { name: project, exact: true }).click();
+    await expect(page.getByRole("heading", { name: project })).toBeVisible({ timeout: 5000 });
+    await expect(page.getByText(task, { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "MainAI-läge" })).toBeVisible();
+    await expect(page.getByText(/Globala mål och arbetskedjor/)).toBeVisible();
+  });
 });

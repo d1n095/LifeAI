@@ -408,6 +408,17 @@ export default function MainAIExecutionPage() {
                   <div>
                     Godkännande: {selectedTask.approval_required ? (selectedTask.approval_granted ? "Beviljat" : "Krävs, ej beviljat") : "Krävs inte"}
                   </div>
+                  {selectedTask.depends_on.length > 0 && (
+                    <div>Beroenden: {selectedTask.depends_on.length} task(s)</div>
+                  )}
+                  {selectedTask.verification_plan.length > 0 && (
+                    <div className="mt-2">
+                      <div className="text-white/50">Verifieringsplan</div>
+                      <pre className="mt-1 max-h-40 overflow-auto rounded border border-border/60 bg-base/50 p-2 text-[11px] text-white/60">
+                        {JSON.stringify(selectedTask.verification_plan, null, 2)}
+                      </pre>
+                    </div>
+                  )}
                   {selectedTask.next_retry_at && (
                     <div className="text-blue-300/80">
                       Automatiskt nytt försök: {new Date(selectedTask.next_retry_at).toLocaleString("sv-SE")}

@@ -105,6 +105,10 @@ export default function ChatPage() {
   // instead of creating a second message/provider call.
   const [failedSend, setFailedSend] = useState<FailedSend | null>(null);
   const [streamingText, setStreamingText] = useState("");
+  // The backend chooses the active, authorized chat model; this is a read-only display of
+  // that real selection, not a second model picker or a client-side guess.
+  const [modelState, setModelState] = useState<"loading" | "ready" | "missing" | "error">("loading");
+  const [modelLabel, setModelLabel] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const voice = useVoice();
@@ -123,6 +127,30 @@ export default function ChatPage() {
     // pattern, setState happens after an await inside refreshConversations().
     // eslint-disable-next-line react-hooks/set-state-in-effect
     refreshConversations();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .providerStatus()
+      .then((providers) => {
+        if (cancelled) return;
+        const active = providers.find((provider) => provider.active_chat);
+        if (!active) {
+          setModelState("missing");
+          setModelLabel(null);
+          return;
+        }
+        const model = active.chat_verification?.model;
+        setModelLabel(`${active.name}${model ? ` · ${model}` : ""}`);
+        setModelState("ready");
+      })
+      .catch(() => {
+        if (!cancelled) setModelState("error");
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -451,6 +479,27 @@ export default function ChatPage() {
               />
               Läs upp svar
             </label>
+          )}
+        </div>
+
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-white/40" role="status" aria-live="polite">
+          {modelState === "loading" && <span>Kontrollerar aktiv modell…</span>}
+          {modelState === "ready" && (
+            <>
+              <span>Aktiv modell:</span>
+              <span className="text-white/65">{modelLabel}</span>
+            </>
+          )}
+          {modelState === "missing" && (
+            <span className="text-amber-300">Ingen aktiv chat-modell är konfigurerad.</span>
+          )}
+          {modelState === "error" && (
+            <span className="text-amber-300">Modellstatus kunde inte läsas.</span>
+          )}
+          {(modelState === "missing" || modelState === "error") && (
+            <Link href="/admin" className="text-accent2 hover:underline">
+              Konfigurera modell
+            </Link>
           )}
         </div>
 
