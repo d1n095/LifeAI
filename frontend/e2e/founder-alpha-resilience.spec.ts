@@ -43,23 +43,24 @@ test.describe("Founder Alpha resilience", () => {
   test("a dropped chat response resumes the same send without duplicating it", async ({ page }) => {
     const message = `E2E-idempotens-${Date.now()}`;
     let firstChatRequest = true;
-    let firstBody: { user_message_id: string; assistant_message_id: string } | null = null;
-    let secondBody: { user_message_id: string; assistant_message_id: string } | null = null;
+    let firstClientId: string | null = null;
+    let secondClientId: string | null = null;
 
     // Let the FIRST request reach the real backend and persist its reply, then abort the
     // response before the browser can read it. The UI must retry with the same
     // client_message_id, so the backend replays the durable reply instead of creating a
     // second user message or a second provider call.
-    await page.route("**/api/chat", async (route) => {
+    await page.route("**/api/chat/stream", async (route) => {
+      const body = route.request().postDataJSON() as { client_message_id?: string };
       if (firstChatRequest) {
         firstChatRequest = false;
+        firstClientId = body.client_message_id ?? null;
         const response = await route.fetch();
-        firstBody = await response.json();
         await route.abort("failed");
         return;
       }
+      secondClientId = body.client_message_id ?? null;
       const response = await route.fetch();
-      secondBody = await response.json();
       await route.fulfill({ response });
     });
 
@@ -78,13 +79,55 @@ test.describe("Founder Alpha resilience", () => {
     await expect(
       page.locator('div[aria-live="polite"]').getByText(message, { exact: true })
     ).toHaveCount(1);
-    expect(firstBody).not.toBeNull();
-    expect(secondBody).not.toBeNull();
-    expect(secondBody!.user_message_id).toBe(firstBody!.user_message_id);
-    expect(secondBody!.assistant_message_id).toBe(firstBody!.assistant_message_id);
+    expect(firstClientId).not.toBeNull();
+    expect(secondClientId).toBe(firstClientId);
     await expect(
       page.getByRole("alert").filter({ hasText: "Kunde inte nå servern" })
     ).toHaveCount(0);
+  });
+
+  test("chat streams partial text and then completes without duplicating the message", async ({ page }) => {
+    const message = `E2E-stream-${Date.now()}`;
+    await page.goto(`${FRONTEND_URL}/chat`, { waitUntil: "networkidle" });
+
+    await page.getByLabel("Meddelande till MainAI").fill(message);
+    await page.getByRole("button", { name: "Skicka" }).click();
+
+    const transcript = page.locator('div[aria-live="polite"]');
+    // The first delayed chunk proves the UI renders the reply while generation is still
+    // running, not only after the final JSON response.
+    await expect(page.getByRole("button", { name: "Avbryt", exact: true })).toBeVisible({ timeout: 5000 });
+    await expect(transcript.getByText(/Hej! Detta ar ett riktigt svar/)).toBeVisible({ timeout: 5000 });
+
+    await expect(page.getByRole("button", { name: "Avbryt", exact: true })).toHaveCount(0, { timeout: 10000 });
+    await expect(transcript.getByText(message, { exact: true })).toHaveCount(1);
+  });
+
+  test("cancelling a stream stops generation and keeps exactly one saved user message", async ({ page }) => {
+    const message = `E2E-avbryt-${Date.now()}`;
+    await page.goto(`${FRONTEND_URL}/chat`, { waitUntil: "networkidle" });
+
+    await page.getByLabel("Meddelande till MainAI").fill(message);
+    await page.getByRole("button", { name: "Skicka" }).click();
+
+    const transcript = page.locator('div[aria-live="polite"]');
+    await expect(page.getByRole("button", { name: "Avbryt", exact: true })).toBeVisible({ timeout: 5000 });
+    await expect(transcript.getByText(/Detta är ett långsamt strömmande svar/)).toBeVisible({ timeout: 5000 });
+
+    await page.getByRole("button", { name: "Avbryt", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Skicka" })).toBeVisible({ timeout: 5000 });
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Fel: Genereringen avbröts." })
+    ).toBeVisible({ timeout: 5000 });
+    await expect(transcript.getByText(message, { exact: true })).toHaveCount(1);
+
+    // Reloading and reopening the same conversation must not create a second user message.
+    await page.reload({ waitUntil: "networkidle" });
+    await page
+      .locator('div[aria-label="Tidigare konversationer"]')
+      .getByText(message, { exact: true })
+      .click();
+    await expect(transcript.getByText(message, { exact: true })).toHaveCount(1);
   });
 
   test("chat is fully keyboard-operable and sends with Enter", async ({ page }) => {

@@ -35,6 +35,7 @@ from app.routers import (
     execution_envelopes,
     founder_recovery,
     health,
+    incidents,
     inspectable_memory,
     knowledge,
     library,
@@ -82,6 +83,7 @@ app.include_router(account.router)
 app.include_router(blueprint.router)
 app.include_router(calendar.router)
 app.include_router(chat.router)
+app.include_router(incidents.router)
 app.include_router(conversations.router)
 app.include_router(documents.router)
 app.include_router(projects.router)

@@ -44,6 +44,8 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import Session
 
+from app.incidents.service import record_incident_standalone
+
 from app.agent_coordination.adapter_config import adapter_availability
 from app.agent_coordination.service import (
     OUTCOME_ASSIGNABLE,
@@ -311,6 +313,16 @@ async def dispatch_assignment(
         transition_status(
             db, assignment=assignment, new_status="blocked",
             detail={"reason": "adapter_start_assignment_failed", "detail": str(exc), "attempt_id": str(attempt_id)},
+        )
+        record_incident_standalone(
+            owner_id=assignment.owner_id,
+            error_code="sandbox_start_failure",
+            component="agent_coordination.dispatch",
+            severity="high",
+            summary="Adapter/sandbox kunde inte starta",
+            correlation_id=str(assignment.id),
+            app_version="0.1.0",
+            details={"assignment_id": str(assignment.id), "failure_class": "adapter_start_failure"},
         )
         raise
 

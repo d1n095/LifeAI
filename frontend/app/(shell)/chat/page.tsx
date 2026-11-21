@@ -104,6 +104,8 @@ export default function ChatPage() {
   // reply. Keep the exact idempotency key so "Försök igen" resumes the same logical send
   // instead of creating a second message/provider call.
   const [failedSend, setFailedSend] = useState<FailedSend | null>(null);
+  const [streamingText, setStreamingText] = useState("");
+  const abortRef = useRef<AbortController | null>(null);
 
   const voice = useVoice();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -125,7 +127,9 @@ export default function ChatPage() {
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [entries, loading]);
+  }, [entries, loading, streamingText]);
+
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   async function openConversation(id: string) {
     setHistoryOpen(false);
@@ -225,50 +229,109 @@ export default function ChatPage() {
     refreshConversations();
   }
 
+  async function runStream(
+    message: string,
+    targetConversationId: string | undefined,
+    clientMessageId: string
+  ) {
+    setLoading(true);
+    setError(null);
+    setStreamingText("");
+    const controller = new AbortController();
+    abortRef.current = controller;
+    let streamedUserMessageId: string | undefined;
+    let streamedErrorMessage: string | undefined;
+    let sawDone = false;
+    try {
+      const res = await api.streamChat(message, targetConversationId, clientMessageId, {
+        signal: controller.signal,
+        onEvent: (event) => {
+          if (event.type === "start") streamedUserMessageId = event.user_message_id;
+          else if (event.type === "delta") setStreamingText((prev) => prev + event.text);
+          else if (event.type === "done") {
+            sawDone = true;
+            setStreamingText("");
+          } else if (event.type === "error") {
+            streamedErrorMessage = event.message;
+          }
+        },
+      });
+      applyChatResponse(res, message);
+    } catch (e: any) {
+      setStreamingText("");
+      if (e?.name === "AbortError") {
+        // The user explicitly cancelled. The server sees the disconnect and persists an
+        // honest terminal state; keep the saved user message retryable instead of resending
+        // it as a brand-new message.
+        if (!sawDone && streamedUserMessageId) {
+          setEntries((prev) => {
+            if (prev.some((x) => x.role === "assistant" && x.userMessageId === streamedUserMessageId)) {
+              return prev;
+            }
+            return [
+              ...prev,
+              {
+                role: "assistant",
+                content: "",
+                failed: true,
+                errorMessage: "Genereringen avbröts. Ditt meddelande finns sparat.",
+                retryable: true,
+                userMessageId: streamedUserMessageId,
+              },
+            ];
+          });
+        } else if (!sawDone) {
+          setFailedSend({ message, clientMessageId, conversationId: targetConversationId });
+        }
+        setError("Genereringen avbröts.");
+        return;
+      }
+      if (!sawDone && streamedErrorMessage && streamedUserMessageId) {
+        setEntries((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: "",
+            failed: true,
+            errorMessage: streamedErrorMessage,
+            retryable: false,
+            userMessageId: streamedUserMessageId,
+          },
+        ]);
+        setError(streamedErrorMessage);
+        flashError();
+        return;
+      }
+      // A request-level failure (network down, proxy timeout, session expired) is distinct
+      // from assistant_status:"failed": the server may already have saved the message and
+      // completed the reply. Preserve the key so retry resumes the SAME logical send.
+      setFailedSend({ message, clientMessageId, conversationId: targetConversationId });
+      setError(e.message);
+      flashError();
+    } finally {
+      abortRef.current = null;
+      setLoading(false);
+    }
+  }
+
   async function send(message: string) {
     if (!message.trim() || loading) return;
     const clientMessageId = newClientMessageId();
     setFailedSend(null);
     setEntries((prev) => [...prev, { role: "user", content: message }]);
     setInput("");
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await api.sendChat(message, conversationId, clientMessageId);
-      applyChatResponse(res, message);
-    } catch (e: any) {
-      // A real request-level failure (network down, proxy timeout, session expired) is
-      // distinct from assistant_status:"failed": the response never reached the browser,
-      // so the server may still have completed the send. Preserve the key and let the
-      // founder resume the SAME logical send; never silently resend with a new one.
-      setFailedSend({ message, clientMessageId, conversationId });
-      setError(e.message);
-      flashError();
-    } finally {
-      setLoading(false);
-    }
+    await runStream(message, conversationId, clientMessageId);
   }
 
   async function retryFailedSend() {
     if (!failedSend || loading) return;
     const pending = failedSend;
     setFailedSend(null);
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await api.sendChat(
-        pending.message,
-        pending.conversationId,
-        pending.clientMessageId
-      );
-      applyChatResponse(res, pending.message);
-    } catch (e: any) {
-      setFailedSend(pending);
-      setError(e.message);
-      flashError();
-    } finally {
-      setLoading(false);
-    }
+    await runStream(pending.message, pending.conversationId, pending.clientMessageId);
+  }
+
+  function cancelStream() {
+    abortRef.current?.abort();
   }
 
   async function retry(userMessageId: string) {
@@ -515,8 +578,10 @@ export default function ChatPage() {
             </div>
           ))}
           {loading && (
-            <div className="text-white/40 text-sm" role="status">
-              MainAI skriver…
+            <div className="max-w-2xl" role="status" aria-live="polite">
+              <div className="rounded-xl border border-border bg-panel px-4 py-3 text-sm whitespace-pre-wrap">
+                {streamingText || "MainAI skriver…"}
+              </div>
             </div>
           )}
           {error && (
@@ -561,14 +626,23 @@ export default function ChatPage() {
             placeholder="Fråga MainAI vad som helst…"
             className="flex-1 rounded-lg border border-border bg-panel px-4 py-3 text-sm outline-none focus:border-accent"
           />
-          <button
-            type="button"
-            onClick={() => send(input)}
-            disabled={loading}
-            className="rounded-lg bg-accent px-5 py-3 text-sm font-medium disabled:opacity-50"
-          >
-            Skicka
-          </button>
+          {loading ? (
+            <button
+              type="button"
+              onClick={cancelStream}
+              className="rounded-lg border border-red-500/40 px-5 py-3 text-sm font-medium text-red-300 hover:bg-red-500/10"
+            >
+              Avbryt
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => send(input)}
+              className="rounded-lg bg-accent px-5 py-3 text-sm font-medium"
+            >
+              Skicka
+            </button>
+          )}
         </div>
       </div>
     </div>

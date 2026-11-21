@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -370,9 +371,15 @@ async def chat_with_fallback(
     selection_policy: ModelSelectionPolicy | None = None,
     effect_guard: bool = False,
     attempt_observer=None,
+    stream_observer=None,
     **kwargs,
 ) -> tuple[ChatResult, list[str]]:
     """Try the primary chat provider, then fall back through CHAT_FALLBACK_ORDER on failure.
+
+    When `stream_observer` is supplied, the same chain/egress/budget/fallback rules are used
+    but each provider is consumed through `stream_chat()` and every text delta is forwarded
+    to the observer before the final `ChatResult` is returned. The observer is intentionally
+    a narrow callback rather than a second provider or chat path.
 
     Returns the successful result plus the list of provider names that were attempted
     (including the one that succeeded), so callers can log/audit exactly what happened
@@ -400,6 +407,24 @@ async def chat_with_fallback(
     # exact line logged a raw httpx.HTTPStatusError straight to the Docker log, and it happened
     # to contain a live Gemini key.
     from app.providers.verification import classify_provider_exception
+
+    if stream_observer is not None:
+        return await stream_chat_with_fallback(
+            db,
+            messages,
+            stream_observer=stream_observer,
+            owner_id=owner_id,
+            worker_lease=worker_lease,
+            purpose=purpose,
+            requested_by=requested_by,
+            task_id=task_id,
+            goal_id=goal_id,
+            job_id=job_id,
+            selection_policy=selection_policy,
+            effect_guard=effect_guard,
+            attempt_observer=attempt_observer,
+            **kwargs,
+        )
 
     # Deferred for the same reason: keep app.egress_policy's own import graph (which reaches
     # into app.development_operator.service) from ever becoming a load-time dependency of this
@@ -523,6 +548,175 @@ async def chat_with_fallback(
                 ) from None
             safe = classify_provider_exception(exc)
             logger.warning("Chat provider %s failed (%s): %s", provider.name, safe.result.value, safe.message)
+            last_error = exc
+
+    outcome = classify_provider_exception(last_error) if last_error is not None else None
+    category = outcome.result.value if outcome else "unreachable"
+    safe_detail = outcome.message if outcome else "Okänt fel inträffade."
+    raise ProviderError(
+        f"Alla konfigurerade leverantörer misslyckades ({', '.join(attempted)}). {safe_detail}",
+        category=category,
+    )
+
+
+async def stream_chat_with_fallback(
+    db: Session,
+    messages: list[Message],
+    *,
+    stream_observer,
+    owner_id: uuid.UUID | None = None,
+    worker_lease: WorkerLease | None = None,
+    purpose: str | None = None,
+    requested_by: str | None = None,
+    task_id: uuid.UUID | None = None,
+    goal_id: uuid.UUID | None = None,
+    job_id: uuid.UUID | None = None,
+    selection_policy: ModelSelectionPolicy | None = None,
+    effect_guard: bool = False,
+    attempt_observer=None,
+    **kwargs,
+) -> tuple[ChatResult, list[str]]:
+    """Streaming sibling of `chat_with_fallback` with the same authority boundaries.
+
+    A provider is allowed to fall back only before it has emitted a delta. Once any text has
+    reached the founder, a second provider would create a second external effect and a
+    visibly mixed answer, so the stream fails closed as `external_effect_unknown`.
+    """
+
+    if stream_observer is None:
+        raise ProviderError("Streaming observer is required.", category="unsupported", provider_request_may_have_left=False)
+
+    from app.providers.verification import classify_provider_exception
+    from app.egress_policy.service import EgressDeniedError, enforce_egress_policy, resolve_egress_owner
+    from app.billing.reservation import estimate_prompt_tokens, estimate_text_tokens
+
+    if selection_policy is not None and owner_id is None and worker_lease is None:
+        raise ModelSelectionError("controlled chat routing requires owner_id for egress")
+    chain = resolve_chat_chain(db, selection_policy=selection_policy)
+    if any(not getattr(provider, "is_local", False) for provider, _model in chain) or worker_lease is not None:
+        owner_id = resolve_egress_owner(db, owner_id=owner_id, worker_lease=worker_lease)
+
+    attempted: list[str] = []
+    last_error: Exception | None = None
+
+    for provider, model in chain:
+        attempted.append(provider.name)
+        invoked = False
+        emitted = False
+        parts: list[str] = []
+        usage: dict = {}
+        try:
+            if selection_policy is not None:
+                _require_policy_candidate(
+                    db,
+                    resolve_model_spec(
+                        provider.name,
+                        model,
+                        role=selection_policy.role,
+                        allow_custom_local=selection_policy.allow_custom_local,
+                    ),
+                    selection_policy,
+                )
+            outbound_messages = messages
+            if owner_id is not None:
+                payload = [{"role": m.role, "content": m.content} for m in messages]
+                redacted = enforce_egress_policy(
+                    db,
+                    owner_id=owner_id,
+                    provider=provider.name,
+                    model=model,
+                    purpose=purpose or "chat",
+                    requested_by=requested_by or "providers.registry.stream_chat_with_fallback",
+                    payload=payload,
+                    task_id=task_id,
+                    goal_id=goal_id,
+                    job_id=job_id,
+                )
+                outbound_messages = [Message(role=m["role"], content=m["content"]) for m in redacted]
+            if not provider.is_configured():
+                raise ProviderError(
+                    "Provider is not configured.",
+                    category="not_configured",
+                    provider_request_may_have_left=False,
+                )
+            if attempt_observer is not None:
+                attempt_observer.before(provider.name, model)
+                db.commit()
+                marker = getattr(attempt_observer, "invoking", None)
+                if marker is not None:
+                    marker()
+            invoked = True
+            async for chunk in provider.stream_chat(outbound_messages, model=model, **kwargs):
+                if chunk.delta:
+                    emitted = True
+                    parts.append(chunk.delta)
+                    await stream_observer.delta(chunk.delta)
+                if chunk.raw_usage:
+                    usage.update(chunk.raw_usage)
+            content = "".join(parts)
+            if not content.strip():
+                raise ProviderError(
+                    "Provider returned no valid streamed reply.",
+                    category="external_effect_unknown",
+                    provider_request_may_have_left=True,
+                )
+            if effect_guard and attempt_observer is not None and getattr(attempt_observer, "requires_usage", True):
+                prompt = usage.get("prompt_tokens")
+                completion = usage.get("completion_tokens")
+                if type(prompt) is not int or prompt < 0 or type(completion) is not int or completion <= 0:
+                    # Streaming transports do not all expose usage. The counts are then a
+                    # conservative local estimate, explicitly marked so reconciliation can
+                    # see that they were not provider-reported.
+                    usage = {
+                        **usage,
+                        "prompt_tokens": estimate_prompt_tokens([m.content for m in outbound_messages]),
+                        "completion_tokens": max(1, estimate_text_tokens(content)),
+                        "usage_estimated": True,
+                    }
+            result = ChatResult(content=content, provider=provider.name, model=model, raw_usage=usage)
+            if attempt_observer is not None:
+                attempt_observer.succeeded(result)
+            if len(attempted) > 1:
+                logger.warning(
+                    "Chat stream fallback engaged: %s failed over to %s (attempted: %s)",
+                    attempted[0],
+                    provider.name,
+                    attempted,
+                )
+            return result, attempted
+        except asyncio.CancelledError:
+            if attempt_observer is not None and invoked:
+                attempt_observer.failed(
+                    ProviderError(
+                        "Chat stream cancelled after provider invocation began.",
+                        category="external_effect_unknown",
+                        provider_request_may_have_left=True,
+                    )
+                )
+            raise
+        except EgressDeniedError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - provider failure must follow the same fail-closed rules
+            if getattr(exc, "is_egress_denial", False):
+                raise
+            if attempt_observer is not None:
+                if not invoked:
+                    raise
+                attempt_observer.failed(exc)
+            if emitted:
+                raise ProviderError(
+                    "Streaming avbröts efter att delar av svaret redan visats; automatiskt återförsök är blockerat.",
+                    category="external_effect_unknown",
+                    provider_request_may_have_left=True,
+                ) from None
+            if effect_guard and invoked and getattr(exc, "provider_request_may_have_left", None) is not False:
+                raise ProviderError(
+                    "Provider outcome is uncertain; automatic retry and fallback are blocked.",
+                    category="external_effect_unknown",
+                    provider_request_may_have_left=True,
+                ) from None
+            safe = classify_provider_exception(exc)
+            logger.warning("Chat stream provider %s failed (%s): %s", provider.name, safe.result.value, safe.message)
             last_error = exc
 
     outcome = classify_provider_exception(last_error) if last_error is not None else None

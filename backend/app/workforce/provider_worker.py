@@ -31,6 +31,7 @@ from app.workforce.activation_gates import (
 )
 from app.workforce.authority import require_live_assignment_authority
 from app.workforce.broker import DelegationBrokerError, ingest_untrusted_result
+from app.incidents.service import record_incident_standalone
 from app.workforce.failure import mark_failure, record_checkpoint
 from app.workforce.injection import scrub_authority_mutations
 from app.workforce.kill_switch import assert_not_killed
@@ -413,6 +414,16 @@ def execute_workforce_assignment(
             external_effect_state="none_proven",
             partial_result={"cancelled_before_invoke": True},
         )
+        record_incident_standalone(
+            owner_id=owner_id,
+            error_code="worker_restart",
+            component="workforce.provider_worker",
+            severity="medium",
+            summary="Workforce-uppdrag avbröts före provider-anrop",
+            correlation_id=str(assignment.id),
+            app_version="0.1.0",
+            details={"assignment_id": str(assignment.id), "failure_class": "worker_restart"},
+        )
         return WorkerExecutionReceipt(
             assignment_id=assignment.id,
             provider_invoked=False,
@@ -492,6 +503,16 @@ def execute_workforce_assignment(
             assignment=assignment,
             failure_class="provider_timeout",
             external_effect_state=external_effect_state,
+        )
+        record_incident_standalone(
+            owner_id=owner_id,
+            error_code="provider_timeout",
+            component="workforce.provider_worker",
+            severity="high",
+            summary="Provider-timeout under workforce-uppdrag",
+            correlation_id=str(assignment.id),
+            app_version="0.1.0",
+            details={"assignment_id": str(assignment.id), "failure_class": "provider_timeout"},
         )
         raw = {}
 

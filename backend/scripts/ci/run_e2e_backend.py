@@ -28,7 +28,7 @@ PORT = int(os.environ.get("E2E_BACKEND_PORT", "8010"))
 open(EMAIL_LOG_PATH, "w").close()
 
 from app.config import get_settings
-from app.providers.base import ChatResult
+from app.providers.base import ChatResult, ChatStreamChunk
 from app.providers.openai_provider import OpenAIProvider
 from app.providers.ollama_provider import OllamaProvider
 from app.rag.claims import CLAIM_EXTRACTION_SYSTEM_PROMPT
@@ -64,6 +64,38 @@ async def fake_chat(self, messages, model, **kwargs):
         provider="openai",
         model=model,
         raw_usage={"prompt_tokens": 180, "completion_tokens": 55},
+    )
+
+
+async def fake_stream_chat(self, messages, model, **kwargs):
+    """Chunked transport for the streaming E2E path.
+
+    The ordinary browser suite only needs a completed reply. These tests need to observe
+    the SSE path itself, so emit the same deterministic answer in three delayed chunks —
+    and a deliberately slow answer when the message asks for the cancellation scenario.
+    """
+    result = await fake_chat(self, messages, model, **kwargs)
+    prompt = messages[-1].content if messages else ""
+    if "E2E-avbryt" in prompt:
+        text = " ".join(["Detta är ett långsamt strömmande svar."] * 24)
+        chunks = [text[i : i + 18] for i in range(0, len(text), 18)]
+        delay = 0.35
+    else:
+        text = result.content
+        third = max(1, len(text) // 3)
+        chunks = [text[:third], text[third : 2 * third], text[2 * third :]]
+        delay = 0.25
+
+    for chunk in chunks:
+        if not chunk:
+            continue
+        await asyncio.sleep(delay)
+        yield ChatStreamChunk(delta=chunk, provider=result.provider, model=result.model)
+    yield ChatStreamChunk(
+        provider=result.provider,
+        model=result.model,
+        raw_usage=result.raw_usage,
+        done=True,
     )
 
 
@@ -116,6 +148,7 @@ def fake_send_email(to: str, subject: str, body_text: str) -> None:
 
 
 OpenAIProvider.chat = fake_chat
+OpenAIProvider.stream_chat = fake_stream_chat
 OllamaProvider.embed = fake_embed
 vector_store.search = fake_search
 retrieve_mod.search = fake_search

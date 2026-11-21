@@ -12,6 +12,7 @@ from app.providers.base import (
     ProviderError,
     looks_like_placeholder_secret,
 )
+from app.providers.streaming import stream_openai_http
 
 
 
@@ -120,6 +121,47 @@ class ZAIProvider(LLMProvider):
                 "completion_tokens": usage.get("completion_tokens", 0),
             },
         )
+
+    async def stream_chat(self, messages: list[Message], model: str, *, timeout: float | None = None, **kwargs):
+        if not self.is_configured():
+            raise ProviderError(
+                "Z.ai API-nyckel saknas.",
+                category="not_configured",
+                provider_request_may_have_left=False,
+            )
+        try:
+            base_url = validated_zai_base_url(self.settings.zai_base_url)
+            if any(key not in {"temperature", "max_tokens"} for key in kwargs):
+                raise ValueError("unsupported chat options")
+            temperature = kwargs.get("temperature", 0.4)
+            if not isinstance(temperature, (int, float)) or not math.isfinite(temperature) or not 0 <= temperature <= 2:
+                raise ValueError("invalid temperature")
+            max_tokens = kwargs.get("max_tokens")
+            if max_tokens is not None and (type(max_tokens) is not int or max_tokens <= 0):
+                raise ValueError("invalid token bound")
+        except ValueError:
+            raise ProviderError(
+                "Z.ai konfiguration eller anropsparametrar stöds inte.",
+                category="unsupported",
+                provider_request_may_have_left=False,
+            ) from None
+        payload = {
+            "model": model,
+            "messages": [{"role": message.role, "content": message.content} for message in messages],
+            "temperature": temperature,
+            "stream": True,
+        }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        async for chunk in stream_openai_http(
+            url=f"{base_url}/chat/completions",
+            headers=self._headers(),
+            payload=payload,
+            provider=self.name,
+            model=model,
+            timeout=timeout,
+        ):
+            yield chunk
 
     async def embed(
         self,

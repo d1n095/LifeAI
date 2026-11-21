@@ -209,6 +209,12 @@ export type ChatResponse = {
   retryable: boolean;
 };
 
+export type ChatStreamEvent =
+  | { type: "start"; conversation_id: string; user_message_id: string; assistant_message_id: string | null }
+  | { type: "delta"; text: string }
+  | { type: "done"; response: ChatResponse }
+  | { type: "error"; message: string; retryable: boolean };
+
 export type ConversationItem = {
   id: string;
   title: string;
@@ -450,6 +456,25 @@ export type ModelCatalog = {
   supported_capabilities: string[];
   verification_result: string | null;
   metadata_note: string;
+};
+
+export type RuntimeIncident = {
+  id: string;
+  error_code: string;
+  component: string;
+  severity: "low" | "medium" | "high" | "critical";
+  status: "open" | "acknowledged" | "resolved";
+  summary: string;
+  correlation_id: string | null;
+  app_version: string | null;
+  occurrence_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  details: Record<string, unknown>;
+  analysis: { known_cause?: string; confidence?: string; reason?: string; automatic_action?: string };
+  recovery_options: { action: string; safe: boolean; requires_owner: boolean; description: string }[];
+  acknowledged_at: string | null;
+  resolved_at: string | null;
 };
 
 export type ProviderStatus = {
@@ -897,6 +922,115 @@ export type ProjectStatus = {
   authorization: { created_goals: number; created_tasks: number; note: string };
 };
 
+async function streamChatRequest(
+  message: string,
+  conversationId: string | undefined,
+  clientMessageId: string | undefined,
+  options: { signal?: AbortSignal; onEvent?: (event: ChatStreamEvent) => void } = {},
+  isRetry = false
+): Promise<ChatResponse> {
+  const headers: Record<string, string> = { "Content-Type": "application/json", ...csrfHeader() };
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}/api/chat/stream`, {
+      method: "POST",
+      credentials: "include",
+      cache: "no-store",
+      signal: options.signal,
+      headers,
+      body: JSON.stringify({
+        message,
+        conversation_id: conversationId,
+        client_message_id: clientMessageId ?? newClientMessageId(),
+      }),
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    throw new NetworkError();
+  }
+
+  if (res.status === 401 && !isRetry) {
+    const refreshed = await attemptRefresh();
+    if (refreshed) {
+      return streamChatRequest(message, conversationId, clientMessageId, options, true);
+    }
+    throw new AuthError("Sessionen har gått ut. Logga in igen.");
+  }
+  if (!res.ok) {
+    const body = await res.text();
+    let detail: string | undefined;
+    try {
+      const parsed = JSON.parse(body);
+      if (parsed && typeof parsed.detail === "string") detail = parsed.detail;
+    } catch {
+      /* not JSON */
+    }
+    const err = new Error(detail ?? `API-fel (${res.status}): ${body}`);
+    (err as Error & { status?: number }).status = res.status;
+    throw err;
+  }
+
+  const reader = res.body?.getReader();
+  if (!reader) throw new Error("Servern kunde inte öppna svarsströmmen.");
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalResponse: ChatResponse | null = null;
+
+  const consume = (block: string) => {
+    let eventName = "message";
+    const dataLines: string[] = [];
+    for (const line of block.split("\n")) {
+      if (line.startsWith("event:")) eventName = line.slice(6).trim();
+      else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+    }
+    if (dataLines.length === 0) return;
+    let data: any;
+    try {
+      data = JSON.parse(dataLines.join("\n"));
+    } catch {
+      return;
+    }
+    if (eventName === "start") {
+      options.onEvent?.({
+        type: "start",
+        conversation_id: data.conversation_id,
+        user_message_id: data.user_message_id,
+        assistant_message_id: data.assistant_message_id ?? null,
+      });
+    } else if (eventName === "delta" && typeof data.text === "string") {
+      options.onEvent?.({ type: "delta", text: data.text });
+    } else if (eventName === "done") {
+      finalResponse = data as ChatResponse;
+      options.onEvent?.({ type: "done", response: finalResponse });
+    } else if (eventName === "error") {
+      options.onEvent?.({
+        type: "error",
+        message: typeof data.message === "string" ? data.message : "Strömmen avbröts.",
+        retryable: Boolean(data.retryable),
+      });
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    buffer = buffer.replace(/\r\n/g, "\n");
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary >= 0) {
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      consume(block);
+      boundary = buffer.indexOf("\n\n");
+    }
+  }
+  if (buffer.trim()) consume(buffer);
+  if (!finalResponse) {
+    throw new Error("Strömmen avslutades utan ett komplett svar. Försök igen.");
+  }
+  return finalResponse;
+}
+
 export const api = {
   projectStatus: () => request<ProjectStatus>("/api/mainai/project-status"),
   login: (email: string, password: string) =>
@@ -941,6 +1075,12 @@ export const api = {
         client_message_id: clientMessageId ?? newClientMessageId(),
       }),
     }),
+  streamChat: (
+    message: string,
+    conversationId?: string,
+    clientMessageId?: string,
+    options?: { signal?: AbortSignal; onEvent?: (event: ChatStreamEvent) => void }
+  ) => streamChatRequest(message, conversationId, clientMessageId, options),
   retryChatMessage: (userMessageId: string) =>
     request<ChatResponse>(`/api/chat/messages/${userMessageId}/retry`, { method: "POST" }),
 
@@ -977,6 +1117,12 @@ export const api = {
 
   modelCatalog: () => request<ModelCatalog[]>("/api/admin/providers/models"),
   providerStatus: () => request<ProviderStatus[]>("/api/admin/providers/status"),
+  listIncidents: (status?: string) =>
+    request<RuntimeIncident[]>(`/api/incidents${status ? `?status=${encodeURIComponent(status)}` : ""}`),
+  acknowledgeIncident: (id: string) =>
+    request<RuntimeIncident>(`/api/incidents/${id}/acknowledge`, { method: "POST" }),
+  resolveIncident: (id: string) =>
+    request<RuntimeIncident>(`/api/incidents/${id}/resolve`, { method: "POST" }),
   setProviderConfig: (role: "chat" | "embedding", provider: string, model: string) =>
     request("/api/admin/providers/config", {
       method: "PUT",

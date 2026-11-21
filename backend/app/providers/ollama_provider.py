@@ -3,6 +3,7 @@ import httpx
 from app.providers.base import chat_token_limit
 from app.config import get_settings
 from app.providers.base import ChatResult, LLMProvider, Message, ProviderError
+from app.providers.streaming import iter_ollama_ndjson
 
 
 def _http_error_category(exc: httpx.HTTPError) -> str:
@@ -161,6 +162,41 @@ class OllamaProvider(LLMProvider):
                 "completion_tokens": data.get("eval_count", 0) if isinstance(data, dict) else 0,
             },
         )
+
+    async def stream_chat(self, messages: list[Message], model: str, *, timeout: float | None = None, **kwargs):
+        payload = {
+            "model": model,
+            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "stream": True,
+        }
+        token_limit = chat_token_limit(kwargs)
+        if token_limit is not None:
+            payload["options"] = {"num_predict": token_limit}
+        try:
+            async with httpx.AsyncClient(timeout=timeout or 120, follow_redirects=False, trust_env=False) as client:
+                async with client.stream(
+                    "POST", f"{self.settings.ollama_base_url}/api/chat", json=payload
+                ) as response:
+                    if response.status_code >= 400:
+                        raise ProviderError(
+                            f"Lokal modell (Ollama) svarade med HTTP {response.status_code}.",
+                            category=_http_error_category(
+                                httpx.HTTPStatusError(
+                                    "stream status", request=response.request, response=response
+                                )
+                            ),
+                            provider_request_may_have_left=True,
+                        )
+                    async for chunk in iter_ollama_ndjson(
+                        response.aiter_lines(), provider=self.name, model=model
+                    ):
+                        yield chunk
+        except httpx.HTTPError:
+            raise ProviderError(
+                "Lokal modell (Ollama) kunde inte nås under streaming.",
+                category="unreachable",
+                provider_request_may_have_left=True,
+            ) from None
 
     async def embed(self, texts: list[str], model: str, *, timeout: float | None = None) -> list[list[float]]:
         """Embed a whole batch in ONE `/api/embed` call, at the model's NATIVE width.

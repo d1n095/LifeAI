@@ -634,6 +634,9 @@ _MAINAI_EXECUTION_TABLES = (
     # append-only, same structural role as provider_spend_usage_events above -- deletion only
     # through erase_own_provider_disclosure_events().
     "provider_disclosure_events",
+    # V4 runtime incidents: one small owner-scoped history table, same FORCE-RLS and
+    # ownership verification as the other runtime-observability tables.
+    "runtime_incidents",
     # Migration 0067 (MainAI Internal Workforce Foundation): owner-scoped organizational
     # agent registry, delegation broker receipts, context packages, assignments, performance
     # rollups. Ordinary mutable tables (baseline CRUD) — sit ABOVE coordination_agents (0046),
@@ -1110,6 +1113,9 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         )
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON provider_disclosure_events FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_provider_disclosure_events() TO mainai_app"))
+        # V4 runtime incidents: owner-visible history, never deleted through the app role.
+        # Rows disappear only through the user FK cascade during account erasure.
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON runtime_incidents FROM mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -1187,6 +1193,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("provider_spend_authorizations", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("provider_spend_usage_events", frozenset({"SELECT", "INSERT"})),
             ("provider_disclosure_events", frozenset({"SELECT", "INSERT"})),
+            ("runtime_incidents", frozenset({"SELECT", "INSERT", "UPDATE"})),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:

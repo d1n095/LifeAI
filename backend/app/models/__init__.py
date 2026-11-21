@@ -218,6 +218,7 @@ from app.models.project_memory import (
 )
 from app.models.github_status import GithubStatusSnapshot
 from app.models.provider_config import ProviderConfig
+from app.models.runtime_incident import RuntimeIncident
 from app.models.provider_disclosure import (
     ProviderDisclosureDecision,
     ProviderDisclosureEvent,

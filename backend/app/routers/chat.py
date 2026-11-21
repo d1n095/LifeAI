@@ -9,12 +9,16 @@ one assistant `MessageModel` row (enforced by migration 0016's partial unique in
 
 from base64 import urlsafe_b64encode
 
+import asyncio
+import json
 import logging
 import uuid
 from datetime import datetime
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -31,6 +35,7 @@ from app.db import get_db
 from app.deps import require_founder
 from app.egress_policy import EgressDeniedError
 from app.founder_memory_signals import record_candidate_signal
+from app.incidents.service import record_incident
 from app.limiter import limiter
 from app.mainai_runtime_contract import build_answer_response, sanitize_unverified_execution_claims
 from app.models.conversation import (
@@ -275,7 +280,10 @@ def _record_candidate_signal_if_worth_noticing(
         logger.warning("failed to record candidate learning signal for message %s (non-fatal)", user_message.id, exc_info=True)
 
 
-async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, user_message: MessageModel, user: User) -> ChatMessageOut:
+async def _attempt_assistant_reply(
+    db: Session, *, conversation: Conversation, user_message: MessageModel, user: User,
+    stream_observer=None,
+) -> ChatMessageOut:
     """Generates the assistant's reply for `user_message` (already committed). Used by both
     the initial send and the retry endpoint — a retry runs this exact same path, not a
     parallel one, so its behavior can never drift from the first attempt's."""
@@ -488,6 +496,7 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
             effect_guard=True,
             max_tokens=1024,
             attempt_observer=attempt_budget,
+            stream_observer=stream_observer,
         )
     except BillingBudgetExceededError as exc:
         # Proven pre-invoke refusal is retryable only after budget/policy changes.
@@ -507,6 +516,15 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
         assistant_row.content = ""
         db.commit()
         db.refresh(assistant_row)
+        _record_chat_incident(
+            db,
+            user=user,
+            user_message=user_message,
+            error_code="provider_unverified",
+            summary="Chat-modellen kunde inte verifieras",
+            severity="medium",
+            details={"error_category": "provider_unverified"},
+        )
         return ChatMessageOut(
             conversation_id=conversation.id,
             user_message_id=user_message.id,
@@ -545,6 +563,21 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
         # The failed reply row is still an honest part of the founder's history — capture
         # its provenance too (fail-open, same helper as the success path).
         _capture_message_source(db, message=assistant_row, conversation=conversation)
+        if category != "egress_denied":
+            _record_chat_incident(
+                db,
+                user=user,
+                user_message=user_message,
+                error_code=category,
+                summary="Chat provider misslyckades",
+                severity="high" if category in _UNRESOLVED_EFFECT_CATEGORIES else "medium",
+                details={
+                    "provider": assistant_row.provider,
+                    "model": assistant_row.model,
+                    "error_category": category,
+                    "streaming": stream_observer is not None,
+                },
+            )
         return ChatMessageOut(
             conversation_id=conversation.id,
             user_message_id=user_message.id,
@@ -643,6 +676,36 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
 
 
 
+def _record_chat_incident(
+    db: Session,
+    *,
+    user: User,
+    user_message: MessageModel,
+    error_code: str,
+    summary: str,
+    severity: str = "medium",
+    details: dict | None = None,
+) -> None:
+    """Best-effort local incident capture; never changes the chat response."""
+
+    try:
+        record_incident(
+            db,
+            owner_id=user.id,
+            error_code=error_code,
+            component="chat.provider",
+            severity=severity,
+            summary=summary,
+            correlation_id=str(user_message.id),
+            app_version="0.1.0",
+            details=details,
+        )
+        db.commit()
+    except Exception:
+        logger.exception("chat: incident capture failed for message %s", user_message.id)
+        db.rollback()
+
+
 def _capture_message_source(db: Session, *, message, conversation) -> None:
     """Capture the S1C immutable provenance unit (memory_source_units/message_source_units)
     for a message AT WRITE TIME (Founder Alpha audit gap A1-a: previously these existed
@@ -674,20 +737,27 @@ def _capture_message_source(db: Session, *, message, conversation) -> None:
         db.rollback()
 
 
-@router.post("", response_model=ChatMessageOut)
-@limiter.limit(f"{settings.rate_limit_chat_per_minute}/minute")
-async def chat(
-    request: Request,
-    payload: ChatMessageIn,
-    db: Session = Depends(get_db),
-    user: User = Depends(require_founder),
-):
+def _get_or_create_chat_turn(
+    db: Session, *, payload: ChatMessageIn, user: User
+) -> tuple[Conversation | None, MessageModel | None, ChatRequestClaim | None, bool]:
+    """Resolve one logical send exactly once.
+
+    Both the JSON and streaming routes share this function so their idempotency and
+    durability behavior cannot drift. The fourth return value says whether this call
+    created the user message (and therefore needs the provenance capture).
+    """
+
     if payload.client_message_id is not None:
         existing_claim = _get_chat_request_claim(
             db, owner_id=user.id, client_message_id=payload.client_message_id
         )
         if existing_claim is not None:
-            return await _replay_chat_request(db, claim=existing_claim, payload=payload, user=user)
+            return (
+                db.get(Conversation, existing_claim.conversation_id),
+                db.get(MessageModel, existing_claim.user_message_id),
+                existing_claim,
+                False,
+            )
 
     conversation = None
     if payload.conversation_id:
@@ -706,11 +776,8 @@ async def chat(
             # Keep the new conversation uncommitted until the claim and user message are
             # durable together; a losing concurrent duplicate rolls all three back.
             db.flush()
-        # No db.refresh(): id/created_at/updated_at are populated client-side by SQLAlchemy
-        # at flush (see app/models/conversation.py defaults), so the object is already
-        # fully populated — a refresh would just be an unnecessary extra round-trip.
 
-    # THE FIX: persisted and committed before any provider is ever called. With a client
+    # Persisted and committed before any provider is ever called. With a client
     # idempotency key the user message and its claim are committed in the SAME transaction,
     # so a concurrent duplicate either wins the unique constraint or replays the winner —
     # never a second user message and never a second billable provider call.
@@ -743,11 +810,255 @@ async def chat(
                     status_code=409,
                     detail="Förfrågan kunde inte idempotenssäkras.",
                 ) from None
-            return await _replay_chat_request(db, claim=existing_claim, payload=payload, user=user)
+            return (
+                db.get(Conversation, existing_claim.conversation_id),
+                db.get(MessageModel, existing_claim.user_message_id),
+                existing_claim,
+                False,
+            )
     db.refresh(user_message)
     _capture_message_source(db, message=user_message, conversation=conversation)
+    return conversation, user_message, None, True
 
+
+@router.post("", response_model=ChatMessageOut)
+@limiter.limit(f"{settings.rate_limit_chat_per_minute}/minute")
+async def chat(
+    request: Request,
+    payload: ChatMessageIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    conversation, user_message, existing_claim, _created = _get_or_create_chat_turn(
+        db, payload=payload, user=user
+    )
+    if existing_claim is not None:
+        return await _replay_chat_request(db, claim=existing_claim, payload=payload, user=user)
+    assert conversation is not None and user_message is not None
     return await _attempt_assistant_reply(db, conversation=conversation, user_message=user_message, user=user)
+
+
+class _StreamObserver:
+    """Narrow callback from the provider layer to one SSE response.
+
+    It carries only text deltas; the final ChatMessageOut still comes from the one shared
+    `_attempt_assistant_reply` path, so persistence, billing, provenance and sanitization
+    remain identical to the JSON endpoint.
+    """
+
+    def __init__(self) -> None:
+        self.queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+
+    async def delta(self, text: str) -> None:
+        await self.queue.put(("delta", text))
+
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _mark_stream_interrupted(db: Session, *, user_message_id: uuid.UUID) -> None:
+    """Persist an honest terminal state after a disconnect/cancel.
+
+    If the provider was never selected, the attempt is safely retryable. If a provider name
+    was already written, the external effect is unknown; the reply is marked unresolved so a
+    blind retry cannot double-charge it.
+    """
+
+    try:
+        db.rollback()
+        reply = (
+            db.query(MessageModel)
+            .filter_by(in_reply_to_id=user_message_id)
+            .with_for_update()
+            .one_or_none()
+        )
+        if reply is None or reply.status == MessageStatus.succeeded:
+            return
+        reply.status = MessageStatus.failed
+        reply.error_category = "external_effect_unresolved" if reply.provider else "cancelled"
+        reply.content = ""
+        db.commit()
+    except Exception:
+        logger.exception("chat stream: could not persist interrupted reply for %s", user_message_id)
+        db.rollback()
+
+
+async def _stream_saved_response(out: ChatMessageOut):
+    yield _sse(
+        "start",
+        {
+            "conversation_id": str(out.conversation_id),
+            "user_message_id": str(out.user_message_id),
+            "assistant_message_id": str(out.assistant_message_id) if out.assistant_message_id else None,
+        },
+    )
+    if out.reply:
+        yield _sse("delta", {"text": out.reply})
+    yield _sse("done", out.model_dump(mode="json"))
+
+
+async def _stream_existing_claim(
+    request: Request, db: Session, *, claim: ChatRequestClaim, payload: ChatMessageIn, user: User
+):
+    conversation = db.get(Conversation, claim.conversation_id)
+    user_message = db.get(MessageModel, claim.user_message_id)
+    if conversation is None or user_message is None or conversation.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Meddelandet hittades inte.")
+    if payload.conversation_id is not None and payload.conversation_id != conversation.id:
+        raise HTTPException(
+            status_code=409,
+            detail="Idempotensnyckeln användes redan för en annan konversation.",
+        )
+    if user_message.content != payload.message:
+        raise HTTPException(
+            status_code=409,
+            detail="Idempotensnyckeln användes redan för ett annat meddelande.",
+        )
+
+    reply = _get_or_create_reply_slot(db, user_message.id)
+    if reply is None:
+        return _stream_new_turn(request, db, conversation=conversation, user_message=user_message, user=user)
+    if str(reply.error_category or "").startswith(("provider_inflight", "inflight:")) or (
+        reply.error_category in _UNRESOLVED_EFFECT_CATEGORIES
+    ):
+        raise HTTPException(status_code=409, detail="Provider outcome is unresolved; retry is blocked.")
+    if reply.status == MessageStatus.succeeded:
+        out = ChatMessageOut(
+            conversation_id=conversation.id,
+            user_message_id=user_message.id,
+            assistant_status="succeeded",
+            assistant_message_id=reply.id,
+            reply=reply.content,
+            provider=reply.provider,
+            model=reply.model,
+        )
+    else:
+        out = ChatMessageOut(
+            conversation_id=conversation.id,
+            user_message_id=user_message.id,
+            assistant_status="failed",
+            assistant_message_id=reply.id,
+            provider=reply.provider,
+            model=reply.model,
+            error_category=reply.error_category,
+            retryable=reply.error_category in _RETRYABLE_ERROR_CATEGORIES,
+        )
+    return StreamingResponse(
+        _stream_saved_response(out),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _stream_new_turn(
+    request: Request, db: Session, *, conversation: Conversation, user_message: MessageModel, user: User
+):
+    observer = _StreamObserver()
+
+    async def run_attempt() -> None:
+        try:
+            out = await _attempt_assistant_reply(
+                db,
+                conversation=conversation,
+                user_message=user_message,
+                user=user,
+                stream_observer=observer,
+            )
+            await observer.queue.put(("done", out))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("chat stream: unexpected attempt failure for %s", user_message.id)
+            await observer.queue.put(("error", None))
+
+    task = asyncio.create_task(run_attempt())
+
+    async def generate():
+        try:
+            yield _sse(
+                "start",
+                {
+                    "conversation_id": str(conversation.id),
+                    "user_message_id": str(user_message.id),
+                    "assistant_message_id": None,
+                },
+            )
+            loop = asyncio.get_running_loop()
+            last_keepalive = loop.time()
+            while True:
+                try:
+                    kind, payload = await asyncio.wait_for(observer.queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    if await request.is_disconnected():
+                        break
+                    now = loop.time()
+                    if now - last_keepalive >= 15:
+                        yield ": keepalive\n\n"
+                        last_keepalive = now
+                    continue
+                if kind == "delta":
+                    yield _sse("delta", {"text": payload})
+                elif kind == "done":
+                    yield _sse("done", payload.model_dump(mode="json"))
+                    break
+                else:
+                    _mark_stream_interrupted(db, user_message_id=user_message.id)
+                    yield _sse(
+                        "error",
+                        {
+                            "message": "Ett oväntat fel avbröt svaret. Meddelandet finns sparat; försök igen.",
+                            "retryable": False,
+                        },
+                    )
+                    break
+        finally:
+            if not task.done():
+                task.cancel()
+                finished = True
+                try:
+                    await asyncio.wait_for(task, timeout=5)
+                except asyncio.TimeoutError:
+                    # The provider ignored cancellation. Do not touch the shared Session
+                    # while that attempt may still be using it; leaving the durable
+                    # inflight claim is the safe, retry-blocking outcome.
+                    finished = False
+                except asyncio.CancelledError:
+                    finished = True
+                if finished:
+                    _mark_stream_interrupted(db, user_message_id=user_message.id)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/stream")
+@limiter.limit(f"{settings.rate_limit_chat_per_minute}/minute")
+async def chat_stream(
+    request: Request,
+    payload: ChatMessageIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Token-streaming sibling of POST /api/chat.
+
+    It deliberately shares `_get_or_create_chat_turn` and `_attempt_assistant_reply` with the
+    JSON endpoint. The only difference is that provider deltas are forwarded as SSE while the
+    attempt is running; the final `done` event is the same `ChatMessageOut` contract.
+    """
+
+    conversation, user_message, existing_claim, _created = _get_or_create_chat_turn(
+        db, payload=payload, user=user
+    )
+    if existing_claim is not None:
+        return await _stream_existing_claim(
+            request, db, claim=existing_claim, payload=payload, user=user
+        )
+    assert conversation is not None and user_message is not None
+    return _stream_new_turn(request, db, conversation=conversation, user_message=user_message, user=user)
 
 
 @router.post("/messages/{message_id}/retry", response_model=ChatMessageOut)

@@ -46,6 +46,7 @@ from app.jobs.lease import claim_next_job
 from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.jobs.service import mark_failed, record_claimed
+from app.incidents.service import record_incident
 from app.mainai_execution.approval import ApprovalRequiredError
 from app.mainai_execution.execution_job import _finalize_task_outcome, resume_waiting_ci_task, run_task_execution_job
 from app.mainai_execution.executor import dispatch_ready_task, retry_task, task_for_job
@@ -228,6 +229,22 @@ async def process_claimed_mainai_job(
         if job is not None:
             try:
                 mark_failed(db, job, worker_id=worker_id, lease_generation=lease_generation, error_category=MainAIJobErrorCategory.unexpected)
+                try:
+                    record_incident(
+                        db,
+                        owner_id=owner_id,
+                        error_code="worker_unexpected",
+                        component="worker.mainai_job",
+                        severity="high",
+                        summary="Worker misslyckades med ett MainAI-jobb",
+                        correlation_id=str(job_id),
+                        app_version="0.1.0",
+                        details={"job_id": str(job_id), "failure_class": "unexpected"},
+                    )
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    logger.exception("Worker %s: could not record incident for job %s.", worker_id, job_id)
             except JobLeaseLostError:
                 logger.warning("Worker %s: lease already lost for mainai_job %s -- could not record the failure.", worker_id, job_id)
 
