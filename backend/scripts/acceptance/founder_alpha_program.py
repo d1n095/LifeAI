@@ -404,7 +404,7 @@ class Program:
                 json={"name": f"Program project {self.run_id}", "description": "isolated acceptance project"},
                 headers={"X-CSRF-Token": csrf},
             )
-            if project.status_code == 201:
+            if project.status_code in (200, 201):
                 project_id = project.json()["id"]
                 task = client.post(
                     "/api/projects/tasks",
@@ -677,12 +677,16 @@ class Program:
             timeout=max(120, duration + 90),
         )
         data = _read_json(out) or {}
-        status = data.get("status") or ("FAIL" if result.returncode not in (0, 3) else "BLOCKED")
-        if duration < REQUIRED_SOAK_SECONDS:
+        failures = data.get("failures") or []
+        if failures or result.returncode not in (0, 3):
+            status = "FAIL"
+        elif duration < REQUIRED_SOAK_SECONDS:
             status = "BLOCKED"
+        else:
+            status = data.get("status") if data.get("status") in {"PASS", "FAIL", "BLOCKED"} else "BLOCKED"
         self.check(
             "endurance soak",
-            status if status in {"PASS", "FAIL", "BLOCKED"} else "BLOCKED",
+            status,
             {
                 "exit": result.returncode,
                 "status": status,
@@ -690,6 +694,7 @@ class Program:
                 "required_seconds": REQUIRED_SOAK_SECONDS,
                 "f23_status": "BLOCKED" if duration < REQUIRED_SOAK_SECONDS else data.get("f23_status"),
                 "blockers": data.get("blockers"),
+                "failures": failures,
             },
         )
 
@@ -881,6 +886,9 @@ class Program:
             self._contracts()
             self._journey()
             self._restart()
+            # The remaining probes start their own backend/worker. Keeping the main one alive
+            # would put two workers on the same database and let them race for import jobs.
+            self._stop_backend()
             self._recovery_matrix()
             self._backup_restore()
             self._upgrade()
