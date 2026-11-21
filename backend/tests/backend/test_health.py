@@ -23,6 +23,33 @@ import pytest
 from app.routers import health as health_router
 
 
+# --------------------------------------------------------------- liveness / readiness split
+
+def test_liveness_does_not_depend_on_database_or_redis(client, monkeypatch):
+    monkeypatch.setattr(health_router, "_check_database", lambda _db: False)
+    monkeypatch.setattr(health_router, "_check_redis", lambda: False)
+    res = client.get("/api/health/live")
+    assert res.status_code == 200
+    assert res.json() == {"status": "ok"}
+
+
+def test_readiness_is_ok_when_dependencies_are_available(client, monkeypatch):
+    monkeypatch.setattr(health_router, "_check_database", lambda _db: True)
+    monkeypatch.setattr(health_router, "_check_redis", lambda: True)
+    res = client.get("/api/health/ready")
+    assert res.status_code == 200
+    assert res.json() == {"status": "ok"}
+
+
+@pytest.mark.parametrize("database_ok,redis_ok", [(False, True), (True, False), (False, False)])
+def test_readiness_fails_closed_without_leaking_dependency_details(client, monkeypatch, database_ok, redis_ok):
+    monkeypatch.setattr(health_router, "_check_database", lambda _db: database_ok)
+    monkeypatch.setattr(health_router, "_check_redis", lambda: redis_ok)
+    res = client.get("/api/health/ready")
+    assert res.status_code == 503
+    assert res.json() == {"status": "unavailable"}
+
+
 # ------------------------------------------------------------------------------ worker field
 
 def test_health_reports_alive_when_heartbeat_is_present(client, monkeypatch):

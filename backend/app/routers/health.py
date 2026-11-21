@@ -139,6 +139,34 @@ def _check_local_model(db: Session) -> dict[str, Any] | None:
     }
 
 
+@router.get("/live")
+def live():
+    """Process liveness only.
+
+    This endpoint deliberately performs no database, Redis or model probe. It answers the
+    narrow question an orchestrator asks before restarting a process: "is this process able
+    to serve HTTP at all?" Dependency failures belong to ``/ready`` so a transient database
+    outage does not cause a restart loop of an otherwise healthy API process.
+    """
+    return {"status": "ok"}
+
+
+@router.get("/ready")
+def ready(response: Response, db: Session = Depends(get_db)):
+    """Dependency readiness for traffic admission.
+
+    Unlike liveness, this fails closed with 503 when the database or a configured Redis is
+    unreachable. The body stays intentionally generic, matching ``/api/health``: connection
+    strings and exception details are logged server-side only. The worker heartbeat is not a
+    readiness condition here, because an idle API without a worker can still serve reads and
+    the existing founder ops view classifies worker availability separately.
+    """
+    if not (_check_database(db) and _check_redis()):
+        response.status_code = 503
+        return {"status": "unavailable"}
+    return {"status": "ok"}
+
+
 @router.get("")
 def health(response: Response, db: Session = Depends(get_db)):
     """Genuinely checks dependencies (database, Redis if configured) instead of returning a
