@@ -85,7 +85,7 @@
       "title": "Dokumentuppladdning",
       "status": "PASS",
       "evidence": {
-        "tests": 82,
+        "tests": 84,
         "failed": 0,
         "skipped": 1,
         "needles": [
@@ -101,7 +101,7 @@
       "title": "Indexering och embeddings",
       "status": "PASS",
       "evidence": {
-        "tests": 50,
+        "tests": 52,
         "failed": 0,
         "skipped": 1,
         "needles": [
@@ -270,7 +270,7 @@
       "title": "Redis- och köfel",
       "status": "PASS",
       "evidence": {
-        "tests": 9,
+        "tests": 10,
         "failed": 0,
         "skipped": 0,
         "needles": [

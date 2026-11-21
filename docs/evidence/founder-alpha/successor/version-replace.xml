@@ -1,14 +1,14 @@
 <?xml version='1.0' encoding='utf-8'?>
-<testsuites tests="7" failures="0" errors="0" skipped="0" time="24.333">
-  <testsuite name="pytest" errors="0" failures="0" skipped="0" tests="2" time="7.490" timestamp="2026-11-21T13:29:04.055169+00:00" hostname="ubuntu">
-    <testcase classname="tests.backend.rag.test_library_import" name="test_resume_claim_extraction_crash_after_flush_rolls_back_cleanly" time="5.147" />
-    <testcase classname="tests.backend.rag.test_library_import" name="test_resume_recreates_missing_version_and_storage_after_crash_between_commits" time="1.224" />
+<testsuites tests="7" failures="0" errors="0" skipped="0" time="21.160">
+  <testsuite name="pytest" errors="0" failures="0" skipped="0" tests="2" time="7.078" timestamp="2026-11-21T14:50:20.678251+00:00" hostname="ubuntu">
+    <testcase classname="tests.backend.rag.test_library_import" name="test_resume_claim_extraction_crash_after_flush_rolls_back_cleanly" time="4.799" />
+    <testcase classname="tests.backend.rag.test_library_import" name="test_resume_recreates_missing_version_and_storage_after_crash_between_commits" time="1.174" />
   </testsuite>
-  <testsuite name="pytest" errors="0" failures="0" skipped="0" tests="5" time="16.843" timestamp="2026-11-21T13:28:45.282310+00:00" hostname="ubuntu">
-    <testcase classname="tests.backend.rag.test_library_replace" name="test_replace_source_creates_next_version_and_invalidates_old_retrieval" time="9.109" />
-    <testcase classname="tests.backend.rag.test_library_replace" name="test_replace_requires_explicit_confirmation" time="1.971" />
-    <testcase classname="tests.backend.rag.test_library_replace" name="test_replace_identical_bytes_is_refused_without_creating_a_version" time="1.788" />
-    <testcase classname="tests.backend.rag.test_library_replace" name="test_replace_with_content_already_owned_by_another_source_is_refused" time="1.613" />
-    <testcase classname="tests.backend.rag.test_library_replace" name="test_replace_route_requires_founder" time="2.285" />
+  <testsuite name="pytest" errors="0" failures="0" skipped="0" tests="5" time="14.082" timestamp="2026-11-21T14:49:46.032878+00:00" hostname="ubuntu">
+    <testcase classname="tests.backend.rag.test_library_replace" name="test_replace_source_creates_next_version_and_invalidates_old_retrieval" time="7.524" />
+    <testcase classname="tests.backend.rag.test_library_replace" name="test_replace_requires_explicit_confirmation" time="1.632" />
+    <testcase classname="tests.backend.rag.test_library_replace" name="test_replace_identical_bytes_is_refused_without_creating_a_version" time="1.534" />
+    <testcase classname="tests.backend.rag.test_library_replace" name="test_replace_with_content_already_owned_by_another_source_is_refused" time="1.581" />
+    <testcase classname="tests.backend.rag.test_library_replace" name="test_replace_route_requires_founder" time="1.742" />
   </testsuite>
 </testsuites>

@@ -1,6 +1,6 @@
 # Founder Alpha successor — QA-evidens (2026-11-21)
 
-**Kandidat:** `0db06d528942dec26d3217128ba1443c09fbf1f3`
+**Kodkandidat:** `4814a1d5e10974b490af0fb41f3fc2c08ca43e8b`
 **Branch:** `claude/founder-alpha-fullstack-qa` (bas `6ececab`)
 **QA-grind:** **BLOCKED** — 21 PASS, 0 FAIL, 3 BLOCKED, 0 SKIP
 **Ingen push, PR, merge eller deployment har gjorts.** `first_cycle_go=false`.
@@ -50,13 +50,15 @@
 
 | Svit | Resultat |
 | --- | --- |
-| Samlad backend-JUnit | **522 tester, 0 failures, 0 errors, 2 skips** |
+| Samlad backend-JUnit | **527 tester, 0 failures, 0 errors, 2 skips (525 passed)** |
 | Health/startup/OpenAPI/config | **48 passed** |
 | Auth/session | **11 passed** |
 | Providers | **228 passed** |
 | Chat-historik | **18 passed** |
 | Bibliotek/RAG/uppladdning | **81 passed, 1 skipped** (`zip` saknas) |
 | F09 RAG-kvalitet | **6 passed** |
+| Beteendekrav (beslut/agent/korrigering) | **3 passed** |
+| PR #464 oberoende fokustester | **66 passed** |
 | Playwright founder/E2E | **12 passed, 0 failed, 0 flaky** |
 | Explicit ersättning/version | **5 passed** |
 | Crash-säker version-resume | **2 passed** |
@@ -66,6 +68,15 @@
 | F18 recovery-matris | **PASS** |
 | F01–F24 | **21 PASS, 0 FAIL, 3 BLOCKED** |
 | QA-grind | **BLOCKED** (exit 3) |
+
+## PR #464 — oberoende granskning
+
+PR #464 (`8667146`, bas `16a6bd3`) granskades som en riktig diff och dess egna
+R15-/chat-retrytester kördes i en separat worktree: **66 passed, 0 failed, 0
+skipped**. Inga kodändringar gjordes i PR:en. Granskningen omfattar retry och
+dubbelräkning, provider-timeout/503, osäkra externa effekter, eval-isolering och
+race conditions. Fullständig analys och kvarstående risker finns i
+[`../pr464-review.md`](../pr464-review.md).
 
 ## Reproducerbara kommandon
 
@@ -103,6 +114,8 @@ pytest tests/backend/test_openai_consult.py --junitxml=/tmp/sub-g.xml -q
 pytest tests/backend/rag/test_library_replace.py --junitxml=/tmp/replace-tests.xml -q
 pytest tests/backend/rag/test_library_import.py -k "resume" --junitxml=/tmp/version-resume.xml -q
 pytest tests/backend/rag/test_rag_quality_matrix.py --junitxml=/tmp/rag-quality.xml -q
+pytest tests/backend/mainai/test_founder_behavior_requirements.py \
+  --junitxml=/tmp/behavior.xml -q
 
 python scripts/acceptance/merge_junit.py --out /tmp/version-replace.xml \
   /tmp/version-resume.xml /tmp/replace-tests.xml
@@ -110,7 +123,7 @@ python scripts/acceptance/merge_junit.py --out /tmp/version-replace.xml \
 python scripts/acceptance/merge_junit.py --out /tmp/program-tests.xml \
   /tmp/sub-a.xml /tmp/sub-b.xml /tmp/sub-c.xml /tmp/sub-d.xml \
   /tmp/sub-e.xml /tmp/sub-f.xml /tmp/sub-g.xml /tmp/replace-tests.xml \
-  /tmp/rag-quality.xml
+  /tmp/rag-quality.xml /tmp/behavior.xml
 
 # Playwright: kör per spec med rensade testtabeller mellan varje, mot riktig
 # backend/worker. Upprepa för auth, shell-pages, founder-knowledge-studio,
@@ -167,7 +180,8 @@ python scripts/acceptance/qa_gate.py \
   `stream=false`. Ingen verklig lokal konversation kunde köras. Detta får inte
   lösas genom att installera en tung modell på 1,8 GiB-VPS:en.
 - **F23:** Fyra timmars aktiv soak är inte körd; en kort smoke är inte
-  ekvivalent. Kräver en separat resursbegränsad testmiljö.
+  ekvivalent. Kräver en separat resursbegränsad testmiljö. Förberedd runbook:
+  [`../soak-runbook.md`](../soak-runbook.md).
 - **F24:** Grinden är BLOCKED eftersom F04 och F23 är BLOCKED; alla övriga
   arbetsområden är PASS.
 

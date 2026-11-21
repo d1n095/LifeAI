@@ -17,8 +17,9 @@ F01–F24-matris, JUnit-sammanslagning och BLOCKED-propagering i QA-grinden, `b8
 testkontrakt för planner/egress, `2771905` F05-matchning av JUnit-classnames, `c527543`
 riktig PostgreSQL-felinjektion för F13, `35d65a9` explicit ersättning/versionsbyte med
 F11-tester och Knowledge Studio-UI, `0db06d5` F09 RAG-kvalitetsmatris och 12/12 riktig
-Playwright-founderresa. Dokumentationscommiten med denna post och evidensen ligger ovanpå
-`0db06d5`.
+Playwright-founderresa, `4814a1d` tre riktiga beteendetester för beständiga beslut,
+bounded agentstyrning och korrigerat beteende. Dokumentationscommiten med denna post,
+PR #464-granskningen och den nya 527-testevidensen ligger ovanpå `4814a1d`.
 
 **Scope:** En verklig crash-window-bugg i `app/rag/library_import.py` är reparerad: en
 `Document`-rad som committats före `KnowledgeVersion`/`storage_key` kunde återupptas som
@@ -34,16 +35,20 @@ irrelevanta, motstridiga, historiska och explicit ersatta källor. Den fulla fou
 körs i Playwright mot riktig Next.js-proxy, backend och durable worker. Ingen ny
 produktarkitektur eller parallell minnesväg har införts.
 
-**Faktiska resultat:** samlad backend-JUnit **522 tester, 0 failures, 0 errors, 2 skips**
-(`zip` och live OpenAI). F09 **PASS**: 6 riktiga RAG-kvalitetstester. F11 **PASS**: 5
+**Faktiska resultat:** samlad backend-JUnit **527 tester, 0 failures, 0 errors, 2 skips**
+(525 passed; `zip` och live OpenAI). F09 **PASS**: 6 riktiga RAG-kvalitetstester.
+Beteendekraven **3/3 PASS**: beständigt superseded beslut över ny DB-session, körande
+agent med slutfört arbete som inte avbryts/återsänds, samt founder-korrigerad regel som
+ändrar den faktiska verifieringsplanen. PR #464 **66 fokustester PASS** i separat
+worktree, utan ändringar i PR:en. F11 **PASS**: 5
 ersättningstester och 2 crash-resume-tester. F12/F19/F21 **PASS**: 12/12 Playwright-tester
 mot riktig backend/worker, inklusive import → indexering → sökning → källciterat svar →
 öppna källa → fortsätta → radering, mobil layout och felåterhämtning. F13 **6/6 PASS**:
 rollback, en exakt deadlock `40P01`, låstimeout `55P03`, statement/commit-timeout `57014`,
 dödad backend med återanslutning och samtidiga commits. F18 recovery-matris **PASS**.
-F01–F24: **21 PASS, 0 FAIL, 3 BLOCKED**. QA-grinden körde mot exakt `0db06d5` med ren
+F01–F24: **21 PASS, 0 FAIL, 3 BLOCKED**. QA-grinden körs mot evidens-HEAD ovanpå `4814a1d` med ren
 tracked tree, Alembic `0091`, PostgreSQL/Redis nåbara, installmatris 12/0/0, resursprobe
-PASS, 522 backendtester och 12/12 browser-E2E; resultatet är **BLOCKED** (exit 3), inte PASS.
+PASS, 527 backendtester och 12/12 browser-E2E; resultatet är **BLOCKED** (exit 3), inte PASS.
 
 **Kvarstående blockerare:** F04 (Ollama saknas), F23 (fyra timmars soak) och F24 (grinden
 ärver dessa). `pg_stat_statements`, `zip`, Z.ai-CLI, exakt-head GitHub Actions och
@@ -52,8 +57,8 @@ resursutmattning är fortsatt kända begränsningar.
 **Evidens:** `docs/evidence/founder-alpha/successor/` (`program-tests.xml`,
 `recovery-matrix.json`, `postgres-faults.json`, `version-resume.xml`,
 `version-replace.xml`, `rag-quality.json`, `rag-quality.xml`, `playwright-founder.json`,
-`program-matrix.json`, `qa-gate.json`, `qa-gate.md` och `README.md` med reproducerbara
-kommandon).
+`behavior-requirements.xml`, `program-matrix.json`, `qa-gate.json`, `qa-gate.md`,
+`README.md` med reproducerbara kommandon, `pr464-review.md` och `soak-runbook.md`).
 
 **Merge:** efter R15 och den tidigare reliability-leveransen. Inga ändringar i Codex- eller
 Z-brancher; ingen känd överlappning. F09, F12, F19 och F21 är nu stängda med riktig
