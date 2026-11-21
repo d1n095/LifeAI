@@ -256,9 +256,20 @@ async def test_demo_1_full_success_path_end_to_end_through_the_real_worker_poll_
     for task_type, task in by_type.items():
         assert task.status == MainAITaskStatus.completed, f"{task_type} ended as {task.status.value}, not completed"
 
-    written = tmp_path / "backend" / "tests" / "test_demo_doc_fix.py"
-    assert written.exists()
-    assert "assert True" in written.read_text()
+    # BEHAVIOR CHANGE (founder directive, independent-review finding PI-1d): this used to
+    # assert the proposed test file landed directly inside `tmp_path` (the fake repo root) --
+    # the original, now-fixed defect PI-1d exists to close. It now asserts the opposite: the
+    # fake repo root was never touched, which is only possible if the full real chain still
+    # worked end to end across THREE separate tasks sharing one disposable workspace --
+    # repo_edit wrote it, run_tests verified it there too (not against _backend_root()), and
+    # by the time this goal closed, its workspace is already cleaned up (see below).
+    from app.mainai_execution.execution_job import _proposal_workspace_path
+
+    assert not (tmp_path / "backend" / "tests" / "test_demo_doc_fix.py").exists()
+    assert not _proposal_workspace_path(by_type["repo_edit"].id).exists(), (
+        "PI-1d: the goal is fully terminal now (every task completed) -- its repo_edit "
+        "sibling's disposable workspace must be cleaned up, not left on disk"
+    )
 
     open_pr_event = superuser_db.execute(
         sa_text("SELECT detail FROM mainai_task_events WHERE task_id = :t AND event_type = 'completed'"), {"t": str(by_type["open_pr"].id)}

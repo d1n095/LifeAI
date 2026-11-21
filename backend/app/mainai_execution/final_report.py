@@ -320,6 +320,24 @@ def record_final_report(db: Session, *, goal: MainAIGoal) -> dict:
         goal.completed_at = datetime.utcnow()
         goal.status = MainAIGoalStatus.completed if all(s == MainAITaskStatus.completed for s in task_statuses) else MainAIGoalStatus.failed
         db.flush()
+        # PI-1d (founder directive, "RESUME LIFEAI FIRST-CYCLE REMEDIATION" /
+        # "FOUNDER DECISION — EGRESS AUTHORIZATION & FIRST-CYCLE INTEGRATION"): proposal-mode
+        # repo_edit tasks (execution_job.py's _propose_repo_edit()) write into a disposable,
+        # per-TASK workspace rather than the live backend checkout -- but that workspace is a
+        # GOAL-level shared resource while the goal runs: a sibling run_tests task (dispatched
+        # LATER, as its own separate task/job) reads it via _handle_run_tests()'s own
+        # `proposal_workspace` lookup. Cleaning it up at the repo_edit task's OWN finalization
+        # (tried first, found wrong: a real regression reproduced it -- see this fix's PR
+        # description) deleted it out from under that still-pending sibling. THIS is the one
+        # point that's actually safe: every task under the goal, repo_edit's sibling run_tests
+        # included, is confirmed genuinely terminal right here, so nothing can still need it.
+        # Local import avoids a circular import -- execution_job.py imports
+        # record_final_report from this module.
+        from app.mainai_execution.execution_job import _cleanup_proposal_workspace
+
+        for t in report["tasks"]:
+            if t["task_type"] == "repo_edit":
+                _cleanup_proposal_workspace(uuid.UUID(t["task_id"]))
     else:
         has_waiting = any(s in _WAITING_TASK_STATUSES for s in task_statuses)
         has_actionable = any(s in _IMMEDIATELY_ACTIONABLE_TASK_STATUSES for s in task_statuses)

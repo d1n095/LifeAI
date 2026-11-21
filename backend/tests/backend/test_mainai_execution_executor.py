@@ -1060,8 +1060,20 @@ async def test_run_task_execution_job_repo_edit_proposes_only_with_real_local_ve
     """github_write_enabled defaults to False (app/config.py) and no GitHub credentials are
     configured in this test environment, so any accidental attempt at a real network call would
     itself fail this test -- the absence of a mock IS the assertion. What must still be real:
-    the AI-proposed file content is actually written locally and a real subprocess pytest run
-    verifies it before the task can complete."""
+    the AI-proposed file content is actually written somewhere real and a real subprocess
+    pytest run verifies it before the task can complete.
+
+    BEHAVIOR CHANGE (founder directive, independent-review finding PI-1d): before this fix,
+    this test asserted the proposed file landed directly inside `tmp_path` (the fake repo
+    root) -- the ORIGINAL, now-fixed defect this whole mechanism exists to close (proposal
+    mode used to mutate the live checkout it stood in for). It now asserts the opposite: the
+    fake repo root is NEVER touched (the direct proof of isolation), while the task still
+    reaches `completed` -- which is only possible if a real pytest run against the proposed
+    content, somewhere else entirely (the disposable workspace), actually passed. A sibling
+    test below (`test_propose_repo_edit_writes_into_an_isolated_disposable_workspace_not_the_
+    real_repo_root`) checks the disposable copy's own content directly, and
+    `test_run_task_execution_job_repo_edit_proposal_mode_cleans_up_its_disposable_workspace_
+    on_completion` checks that it's gone again afterward."""
     from app.mainai_execution import execution_job
 
     monkeypatch.setattr(execution_job, "_repo_root", lambda: tmp_path)
@@ -1087,9 +1099,8 @@ async def test_run_task_execution_job_repo_edit_proposes_only_with_real_local_ve
     _set_rls_user(db_session, owner_id)
     await run_task_execution_job(db_session, job.id, owner_id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
 
-    written = tmp_path / "backend" / "tests" / "test_scratch_edit.py"
-    assert written.exists()
-    assert "assert 2 + 3 == 5" in written.read_text()
+    never_written = tmp_path / "backend" / "tests" / "test_scratch_edit.py"
+    assert not never_written.exists(), "PI-1d: proposal-mode edits must never land in the real repo root, even on success"
 
     job = superuser_db.get(MainAIJob, job.id)
     assert job.status == MainAIJobStatus.completed
@@ -1102,6 +1113,140 @@ async def test_run_task_execution_job_repo_edit_proposes_only_with_real_local_ve
     ).scalar_one()
     assert completed_event["work_result"]["proposed"] is True
     assert "branch" in completed_event["work_result"]
+    # PI-1d: the durable record of WHERE the proposal actually lives, never a path under the
+    # real (fake) repo root.
+    assert completed_event["work_result"]["proposal_workspace"].startswith("/tmp/mainai-proposal-workspaces/")
+
+
+@pytest.mark.asyncio
+async def test_propose_repo_edit_writes_into_an_isolated_disposable_workspace_not_the_real_repo_root(db_session, owner_id, monkeypatch, tmp_path):
+    """PI-1d, direct proof of WHERE the content actually goes: calls _propose_repo_edit()
+    itself (not the full job, so this runs before any terminal-state cleanup could remove the
+    workspace) and checks its own returned `proposal_workspace` path for the real file content,
+    while confirming the real (fake) repo root was never touched."""
+    from app.mainai_execution import execution_job
+    from app.mainai_execution.execution_job import _propose_repo_edit
+
+    monkeypatch.setattr(execution_job, "_repo_root", lambda: tmp_path)
+    (tmp_path / "backend" / "tests").mkdir(parents=True)
+    (tmp_path / "README.md").write_text("original\n")
+    monkeypatch.setattr(
+        OpenAIProvider,
+        "chat",
+        _fake_chat('{"files": [{"path": "backend/tests/test_scratch_edit.py", "content": "def test_scratch_edit():\\n    assert 2 + 3 == 5\\n"}], "commit_message": "x"}'),
+    )
+
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(db_session, goal, task_type="repo_edit", verification_plan=[])
+    db_session.commit()
+
+    work_result = await _propose_repo_edit(db_session, task)
+
+    assert not (tmp_path / "backend" / "tests" / "test_scratch_edit.py").exists()
+
+    workspace = Path(work_result["proposal_workspace"])
+    assert workspace != tmp_path
+    assert str(workspace).startswith("/tmp/mainai-proposal-workspaces/")
+    written = workspace / "backend" / "tests" / "test_scratch_edit.py"
+    assert written.exists()
+    assert "assert 2 + 3 == 5" in written.read_text()
+    # The rest of the real repo tree was genuinely copied too, not just the one edited file.
+    assert (workspace / "README.md").read_text() == "original\n"
+
+
+@pytest.mark.asyncio
+async def test_run_task_execution_job_repo_edit_proposal_mode_cleans_up_its_disposable_workspace_on_completion(
+    db_session, superuser_db, owner_id, monkeypatch, tmp_path
+):
+    """PI-1d cleanup requirement: once the owning task reaches a terminal `completed` state,
+    its disposable proposal workspace must be gone -- never accumulating indefinitely under
+    /tmp across every proposal-mode attempt the system ever makes."""
+    from app.mainai_execution import execution_job
+    from app.mainai_execution.execution_job import _proposal_workspace_path
+
+    monkeypatch.setattr(execution_job, "_repo_root", lambda: tmp_path)
+    (tmp_path / "backend" / "tests").mkdir(parents=True)
+    monkeypatch.setattr(
+        OpenAIProvider,
+        "chat",
+        _fake_chat('{"files": [{"path": "backend/tests/test_scratch_edit.py", "content": "def test_scratch_edit():\\n    assert 2 + 3 == 5\\n"}], "commit_message": "x"}'),
+    )
+
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(
+        db_session, goal, task_type="repo_edit", verification_plan=[{"kind": "targeted_tests", "target": "tests/test_scratch_edit.py"}]
+    )
+
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _set_rls_user(db_session, owner_id)
+    await run_task_execution_job(db_session, job.id, owner_id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
+
+    task = superuser_db.get(MainAITask, task.id)
+    assert task.status == MainAITaskStatus.completed
+    assert not _proposal_workspace_path(task.id).exists(), "the disposable workspace must be cleaned up once the task is terminal"
+
+
+@pytest.mark.asyncio
+async def test_run_task_execution_job_repo_edit_proposal_mode_real_crash_before_finalize_leaves_the_real_repo_root_untouched(
+    db_session, superuser_db, owner_id, monkeypatch, tmp_path
+):
+    """PI-1d, the actual directive-required crash-simulation proof: a genuine process crash
+    (an uncaught exception escaping run_task_execution_job() entirely, simulating a killed
+    worker) happening AFTER _propose_repo_edit() has already written the proposed content must
+    still never have touched the real repo root -- recovery of a crashed proposal-mode attempt
+    is "the real tree was never at risk in the first place", not "something to roll back"."""
+    from app.mainai_execution import execution_job
+
+    monkeypatch.setattr(execution_job, "_repo_root", lambda: tmp_path)
+    (tmp_path / "backend" / "tests").mkdir(parents=True)
+    (tmp_path / "README.md").write_text("original\n")
+    monkeypatch.setattr(
+        OpenAIProvider,
+        "chat",
+        _fake_chat('{"files": [{"path": "backend/tests/test_scratch_edit.py", "content": "def test_scratch_edit():\\n    assert 2 + 3 == 5\\n"}], "commit_message": "x"}'),
+    )
+
+    real_renew = execution_job.renew_mainai_job_lease
+    call_count = {"n": 0}
+
+    def _renew_then_crash_on_second_call(*args, **kwargs):
+        call_count["n"] += 1
+        real_renew(*args, **kwargs)  # the real lease-renewal write happens first, every time
+        if call_count["n"] == 2:
+            # Call #1 is the dispatch-time renewal, BEFORE _handle_repo_edit()/
+            # _propose_repo_edit() ever runs -- crashing there would prove nothing about a
+            # crash mid-proposal, since the workspace wouldn't exist yet. Call #2 is the
+            # renewal immediately after _propose_repo_edit() has already run and written into
+            # its disposable workspace, right before the work_result checkpoint commits --
+            # exactly the crash point this test needs.
+            raise RuntimeError("simulated process crash right after the work_result checkpoint's own lease check")
+
+    monkeypatch.setattr(execution_job, "renew_mainai_job_lease", _renew_then_crash_on_second_call)
+
+    goal = _goal(db_session, owner_id)
+    task = _single_task_plan(
+        db_session, goal, task_type="repo_edit", verification_plan=[{"kind": "targeted_tests", "target": "tests/test_scratch_edit.py"}]
+    )
+
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+
+    _, _, generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    _set_rls_user(db_session, owner_id)
+    with pytest.raises(RuntimeError, match="simulated process crash"):
+        await run_task_execution_job(db_session, job.id, owner_id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
+    db_session.rollback()
+
+    assert (tmp_path / "README.md").read_text() == "original\n", "a crash mid-proposal must never have touched the real repo root"
+    assert not (tmp_path / "backend" / "tests" / "test_scratch_edit.py").exists()
+
+    # The real git-status equivalent for this fake "repo root": nothing under it changed at all.
+    for p in tmp_path.rglob("*"):
+        if p.is_file():
+            assert p.name != "test_scratch_edit.py"
 
 
 # ---------------------------------------------------------------- E'. repo_edit absolute-path attack
