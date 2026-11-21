@@ -115,9 +115,57 @@
     {
       "workstream": "F09",
       "title": "RAG-kvalitet",
-      "status": "BLOCKED",
-      "evidence": "no dedicated RAG quality evidence",
-      "note": "Existing RAG tests prove mechanics, not the full four-class quality dataset."
+      "status": "PASS",
+      "evidence": {
+        "status": "PASS",
+        "dataset": "F09 real PostgreSQL RLS dataset",
+        "classes": [
+          "relevant",
+          "irrelevant",
+          "contradictory",
+          "historical/outdated",
+          "superseded",
+          "no-match/uncertainty"
+        ],
+        "tests": [
+          {
+            "classname": "tests.backend.rag.test_rag_quality_matrix",
+            "name": "test_relevant_source_is_retrieved_with_citation_fields",
+            "status": "PASS"
+          },
+          {
+            "classname": "tests.backend.rag.test_rag_quality_matrix",
+            "name": "test_irrelevant_source_is_not_retrieved_for_unrelated_query",
+            "status": "PASS"
+          },
+          {
+            "classname": "tests.backend.rag.test_rag_quality_matrix",
+            "name": "test_contradictory_sources_are_retrieved_together_and_flagged",
+            "status": "PASS"
+          },
+          {
+            "classname": "tests.backend.rag.test_rag_quality_matrix",
+            "name": "test_historical_source_is_retrieved_with_capped_confidence_and_warning",
+            "status": "PASS"
+          },
+          {
+            "classname": "tests.backend.rag.test_rag_quality_matrix",
+            "name": "test_explicitly_superseded_source_is_not_retrieved",
+            "status": "PASS"
+          },
+          {
+            "classname": "tests.backend.rag.test_rag_quality_matrix",
+            "name": "test_no_match_returns_no_citations_and_uncertainty_instruction",
+            "status": "PASS"
+          }
+        ],
+        "summary": {
+          "tests": 6,
+          "passed": 6,
+          "failed": 0
+        }
+      },
+      "note": "Relevant/irrelevant/contradictory/outdated dataset."
     },
     {
       "workstream": "F10",
@@ -164,9 +212,15 @@
     {
       "workstream": "F12",
       "title": "Knowledge Studio",
-      "status": "BLOCKED",
-      "evidence": "no Knowledge Studio Playwright JSON",
-      "note": "Run the real E2E suite."
+      "status": "PASS",
+      "evidence": [
+        "auth.spec.ts",
+        "founder-alpha-resilience.spec.ts",
+        "founder-knowledge-studio.spec.ts",
+        "library-workbench-mobile.spec.ts",
+        "shell-pages.spec.ts"
+      ],
+      "note": "Knowledge Studio browser evidence present."
     },
     {
       "workstream": "F13",
@@ -287,11 +341,15 @@
     {
       "workstream": "F19",
       "title": "Full Playwright E2E",
-      "status": "BLOCKED",
+      "status": "PASS",
       "evidence": [
-        "founder-alpha-resilience.spec.ts"
+        "auth.spec.ts",
+        "founder-alpha-resilience.spec.ts",
+        "founder-knowledge-studio.spec.ts",
+        "library-workbench-mobile.spec.ts",
+        "shell-pages.spec.ts"
       ],
-      "note": "Full E2E JSON missing."
+      "note": "Full founder journey browser evidence present."
     },
     {
       "workstream": "F20",
@@ -311,9 +369,15 @@
     {
       "workstream": "F21",
       "title": "Tillgänglighet och mobil",
-      "status": "BLOCKED",
-      "evidence": "no mobile/a11y Playwright JSON",
-      "note": "Run the browser suite."
+      "status": "PASS",
+      "evidence": [
+        "auth.spec.ts",
+        "founder-alpha-resilience.spec.ts",
+        "founder-knowledge-studio.spec.ts",
+        "library-workbench-mobile.spec.ts",
+        "shell-pages.spec.ts"
+      ],
+      "note": "Mobile viewport and login accessibility evidence."
     },
     {
       "workstream": "F22",
@@ -419,17 +483,17 @@
       "title": "Fullständig QA- och integrationsgrind",
       "status": "BLOCKED",
       "evidence": {
-        "pass": 17,
+        "pass": 21,
         "fail": 0,
-        "blocked": 6
+        "blocked": 2
       },
       "note": "The matrix itself is the gate input; overall status is the worst workstream status."
     }
   ],
   "summary": {
-    "PASS": 17,
+    "PASS": 21,
     "FAIL": 0,
-    "BLOCKED": 7,
+    "BLOCKED": 3,
     "SKIP": 0
   }
 }

@@ -1,8 +1,8 @@
 # Founder Alpha successor — QA-evidens (2026-11-21)
 
-**Kandidat:** `35d65a9e3942995596e9c693f6ee041c517ed02a`
+**Kandidat:** `0db06d528942dec26d3217128ba1443c09fbf1f3`
 **Branch:** `claude/founder-alpha-fullstack-qa` (bas `6ececab`)
-**QA-grind:** **BLOCKED** — 17 PASS, 0 FAIL, 7 BLOCKED, 0 SKIP
+**QA-grind:** **BLOCKED** — 21 PASS, 0 FAIL, 3 BLOCKED, 0 SKIP
 **Ingen push, PR, merge eller deployment har gjorts.** `first_cycle_go=false`.
 
 ## Vad som verifierades och ändrades
@@ -20,6 +20,18 @@
   sökning. Identiskt innehåll, innehåll som redan finns som annan källa och en
   redan ersatt källa avvisas explicit. Knowledge Studio-detaljsidan har ett
   bekräftat ersättningsflöde.
+- **RAG-kvalitet (F09):** 6 riktiga PostgreSQL/RLS-tester täcker relevant
+  träff med källfält, irrelevant utebliven träff, två motstridiga källor med
+  `contradicts`-flagga, historisk källa med kapad confidence och explicit
+  varning, explicit `supersedes`-uteslutning samt tomt resultat med
+  osäkerhetsinstruktion. Ingen retrieval-, RLS- eller trust-kod är mockad.
+- **Full founder-E2E (F12/F19/F21):** 12/12 Playwright-tester mot riktig
+  Next.js-proxy, backend och durable worker: login/session, chatt, import,
+  indexering, sökning, källciterat svar, öppna källa, fortsätta samtal,
+  radering, projekt/uppgift, reload, nätverksfel, mobil layout och
+  felmeddelanden. Körningen gjordes per spec med rensade testtabeller för att
+  undvika ordningsberoenden; JSON:en är sammanslagen i
+  `playwright-founder.json`.
 - **Recovery-matris (F18):** giltig restore gav identiska radantal; korrupt
   dump avvisades av checksumman och `pg_restore`; partiell dump avvisades;
   källan förblev oförändrad och nåbar.
@@ -38,19 +50,21 @@
 
 | Svit | Resultat |
 | --- | --- |
-| Samlad backend-JUnit | **516 tester, 0 failures, 0 errors, 2 skips** |
+| Samlad backend-JUnit | **522 tester, 0 failures, 0 errors, 2 skips** |
 | Health/startup/OpenAPI/config | **48 passed** |
 | Auth/session | **11 passed** |
 | Providers | **228 passed** |
 | Chat-historik | **18 passed** |
 | Bibliotek/RAG/uppladdning | **81 passed, 1 skipped** (`zip` saknas) |
+| F09 RAG-kvalitet | **6 passed** |
+| Playwright founder/E2E | **12 passed, 0 failed, 0 flaky** |
 | Explicit ersättning/version | **5 passed** |
 | Crash-säker version-resume | **2 passed** |
 | Worker/recovery/minne/lease/Redis | **88 passed** |
 | OpenAI consult | **35 passed, 1 skipped** (live-test kräver nyckel/nätverk) |
 | F13 PostgreSQL-faults | **6/6 PASS** |
 | F18 recovery-matris | **PASS** |
-| F01–F24 | **17 PASS, 0 FAIL, 7 BLOCKED** |
+| F01–F24 | **21 PASS, 0 FAIL, 3 BLOCKED** |
 | QA-grind | **BLOCKED** (exit 3) |
 
 ## Reproducerbara kommandon
@@ -67,6 +81,7 @@ export LIFEAI_TEST_REDIS_DB=14
 export REDIS_URL="redis://127.0.0.1:56379/14"
 export SECRET_KEY="local-test-secret"
 export COOKIE_SECURE=true
+export E2E_FOUNDER_PASSWORD="TestFounderPassword123!"
 
 # Grupperna som ligger bakom den samlade JUnit-filen.
 pytest tests/backend/test_health.py tests/backend/test_startup_checks.py \
@@ -87,13 +102,30 @@ pytest tests/backend/jobs/test_worker.py \
 pytest tests/backend/test_openai_consult.py --junitxml=/tmp/sub-g.xml -q
 pytest tests/backend/rag/test_library_replace.py --junitxml=/tmp/replace-tests.xml -q
 pytest tests/backend/rag/test_library_import.py -k "resume" --junitxml=/tmp/version-resume.xml -q
+pytest tests/backend/rag/test_rag_quality_matrix.py --junitxml=/tmp/rag-quality.xml -q
 
 python scripts/acceptance/merge_junit.py --out /tmp/version-replace.xml \
   /tmp/version-resume.xml /tmp/replace-tests.xml
 
 python scripts/acceptance/merge_junit.py --out /tmp/program-tests.xml \
   /tmp/sub-a.xml /tmp/sub-b.xml /tmp/sub-c.xml /tmp/sub-d.xml \
-  /tmp/sub-e.xml /tmp/sub-f.xml /tmp/sub-g.xml /tmp/replace-tests.xml
+  /tmp/sub-e.xml /tmp/sub-f.xml /tmp/sub-g.xml /tmp/replace-tests.xml \
+  /tmp/rag-quality.xml
+
+# Playwright: kör per spec med rensade testtabeller mellan varje, mot riktig
+# backend/worker. Upprepa för auth, shell-pages, founder-knowledge-studio,
+# library-workbench-mobile och founder-alpha-resilience; slå ihop JSON-filerna.
+(
+  cd ../frontend
+  CI=1 E2E_FOUNDER_PASSWORD="$E2E_FOUNDER_PASSWORD" \
+    E2E_INTERNAL_API_URL=http://127.0.0.1:8010 \
+    npx playwright test e2e/founder-knowledge-studio.spec.ts \
+    --project=chromium --workers=1 --reporter=json \
+    > /tmp/playwright-founder.json
+)
+# Den committade evidensen ligger i ../docs/evidence/founder-alpha/successor/;
+# använd playwright-founder.json och rag-quality.json för att verifiera leveransen
+# utan att köra om hela sviten.
 
 python scripts/acceptance/recovery_matrix.py \
   --source-url "postgresql://postgres@127.0.0.1:55432/lifeos_e2e" \
@@ -111,19 +143,20 @@ python scripts/acceptance/program_matrix.py \
   --recovery-matrix /tmp/recovery-matrix.json \
   --pytest-junit /tmp/program-tests.xml \
   --version-junit /tmp/version-replace.xml \
-  --playwright-json ../docs/evidence/founder-alpha/playwright-resilience.json \
+  --playwright-json /tmp/playwright-founder.json \
+  --rag-quality-evidence /tmp/rag-quality.json \
   --postgres-fault-evidence /tmp/postgres-faults.json \
   --out /tmp/program-matrix.json
 
 python scripts/acceptance/qa_gate.py \
-  --expected-sha "$(git rev-parse HEAD)" \
-  --database-url "postgresql://postgres@127.0.0.1:55432/lifeos_gate" \
+  --expected-sha "0db06d528942dec26d3217128ba1443c09fbf1f3" \
+  --database-url "postgresql://postgres@127.0.0.1:55432/lifeos_e2e_r16" \
   --redis-url "redis://127.0.0.1:56379/15" \
   --install-evidence ../docs/evidence/founder-alpha/install-matrix.json \
   --performance-evidence ../docs/evidence/founder-alpha/resource-probe.json \
   --recovery-evidence ../docs/evidence/founder-alpha/recovery.json \
   --pytest-junit /tmp/program-tests.xml \
-  --playwright-json ../docs/evidence/founder-alpha/playwright-resilience.json \
+  --playwright-json /tmp/playwright-founder.json \
   --program-evidence /tmp/program-matrix.json \
   --out-dir /tmp/qa-gate
 ```
@@ -131,23 +164,18 @@ python scripts/acceptance/qa_gate.py \
 ## Kvarstående blockerare
 
 - **F04:** Ollama är inte installerad/port `11434` svarar inte; providern använder
-  `stream=false`. Ingen verklig lokal konversation kunde köras.
-- **F09:** Dedikerat RAG-kvalitetsdataset med relevanta, irrelevanta,
-  motstridiga och inaktuella dokument saknas. Mekaniktesterna är gröna, men
-  de bevisar inte den fyra klasserna.
-- **F12:** Knowledge Studio har inget fullständigt Playwright-JSON mot riktig
-  backend i denna miljö.
-- **F19:** Full Playwright-resa för grundaren (login, chat, dokument, minne,
-  omstart, recovery) saknas som JSON.
-- **F21:** Mobil-/tillgänglighets-JSON saknas.
+  `stream=false`. Ingen verklig lokal konversation kunde köras. Detta får inte
+  lösas genom att installera en tung modell på 1,8 GiB-VPS:en.
 - **F23:** Fyra timmars aktiv soak är inte körd; en kort smoke är inte
-  ekvivalent.
-- **F24:** Grinden är BLOCKED eftersom ovanstående arbetsområden är BLOCKED.
+  ekvivalent. Kräver en separat resursbegränsad testmiljö.
+- **F24:** Grinden är BLOCKED eftersom F04 och F23 är BLOCKED; alla övriga
+  arbetsområden är PASS.
 
 ## Kända begränsningar
 
 `pg_stat_statements` saknas (långsamma queries är BLOCKED, inte gissade);
 `zip`-binären saknas för ett test; Z.ai-CLI-beroende tester körs inte; exakt-head
 GitHub Actions kräver godkänd push; resursutmattning (CPU/minne/disk) är inte
-mätt. `delivery/founder-alpha-reliability/` är orörd och dess checksummor är
-inte ändrade.
+mätt. E2E kräver en skrivbar `STORAGE_ROOT`; standardvägen `/var/lib/lifeai`
+är inte användbar i den isolerade testmiljön. `delivery/founder-alpha-reliability/`
+är orörd och dess checksummor är inte ändrade.
