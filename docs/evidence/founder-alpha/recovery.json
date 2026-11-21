@@ -1,0 +1,35 @@
+{
+  "status": "PASS",
+  "source_database": "lifeos_e2e",
+  "restore_database": "lifeos_restore_check",
+  "source_counts": {
+    "users": 2,
+    "conversations": 3,
+    "messages": 6,
+    "documents": 1,
+    "document_chunks": 1,
+    "knowledge_import_jobs": 1,
+    "memory_source_units": 7
+  },
+  "restored_counts": {
+    "users": 2,
+    "conversations": 3,
+    "messages": 6,
+    "documents": 1,
+    "document_chunks": 1,
+    "knowledge_import_jobs": 1,
+    "memory_source_units": 7
+  },
+  "checksum_sha256": "617eb73a9839b6e6dccdba7018beea09b618bc176313613dec739b13b6c0c2f6",
+  "rls_verified": true,
+  "api": {
+    "login": 200,
+    "documents": 200,
+    "conversations": 200,
+    "project_status": 200,
+    "chat": 200,
+    "reply_chars": 167,
+    "source_documents": 1,
+    "source_conversations": 3
+  }
+}

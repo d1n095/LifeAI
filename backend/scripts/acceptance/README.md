@@ -77,3 +77,65 @@ python scripts/acceptance/backup_restore_check.py \
 The script refuses to restore over its source, verifies the dump checksum, restores into a new
 database, preserves ACLs, compares row counts, checks RLS with two real users, then starts the
 API on the restored data and verifies login, documents, conversations, project status and chat.
+Add `--out recovery.json` to persist the machine-readable PASS summary used by the QA gate.
+
+## Installation matrix
+
+Runs 12 real-service scenarios: clean install, existing data, invalid app role, unavailable
+PostgreSQL, unavailable Redis, missing Ollama, bad model configuration, partial/aborted
+migration, failed migration, restart after an aborted install and recovery after a partial
+startup. Every scenario checks actual health/revision/grants, not just an exit code.
+
+```bash
+cd backend
+python scripts/acceptance/install_matrix.py \
+  --admin-url postgresql://postgres@127.0.0.1:55432/postgres \
+  --existing-url postgresql://postgres@127.0.0.1:55432/lifeos_e2e \
+  --existing-app-url postgresql://mainai_app:mainai_app_pw@127.0.0.1:55432/lifeos_e2e \
+  --redis-url redis://127.0.0.1:56379/15 \
+  --pg-bin /path/to/postgresql/bin \
+  --out ../docs/evidence/founder-alpha/install-matrix.json
+```
+
+## Resource probe
+
+```bash
+python scripts/acceptance/resource_probe.py \
+  --database-url postgresql://postgres@127.0.0.1:55432/lifeos_e2e \
+  --app-database-url postgresql://mainai_app:mainai_app_pw@127.0.0.1:55432/lifeos_e2e \
+  --redis-url redis://127.0.0.1:56379/15 \
+  --out ../docs/evidence/founder-alpha/resource-probe.json
+```
+
+## QA gate
+
+The gate is fail-closed: missing evidence is BLOCKED, never PASS. It checks the exact SHA, a
+clean tracked tree, live PostgreSQL/Redis, Alembic head, the installation matrix, JUnit totals,
+Playwright JSON, recovery JSON and performance JSON.
+
+```bash
+python scripts/acceptance/qa_gate.py \
+  --expected-sha "$(git rev-parse HEAD)" \
+  --database-url postgresql://postgres@127.0.0.1:55432/lifeos_e2e \
+  --redis-url redis://127.0.0.1:56379/15 \
+  --install-evidence ../docs/evidence/founder-alpha/install-matrix.json \
+  --performance-evidence ../docs/evidence/founder-alpha/resource-probe.json \
+  --recovery-evidence ../docs/evidence/founder-alpha/recovery.json \
+  --playwright-json ../docs/evidence/founder-alpha/playwright-resilience.json \
+  --pytest-junit ../docs/evidence/founder-alpha/backend-tests.xml \
+  --out-dir ../docs/evidence/founder-alpha/qa-gate
+```
+
+## Browser E2E and cookies
+
+`localhost` is a secure context in Chromium, so the E2E backend must run with
+`COOKIE_SECURE=true`. With `false`, `SameSite=None` cookies are rejected by Chromium and every
+protected page redirects to `/login`; this is a harness configuration issue, not a product bug.
+Use `CI=1` so Playwright starts a fresh Next server instead of reusing a stale one, and set
+`LD_LIBRARY_PATH` to the isolated Chromium library directory.
+
+```bash
+cd frontend
+CI=1 E2E_FOUNDER_PASSWORD=... E2E_INTERNAL_API_URL=http://127.0.0.1:8010 \
+  npx playwright test e2e/founder-alpha-resilience.spec.ts --reporter=json --workers=1
+```

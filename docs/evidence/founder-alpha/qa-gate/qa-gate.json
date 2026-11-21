@@ -1,0 +1,86 @@
+{
+  "generated_at": "2026-11-21T01:39:20.395793+00:00",
+  "commit": "216f29098474a58be88cffdf65f060d8d6000b08",
+  "status": "PASS",
+  "checks": [
+    {
+      "check": "exact commit SHA",
+      "status": "PASS",
+      "actual": "216f29098474a58be88cffdf65f060d8d6000b08",
+      "expected": "216f29098474a58be88cffdf65f060d8d6000b08"
+    },
+    {
+      "check": "tracked tree clean",
+      "status": "PASS",
+      "detail": "clean"
+    },
+    {
+      "check": "PostgreSQL reachable",
+      "status": "PASS"
+    },
+    {
+      "check": "Redis reachable",
+      "status": "PASS"
+    },
+    {
+      "check": "Alembic revision",
+      "status": "PASS",
+      "actual": "0091",
+      "expected": "0091"
+    },
+    {
+      "check": "installation matrix",
+      "status": "PASS",
+      "actual": {
+        "PASS": 12,
+        "FAIL": 0,
+        "BLOCKED": 0
+      },
+      "expected": {
+        "FAIL": 0,
+        "BLOCKED": 0,
+        "PASS": ">=12"
+      }
+    },
+    {
+      "check": "resource/performance probe",
+      "status": "PASS",
+      "detail": {
+        "status": "PASS",
+        "blockers": []
+      }
+    },
+    {
+      "check": "backup/restore recovery",
+      "status": "PASS",
+      "detail": "PASS"
+    },
+    {
+      "check": "backend tests",
+      "status": "PASS",
+      "tests": 31,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "check": "real browser E2E",
+      "status": "PASS",
+      "stats": {
+        "startTime": "2026-11-21T01:37:18.006Z",
+        "duration": 15764.306999999999,
+        "expected": 3,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      }
+    }
+  ],
+  "known_limitations": [
+    "Z.ai CLI-dependent tests are not run in this environment.",
+    "`zip`-dependent tests are skipped when the binary is unavailable.",
+    "pg_stat_statements is not installed, so slow-query statistics are BLOCKED rather than guessed.",
+    "Resource-exhaustion behavior (CPU/memory/disk limits) is not measured.",
+    "Exact-head GitHub Actions cannot run without an approved push."
+  ]
+}

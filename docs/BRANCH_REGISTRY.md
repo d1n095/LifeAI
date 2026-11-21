@@ -6,6 +6,53 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Founder Alpha system reliability QA — PASS vid `216f290` (2026-11-21)
+
+**Branch:** `claude/founder-alpha-reliability`. QA-grinden passerade vid `216f290`; en
+uppföljande dokumentationscommit lägger endast till evidens och ändrar ingen kod. Ingen PR,
+push, merge eller deployment har gjorts. `first_cycle_go=false`.
+
+**Commits:** `47d6bef` installmatris/failure-injection/resursprobe/QA-grind/E2E-resiliens,
+`216f290` rättad JUnit-aggregering i grinden.
+
+**Nytt i denna omgång:** startup vägrar nu köra mot en databas som inte står på exakt
+Alembic-head. Det stänger en verklig lucka där en avbruten eller misslyckad migration kunde
+lämna en levande API mot partiellt schema. Installationsmatrisen kör mot riktig PostgreSQL och
+Redis och kontrollerar health, revision, grants och API — inte bara exit code.
+
+**Faktiskt körda resultat:**
+
+| Svit | Resultat |
+| --- | --- |
+| Installationsmatris, riktiga tjänster | **12 PASS, 0 FAIL, 0 BLOCKED** |
+| Startup/head-kontroll + RLS + durable delivery | **31 passed, 0 failed, 0 skipped** |
+| Ny Playwright-resiliens (reload, nätverksfel, projekt/uppgift) | **3 passed** |
+| Full E2E-svit från tidigare | **33 passed, 1 skipped** |
+| Isolerad backup/restore | **PASS** |
+| Resurs-/prestandaproben | **PASS** |
+
+Matrisen verifierade: ren installation, befintlig data, felaktig app-roll, otillgänglig
+PostgreSQL, otillgänglig Redis, saknad Ollama, felaktig modellkonfiguration, partiell/avbruten
+migration, misslyckad migration, omstart efter avbruten installation och recovery efter
+partiell uppstart. Alla fail-closed-scenarier stannade utan att servera trafik mot fel tillstånd.
+
+**Resursmätning:** startup **3,8 s**, health p50 **29,3 ms** / p95 **37,8 ms**, login **152,6 ms**,
+chat **97,6 ms**, 40 samtidiga health-anrop med 10 workers p50 **229,4 ms** / p95 **506,9 ms**,
+RSS **186,3 → 186,6 MB** över 100 upprepade läsningar, CPU **100,8 %** av en kärna under
+mätfönstret, DB **20,9 MB**, 6 anslutningar. `pg_stat_statements` saknas, så långsamma queries
+är **BLOCKED**, inte gissade.
+
+**Backup/restore:** källa 3 konversationer, 1 dokument, 1 chunk, 6 meddelanden, 7 minnesenheter;
+SHA-256 verifierad; restore till ny DB gav identiska radantal; RLS med två principaler; API på
+återställd data svarade 200 för login, dokument, konversationer, projektstatus och chat.
+
+**Kvarstående begränsningar:** exakt-head GitHub Actions kräver godkänd push; 10 tester kräver
+Z.ai-CLI och 1 `zip`; `pg_stat_statements` saknas; resursutmattning (CPU/minne/disk) är inte
+mätt; hela felmatrisen för Ollama/DB/migration är delvis täckt av matrisen, inte uttömmande.
+
+**Evidens:** `docs/evidence/founder-alpha/` (installmatris, resursprobe, recovery, Playwright,
+JUnit och QA-grind). **Merge:** efter R15; ingen överlappning med Codex/Z-brancher.
+
 ## Founder Alpha reliability successor — integration, recovery och restore verifierad (2026-11-20)
 
 **Branch:** `claude/founder-alpha-reliability`, bas `6410abe` (R15-leveransen). R15-branchen
