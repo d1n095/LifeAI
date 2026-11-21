@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import PurePosixPath
 
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -245,6 +245,7 @@ async def _resume_incomplete_document(
     *,
     archive_path: str | None = None,
     archive_chain: list[dict] | None = None,
+    max_upload_bytes: int = 60 * 1024 * 1024,
 ) -> FileOutcome:
     """P1, widened 2026-07-28: re-attempts extraction+embedding for a Document that is NOT
     in a terminal state — reuses the SAME row and its existing KnowledgeVersion rather than
@@ -283,6 +284,96 @@ async def _resume_incomplete_document(
         .order_by(KnowledgeVersion.version_number.desc())
         .first()
     )
+
+    # Crash boundary: _import_one_file commits the Document row BEFORE the
+    # KnowledgeVersion and the durable original. A hard kill in that window leaves a
+    # resumable row with no version (and possibly no storage_key). Resuming only the
+    # extraction step used to index the document while silently skipping claim extraction
+    # forever, because `version` stayed None. Re-establish both durable pieces first.
+    storage = get_storage()
+    content_checksum = sha256_bytes(content)
+    if document.checksum is None:
+        document.checksum = content_checksum
+        db.add(document)
+        db.commit()
+    elif document.checksum != content_checksum:
+        # The caller selected this row by checksum, so a mismatch here means the durable
+        # upload and the Document reference disagree. Never index one as if it were the
+        # other; fail closed and leave the original untouched.
+        raise StorageError(
+            f"Dokument {document.id} har checksum {document.checksum}, men det lagrade "
+            f"originalet har {content_checksum}."
+        )
+
+    if document.storage_key is None or not storage.verify(
+        document.storage_key, expected_sha256=content_checksum, expected_size=len(content)
+    ):
+        if document.storage_key is None:
+            document.status = IndexStatus.original_storing
+            db.add(document)
+            db.commit()
+        try:
+            blob = _store_bytes_with_reference_lock(db, storage, content, max_bytes=max_upload_bytes)
+        except StorageError as exc:
+            document.status = IndexStatus.storage_failed
+            document.error_message = f"Kunde inte lagra originalfilen: {exc}"
+            db.add(document)
+            db.commit()
+            return FileOutcome(
+                filename=filename,
+                status="failed",
+                reason=document.error_message,
+                source_id=str(document.id),
+                archive_path=archive_path,
+                archive_chain=archive_chain,
+            )
+        if document.storage_key is not None and document.storage_key != blob.storage_key:
+            # The checksum matched, so a different content-addressed key here means the
+            # stored reference is corrupt rather than a legitimate replacement. Fail closed;
+            # the immutable-storage trigger would reject the UPDATE anyway.
+            raise StorageError(
+                f"Dokument {document.id} pekar på {document.storage_key}, men innehållet har "
+                f"nyckeln {blob.storage_key}."
+            )
+        if document.storage_key is None:
+            document.storage_key = blob.storage_key
+            document.size_bytes = blob.size_bytes
+            document.stored_at = datetime.utcnow()
+            document.status = IndexStatus.original_stored
+            db.add(document)
+            db.commit()
+            retain_pending_rejected_upload_cleanup_tasks(blob.storage_key)
+
+    if version is None:
+        next_version_number = (
+            db.query(func.max(KnowledgeVersion.version_number))
+            .filter(KnowledgeVersion.source_id == document.id)
+            .scalar()
+            or 0
+        ) + 1
+        raw_metadata = {
+            "original_filename": filename,
+            "size_bytes": len(content),
+            "media_type": document.media_type,
+        }
+        if archive_path is not None:
+            raw_metadata["archive_path"] = archive_path
+            raw_metadata["archive_chain"] = archive_chain
+        version = KnowledgeVersion(
+            source_id=document.id,
+            owner_id=owner_id,
+            version_number=next_version_number,
+            checksum=content_checksum,
+            extraction_version=EXTRACTION_VERSION,
+            raw_metadata=raw_metadata,
+        )
+        document.version_number = next_version_number
+        db.add_all([version, document])
+        db.commit()
+    elif document.version_number != version.version_number:
+        document.version_number = version.version_number
+        db.add(document)
+        db.commit()
 
     media_kind = media_import.media_kind_for(filename)
     if media_kind is None:
@@ -407,7 +498,14 @@ async def _import_one_file(
         # _resume_incomplete_document's docstring).
         if existing.status in (IndexStatus.awaiting_provider, IndexStatus.blocked_provider):
             return await _resume_incomplete_document(
-                db, existing, owner_id, filename, content, archive_path=archive_path, archive_chain=archive_chain
+                db,
+                existing,
+                owner_id,
+                filename,
+                content,
+                archive_path=archive_path,
+                archive_chain=archive_chain,
+                max_upload_bytes=max_upload_bytes,
             )
         # 2026-07-28, second incident: a document left at any OTHER non-terminal status
         # (embedding, extracting, original_stored, ...) got there because the worker PROCESS
@@ -421,7 +519,14 @@ async def _import_one_file(
         # scratch is safe here regardless of which exact step the crash interrupted.
         if existing.status in RESUMABLE_INDEX_STATUSES:
             return await _resume_incomplete_document(
-                db, existing, owner_id, filename, content, archive_path=archive_path, archive_chain=archive_chain
+                db,
+                existing,
+                owner_id,
+                filename,
+                content,
+                archive_path=archive_path,
+                archive_chain=archive_chain,
+                max_upload_bytes=max_upload_bytes,
             )
         # 2026-07-28 incident: a real, still-unresolved failure must keep reporting as
         # "failed" on a resumed pass (e.g. app/worker.py's _requeue_blocked_jobs reprocessing
