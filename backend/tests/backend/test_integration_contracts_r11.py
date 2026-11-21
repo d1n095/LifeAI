@@ -185,5 +185,8 @@ def test_contract_audit_actions_stable(db_session):
     db_session.commit()
     row = db_session.query(AuditLog).filter_by(action="decision_superseded").one()
     assert row.entity_type == "life_problem_decision"
-    db_session.delete(row)
-    db_session.commit()
+    # No manual cleanup here (reconciling R15 into this branch): migration 0079 made
+    # audit_log append-only (audit_log_reject_mutation(), enforced not only documented), so
+    # the DELETE this test used to clean up after itself is now rejected by the database
+    # itself -- correctly so, that is the feature. Leaving the row is harmless; an audit
+    # trail is expected to keep every row it was ever given, test-created ones included.

@@ -419,13 +419,20 @@ async def chat_with_fallback(
     # Task #60 worker-lease re-verification (requirement 2) -- evaluated before anything else,
     # including selection_policy/LOCAL_ONLY_MODE below, since a dead job's claimed identity
     # must never reach even the chain-resolution step.
-    lease_fields_given = [job_id is not None, lease_worker_id is not None, lease_generation is not None]
-    if any(lease_fields_given) and not all(lease_fields_given):
+    # `job_id` alone (neither `lease_worker_id` nor `lease_generation` given) is the
+    # pre-existing, unrelated "plain attribution for the disclosure ledger" use (see this
+    # function's own docstring) and must raise nothing here -- that was a real regression
+    # found reconciling this merge: treating job_id as a third member of the lease triple
+    # denied every caller that only ever passed job_id for attribution, which is most of
+    # them. The lease assertion is specifically about lease_worker_id/lease_generation;
+    # job_id only joins the "incomplete" check once at least one of those two is present.
+    lease_assertion_fields = [lease_worker_id is not None, lease_generation is not None]
+    if any(lease_assertion_fields) and not (all(lease_assertion_fields) and job_id is not None):
         raise EgressDeniedError(
             "incomplete worker-lease assertion: job_id/lease_worker_id/lease_generation must be given "
             "all together or not at all -- refusing to guess which ones were meant."
         )
-    if all(lease_fields_given):
+    if all(lease_assertion_fields):
         if not verify_active_lease(db, job_id=job_id, worker_id=lease_worker_id, lease_generation=lease_generation):
             raise EgressDeniedError(
                 f"worker lease for job {job_id} (worker={lease_worker_id!r}, generation={lease_generation}) "
@@ -451,6 +458,28 @@ async def chat_with_fallback(
 
     for provider, model in chain:
         attempted.append(provider.name)
+
+        # Checked BEFORE egress enforcement, deliberately (reconciliation fix: this used to run
+        # inside the try block below, AFTER the egress-policy block, which meant a candidate
+        # that selection_policy had already rejected still incurred a real owner-scoped
+        # disclosure-ledger write for a provider that was never actually going to be attempted
+        # -- semantically wrong (no genuine attempt happened) and, found empirically, fatal
+        # whenever the caller's session has no matching `app.current_user_id` RLS context (the
+        # disclosure table's INSERT policy requires owner_id to match it), surfacing as a raw
+        # RLS/DB error instead of the intended ModelSelectionError/ProviderError. A policy
+        # rejection here is specific to THIS candidate, unlike an EgressDeniedError's content-
+        # wide denial below, so it is caught and continues the loop over the chain rather than
+        # aborting the whole call.
+        if selection_policy is not None:
+            try:
+                _require_policy_candidate(db, get_model_spec(provider.name, model), selection_policy)
+            except ModelSelectionError as exc:
+                safe = classify_provider_exception(exc)
+                logger.warning("Chat provider %s rejected by selection policy (%s): %s",
+                                provider.name, safe.result.value, safe.message)
+                last_error = exc
+                continue
+
         # Hardening finding (Task #60 security-acceptance testing): egress-policy enforcement
         # is a policy/authorization decision, NOT a provider-connectivity concern -- so it is
         # DELIBERATELY outside the try block below that classifies ordinary provider failures
@@ -482,9 +511,6 @@ async def chat_with_fallback(
             outbound_messages = [Message(role=m["role"], content=m["content"]) for m in redacted]
         invoked = False
         try:
-            if selection_policy is not None:
-                # The chain was built earlier; a concurrent verification failure may now exist.
-                _require_policy_candidate(db, get_model_spec(provider.name, model), selection_policy)
             if not provider.is_configured():
                 raise ProviderError("Provider is not configured.", category="not_configured",
                                     provider_request_may_have_left=False)

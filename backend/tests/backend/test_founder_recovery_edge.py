@@ -233,6 +233,9 @@ def test_migration_0080_matches_model_and_preserves_single_lineage_head():
     assert "0080" in revs and "0078" in downs
     heads = set(revs) - downs
     # Exactly one head; later billing/R15 revisions legitimately extend recovery.
-    assert re.search(r'^down_revision\s*=\s*"0078"', mig, re.M)
+    # 0080's own down_revision (reconciling R15 into this branch, see 9c662202): was "0078",
+    # a real two-head fork (0079 was chained in alongside it, not after it) -- re-chained onto
+    # "0079" so the lineage is 0078 -> 0079 -> 0080, not 0078 -> {0079, 0080}.
+    assert re.search(r'^down_revision\s*=\s*"0079"', mig, re.M)
     assert len(heads) == 1, f"lineage must have exactly one head, got {heads}"
-    assert "0080" in revs and "0078" in downs, "composed recovery migration must stay chained 0078 -> 0080"
+    assert "0080" in revs and "0078" in downs, "composed recovery migration must stay chained 0078 -> 0079 -> 0080"

@@ -284,21 +284,34 @@ async def test_an_accepted_proposals_checkout_is_removed_once_the_goal_finalizes
     -- is confirmed genuinely terminal, via the task's own durable `proposal_worktree_path`
     record."""
     shared = _shared_checkout(tmp_path)
+    seen: dict = {}
+
+    def _verification(*args, cwd=None, **kwargs):
+        # Captured DURING verification, not read back afterwards: a single-task goal's last
+        # task completing finalizes the GOAL inline in the same call (found reconciling this
+        # test -- `_run_proposal` returning with task.status == completed already means
+        # cleanup has already run), so by the time `_run_proposal` returns there is nothing
+        # left to sanity-check the checkout's existence against.
+        # `cwd` is the backend/ subdirectory inside the checkout's "tree" worktree (see
+        # execution_job.py's `verify_cwd = str(Path(source_root) / "backend")`) -- a path
+        # constructed unconditionally, whether or not this fixture's synthetic single-file
+        # repo actually has a `backend/` subdirectory (it doesn't), so `cwd` itself need not
+        # exist. `cwd.parent` is "tree" itself (== the task's durable `proposal_worktree_path`,
+        # the directory that genuinely was created), and `cwd.parent.parent` is the whole
+        # per-attempt root this test needs gone afterwards.
+        seen["cwd"] = Path(cwd)
+        assert seen["cwd"].parent.exists(), "sanity: the checkout really was created for this attempt"
+        return _passing_verification()
 
     task = await _run_proposal(
         db_session, superuser_db, owner_id, monkeypatch, shared,
         _proposal(("README.md", "ACCEPTED CONTENT\n")),
-        _passing_verification,
+        _verification,
     )
     assert task.status == MainAITaskStatus.completed
 
-    completed_event = superuser_db.execute(
-        sa_text("SELECT detail FROM mainai_task_events WHERE task_id = :id AND event_type = 'completed'"),
-        {"id": str(task.id)},
-    ).scalar_one()
-    checkout_path = Path(completed_event["work_result"]["proposal_worktree_path"])
-    assert checkout_path.exists(), "sanity: the checkout really was created for this attempt"
-    assert not checkout_path.parent.exists(), "the whole per-attempt checkout directory must be gone once the goal is terminal"
+    attempt_root = seen["cwd"].parent.parent
+    assert not attempt_root.exists(), "the whole per-attempt checkout directory must be gone once the goal is terminal"
 
 
 @pytest.mark.asyncio

@@ -29,6 +29,9 @@ CONFIG_MATRIX: dict[str, dict] = {
                                     "validates": "none — stale snapshot threshold, not evidence of current status"},
     "local_repo_path": {"required_in_production": False, "secret": False, "default": None,
                         "validates": "none — operator-provisioned optional read-only git observation path"},
+    "local_only_mode": {"required_in_production": False, "secret": False, "default": False,
+                       "validates": "none — deployment-level network posture, enforced unconditionally in "
+                                     "app/providers/registry.py's chat_with_fallback(), not a per-request field"},
     "environment": {
         "required_in_production": False,
         "secret": False,
