@@ -210,7 +210,11 @@ def _start_backend(args: argparse.Namespace, port: int, temp: Path) -> tuple[sub
             "STORAGE_ROOT": str(temp / "storage"),
             "COOKIE_SECURE": "false",
             "ENABLE_SCHEDULED_CLEANUP": "false",
-            "OPENAI_API_KEY": "resource-probe-placeholder",
+            # The E2E harness replaces the provider transport, but the registry still
+            # requires a configured provider. A value that looks like a template
+            # placeholder is treated as unconfigured by app.providers.base, so use a
+            # non-placeholder test key to exercise the real chat path.
+            "OPENAI_API_KEY": "sk-resource-probe-local-only",
             "RATE_LIMIT_LOGIN_PER_MINUTE": "1000",
             "RATE_LIMIT_REGISTER_PER_MINUTE": "1000",
             "RATE_LIMIT_FORGOT_PASSWORD_PER_MINUTE": "1000",

@@ -131,7 +131,10 @@ def _start_backend(args: argparse.Namespace, port: int, temp: Path) -> tuple[sub
             "STORAGE_ROOT": str(temp / "storage"),
             "COOKIE_SECURE": "false",
             "ENABLE_SCHEDULED_CLEANUP": "false",
-            "OPENAI_API_KEY": "soak-placeholder",
+            # Same reason as resource_probe.py: the transport is faked by the E2E
+            # harness, but the provider registry must see a configured key rather than
+            # a template placeholder that app.providers.base deliberately rejects.
+            "OPENAI_API_KEY": "sk-soak-local-only",
             "RATE_LIMIT_CHAT_PER_MINUTE": "100000",
             "RATE_LIMIT_DEFAULT_PER_MINUTE": "100000",
             "RATE_LIMIT_LIBRARY_IMPORT_PER_MINUTE": "100000",
