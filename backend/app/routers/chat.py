@@ -50,6 +50,7 @@ from app.billing.chat_attempts import ReconciliationDenied, ReconciliationUnavai
 from app.billing.enforcement import BillingBudgetExceededError, BillingEnforcementUnavailableError
 from app.billing.limits import effective_limits
 from app.billing.reservation import ChatAttemptBudget, estimate_prompt_tokens
+from app.models.project import Project
 from app.models.provider_config import ProviderConfig
 from app.models.user import User
 from app.providers.base import Message, ProviderError
@@ -188,6 +189,11 @@ async def _replay_chat_request(
             status_code=409,
             detail="Idempotensnyckeln användes redan för en annan konversation.",
         )
+    if payload.project_id is not None and conversation.project_id != payload.project_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Konversationen tillhör ett annat workspace.",
+        )
     if user_message.content != payload.message:
         raise HTTPException(
             status_code=409,
@@ -312,7 +318,14 @@ async def _attempt_assistant_reply(
                               reply=assistant_row.content, provider=assistant_row.provider, model=assistant_row.model)
     retrieval_degraded_reason: str | None = None
     try:
-        hits = await retrieve_context(db, user.id, user_message.content, top_k=5, effect_guard=True)
+        hits = await retrieve_context(
+            db,
+            user.id,
+            user_message.content,
+            top_k=5,
+            project_id=conversation.project_id,
+            effect_guard=True,
+        )
     except GroundingUnavailableError as exc:
         # The effect guard refused the active embedding provider before any call. This is
         # a configuration fact, not a provider outage, and it must never be silent: the
@@ -759,6 +772,21 @@ def _get_or_create_chat_turn(
                 False,
             )
 
+    workspace = None
+    if payload.project_id is not None:
+        workspace = (
+            db.query(Project)
+            .filter(
+                Project.id == payload.project_id,
+                Project.created_by == user.id,
+                Project.deleted_at.is_(None),
+                Project.archived_at.is_(None),
+            )
+            .first()
+        )
+        if workspace is None:
+            raise HTTPException(status_code=404, detail="Workspace hittades inte.")
+
     conversation = None
     if payload.conversation_id:
         # RLS on `conversations` already prevents cross-user reads, but we check
@@ -767,8 +795,17 @@ def _get_or_create_chat_turn(
         conversation = db.get(Conversation, payload.conversation_id)
         if conversation is not None and conversation.user_id != user.id:
             raise HTTPException(status_code=404, detail="Konversationen hittades inte.")
+        if conversation is not None and workspace is not None:
+            if conversation.project_id not in (None, workspace.id):
+                raise HTTPException(status_code=409, detail="Konversationen tillhör ett annat workspace.")
+            if conversation.project_id is None:
+                conversation.project_id = workspace.id
     if conversation is None:
-        conversation = Conversation(title=payload.message[:60], user_id=user.id)
+        conversation = Conversation(
+            title=payload.message[:60],
+            user_id=user.id,
+            project_id=workspace.id if workspace is not None else None,
+        )
         db.add(conversation)
         if payload.client_message_id is None:
             db.commit()
@@ -952,6 +989,11 @@ async def _stream_existing_claim(
         raise HTTPException(
             status_code=409,
             detail="Idempotensnyckeln användes redan för en annan konversation.",
+        )
+    if payload.project_id is not None and conversation.project_id != payload.project_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Konversationen tillhör ett annat workspace.",
         )
     if user_message.content != payload.message:
         raise HTTPException(

@@ -91,6 +91,9 @@ class SessionOut(UserOut):
 
 class ChatMessageIn(BaseModel):
     conversation_id: uuid.UUID | None = None
+    # Optional workspace association. When present, the conversation is bound to that
+    # owner-scoped project and retrieval is narrowed to its documents.
+    project_id: uuid.UUID | None = None
     message: str
     # Optional caller-supplied idempotency key. A retry of the same logical send must reuse
     # this exact value; a new user intent gets a new value. Bounded/opaque so it can be used
@@ -247,6 +250,7 @@ class MessageOut(BaseModel):
 class ConversationOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
+    project_id: uuid.UUID | None = None
     title: str
     created_at: datetime
     updated_at: datetime
@@ -525,6 +529,161 @@ class ProjectDetailOut(ProjectOut):
 
     tasks: list[TaskOut] = []
     sources: list[KnowledgeSourceOut] = []
+
+
+# --- Life Workspaces (persistent project-centered founder experience) ----------------------
+
+_WORKSPACE_STATUSES = {"idea", "active", "paused", "done"}
+_WORKSPACE_DECISION_STATUSES = {"proposed", "accepted", "superseded"}
+
+
+def _bounded_goals(value: list[str]) -> list[str]:
+    cleaned = [item.strip() for item in value if item and item.strip()]
+    if len(cleaned) > 50:
+        raise ValueError("Ett workspace får ha högst 50 mål.")
+    if any(len(item) > 500 for item in cleaned):
+        raise ValueError("Ett mål får vara högst 500 tecken.")
+    return cleaned
+
+
+class WorkspaceIn(BaseModel):
+    name: str = Field(min_length=1, max_length=256)
+    description: str | None = Field(default=None, max_length=20_000)
+    purpose: str | None = Field(default=None, max_length=20_000)
+    goals: list[str] = Field(default_factory=list)
+    status: str = "idea"
+    settings: dict = Field(default_factory=dict)
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Workspace-namnet får inte vara tomt.")
+        return value
+
+    @field_validator("status")
+    @classmethod
+    def valid_status(cls, value: str) -> str:
+        if value not in _WORKSPACE_STATUSES:
+            raise ValueError(f"status måste vara en av: {', '.join(sorted(_WORKSPACE_STATUSES))}.")
+        return value
+
+    @field_validator("goals")
+    @classmethod
+    def valid_goals(cls, value: list[str]) -> list[str]:
+        return _bounded_goals(value)
+
+
+class WorkspaceUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=256)
+    description: str | None = Field(default=None, max_length=20_000)
+    purpose: str | None = Field(default=None, max_length=20_000)
+    goals: list[str] | None = None
+    status: str | None = None
+    settings: dict | None = None
+
+    @field_validator("name")
+    @classmethod
+    def clean_optional_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("Workspace-namnet får inte vara tomt.")
+        return value
+
+    @field_validator("status")
+    @classmethod
+    def valid_optional_status(cls, value: str | None) -> str | None:
+        if value is not None and value not in _WORKSPACE_STATUSES:
+            raise ValueError(f"status måste vara en av: {', '.join(sorted(_WORKSPACE_STATUSES))}.")
+        return value
+
+    @field_validator("goals")
+    @classmethod
+    def valid_optional_goals(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else _bounded_goals(value)
+
+
+class WorkspaceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    name: str
+    description: str | None = None
+    purpose: str | None = None
+    goals: list[str] = Field(default_factory=list)
+    status: str
+    settings: dict = Field(default_factory=dict)
+    archived_at: datetime | None = None
+    last_activity_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkspaceActivityOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    kind: str
+    summary: str
+    detail: dict = Field(default_factory=dict)
+    created_at: datetime
+
+
+class WorkspaceDecisionIn(BaseModel):
+    title: str = Field(min_length=1, max_length=256)
+    decision: str = Field(min_length=1, max_length=20_000)
+    rationale: str | None = Field(default=None, max_length=20_000)
+    status: str = "accepted"
+
+    @field_validator("status")
+    @classmethod
+    def valid_decision_status(cls, value: str) -> str:
+        if value not in _WORKSPACE_DECISION_STATUSES:
+            raise ValueError(f"status måste vara en av: {', '.join(sorted(_WORKSPACE_DECISION_STATUSES))}.")
+        return value
+
+
+class WorkspaceDecisionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    title: str
+    decision: str
+    rationale: str | None = None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkspaceContextSourceOut(BaseModel):
+    document_id: uuid.UUID
+    title: str
+    snippet: str
+    score: float
+    active_truth_status: str | None = None
+
+
+class WorkspaceContextOut(BaseModel):
+    workspace_id: uuid.UUID
+    objectives: list[str]
+    source_documents: list[KnowledgeSourceOut]
+    decisions: list[WorkspaceDecisionOut]
+    outstanding_tasks: list[TaskOut]
+    past_conversations: list[ConversationOut]
+    recent_changes: list[WorkspaceActivityOut]
+    uncertainties: list[dict]
+    retrieval_sources: list[WorkspaceContextSourceOut] = Field(default_factory=list)
+    retrieval_degraded_reason: str | None = None
+    bounded: bool = True
+
+
+class WorkspaceDetailOut(WorkspaceOut):
+    tasks: list[TaskOut] = Field(default_factory=list)
+    sources: list[KnowledgeSourceOut] = Field(default_factory=list)
+    conversations: list[ConversationOut] = Field(default_factory=list)
+    activities: list[WorkspaceActivityOut] = Field(default_factory=list)
+    decisions: list[WorkspaceDecisionOut] = Field(default_factory=list)
+    context: WorkspaceContextOut
 
 
 class KnowledgeClaimOut(BaseModel):

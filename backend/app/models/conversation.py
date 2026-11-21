@@ -31,6 +31,11 @@ class Conversation(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    # Optional workspace association. The conversation remains owner-scoped by user_id; this
+    # link only narrows retrieval/context when the founder talks inside a project workspace.
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     title: Mapped[str] = mapped_column(String(256), default="Ny konversation")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

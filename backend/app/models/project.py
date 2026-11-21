@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, String, Text
+from sqlalchemy import JSON, DateTime, Enum, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -30,13 +30,26 @@ class TaskPriority(str, enum.Enum):
 
 
 class Project(Base):
+    """A persistent founder project/workspace.
+
+    The original table is intentionally kept as the single source of project identity so
+    documents, tasks and conversations keep their existing foreign keys. Workspace-only
+    metadata is additive: purpose/goals/settings plus archive and soft-delete timestamps.
+    """
+
     __tablename__ = "projects"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     name: Mapped[str] = mapped_column(String(256))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    purpose: Mapped[str | None] = mapped_column(Text, nullable=True)
+    goals: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    settings: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     status: Mapped[ProjectStatus] = mapped_column(Enum(ProjectStatus), default=ProjectStatus.idea)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_activity_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

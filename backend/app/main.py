@@ -46,6 +46,7 @@ from app.routers import (
     projects,
     provider_spend,
     workbench,
+    workspaces,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -87,6 +88,7 @@ app.include_router(incidents.router)
 app.include_router(conversations.router)
 app.include_router(documents.router)
 app.include_router(projects.router)
+app.include_router(workspaces.router)
 app.include_router(knowledge.router)
 app.include_router(library.router)
 app.include_router(workbench.router)

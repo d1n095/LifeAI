@@ -217,6 +217,7 @@ export type ChatStreamEvent =
 
 export type ConversationItem = {
   id: string;
+  project_id?: string | null;
   title: string;
   created_at: string;
   updated_at: string;
@@ -254,8 +255,14 @@ export type ProjectItem = {
   id: string;
   name: string;
   description: string | null;
+  purpose?: string | null;
+  goals?: string[];
+  settings?: Record<string, unknown>;
   status: string;
+  archived_at?: string | null;
+  last_activity_at?: string | null;
   created_at: string;
+  updated_at?: string;
 };
 
 // --- Founder Knowledge Studio v1 (see docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md) ---
@@ -448,6 +455,53 @@ export type TaskItem = {
 export type ProjectDetail = ProjectItem & {
   tasks: TaskItem[];
   sources: KnowledgeSourceItem[];
+};
+
+export type WorkspaceActivity = {
+  id: string;
+  kind: string;
+  summary: string;
+  detail: Record<string, unknown>;
+  created_at: string;
+};
+
+export type WorkspaceDecision = {
+  id: string;
+  title: string;
+  decision: string;
+  rationale: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkspaceContext = {
+  workspace_id: string;
+  objectives: string[];
+  source_documents: KnowledgeSourceItem[];
+  decisions: WorkspaceDecision[];
+  outstanding_tasks: TaskItem[];
+  past_conversations: ConversationItem[];
+  recent_changes: WorkspaceActivity[];
+  uncertainties: Record<string, unknown>[];
+  retrieval_sources: {
+    document_id: string;
+    title: string;
+    snippet: string;
+    score: number;
+    active_truth_status: string | null;
+  }[];
+  retrieval_degraded_reason: string | null;
+  bounded: boolean;
+};
+
+export type WorkspaceDetail = ProjectItem & {
+  tasks: TaskItem[];
+  sources: KnowledgeSourceItem[];
+  conversations: ConversationItem[];
+  activities: WorkspaceActivity[];
+  decisions: WorkspaceDecision[];
+  context: WorkspaceContext;
 };
 
 export type ProviderVerification = {
@@ -958,7 +1012,8 @@ async function streamChatRequest(
   conversationId: string | undefined,
   clientMessageId: string | undefined,
   options: { signal?: AbortSignal; onEvent?: (event: ChatStreamEvent) => void } = {},
-  isRetry = false
+  isRetry = false,
+  projectId?: string
 ): Promise<ChatResponse> {
   const headers: Record<string, string> = { "Content-Type": "application/json", ...csrfHeader() };
   let res: Response;
@@ -972,6 +1027,7 @@ async function streamChatRequest(
       body: JSON.stringify({
         message,
         conversation_id: conversationId,
+        project_id: projectId,
         client_message_id: clientMessageId ?? newClientMessageId(),
       }),
     });
@@ -983,7 +1039,7 @@ async function streamChatRequest(
   if (res.status === 401 && !isRetry) {
     const refreshed = await attemptRefresh();
     if (refreshed) {
-      return streamChatRequest(message, conversationId, clientMessageId, options, true);
+      return streamChatRequest(message, conversationId, clientMessageId, options, true, projectId);
     }
     throw new AuthError("Sessionen har gått ut. Logga in igen.");
   }
@@ -1097,12 +1153,13 @@ export const api = {
   deleteAccount: (password: string) =>
     request("/api/account", { method: "DELETE", body: JSON.stringify({ password }) }),
 
-  sendChat: (message: string, conversationId?: string, clientMessageId?: string) =>
+  sendChat: (message: string, conversationId?: string, clientMessageId?: string, projectId?: string) =>
     request<ChatResponse>("/api/chat", {
       method: "POST",
       body: JSON.stringify({
         message,
         conversation_id: conversationId,
+        project_id: projectId,
         client_message_id: clientMessageId ?? newClientMessageId(),
       }),
     }),
@@ -1110,8 +1167,9 @@ export const api = {
     message: string,
     conversationId?: string,
     clientMessageId?: string,
-    options?: { signal?: AbortSignal; onEvent?: (event: ChatStreamEvent) => void }
-  ) => streamChatRequest(message, conversationId, clientMessageId, options),
+    options?: { signal?: AbortSignal; onEvent?: (event: ChatStreamEvent) => void },
+    projectId?: string
+  ) => streamChatRequest(message, conversationId, clientMessageId, options, false, projectId),
   retryChatMessage: (userMessageId: string) =>
     request<ChatResponse>(`/api/chat/messages/${userMessageId}/retry`, { method: "POST" }),
 
@@ -1134,6 +1192,42 @@ export const api = {
   getProject: (id: string) => request<ProjectDetail>(`/api/projects/${id}`),
   createProject: (payload: Partial<ProjectItem>) =>
     request<ProjectItem>("/api/projects", { method: "POST", body: JSON.stringify(payload) }),
+
+  listWorkspaces: (includeArchived = false) =>
+    request<ProjectItem[]>(`/api/workspaces${includeArchived ? "?include_archived=true" : ""}`),
+  getWorkspace: (id: string) => request<WorkspaceDetail>(`/api/workspaces/${id}`),
+  createWorkspace: (payload: {
+    name: string;
+    description?: string | null;
+    purpose?: string | null;
+    goals?: string[];
+    status?: string;
+    settings?: Record<string, unknown>;
+  }) => request<ProjectItem>("/api/workspaces", { method: "POST", body: JSON.stringify(payload) }),
+  updateWorkspace: (id: string, payload: Partial<ProjectItem> & { goals?: string[]; purpose?: string | null }) =>
+    request<ProjectItem>(`/api/workspaces/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  archiveWorkspace: (id: string) => request<ProjectItem>(`/api/workspaces/${id}/archive`, { method: "POST" }),
+  restoreWorkspace: (id: string) => request<ProjectItem>(`/api/workspaces/${id}/restore`, { method: "POST" }),
+  deleteWorkspace: (id: string) => request(`/api/workspaces/${id}`, { method: "DELETE" }),
+  workspaceKnowledge: (id: string) => request<KnowledgeSourceItem[]>(`/api/workspaces/${id}/knowledge`),
+  associateWorkspaceDocument: (id: string, documentId: string) =>
+    request<KnowledgeSourceItem>(`/api/workspaces/${id}/documents/${documentId}`, { method: "POST" }),
+  disassociateWorkspaceDocument: (id: string, documentId: string) =>
+    request<KnowledgeSourceItem>(`/api/workspaces/${id}/documents/${documentId}`, { method: "DELETE" }),
+  workspaceTasks: (id: string) => request<TaskItem[]>(`/api/workspaces/${id}/tasks`),
+  createWorkspaceTask: (id: string, payload: Partial<TaskItem>) =>
+    request<TaskItem>(`/api/workspaces/${id}/tasks`, { method: "POST", body: JSON.stringify(payload) }),
+  workspaceConversations: (id: string) => request<ConversationItem[]>(`/api/workspaces/${id}/conversations`),
+  createWorkspaceConversation: (id: string) =>
+    request<ConversationItem>(`/api/workspaces/${id}/conversations`, { method: "POST" }),
+  workspaceActivity: (id: string) => request<WorkspaceActivity[]>(`/api/workspaces/${id}/activity`),
+  workspaceDecisions: (id: string) => request<WorkspaceDecision[]>(`/api/workspaces/${id}/decisions`),
+  createWorkspaceDecision: (
+    id: string,
+    payload: { title: string; decision: string; rationale?: string | null; status?: string }
+  ) => request<WorkspaceDecision>(`/api/workspaces/${id}/decisions`, { method: "POST", body: JSON.stringify(payload) }),
+  workspaceContext: (id: string, query?: string) =>
+    request<WorkspaceContext>(`/api/workspaces/${id}/context${query ? `?q=${encodeURIComponent(query)}` : ""}`),
 
   listTasks: () => request<TaskItem[]>("/api/projects/tasks"),
   createTask: (payload: Partial<TaskItem>) =>
