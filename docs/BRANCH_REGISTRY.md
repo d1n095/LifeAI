@@ -6,6 +6,44 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Founder Alpha functional completion v3 — verifierad, F04/F23/F24 kvarstår (2026-11-21)
+
+**Branch:** `claude/founder-alpha-fullstack-qa`, kodcommit `59184c937947dece75a46e11ab600d2690c5a3c6`,
+bas `6ececab306d0c1551d6cefad3bb1c4b62fd8a8c9`. Ingen PR, push, merge eller deployment har
+gjorts. `first_cycle_go=false`. Produktionscontainrar, `/opt/lifeai` och produktionsdatabasen
+är orörda.
+
+**Vad som ändrades:** två bekräftade chattfel stängdes utan ny arkitektur eller migration.
+(1) En durable `ChatRequestClaim` som överlevde en krasch men saknade assistentrad gav
+permanent 409 på varje retry med samma `client_message_id`; replay går nu tillbaka in i den
+befintliga row-lockade försöksvägen, vilket är säkert eftersom originalprocessen aldrig nådde
+provider-claimet. (2) Webbläsaren skapade en ny idempotensnyckel per anrop, så ett tappat svar
+kunde ge ett andra meddelande och ett andra provider-anrop; chattsidan behåller nu samma nyckel
+och erbjuder “Försök igen” för exakt samma logiska sändning. Vid omladdning visas ett avslutande
+användarmeddelande utan svarsrad som återhämtningsbart i stället för att tyst försvinna.
+Tangentbordsnavigation och Enter-sändning verifieras också.
+
+**Faktiska resultat:** samlad backend-JUnit **608 tester, 0 failures, 0 errors, 2 skips
+(606 passed)**. Playwright Founder Alpha **13 expected, 0 unexpected, 0 flaky, 0 skipped**
+(import/indexering/sökning/källciterat svar/öppna källa/fortsätta/radera, media och
+`?t=`-länk, mobil `/library`/`/workbench`/media, reload, nätverksavbrott, projekt/uppgift,
+avbrutet chattsvar med samma `user_message_id`/`assistant_message_id`, tangentbord). PR #464
+kördes om orörd i separat worktree mot head `8667146`: **66 passed, 0 failed, 0 skipped**.
+Frontend production build **PASS** vid `59184c9`.
+
+**Kvarstående blockerare:** F04 (Ollama saknas), F23 (fyra timmars soak) och F24 (ärver
+dessa). Chatten är fortsatt request/response, inte token-streaming; UI:n påstår inte att den
+streamar. `pg_stat_statements`, `zip`, Z.ai-CLI, live OpenAI, exakt-head GitHub Actions och
+resursutmattning är fortsatt kända begränsningar.
+
+**Evidens:** `docs/evidence/founder-alpha/functional-v3/` (`README.md`, `backend-tests.xml`,
+`playwright-founder.json`, `frontend-build.txt`, `summary.json`). PR #464-analysen finns i
+`docs/evidence/founder-alpha/pr464-review.md`.
+
+**Merge:** efter R15 och reliability-leveransen. Ingen känd överlappning med Codex- eller
+Z-brancher. Endast F04 kräver Ollama och F23 en riktig fyratimmarskörning i en resursmässigt
+tillräcklig isolerad miljö.
+
 ## Founder Alpha full-stack QA successor — BLOCKED (2026-11-21)
 
 **Branch:** `claude/founder-alpha-fullstack-qa`, bas `6ececab`. Ingen PR, push, merge eller

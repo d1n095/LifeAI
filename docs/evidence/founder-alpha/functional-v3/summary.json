@@ -1,0 +1,44 @@
+{
+  "schema_version": "founder-alpha-functional-v3",
+  "generated_at": "2026-11-21T15:40:00Z",
+  "branch": "claude/founder-alpha-fullstack-qa",
+  "code_commit": "59184c937947dece75a46e11ab600d2690c5a3c6",
+  "base_commit": "6ececab306d0c1551d6cefad3bb1c4b62fd8a8c9",
+  "backend": {
+    "tests": 608,
+    "passed": 606,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 2,
+    "skip_reasons": [
+      "system zip binary unavailable for encrypted archive test",
+      "live OpenAI roundtrip requires OPENAI_CONSULT_LIVE_TEST=1, real key, outbound network and reachable database"
+    ]
+  },
+  "playwright": {
+    "expected": 13,
+    "unexpected": 0,
+    "flaky": 0,
+    "skipped": 0
+  },
+  "pr464": {
+    "head": "86671468a6dd271b61a3f985434130c4bf470ea8",
+    "base": "16a6bd301a8a389e7648b8a3c1cdd80a3d115662",
+    "focused_tests": 66,
+    "failures": 0,
+    "skipped": 0,
+    "pr_modified": false
+  },
+  "frontend_build": "PASS",
+  "blockers": ["F04", "F23", "F24"],
+  "known_limitations": [
+    "chat is request/response, not token streaming",
+    "pg_stat_statements is not installed",
+    "zip binary is unavailable for one encrypted-archive test",
+    "Z.ai CLI and live OpenAI tests require external environments",
+    "exact-head GitHub Actions requires an approved push",
+    "CPU, memory and disk exhaustion are not measured"
+  ],
+  "production_untouched": true,
+  "push_merge_deploy": false
+}

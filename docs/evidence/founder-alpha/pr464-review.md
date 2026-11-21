@@ -28,6 +28,15 @@ PYTHONPATH=. /tmp/r15-venv/bin/python -m pytest \
 **Resultat: 66 passed, 0 failed, 0 errors, 0 skipped** (78.69 s). Inga andringar
 gjordes i PR #464 eller dess branch.
 
+## Reverifiering 2026-11-21
+
+Samma två filer kördes om på nytt mot exakt head
+`86671468a6dd271b61a3f985434130c4bf470ea8` i en separat detached worktree, med isolerad
+PostgreSQL `lifeos_test_pr464` och Redis DB 12: **66 passed, 0 failed, 0 errors, 0 skipped**
+(78.91 s). PR:en och dess branch är fortfarande orörda. Detta är en oberoende
+regressionskörning av PR:ens egna fokustester, inte en full 3 114-test-CI eller ett
+release-godkännande.
+
 ## Fynd
 
 Ingen blockerande defekt kunde reproduceras i det granskade omradet. De viktigaste

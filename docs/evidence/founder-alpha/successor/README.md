@@ -1,5 +1,9 @@
 # Founder Alpha successor — QA-evidens (2026-11-21)
 
+> Efterföljs av [`../functional-v3/README.md`](../functional-v3/README.md), som lägger till
+> chattåterhämtning vid durable claim utan svarsrad, same-key-retry vid tappat svar och
+> tangentbordsverifiering ovanpå denna kandidat. Denna fil behålls som historisk evidens.
+
 **Kodkandidat:** `4814a1d5e10974b490af0fb41f3fc2c08ca43e8b`
 **Branch:** `claude/founder-alpha-fullstack-qa` (bas `6ececab`)
 **QA-grind:** **BLOCKED** — 21 PASS, 0 FAIL, 3 BLOCKED, 0 SKIP vid `6a3d3d389f8a85b53a80d2c223cd711454da5eb3`
