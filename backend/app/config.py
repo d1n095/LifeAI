@@ -175,6 +175,14 @@ class Settings(BaseSettings):
     # so a keyless deployment's chain head becomes the local model.
     chat_fallback_order: str = "openai,anthropic,gemini,ollama"
 
+    # Founder directive (Task #60, requirement 8): when true, app/providers/registry.py's
+    # chat_with_fallback() refuses to fall back to any non-local provider (today: everything
+    # except "ollama") -- a local-provider failure must surface as an error, never silently
+    # escalate to a real external provider call. No authorization envelope/context can
+    # override this; it is a deployment-level posture, not a per-call exception. Defaults to
+    # False (the historical, still-default behavior) so this is strictly additive.
+    local_only_mode: bool = False
+
     # CORS — comma-separated explicit allow-list, never a wildcard (incompatible with
     # allow_credentials=True anyway, which cookie-based auth requires).
     frontend_origins: str = "http://localhost:3000"
