@@ -6,6 +6,32 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## LifeAI V9 — Founder Alpha funktionell completion (2026-11-21)
+
+**Branch:** `freebuff/v9-founder-alpha-functional-8dafd2f`, bas V8
+`8dafd2f5cb12e19a2fa8416cf93ae6b204a0a97d`. Kodcheckpoint
+`97b16b7bf28d76b992230c64ef24ff7fd97a3aaf`. Ingen PR/push/merge/deploy är gjord;
+GitHub write-access saknas fortfarande. `first_cycle_go=false`.
+
+**Scope:** founder-facing funktionell completion ovanpå befintlig arkitektur. V9 lägger till
+en riktig projektdetaljyta och ett owner-/projekt-scopat API, kopplar projekt till uppgifter,
+gör knowledge-sökningen källattribuerad, förhindrar korsprojektval i Workbench, skiljer ett
+tillfälligt auth-prob från en utgången session och visar aktiv chat-modell samt taskarnas
+verifieringsplan/beroenden i den befintliga MainAI Execution-vyn. Inga nya ramverk,
+migrationer eller parallella motorer infördes.
+
+**Faktiska resultat:** projektdetaljtester **3 passed**; fokuserad backend-svit (workbench,
+streaming, library routes, project-status work chain, founder-only auth) **78 passed**; ruff
+och py_compile **PASS**; frontend lint **PASS** (0 errors, en befintlig varning) och
+produktionsbuild **PASS** med `/projects/[id]` som dynamisk route. Backend-E2E-harnessen var
+healthy på `8010` med isolerad PostgreSQL `0092` och Redis. Playwright-resan är skriven och
+körd men **BLOCKED** eftersom Chromium saknar `libatk-1.0.so.0`; inget browser-PASS påstås.
+
+**Merge:** efter V8 och efter att Claude hanterat V7/R15-integrationen. V9 rör inte
+R15-branchen, security-kernel eller RAG-isolationsarkitekturen. Playwright, Docker och Ollama
+är fortsatt miljöblockerade. Detaljer och reproducerbara kommandon finns i
+`docs/V9_FOUNDER_ALPHA_FUNCTIONAL.md`.
+
 ## LifeAI V8 — säker delivery- och staging-integrationspipeline (2026-11-21)
 
 **Branch:** `freebuff/v8-integration-pipeline-8917f0c`, bas V7
