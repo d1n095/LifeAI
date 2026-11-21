@@ -76,6 +76,22 @@ def _pct(values: list[float], percentile: float) -> float:
     return ordered[index]
 
 
+def f23_verdict(status: str, configured_seconds: int, elapsed_seconds: float) -> str:
+    """F23 is PASS only for a passing run that actually lasted four hours.
+
+    A configured duration is not evidence. A process killed early, a crash-loop that exits
+    the loop, or a resumed/replayed report must stay BLOCKED even if its metadata says
+    duration_seconds=14400.
+    """
+    if status == "FAIL":
+        return "FAIL"
+    if status != "PASS":
+        return "BLOCKED"
+    if configured_seconds < REQUIRED_SECONDS or elapsed_seconds < REQUIRED_SECONDS:
+        return "BLOCKED"
+    return "PASS"
+
+
 def _run(cmd: list[str], *, timeout: int = 120) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, timeout=timeout)
 
@@ -214,7 +230,7 @@ class Runner:
                         event = line[6:].strip()
                     elif line.startswith("data:"):
                         data_lines.append(line[5:].strip())
-        except httpx.ReadError as exc:
+        except httpx.HTTPError as exc:
             if disconnect and start is not None and deltas > 0:
                 self.record_latency("browser_disconnect", started)
                 return {"status": "PASS", "disconnected": True, "deltas": deltas, "detail": str(exc)}
@@ -275,19 +291,13 @@ class Runner:
                 if result.returncode != 0:
                     return {"fault": name, "status": "FAIL", "detail": result.stderr[-500:]}
                 time.sleep(1)
-                if not self.health():
-                    self.failure("redis_interruption_health", None, "health failed during pause")
-                deadline = time.monotonic() + 30
-                recovered = False
-                while time.monotonic() < deadline:
-                    ping = self._compose(["exec", "-T", "redis", "redis-cli", "ping"])
-                    if ping.returncode == 0 and ping.stdout.strip() == "PONG":
-                        recovered = True
-                        break
-                    time.sleep(0.5)
-                if not recovered:
-                    return {"fault": name, "status": "FAIL", "detail": "Redis did not recover"}
-                detail = "Redis paused for 3s and recovered"
+                # Health may legitimately be 503 while Redis is paused. That is the fault
+                # under test, not an application failure: count only non-recovery as FAIL.
+                during = self.health()
+                recovery = self.wait_health(30)
+                if recovery is None:
+                    return {"fault": name, "status": "FAIL", "detail": "API did not recover after Redis pause"}
+                detail = f"Redis paused for 3s; health during pause={during}; recovered after {recovery}s"
             elif name == "database_reconnection":
                 result = self._compose(
                     [
@@ -334,20 +344,24 @@ class Runner:
                 recovered = False
                 while time.monotonic() < deadline:
                     try:
-                        tags = self.client.get("/api/health", timeout=10)
+                        tags = httpx.get(f"{self.args.ollama_url}/api/tags", timeout=5)
                         if tags.status_code == 200:
                             recovered = True
                             break
                     except Exception:
                         pass
                     time.sleep(1)
-                if not expected_failure or not recovered:
+                normal = self.chat() if recovered else {"status": "FAIL"}
+                if not expected_failure or not recovered or normal.get("status") != "PASS":
                     return {
                         "fault": name,
                         "status": "FAIL",
-                        "detail": f"expected_failure={expected_failure}, recovered={recovered}",
+                        "detail": (
+                            f"expected_failure={expected_failure}, ollama_recovered={recovered}, "
+                            f"chat_after_recovery={normal.get('status')}"
+                        ),
                     }
-                detail = "Ollama outage produced a truthful failure; API recovered"
+                detail = "Ollama outage produced a truthful failure; local model and chat recovered"
             elif name == "browser_disconnection":
                 result = self.stream(disconnect=True)
                 if result.get("status") != "PASS":
@@ -586,6 +600,10 @@ class Runner:
             blockers.append(
                 f"duration_seconds={self.args.duration_seconds} < required {REQUIRED_SECONDS}; F23 cannot be claimed"
             )
+        elif elapsed < REQUIRED_SECONDS:
+            blockers.append(
+                f"elapsed_seconds={elapsed} < required {REQUIRED_SECONDS}; F23 cannot be claimed from a short or interrupted run"
+            )
         if not self.samples:
             blockers.append("no resource samples collected")
         if fault_blockers:
@@ -601,8 +619,10 @@ class Runner:
             "generated_at": _now(),
             "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
             "status": status,
-            "f23_status": "PASS" if status == "PASS" and self.args.duration_seconds >= REQUIRED_SECONDS else ("FAIL" if status == "FAIL" else "BLOCKED"),
+            "f23_status": f23_verdict(status, self.args.duration_seconds, elapsed),
             "required_seconds": REQUIRED_SECONDS,
+            "f23_configured_seconds": self.args.duration_seconds,
+            "f23_elapsed_seconds": elapsed,
             "duration_seconds": self.args.duration_seconds,
             "elapsed_seconds": elapsed,
             "provider_mode": provider_mode,

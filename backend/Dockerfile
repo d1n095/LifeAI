@@ -1,5 +1,10 @@
 FROM python:3.12-slim
 
+# Test-only dependencies are opt-in. Production builds keep the default (false), so pytest,
+# ruff and fakeredis never enter the deployed runtime image. docker-compose.testlab.yml sets
+# this to true because its JUnit acceptance step runs pytest inside the backend container.
+ARG INSTALL_TEST_DEPS=false
+
 LABEL org.opencontainers.image.title="LifeAI/MainAI backend" \
       org.opencontainers.image.description="FastAPI backend — deployed with no public ingress, reachable only via the frontend's proxy route on a private Docker network. See docs/VPS_ARCHITECTURE.md." \
       org.opencontainers.image.source="https://github.com/d1n095/LifeAI" \
@@ -36,12 +41,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN groupadd --system --gid 10001 appuser \
     && useradd --system --uid 10001 --gid appuser --home-dir /app --no-create-home --shell /usr/sbin/nologin appuser
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-dev.txt ./
+RUN pip install --no-cache-dir -r requirements.txt \
+    && if [ "$INSTALL_TEST_DEPS" = "true" ]; then pip install --no-cache-dir -r requirements-dev.txt; fi
 
 COPY . .
 RUN chmod +x docker-entrypoint.sh \
-    && chown -R appuser:appuser /app
+    && mkdir -p /data/storage \
+    && chown -R appuser:appuser /app /data/storage
 
 USER appuser
 

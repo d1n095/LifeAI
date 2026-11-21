@@ -6,6 +6,32 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## LifeAI V7 — portabelt testlab och recovery-hardening (2026-11-21)
+
+**Branch:** `freebuff/v7-testlab-5619020`, bas
+`56190209cdfb462f2127f4bc04f91fc2b9b5efe3` (V6). Ingen PR/push är gjord; GitHub write-access
+saknas fortfarande. Exakt V7-commit och bundle finns i `delivery/v7-testlab/`.
+
+**Scope:** portabel preflight, reproducerbar dependency-installation, manuell CI-workflow,
+modell-readiness, komplett evidensinsamling, `--no-docker`-soak, deterministisk teardown samt
+recovery-fixar i reliability-runnern. V6-labben återanvänds oförändrad i grunden; inga
+produktionsresurser refereras. Claude äger R15/integration och PR #468/#469; denna branch rör
+deras säkerhetsinterface inte.
+
+**Resultat:** kontraktstester **3 passed**; Docker-preflight **BLOCKED** av permission-denied
+på Docker-socket; Playwright **BLOCKED** av saknade `atk-1.0`, `atk-bridge-2.0`, `gbm` och
+`asound`; host-preflight har backend/frontend PASS men Ollama onåbar. En 12-sekunders
+host-reliability-körning gav PASS för duplicate delivery, browser disconnect och authorization
+invalidation, men **F23 BLOCKED** (12 s < 14 400 s). F23/F24 är inte PASS.
+
+**Riktiga fixar:** testdeps är opt-in i backend-imagen; `/data/storage` ägs av appuser;
+acceptance samlar journey/Playwright/egress/JUnit även vid delmisslyckande; F23 kräver faktisk
+elapsed tid; Redis-paus räknas inte som appfel; Ollama-recovery verifieras med riktig chat.
+
+**Merge:** efter V6. Oberoende av R15/integration, men kan kollidera i `testlab.py`,
+`v6_reliability.py` och `backend/Dockerfile`. Verifiera med `scripts/testlab/preflight.py` och
+kör `scripts/testlab/ci.sh` på en Docker-värd med Ollama och Playwright-deps.
+
 ## LifeAI V6 — isolerat Founder Alpha-integrationstestlab (2026-11-21)
 
 **Branch:** `freebuff/v6-testlab-10bbfea`, bas

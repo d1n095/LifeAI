@@ -121,6 +121,58 @@ supplied neither, so provider-spend reservation rejected the plan with
 and model for that owner when both are omitted. Regression coverage is
 `backend/tests/backend/mainai/test_provider_assisted_planning.py::test_registry_adapter_defaults_to_active_chat_provider`.
 
+## V7 portability and recovery hardening (2026-11-21)
+
+V7 continues from `56190209cdfb462f2127f4bc04f91fc2b9b5efe3` on branch
+`freebuff/v7-testlab-5619020`. It does not rebuild the V6 lab; it makes the existing harness
+portable and closes runner defects found by auditing it.
+
+### Portable execution
+
+- `scripts/testlab/preflight.py` checks Python test dependencies, Docker CLI/daemon, Compose
+  config, loopback ports, disk, evidence writability, Node/Playwright package, Chromium cache
+  and required shared libraries. `--mode host` instead checks a running backend, frontend and
+  Ollama endpoint. Missing prerequisites are `BLOCKED` with an exact remediation.
+- `scripts/testlab/install_deps.sh` reproducibly installs `backend/requirements-dev.txt`,
+  `npm ci` and Playwright Chromium with system dependencies.
+- `scripts/testlab/ci.sh` is the unattended path: preflight, isolated `up`, founder
+  acceptance, soak, fail-closed gate, and deterministic teardown through an `EXIT` trap.
+- `.github/workflows/v7-testlab.yml` is a manual `ubuntu-24.04` workflow with a duration
+  input and evidence artifact upload. It uses no production secrets or resources.
+- `testlab.py` now supports `preflight`, environment overrides for URLs/evidence, model
+  readiness checks, `soak --no-docker`, `all --keep`, complete evidence collection and
+  deterministic teardown.
+
+### Genuine runner defects fixed
+
+- The backend image never installed `requirements-dev.txt`, so the in-container JUnit step
+  could not run pytest at all. Test dependencies are now opt-in via `INSTALL_TEST_DEPS=true`
+  in `docker-compose.testlab.yml`; the production default remains false.
+- `/data/storage` is created and owned by `appuser` in the image, so the non-root backend can
+  write uploads and the JUnit XML into the named volume.
+- `acceptance` used to abort on the first failed leg, leaving no JUnit or egress evidence. It
+  now runs journey, Playwright, provider-egress and JUnit independently and reports every
+  failed leg.
+- F23 previously trusted the configured duration. It now requires actual elapsed time
+  `>= 14400`, so an interrupted or replayed run cannot become PASS.
+- A Redis pause made `/api/health` return 503; the runner wrongly counted that expected
+  degradation as an application failure. It now requires recovery instead.
+- Browser disconnects are caught as any `httpx.HTTPError`, not only `ReadError`.
+- Ollama recovery is verified through `/api/tags` and a real chat, not just API health.
+- Regression contracts: `backend/tests/backend/test_v7_testlab_contract.py` **3 passed**.
+
+### Actual V7 sandbox results
+
+- Docker preflight: **BLOCKED** — `docker_daemon` permission denied on
+  `/var/run/docker.sock`; Playwright shared libraries `atk-1.0`, `atk-bridge-2.0`, `gbm` and
+  `asound` are missing.
+- Host preflight with the isolated test backend/frontend: backend and frontend PASS, Ollama
+  unreachable, same Playwright library blocker.
+- 12-second host reliability run: duplicate delivery, browser disconnection and authorization
+  invalidation **PASS**; **F23 BLOCKED** because 12 seconds is far below 14,400.
+- Therefore the Docker lab, browser journey and real local-model evidence remain unavailable
+  in this sandbox. F23/F24 are not claimed as PASS.
+
 ## Transfer
 
 The branch is `freebuff/v6-testlab-10bbfea`. If GitHub write credentials are unavailable, the

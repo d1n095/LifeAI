@@ -88,7 +88,12 @@ services:
       retries: 60
 
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      args:
+        # The JUnit acceptance step runs pytest inside this container; the production image
+        # never receives these test-only dependencies (Dockerfile default is false).
+        INSTALL_TEST_DEPS: "true"
     restart: "no"
     environment:
       <<: *backend-env
