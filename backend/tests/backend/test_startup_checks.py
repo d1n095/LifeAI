@@ -9,6 +9,28 @@ import pytest
 import app.main as main_module
 
 
+def test_database_head_check_accepts_matching_revision(monkeypatch):
+    monkeypatch.setattr(main_module, "_alembic_heads", lambda: {"abc123"})
+    monkeypatch.setattr(main_module, "_database_migration_revisions", lambda: {"abc123"})
+    main_module._check_database_at_head()  # must not raise
+
+
+def test_database_head_check_rejects_partial_or_failed_migration(monkeypatch):
+    """A database left behind by an aborted/failed migration must not serve traffic just
+    because some tables happen to exist; the mismatch is a startup failure, not a later 500."""
+    monkeypatch.setattr(main_module, "_alembic_heads", lambda: {"abc123"})
+    monkeypatch.setattr(main_module, "_database_migration_revisions", lambda: {"old456"})
+    with pytest.raises(RuntimeError, match="Alembic-revision"):
+        main_module._check_database_at_head()
+
+
+def test_database_head_check_rejects_missing_revision(monkeypatch):
+    monkeypatch.setattr(main_module, "_alembic_heads", lambda: {"abc123"})
+    monkeypatch.setattr(main_module, "_database_migration_revisions", lambda: set())
+    with pytest.raises(RuntimeError, match="Alembic-revision"):
+        main_module._check_database_at_head()
+
+
 def test_redis_unreachable_error_redacts_password(monkeypatch):
     """Regression test: the pre-fix code embedded the raw REDIS_URL — including its
     password — directly into the RuntimeError message, which startup exceptions routinely

@@ -1,7 +1,9 @@
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -117,6 +119,12 @@ def on_startup():
     # the role killed the entire process here ("Application startup failed. Exiting."), even
     # though the exact same credential worked moments later. ensure_app_role.py now also
     # retries its own self-test connection, so this is defense in depth, not the only guard.
+    # Schema ownership belongs to Alembic, and the app does not migrate at request-serving
+    # startup. That makes an explicit head check the only way to distinguish a fully
+    # provisioned database from one left behind by an aborted or failed migration: without
+    # it, a process could start against a partial schema and only fail later on the first
+    # request that touches a missing table. Fail closed before any RLS/bootstrap work.
+    call_with_db_retry(_check_database_at_head)
     call_with_db_retry(lambda: apply_rls(migration_engine))
     # See app/rls.py's own docstring: mainai_app's blanket ALL PRIVILEGES grant is
     # unconditionally re-applied by ensure_app_role.py on every boot, BEFORE this code runs —
@@ -162,6 +170,49 @@ def on_shutdown():
     from app.redis_client import close_shared_redis_clients
 
     close_shared_redis_clients()
+
+
+def _alembic_heads() -> set[str]:
+    """Return the migration heads declared by this checkout, without touching the DB."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    backend_root = Path(__file__).resolve().parent.parent
+    config = Config(str(backend_root / "alembic.ini"))
+    config.set_main_option("script_location", str(backend_root / "alembic"))
+    return set(ScriptDirectory.from_config(config).get_heads())
+
+
+def _database_migration_revisions() -> set[str]:
+    """Read the revision(s) recorded in the database, fail-closed on a missing table."""
+    try:
+        with migration_engine.connect() as conn:
+            return set(conn.execute(text("SELECT version_num FROM alembic_version")).scalars().all())
+    except Exception as exc:  # noqa: BLE001 - every failure here is a startup failure
+        raise RuntimeError(
+            "Kunde inte läsa alembic_version. Databasen är inte migrerad, eller så "
+            "misslyckades migrationen. Kör `alembic upgrade head` innan appen startas."
+        ) from exc
+
+
+def _check_database_at_head() -> None:
+    """Refuse to serve against a database that is not at exactly this code's Alembic head.
+
+    A partially applied migration can leave enough tables for a few requests to succeed,
+    which makes the failure look like random 500s later instead of a deployment problem.
+    Comparing the recorded revision to the checkout's heads turns that into one loud startup
+    error. This deliberately does not run migrations: schema ownership stays an explicit
+    deploy step, and a process that cannot write DDL must still be able to prove its schema
+    is current.
+    """
+    expected = _alembic_heads()
+    actual = _database_migration_revisions()
+    if actual != expected:
+        raise RuntimeError(
+            "Databasen är inte på rätt Alembic-revision: "
+            f"förväntade {sorted(expected) or ['<ingen head>']}, fann {sorted(actual) or ['<ingen rad>']}. "
+            "Kör `alembic upgrade head` och starta om."
+        )
 
 
 def _check_smtp_mode() -> None:

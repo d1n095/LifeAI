@@ -291,6 +291,7 @@ def main() -> int:
     parser.add_argument("--api-port", type=int, default=8012)
     parser.add_argument("--seed-other-user", action="store_true")
     parser.add_argument("--cleanup-on-failure", action="store_true")
+    parser.add_argument("--out", default="", help="write a machine-readable PASS summary here")
     args = parser.parse_args()
 
     _safe_databases(args.source_url, args.restore_url)
@@ -348,6 +349,27 @@ def main() -> int:
         api_result = _start_and_verify_api(args, source_counts, temp)
         print("restored API verified:", json.dumps(api_result, sort_keys=True))
         success = True
+        if args.out:
+            out = Path(args.out)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(
+                json.dumps(
+                    {
+                        "status": "PASS",
+                        "source_database": _db_name(args.source_url),
+                        "restore_database": restore_db,
+                        "source_counts": source_counts,
+                        "restored_counts": restored_counts,
+                        "checksum_sha256": digest,
+                        "rls_verified": True,
+                        "api": api_result,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            print(f"wrote {out}")
         print("PASS: isolated PostgreSQL backup/restore round trip")
         return 0
     finally:
