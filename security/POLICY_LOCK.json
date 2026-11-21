@@ -23,7 +23,7 @@
     "backend/scripts/security/apply_runtime_privileges.py": "6da5c663ee39d0da79c4ec8820943c8b792c01a07991663d80c8bd8853f1f19a",
     "backend/scripts/security/build_provenance.py": "84eb4e9b27a873eae67a2bc06f0a7b0fae71f4ff23c1e104146721d455d275c0",
     "backend/scripts/security/ensure_app_role.py": "c966378ccd9dd554373567421ef17c2b80f8ff8aaafd132289871bfd456f2d01",
-    "backend/scripts/security/s1a_privilege_policy.py": "2dadd5d593d57c82a7a25b6d2b7f37d399beaba88c2b96b0a72e70519dcaef1e",
+    "backend/scripts/security/s1a_privilege_policy.py": "467a0ad0278ba55e24a3703899f2908f39b201f49422b3c5da5e192f2ea50a5e",
     "backend/scripts/security/verify_agent_capabilities.py": "ff7732907cdf979158ff0b3e1a078b9dde977c3a26c7d77a185da8f767f82a25",
     "backend/scripts/security/verify_policy_lock.py": "76d131c5a997ee3a4f6d1deac568ad5fb01405348020fbbc01d8db03162b8427",
     "backend/tests/requirements/test_requirements_registry.py": "a2c2ca8134089879a2e61dac2cc48b70cebf9243edbd65ee56366d60cef2ba4f",
