@@ -28,6 +28,9 @@ from app.config import get_settings as _guard_test_settings
 from app.providers.ollama_provider import OllamaProvider as _LocalQueryEmbedding
 
 import asyncio
+import hashlib
+import random
+import re
 import uuid
 from datetime import datetime
 
@@ -55,6 +58,42 @@ DIM = get_settings().embedding_dim
 FOUNDER_EMAIL = "founder@lifeos.local"
 
 
+def _deterministic_text_embedding(text: str, dim: int = DIM) -> list[float]:
+    """Deterministic, word-overlap-sensitive fake embedding — a reproducible stand-in for a
+    real encoder, not a semantic model.
+
+    Phase 3 Founder Alpha staging integration: the fixture this replaced returned the exact
+    same constant vector ([0.1] * DIM) for every chunk and every query regardless of content.
+    That made every stored chunk's similarity to any query EXACTLY TIED, so pgvector's
+    nearest-neighbor ORDER BY had no real distance to rank on and fell back to execution-plan-
+    dependent row order — which document came back as the "top hit" was then effectively
+    arbitrary per run. `format_graph_context_instructions`'s deterministic relevance gate
+    (app/rag/graph_instructions.py) correctly includes or skips the science-composition lines
+    based on whichever chunk is top-ranked, so an arbitrary top hit produced an intermittent
+    (~40% failure rate measured over 8 runs) failure of
+    `test_twelve_step_cognitive_acceptance`'s step 6 assertion — a test-fixture defect, not a
+    bug in the gate itself, which was doing exactly its job on whatever tied order it was handed.
+
+    Each distinct word maps to a fixed pseudo-random direction (seeded from the word's own
+    hash, never from Python's global `random` state, so it never collides with-or depends on
+    any other seeding elsewhere in the suite), and a text's embedding is the normalized sum of
+    its words' directions — texts sharing words land closer together, texts sharing none do
+    not tie, and the same text always produces the same vector across runs and across the
+    query/storage call sites below.
+    """
+    words = re.findall(r"[^\W\d_]+", (text or "").lower(), re.UNICODE)
+    if not words:
+        return [0.1] * dim  # empty text: no real retrieval case exercises this
+    vec = [0.0] * dim
+    for word in words:
+        seed = int(hashlib.sha256(word.encode("utf-8")).hexdigest(), 16)
+        rng = random.Random(seed)
+        for i in range(dim):
+            vec[i] += rng.uniform(-1.0, 1.0)
+    norm = sum(v * v for v in vec) ** 0.5 or 1.0
+    return [v / norm for v in vec]
+
+
 def _set_rls_user(session, owner_id) -> None:
     current_user_id_var.set(str(owner_id))
     session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(owner_id)})
@@ -74,7 +113,7 @@ def chain_env(client, db_session, monkeypatch):
     captured: dict = {}
 
     async def _embed(self, texts, model, **kwargs):
-        return [[0.1] * DIM for _ in texts]
+        return [_deterministic_text_embedding(t) for t in texts]
 
     async def _chat(self, messages, model, **kwargs):
         captured["system"] = messages[0].content
@@ -100,7 +139,7 @@ def _source_with_claim(env, *, title, text, topic=None, extra_meta=None, confide
     source = Document(title=title, source=DocumentSource.upload, uploaded_by=owner_id)
     db.add(source)
     db.commit()
-    chunk = DocumentChunk(document_id=source.id, owner_id=owner_id, chunk_index=0, text=text, embedding=[0.1] * DIM, embedding_model=_guard_test_settings().default_embedding_model, embedding_native_dim=DIM)
+    chunk = DocumentChunk(document_id=source.id, owner_id=owner_id, chunk_index=0, text=text, embedding=_deterministic_text_embedding(text), embedding_model=_guard_test_settings().default_embedding_model, embedding_native_dim=DIM)
     db.add(chunk)
     db.commit()
     claim = KnowledgeClaim(
