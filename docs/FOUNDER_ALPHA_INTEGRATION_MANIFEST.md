@@ -5,8 +5,10 @@ came from, and its current status. Built by walking real git ancestry and the Gi
 at the exact head below — not memorized or inferred from prior reports. Re-verify against
 live git/GitHub state before trusting this on a later head; it describes one point in time.
 
-**Candidate head:** `9938fd25fda6828204c76181379dc92871c5bf55`
+**Candidate head (Phase A, PR #471/#472):** `9938fd25fda6828204c76181379dc92871c5bf55`
 (branch `claude/founder-alpha-phase3-staging`, PR #471, base `integration/founder-alpha-20261121` @ `0adb108fa5145ad6b320950fb029bfaf96f003b4`)
+
+**Phase B adds no new commits to the application tree** — see the Phase B section below for why (both claimed outstanding deliveries were confirmed BLOCKED or already-merged, not new code to bring in). This document itself is updated on branch `claude/founder-alpha-phase-b-integration` from PR #472's head `c4d32c0b55d045443b155750f317165197ae51f1`.
 
 ## PR-level provenance
 
@@ -53,3 +55,21 @@ All already landed in #470/#471's commit history (see those PRs' own description
 ## Duplicate/parallel-implementation check (Phase A scope)
 
 Checked the one known candidate for this (PI-1d's two independent isolation mechanisms, #469 vs. the base's `proposal_worktree.py`) — confirmed no duplicate code survives; #469's own workspace functions are absent from the tree, only `proposal_worktree.py` remains live. No other duplicate/parallel implementation of the same responsibility found during this review.
+
+## Phase B — outstanding agent deliveries (re-checked at `c4d32c0b55d045443b155750f317165197ae51f1`, PR #472)
+
+**Z.ai Security Kernel R21–R24, claimed SHA `8ea29a6b341ead92e0e621b2e8865071f239a84c`: confirmed BLOCKED.**
+Verified, not assumed:
+- GitHub API `GET /repos/d1n095/LifeAI/commits/8ea29a6b...` → `422 No commit found for SHA`.
+- `git ls-remote origin` across all 1258 refs (heads, tags, PRs) → no ref points at this SHA or anything near it; no `zai/*` branch beyond the already-known, already-superseded `zai/cognitive-core-r12-release-cc4d2804`.
+- Filesystem-wide search (`find / -iname "*.bundle"`, plus targeted greps for the literal SHA and for "R21"–"R24" security-kernel references) found no bundle, patch, or tarball artifact anywhere in this sandbox — only pre-existing test fixtures for the already-integrated R12-era `zai_provider.py`.
+- **Precise import requirement**: this delivery does not exist anywhere this session can reach. It needs to be delivered as a fetchable git ref (branch/tag) on `origin`, or as an actual bundle/patch file placed somewhere in this environment — not just referenced by SHA in a directive. Nothing was fabricated or assumed integrated.
+
+**Freebuff's latest completed product functionality: nothing new.**
+All 6 known branches re-checked by exact head SHA — `freebuff/local-ai-integration-20261118` (`89140ba8`), `freebuff/ci-readiness-20261118` (`94367545`), `freebuff/founder-alpha-integrated-20261118` (`dd69cb30`), `freebuff/founder-alpha-final-gate-20261118` (`d2d2ccc1`), `freebuff/founder-alpha-ops-recovery-20261118` (`a7ed6d88`), `transfer/freebuff-r15-20261119` (`16a6bd30`) — all 6 confirmed direct ancestors of this head via `git merge-base --is-ancestor`. A full remote branch listing found no Freebuff/transfer branch beyond these 6. Nothing to integrate.
+
+**Alembic revision `0090`: does not exist anywhere.**
+The live chain is `0001`→`0089`, single head, confirmed by `alembic upgrade head` on a fresh database. No `0090` file in `backend/alembic/versions/`, no remote branch or ref mentioning it, nothing granting a dedicated grant-issuer role under that revision. Reported plainly rather than invented — if `0090` is delivered later, it layers onto `0089` as the new head.
+
+**Authorization lifecycle: re-verified intact, nothing new to integrate.**
+Since none of the three claimed deliveries above had anything to actually bring in, this phase added no code. The full authorization-lifecycle test surface was re-run against a fresh database + Redis on this exact head to confirm nothing regressed: `test_chat_with_fallback_central_authorization_boundary.py` (7 tests — the central-egress negative-authorization suite from #468), `test_egress_policy.py` (9), `test_lease_clock_domain.py` (4), `test_worker_live_lease_expiry_takeover.py` (1), `test_supervisor_goal_lease.py` (9), `test_operator_lease_effect_time_race.py` (4), `test_rag_ingest_egress.py` (2) — **37 passed, 0 failed**.
