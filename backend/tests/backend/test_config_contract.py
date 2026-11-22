@@ -23,6 +23,15 @@ from app.config import Settings
 #   validates: short description of what, if anything, enforces correctness (pydantic
 #     validator, startup check in app/main.py, or "none" if nothing currently does).
 CONFIG_MATRIX: dict[str, dict] = {
+    "github_tracked_branch": {"required_in_production": False, "secret": False, "default": None,
+                              "validates": "none — optional read-only snapshot branch; grants no write authority"},
+    "github_status_stale_minutes": {"required_in_production": False, "secret": False, "default": 30,
+                                    "validates": "none — stale snapshot threshold, not evidence of current status"},
+    "local_repo_path": {"required_in_production": False, "secret": False, "default": None,
+                        "validates": "none — operator-provisioned optional read-only git observation path"},
+    "local_only_mode": {"required_in_production": False, "secret": False, "default": False,
+                       "validates": "none — deployment-level network posture, enforced unconditionally in "
+                                     "app/providers/registry.py's chat_with_fallback(), not a per-request field"},
     "environment": {
         "required_in_production": False,
         "secret": False,
@@ -133,8 +142,10 @@ CONFIG_MATRIX: dict[str, dict] = {
     "google_api_key": {"required_in_production": False, "secret": True, "default": None, "validates": "none — see openai_api_key"},
     "deepseek_api_key": {"required_in_production": False, "secret": True, "default": None, "validates": "none — see openai_api_key"},
     "openrouter_api_key": {"required_in_production": False, "secret": True, "default": None, "validates": "none — see openai_api_key"},
+    "zai_api_key": {"required_in_production": False, "secret": True, "default": None, "validates": "none — see openai_api_key"},
+    "zai_base_url": {"required_in_production": False, "secret": False, "default": "https://api.z.ai/api/paas/v4", "validates": "none — fixed provider endpoint, credential is carried only in the Authorization header"},
     "ollama_base_url": {"required_in_production": False, "secret": False, "default": "http://ollama:11434", "validates": "none"},
-    "chat_fallback_order": {"required_in_production": False, "secret": False, "default": "openai,anthropic,gemini", "validates": "none"},
+    "chat_fallback_order": {"required_in_production": False, "secret": False, "default": "openai,anthropic,gemini,ollama", "validates": "resolve_chat_chain (app/providers/registry.py) demotes unconfigured providers; ollama is the zero-key local last resort"},
     "frontend_origins": {"required_in_production": True, "secret": False, "default": "http://localhost:3000", "validates": "none — CORSMiddleware simply rejects any origin not in the list"},
     "storage_root": {"required_in_production": True, "secret": False, "default": "/var/lib/lifeai/uploads", "validates": "none — LocalFilesystemStorage fails at write time if the directory isn't writable, not at startup"},
     "project_root": {"required_in_production": False, "secret": False, "default": "", "validates": "none — app/project_memory.py raises a clear ValueError at call time when unset, never at startup"},
@@ -150,6 +161,48 @@ CONFIG_MATRIX: dict[str, dict] = {
     "github_write_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "none — a plain bool gate; off by default so MainAI only proposes PRs until explicitly turned on"},
     "github_auto_merge_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "none — gates a merge capability that has no implementation yet (see app/integrations/github_client.py's docstring); always off in this slice"},
     "mainai_proposal_worktree_isolation": {"required_in_production": False, "secret": False, "default": True, "validates": "none — a bool gate; on by default so a proposal is written into its own local-only checkout instead of the live tree. Off (or automatically, if a bootstrap cannot be built) falls back to the shared checkout with PI-1d rollback as the protection"},
+    # --- Z.AI OpenAI consultation lane (fail-closed by default; see docs/OPENAI_CONSULT_INTEGRATION.md)
+    "openai_consult_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "gate 1 — every consultation path refuses unless explicitly enabled; see app/openai_consult/policy.py"},
+    "openai_consult_allowed_models": {"required_in_production": False, "secret": False, "default": "gpt-5.1", "validates": "gate 3 — model allowlist enforced in app/openai_consult/policy.py"},
+    "openai_consult_requests_per_minute": {"required_in_production": False, "secret": False, "default": 10, "validates": "policy rate ceiling"},
+    "openai_consult_daily_token_budget": {"required_in_production": False, "secret": False, "default": 200000, "validates": "reserve/settle budget gate (Redis-backed, fail-closed in production)"},
+    "openai_consult_daily_cost_budget_usd": {"required_in_production": False, "secret": False, "default": 5.0, "validates": "reserve/settle budget gate"},
+    "openai_consult_timeout_seconds": {"required_in_production": False, "secret": False, "default": 60, "validates": "provider timeout; reservation released on cancellation"},
+    "openai_consult_max_output_tokens": {"required_in_production": False, "secret": False, "default": 2048, "validates": "bounded output contract"},
+    "openai_consult_store_responses": {"required_in_production": False, "secret": False, "default": False, "validates": "provider-side storage off unless enabled (data-minimization default)"},
+    "openai_consult_web_search_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "egress control — web_search tool disabled unless explicitly enabled"},
+    "openai_consult_mainai_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "independent switch for the MainAI-invoked path (workforce harness)"},
+    "openai_consult_mainai_daily_call_cap": {"required_in_production": False, "secret": False, "default": 20, "validates": "MainAI admission cap per owner per UTC day, Redis-backed counter"},
+    # --- Secure founder account recovery (app/founder_recovery.py, CLI-only initiation)
+    "founder_recovery_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "fail-closed arming switch, re-checked at initiate AND confirm"},
+    "founder_recovery_code_sha256": {"required_in_production": False, "secret": True, "default": "***", "validates": "only the SHA-256 of the recovery code is stored (real default is the empty string — recovery refuses when unset)"},
+    "founder_recovery_token_expire_hours": {"required_in_production": False, "secret": False, "default": 1, "validates": "single-use confirmation link TTL"},
+    # --- Revenue & Compute Engine (app/billing/, migration 0070; docs/REVENUE_COMPUTE_ENGINE.md)
+    "billing_enforcement_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "OFF by default; when ON, spending fails CLOSED if the counter store (Redis) is unavailable in production"},
+    "billing_default_tier": {"required_in_production": False, "secret": False, "default": "paid", "validates": "tier resolution for personal accounts (no tenant membership)"},
+    "billing_free_daily_cost_usd": {"required_in_production": False, "secret": False, "default": 0.1, "validates": "tier policy cap (ad-funded free tier)"},
+    "billing_free_monthly_cost_usd": {"required_in_production": False, "secret": False, "default": 1.5, "validates": "tier policy cap"},
+    "billing_free_daily_token_cap": {"required_in_production": False, "secret": False, "default": 30000, "validates": "tier policy cap"},
+    "billing_free_monthly_token_cap": {"required_in_production": False, "secret": False, "default": 300000, "validates": "tier policy cap"},
+    "billing_paid_daily_cost_usd": {"required_in_production": False, "secret": False, "default": 2.0, "validates": "tier policy cap"},
+    "billing_paid_monthly_cost_usd": {"required_in_production": False, "secret": False, "default": 25.0, "validates": "tier policy cap"},
+    "billing_paid_daily_token_cap": {"required_in_production": False, "secret": False, "default": 300000, "validates": "tier policy cap"},
+    "billing_paid_monthly_token_cap": {"required_in_production": False, "secret": False, "default": 3000000, "validates": "tier policy cap"},
+    "billing_enterprise_daily_cost_usd": {"required_in_production": False, "secret": False, "default": 20.0, "validates": "tier policy cap"},
+    "billing_enterprise_monthly_cost_usd": {"required_in_production": False, "secret": False, "default": 250.0, "validates": "tier policy cap"},
+    "billing_enterprise_daily_token_cap": {"required_in_production": False, "secret": False, "default": 3000000, "validates": "tier policy cap"},
+    "billing_enterprise_monthly_token_cap": {"required_in_production": False, "secret": False, "default": 30000000, "validates": "tier policy cap"},
+    "billing_unknown_cost_fallback_usd_per_1k": {"required_in_production": False, "secret": False, "default": 0.01, "validates": "unpriced provider/model calls still count against cost budgets at this conservative rate — never silently free"},
+    "billing_local_gpu_hour_usd": {"required_in_production": False, "secret": False, "default": 0.75, "validates": "platform-side local-infrastructure cost model (users' local inference is free)"},
+    "billing_local_gpu_tokens_per_second": {"required_in_production": False, "secret": False, "default": 30.0, "validates": "local cost model throughput knob"},
+    "billing_local_energy_overhead_pct": {"required_in_production": False, "secret": False, "default": 20.0, "validates": "local cost model overhead knob"},
+    "billing_safety_margin_pct": {"required_in_production": False, "secret": False, "default": 25, "validates": "allocation withholds this share of SETTLED revenue from spending ceilings (DB CHECK bounds 0..90)"},
+    # --- Advertising subsystem (app/ads/, migration 0071; docs/ADS_COMPLIANCE.md) — DISABLED BY DEFAULT
+    "ads_enabled": {"required_in_production": False, "secret": False, "default": False, "validates": "OFF by default; the HTTP surface 404s and the service serves nothing while disabled"},
+    "ads_house_ads_json": {"required_in_production": False, "secret": False, "default": None, "validates": "operator-supplied house-ad pool (JSON array); provider-agnostic — no ad-network SDK exists"},
+    "ads_max_impressions_per_user_per_day": {"required_in_production": False, "secret": False, "default": 20, "validates": "fraud/abuse ceiling, Redis-backed counter, fail-closed when enabled"},
+    "ads_max_clicks_per_user_per_day": {"required_in_production": False, "secret": False, "default": 5, "validates": "fraud/abuse ceiling"},
+    "ads_click_min_interval_seconds": {"required_in_production": False, "secret": False, "default": 3, "validates": "impression-to-click plausibility floor"},
 }
 
 
@@ -217,7 +270,7 @@ def test_matrix_urls_all_actually_parse():
     """Sanity check on the matrix's own non-secret example/default values (e.g.
     ollama_base_url, public_app_url's default) — they should themselves be parseable URLs
     where the field name implies a URL, catching a typo in this file."""
-    url_like_fields = ["public_app_url", "ollama_base_url"]
+    url_like_fields = ["public_app_url", "ollama_base_url", "zai_base_url"]
     for field in url_like_fields:
         default = CONFIG_MATRIX[field]["default"]
         if default is None or default == "***":

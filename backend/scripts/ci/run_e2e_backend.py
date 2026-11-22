@@ -29,12 +29,16 @@ open(EMAIL_LOG_PATH, "w").close()
 from app.config import get_settings
 from app.providers.base import ChatResult
 from app.providers.openai_provider import OpenAIProvider
+from app.providers.ollama_provider import OllamaProvider
 from app.rag.claims import CLAIM_EXTRACTION_SYSTEM_PROMPT
 import app.rag.vector_store as vector_store
 import app.rag.retrieve as retrieve_mod
 import app.routers.auth as auth_router
 
 _EMBEDDING_DIM = get_settings().embedding_dim
+# Guarded chat permits local query embedding; its transport alone is faked here.
+get_settings().default_embedding_provider = "ollama"
+get_settings().default_embedding_model = "nomic-embed-text"
 
 
 async def fake_chat(self, messages, model, **kwargs):
@@ -107,7 +111,7 @@ def fake_send_email(to: str, subject: str, body_text: str) -> None:
 
 
 OpenAIProvider.chat = fake_chat
-OpenAIProvider.embed = fake_embed
+OllamaProvider.embed = fake_embed
 vector_store.search = fake_search
 retrieve_mod.search = fake_search
 auth_router.send_email = fake_send_email

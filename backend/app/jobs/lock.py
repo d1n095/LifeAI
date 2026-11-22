@@ -12,6 +12,7 @@ import uuid
 import redis
 
 from app.config import get_settings
+from app.redis_client import get_redis_client
 
 logger = logging.getLogger("mainai.jobs.lock")
 
@@ -61,15 +62,15 @@ class JobLock:
         self.key = f"joblock:{key}"
         self.token = str(uuid.uuid4())
         self.lease_seconds = lease_seconds
-        self._client: redis.Redis | None = None
 
     def _get_client(self) -> redis.Redis:
-        if self._client is None:
-            settings = get_settings()
-            if not settings.redis_url:
-                raise JobLockUnavailable("REDIS_URL är inte konfigurerad — jobblås kan inte användas.")
-            self._client = redis.from_url(settings.redis_url, socket_connect_timeout=3, socket_timeout=3)
-        return self._client
+        # The shared process-wide client (app/redis_client.py): a soak creates one JobLock
+        # per job, and one from_url() per JobLock churned a connection per instance until
+        # long runs degraded. The shared client keeps the same per-call behavior otherwise.
+        settings = get_settings()
+        if not settings.redis_url:
+            raise JobLockUnavailable("REDIS_URL är inte konfigurerad — jobblås kan inte användas.")
+        return get_redis_client()
 
     def acquire(self) -> bool:
         """True if this call acquired the lock, False if another holder already has it
