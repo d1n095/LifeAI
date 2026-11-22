@@ -3,6 +3,7 @@ import uuid
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.audit import record_audit
@@ -177,7 +178,16 @@ def register(request: Request, payload: RegisterIn, db: Session = Depends(get_db
 
     user = User(email=payload.email, password_hash=hash_password(payload.password))
     db.add(user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Concurrent registration with the same email: both requests passed the
+        # `existing is None` check before either committed. The unique constraint decides
+        # — the loser gets the neutral response instead of a 500 that would also act as a
+        # timing/enumeration tell.
+        db.rollback()
+        record_audit(db, user_id=None, action="register_duplicate_attempt", request=request)
+        return NEUTRAL_REGISTER_RESPONSE
     _issue_and_send_verification(db, user, request)
     record_audit(db, user_id=user.id, action="register_success", request=request)
     return NEUTRAL_REGISTER_RESPONSE
@@ -257,6 +267,29 @@ def login(request: Request, response: Response, payload: LoginIn, db: Session = 
     return _session_response(user, csrf_token)
 
 
+def _kill_session_family(db: Session, request: Request, response: Response, row: RefreshToken) -> None:
+    """Kill every token in the rotation family — refresh rows AND their paired access
+    tokens. Used by replay/reuse handling so nothing from a stolen chain can be used
+    again, forcing full re-login. Idempotent under concurrent callers."""
+    family_rows = db.query(RefreshToken).filter(
+        RefreshToken.family_id == row.family_id, RefreshToken.revoked_at.is_(None)
+    ).all()
+    for family_row in family_rows:
+        family_row.revoked_at = datetime.utcnow()
+        db.add(family_row)
+        revoke_access_token(db, family_row.access_jti)
+    db.commit()
+    record_audit(
+        db,
+        user_id=row.user_id,
+        action="refresh_token_reuse_detected",
+        entity_type="refresh_token_family",
+        entity_id=str(row.family_id),
+        request=request,
+    )
+    clear_session_cookies(response)
+
+
 @router.post("/refresh", response_model=SessionOut)
 @limiter.limit(f"{settings.rate_limit_refresh_per_minute}/minute")
 def refresh(request: Request, response: Response, db: Session = Depends(get_db)):
@@ -281,23 +314,7 @@ def refresh(request: Request, response: Response, db: Session = Depends(get_db))
         # those apart, so we treat it as a compromise either way: kill every token in the
         # family — refresh AND their paired access tokens — so nothing from a stolen chain
         # can be used again from here, forcing full re-login.
-        family_rows = db.query(RefreshToken).filter(
-            RefreshToken.family_id == row.family_id, RefreshToken.revoked_at.is_(None)
-        ).all()
-        for family_row in family_rows:
-            family_row.revoked_at = datetime.utcnow()
-            db.add(family_row)
-            revoke_access_token(db, family_row.access_jti)
-        db.commit()
-        record_audit(
-            db,
-            user_id=row.user_id,
-            action="refresh_token_reuse_detected",
-            entity_type="refresh_token_family",
-            entity_id=str(row.family_id),
-            request=request,
-        )
-        clear_session_cookies(response)
+        _kill_session_family(db, request, response, row)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sessionen har återkallats. Logga in igen.")
 
     if row.expires_at < datetime.utcnow():
@@ -312,9 +329,21 @@ def refresh(request: Request, response: Response, db: Session = Depends(get_db))
     # Rotate: this token is now spent. A new one takes its place in the same family. Its
     # paired access token is deliberately NOT blocklisted here — a normal rotation isn't a
     # compromise, and the old access token naturally expires within minutes regardless.
-    row.revoked_at = datetime.utcnow()
-    db.add(row)
+    #
+    # ATOMIC single-use claim (P4 fix): a plain SELECT-then-UPDATE leaves a window where
+    # two concurrent refreshes with the same cookie BOTH pass the revoked_at check and BOTH
+    # rotate — handing two live session pairs to whoever holds one token. The conditional
+    # UPDATE claims the row for exactly one caller; the loser is treated as a replay and
+    # the whole family dies (same posture as the reuse check above).
+    claimed = (
+        db.query(RefreshToken)
+        .filter(RefreshToken.id == row.id, RefreshToken.revoked_at.is_(None))
+        .update({"revoked_at": datetime.utcnow()}, synchronize_session=False)
+    )
     db.commit()
+    if claimed != 1:
+        _kill_session_family(db, request, response, row)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sessionen har återkallats. Logga in igen.")
 
     new_row, csrf_token = _issue_session(db, request, response, user, family_id=row.family_id)
     # Purely for audit/forensics — not used by any security check (reuse detection keys
