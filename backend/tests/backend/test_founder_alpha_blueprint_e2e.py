@@ -23,6 +23,9 @@ Required chain covered end to end:
 
 from __future__ import annotations
 
+from app.config import get_settings as _guard_test_settings
+from app.providers.ollama_provider import OllamaProvider as _LocalQueryEmbedding
+
 import uuid
 from datetime import datetime
 
@@ -72,7 +75,8 @@ def _fake_model(monkeypatch):
         return [MATCHING_VECTOR for _ in texts]
 
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat)
-    monkeypatch.setattr(OpenAIProvider, "embed", _fake_embed)
+    monkeypatch.setattr(_guard_test_settings(), "default_embedding_provider", "ollama")
+    monkeypatch.setattr(_LocalQueryEmbedding, "embed", _fake_embed)
     return state
 
 
