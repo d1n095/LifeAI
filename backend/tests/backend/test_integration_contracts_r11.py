@@ -158,10 +158,16 @@ def test_production_paths_produce_a_contract_valid_prompt(client, db_session, mo
 # --- the other integration contract surfaces -----------------------------------------
 
 
-def test_contract_migration_chain_head_and_core_tables(db_session):
+def test_contract_migration_chain_head_and_core_tables(db_session, superuser_db):
     """Startup readiness contract: the migration chain is intact and the Cognitive Core's
     tables exist with their constraints — what another branch's deploy must produce."""
-    version = db_session.execute(sa_text("SELECT version_num FROM alembic_version")).scalar()
+    # Reconciling R15 into this branch: this originally read alembic_version through
+    # db_session (the restricted mainai_app role), which was fine under R15's own,
+    # superseded SELECT-only SFA-1 policy but is correctly refused under the stricter,
+    # already-integrated zero-privilege policy this branch kept (see
+    # s1a_privilege_policy.py's reconciliation note) -- mainai_app has no legitimate use
+    # for this table at all; only an operator/admin connection should ever read it.
+    version = superuser_db.execute(sa_text("SELECT version_num FROM alembic_version")).scalar()
     assert version >= "0077", f"migration head at/after 0077, got {version}"
     for table in (
         "cognitive_gate_runs", "cognitive_gate_case_results", "mainai_improvement_proposals",
