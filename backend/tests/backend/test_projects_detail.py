@@ -65,19 +65,19 @@ def test_project_detail_returns_only_its_tasks_and_owner_visible_sources(
         json={"title": "Uppgift i projektet", "project_id": project_body["id"], "status": "todo"},
         headers=headers,
     )
-    assert own_task.status_code == 200, own_task.text
+    assert own_task.status_code == 201, own_task.text
     other_task = client.post(
         "/api/projects/tasks",
         json={"title": "Uppgift i annat projekt", "project_id": other_project.json()["id"]},
         headers=headers,
     )
-    assert other_task.status_code == 200, other_task.text
+    assert other_task.status_code == 201, other_task.text
     unassigned_task = client.post(
         "/api/projects/tasks",
         json={"title": "Uppgift utan projekt"},
         headers=headers,
     )
-    assert unassigned_task.status_code == 200, unassigned_task.text
+    assert unassigned_task.status_code == 201, unassigned_task.text
 
     founder_id = _founder_id(superuser_db)
     other_user, _ = make_verified_user(email="project-detail-other@example.com")

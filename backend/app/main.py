@@ -29,6 +29,7 @@ from app.routers import (
     auth,
     blueprint,
     calendar,
+    dashboard,
     chat,
     conversations,
     documents,
@@ -44,6 +45,7 @@ from app.routers import (
     memory,
     project_entities,
     projects,
+    search,
     provider_spend,
     workbench,
     workspaces,
@@ -83,11 +85,13 @@ app.include_router(founder_recovery.router)
 app.include_router(account.router)
 app.include_router(blueprint.router)
 app.include_router(calendar.router)
+app.include_router(dashboard.router)
 app.include_router(chat.router)
 app.include_router(incidents.router)
 app.include_router(conversations.router)
 app.include_router(documents.router)
 app.include_router(projects.router)
+app.include_router(search.router)
 app.include_router(workspaces.router)
 app.include_router(knowledge.router)
 app.include_router(library.router)

@@ -203,6 +203,13 @@ from app.models.problem_learning import (
     LifeSolutionSelection,
 )
 from app.models.project import Project, Task
+from app.models.work_management import (
+    MilestoneStatus,
+    TaskDependency,
+    TaskEvent,
+    TaskEventType,
+    WorkspaceMilestone,
+)
 from app.models.workspace import WorkspaceActivity, WorkspaceDecision, WorkspaceDecisionStatus, WorkspaceMember, WorkspaceMemberRole
 from app.models.project_entities import (
     InterpretationProposal,

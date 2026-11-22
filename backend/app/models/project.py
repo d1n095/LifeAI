@@ -19,7 +19,9 @@ class ProjectStatus(str, enum.Enum):
 class TaskStatus(str, enum.Enum):
     todo = "todo"
     in_progress = "in_progress"
+    blocked = "blocked"
     done = "done"
+    cancelled = "cancelled"
 
 
 class TaskPriority(str, enum.Enum):
@@ -68,6 +70,14 @@ class Task(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[TaskStatus] = mapped_column(Enum(TaskStatus), default=TaskStatus.todo)
     priority: Mapped[TaskPriority] = mapped_column(Enum(TaskPriority), default=TaskPriority.medium)
+    due_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    blocked_reason: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    milestone_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspace_milestones.id", ondelete="SET NULL"), nullable=True
+    )
+    version: Mapped[int] = mapped_column(default=1, nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     suggested_by_ai: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

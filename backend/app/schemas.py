@@ -284,19 +284,193 @@ class ProjectOut(ProjectIn):
     created_at: datetime
 
 
+_TASK_STATUSES = {"todo", "in_progress", "blocked", "done", "cancelled"}
+_TASK_PRIORITIES = {"low", "medium", "high", "critical"}
+
+
+def _validate_task_status(value: str) -> str:
+    if value not in _TASK_STATUSES:
+        raise ValueError(f"status måste vara en av: {', '.join(sorted(_TASK_STATUSES))}.")
+    return value
+
+
+def _validate_task_priority(value: str) -> str:
+    if value not in _TASK_PRIORITIES:
+        raise ValueError(f"priority måste vara en av: {', '.join(sorted(_TASK_PRIORITIES))}.")
+    return value
+
+
 class TaskIn(BaseModel):
+    project_id: uuid.UUID | None = None
+    title: str = Field(min_length=1, max_length=512)
+    description: str | None = Field(default=None, max_length=20_000)
+    status: str = "todo"
+    priority: str = "medium"
+    due_at: datetime | None = None
+    milestone_id: uuid.UUID | None = None
+    depends_on_task_ids: list[uuid.UUID] = Field(default_factory=list)
+
+    @field_validator("title")
+    @classmethod
+    def clean_task_title(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Uppgiftens titel får inte vara tom.")
+        return value
+
+    @field_validator("status")
+    @classmethod
+    def valid_task_status(cls, value: str) -> str:
+        return _validate_task_status(value)
+
+    @field_validator("priority")
+    @classmethod
+    def valid_task_priority(cls, value: str) -> str:
+        return _validate_task_priority(value)
+
+
+class TaskUpdate(BaseModel):
+    expected_version: int | None = Field(default=None, ge=1)
+    project_id: uuid.UUID | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=512)
+    description: str | None = Field(default=None, max_length=20_000)
+    status: str | None = None
+    priority: str | None = None
+    due_at: datetime | None = None
+    milestone_id: uuid.UUID | None = None
+    blocked_reason: str | None = Field(default=None, max_length=512)
+    depends_on_task_ids: list[uuid.UUID] | None = None
+
+    @field_validator("title")
+    @classmethod
+    def clean_optional_task_title(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("Uppgiftens titel får inte vara tom.")
+        return value
+
+    @field_validator("status")
+    @classmethod
+    def valid_optional_task_status(cls, value: str | None) -> str | None:
+        return None if value is None else _validate_task_status(value)
+
+    @field_validator("priority")
+    @classmethod
+    def valid_optional_task_priority(cls, value: str | None) -> str | None:
+        return None if value is None else _validate_task_priority(value)
+
+
+class TaskOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
     project_id: uuid.UUID | None = None
     title: str
     description: str | None = None
-    status: str = "todo"
-    priority: str = "medium"
+    status: str
+    priority: str
+    due_at: datetime | None = None
+    completed_at: datetime | None = None
+    blocked_reason: str | None = None
+    milestone_id: uuid.UUID | None = None
+    version: int = 1
+    suggested_by_ai: bool = False
+    created_at: datetime
+    updated_at: datetime | None = None
+    is_blocked: bool = False
+    dependency_count: int = 0
 
 
-class TaskOut(TaskIn):
+class MilestoneIn(BaseModel):
+    title: str = Field(min_length=1, max_length=256)
+    description: str | None = Field(default=None, max_length=20_000)
+    due_at: datetime | None = None
+    status: str = "open"
+
+    @field_validator("title")
+    @classmethod
+    def clean_milestone_title(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Milstolpens titel får inte vara tom.")
+        return value
+
+    @field_validator("status")
+    @classmethod
+    def valid_milestone_status(cls, value: str) -> str:
+        if value not in {"open", "in_progress", "completed", "cancelled"}:
+            raise ValueError("status måste vara en av: open, in_progress, completed, cancelled.")
+        return value
+
+
+class MilestoneUpdate(BaseModel):
+    expected_version: int | None = Field(default=None, ge=1)
+    title: str | None = Field(default=None, min_length=1, max_length=256)
+    description: str | None = Field(default=None, max_length=20_000)
+    due_at: datetime | None = None
+    status: str | None = None
+
+    @field_validator("title")
+    @classmethod
+    def clean_optional_milestone_title(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("Milstolpens titel får inte vara tom.")
+        return value
+
+    @field_validator("status")
+    @classmethod
+    def valid_optional_milestone_status(cls, value: str | None) -> str | None:
+        if value is not None and value not in {"open", "in_progress", "completed", "cancelled"}:
+            raise ValueError("status måste vara en av: open, in_progress, completed, cancelled.")
+        return value
+
+
+class MilestoneOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
-    suggested_by_ai: bool
+    project_id: uuid.UUID
+    title: str
+    description: str | None = None
+    due_at: datetime | None = None
+    status: str
+    completed_at: datetime | None = None
+    version: int = 1
     created_at: datetime
+    updated_at: datetime
+    task_count: int = 0
+    completed_task_count: int = 0
+
+
+class TaskDependencyOut(BaseModel):
+    id: uuid.UUID
+    task_id: uuid.UUID
+    depends_on_task_id: uuid.UUID
+    depends_on_title: str
+    depends_on_status: str
+
+
+class TaskEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    event_type: str
+    from_status: str | None = None
+    to_status: str | None = None
+    detail: dict = Field(default_factory=dict)
+    created_at: datetime
+
+
+class TaskDetailOut(TaskOut):
+    dependencies: list[TaskDependencyOut] = Field(default_factory=list)
+    dependents: list[TaskDependencyOut] = Field(default_factory=list)
+    events: list[TaskEventOut] = Field(default_factory=list)
+    milestone: MilestoneOut | None = None
+    project_name: str | None = None
+    kind: Literal["user_task"] = "user_task"
+    execution_authority: Literal["none"] = "none"
 
 
 class CompanyInfoIn(BaseModel):
@@ -523,11 +697,13 @@ class KnowledgeSourceOut(BaseModel):
 
 
 class ProjectDetailOut(ProjectOut):
-    """A project and the two scoped collections the founder actually needs to inspect it:
-    its own tasks and its own non-deleted knowledge sources. Both lists are filtered by the
-    project id server-side; the frontend never derives project membership from a global list."""
+    """A project and the scoped collections the founder actually needs to inspect it:
+    its own tasks, milestones and non-deleted knowledge sources. Every list is filtered by
+    the project id server-side; the frontend never derives project membership from a global
+    list."""
 
     tasks: list[TaskOut] = []
+    milestones: list[MilestoneOut] = []
     sources: list[KnowledgeSourceOut] = []
 
 
@@ -684,6 +860,8 @@ class WorkspaceDecisionIn(BaseModel):
     decision: str = Field(min_length=1, max_length=20_000)
     rationale: str | None = Field(default=None, max_length=20_000)
     status: str = "accepted"
+    epistemic_status: str = "confirmed"
+    origin: str = "founder"
 
     @field_validator("status")
     @classmethod
@@ -691,6 +869,24 @@ class WorkspaceDecisionIn(BaseModel):
         if value not in _WORKSPACE_DECISION_STATUSES:
             raise ValueError(f"status måste vara en av: {', '.join(sorted(_WORKSPACE_DECISION_STATUSES))}.")
         return value
+
+    @field_validator("epistemic_status")
+    @classmethod
+    def valid_epistemic_status(cls, value: str) -> str:
+        if value not in {"confirmed", "uncertain", "proposed"}:
+            raise ValueError("epistemic_status måste vara confirmed, uncertain eller proposed.")
+        return value
+
+    @field_validator("origin")
+    @classmethod
+    def valid_origin(cls, value: str) -> str:
+        if value not in {"founder", "ai"}:
+            raise ValueError("origin måste vara founder eller ai.")
+        return value
+
+
+class WorkspaceDecisionSupersedeIn(WorkspaceDecisionIn):
+    pass
 
 
 class WorkspaceDecisionOut(BaseModel):
@@ -700,6 +896,11 @@ class WorkspaceDecisionOut(BaseModel):
     decision: str
     rationale: str | None = None
     status: str
+    version: int = 1
+    supersedes_id: uuid.UUID | None = None
+    epistemic_status: str = "confirmed"
+    origin: str = "founder"
+    superseded_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -714,7 +915,9 @@ class WorkspaceContextSourceOut(BaseModel):
 
 class WorkspaceContextOut(BaseModel):
     workspace_id: uuid.UUID
+    context_version: int = 1
     objectives: list[str]
+    milestones: list[MilestoneOut] = Field(default_factory=list)
     source_documents: list[KnowledgeSourceOut]
     decisions: list[WorkspaceDecisionOut]
     outstanding_tasks: list[TaskOut]
@@ -728,6 +931,7 @@ class WorkspaceContextOut(BaseModel):
 
 class WorkspaceDetailOut(WorkspaceOut):
     tasks: list[TaskOut] = Field(default_factory=list)
+    milestones: list[MilestoneOut] = Field(default_factory=list)
     sources: list[KnowledgeSourceOut] = Field(default_factory=list)
     conversations: list[ConversationOut] = Field(default_factory=list)
     activities: list[WorkspaceActivityOut] = Field(default_factory=list)
@@ -1699,11 +1903,62 @@ class ExecutionAuthorizationEnvelopeOut(BaseModel):
 
 
 class CreateCalendarEventIn(BaseModel):
-    title: str
+    title: str = Field(min_length=1, max_length=256)
     starts_at: datetime
     ends_at: datetime | None = None
-    description: str | None = None
-    location: str | None = None
+    description: str | None = Field(default=None, max_length=20_000)
+    location: str | None = Field(default=None, max_length=256)
+    category: str = "personal"
+    timezone: str = "UTC"
+    recurrence_rule: str = "none"
+    recurrence_until: datetime | None = None
+    project_id: uuid.UUID | None = None
+    task_id: uuid.UUID | None = None
+    milestone_id: uuid.UUID | None = None
+
+    @field_validator("title")
+    @classmethod
+    def clean_calendar_title(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Händelsens titel får inte vara tom.")
+        return value
+
+    @field_validator("category")
+    @classmethod
+    def valid_calendar_category(cls, value: str) -> str:
+        if value not in {"personal", "work", "school"}:
+            raise ValueError("category måste vara personal, work eller school.")
+        return value
+
+    @field_validator("recurrence_rule")
+    @classmethod
+    def valid_recurrence_rule(cls, value: str) -> str:
+        if value not in {"none", "daily", "weekly", "monthly"}:
+            raise ValueError("recurrence_rule måste vara none, daily, weekly eller monthly.")
+        return value
+
+
+class UpdateCalendarEventIn(BaseModel):
+    expected_version: int | None = Field(default=None, ge=1)
+    title: str | None = Field(default=None, min_length=1, max_length=256)
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    description: str | None = Field(default=None, max_length=20_000)
+    location: str | None = Field(default=None, max_length=256)
+    category: str | None = None
+    timezone: str | None = None
+    project_id: uuid.UUID | None = None
+    task_id: uuid.UUID | None = None
+    milestone_id: uuid.UUID | None = None
+    apply_to_series: bool = False
+
+    @field_validator("category")
+    @classmethod
+    def valid_optional_calendar_category(cls, value: str | None) -> str | None:
+        if value is not None and value not in {"personal", "work", "school"}:
+            raise ValueError("category måste vara personal, work eller school.")
+        return value
 
 
 class CancelCalendarEventIn(BaseModel):
@@ -1718,9 +1973,66 @@ class CalendarEventOut(BaseModel):
     location: str | None = None
     starts_at: datetime
     ends_at: datetime | None = None
+    category: str = "personal"
+    timezone: str = "UTC"
+    recurrence_rule: str = "none"
+    recurrence_until: datetime | None = None
+    series_id: uuid.UUID | None = None
+    recurrence_index: int = 0
+    project_id: uuid.UUID | None = None
+    task_id: uuid.UUID | None = None
+    milestone_id: uuid.UUID | None = None
     status: str
     source: str
+    version: int = 1
     cancelled_at: datetime | None = None
     cancellation_reason: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class DashboardCountsOut(BaseModel):
+    active_projects: int = 0
+    open_tasks: int = 0
+    blocked_tasks: int = 0
+    upcoming_events: int = 0
+    recent_decisions: int = 0
+    recent_documents: int = 0
+    active_conversations: int = 0
+    active_mainai_goals: int = 0
+    running_mainai_tasks: int = 0
+    awaiting_approval_tasks: int = 0
+
+
+class DashboardOut(BaseModel):
+    generated_at: datetime
+    counts: DashboardCountsOut
+    active_projects: list[WorkspaceOut] = Field(default_factory=list)
+    outstanding_tasks: list[TaskOut] = Field(default_factory=list)
+    blocked_tasks: list[TaskOut] = Field(default_factory=list)
+    upcoming_events: list[CalendarEventOut] = Field(default_factory=list)
+    recent_decisions: list[WorkspaceDecisionOut] = Field(default_factory=list)
+    recent_documents: list[KnowledgeSourceOut] = Field(default_factory=list)
+    active_conversations: list[ConversationOut] = Field(default_factory=list)
+    supervised_goals: list[MainAIGoalOut] = Field(default_factory=list)
+    supervised_tasks: list[MainAITaskOut] = Field(default_factory=list)
+
+
+class SearchResultOut(BaseModel):
+    type: Literal["project", "task", "document", "conversation", "calendar_event"]
+    id: uuid.UUID
+    title: str
+    snippet: str
+    project_id: uuid.UUID | None = None
+    occurred_at: datetime | None = None
+    updated_at: datetime | None = None
+    href: str
+
+
+class SearchResponseOut(BaseModel):
+    query: str
+    results: list[SearchResultOut] = Field(default_factory=list)
+    total: int = 0
+    limit: int = 20
+    offset: int = 0
+    types: list[str] = Field(default_factory=list)

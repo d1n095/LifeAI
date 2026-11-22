@@ -8,6 +8,9 @@ import { api } from "@/lib/api";
 const NAV = [
   { href: "/", label: "Dashboard" },
   { href: "/chat", label: "Chat" },
+  { href: "/tasks", label: "Uppgifter" },
+  { href: "/calendar", label: "Kalender" },
+  { href: "/search", label: "Sök" },
   { href: "/library", label: "Knowledge Studio" },
   { href: "/blueprint", label: "Blueprint" },
   { href: "/workbench", label: "Workbench" },

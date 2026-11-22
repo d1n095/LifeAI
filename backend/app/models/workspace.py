@@ -154,5 +154,12 @@ class WorkspaceDecision(Base):
     status: Mapped[WorkspaceDecisionStatus] = mapped_column(
         Enum(WorkspaceDecisionStatus), default=WorkspaceDecisionStatus.accepted, nullable=False
     )
+    version: Mapped[int] = mapped_column(default=1, nullable=False)
+    supersedes_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspace_decisions.id", ondelete="SET NULL"), nullable=True
+    )
+    epistemic_status: Mapped[str] = mapped_column(String(16), default="confirmed", nullable=False)
+    origin: Mapped[str] = mapped_column(String(16), default="founder", nullable=False)
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

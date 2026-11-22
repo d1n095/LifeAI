@@ -36,6 +36,7 @@ from app.models.mainai_recovery import MainAIRecoveryRecord
 from app.models.mainai_wait import MainAITaskWait
 from app.models.project import Project, Task
 from app.models.user import User
+from app.models.work_management import WorkspaceMilestone
 from app.models.workspace import (
     WorkspaceActivity,
     WorkspaceDecision,
@@ -59,6 +60,7 @@ from app.schemas import (
     MainAITaskEventOut,
     MainAITaskOut,
     MainAITaskWaitOut,
+    MilestoneOut,
     TaskIn,
     TaskOut,
     WorkspaceActivityOut,
@@ -66,6 +68,7 @@ from app.schemas import (
     WorkspaceContextSourceOut,
     WorkspaceDecisionIn,
     WorkspaceDecisionOut,
+    WorkspaceDecisionSupersedeIn,
     WorkspaceDetailOut,
     WorkspaceIn,
     WorkspaceOut,
@@ -76,6 +79,7 @@ from app.schemas import (
     WorkspaceSyncRunOut,
     WorkspaceUpdate,
 )
+from app.work_management import create_task, milestone_out, task_out
 
 router = APIRouter(prefix="/api/workspaces", tags=["workspaces"], dependencies=[Depends(require_founder)])
 
@@ -147,6 +151,26 @@ def _workspace_tasks(
         db.query(Task)
         .filter(Task.project_id == project.id, Task.created_by == user.id)
         .order_by(Task.created_at.asc(), Task.id.asc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+
+def _workspace_milestones(
+    db: Session, project: Project, user: User, limit: int = 100, offset: int = 0
+) -> list[WorkspaceMilestone]:
+    return (
+        db.query(WorkspaceMilestone)
+        .filter(
+            WorkspaceMilestone.project_id == project.id,
+            WorkspaceMilestone.owner_id == user.id,
+        )
+        .order_by(
+            WorkspaceMilestone.due_at.asc().nulls_last(),
+            WorkspaceMilestone.created_at.asc(),
+            WorkspaceMilestone.id.asc(),
+        )
         .offset(offset)
         .limit(limit)
         .all()
@@ -261,14 +285,32 @@ def _sync_entities(db: Session, project: Project, user: User) -> tuple[int, str,
         add(
             "task",
             task.id,
-            1,
+            task.version or 1,
             {
                 "id": str(task.id),
                 "title": task.title,
                 "description": task.description,
                 "status": task.status.value if hasattr(task.status, "value") else task.status,
                 "priority": task.priority.value if hasattr(task.priority, "value") else task.priority,
+                "due_at": task.due_at,
+                "milestone_id": str(task.milestone_id) if task.milestone_id else None,
+                "blocked_reason": task.blocked_reason,
                 "updated_at": task.updated_at,
+            },
+        )
+    for milestone in _workspace_milestones(db, project, user, limit=1000):
+        add(
+            "milestone",
+            milestone.id,
+            milestone.version or 1,
+            {
+                "id": str(milestone.id),
+                "title": milestone.title,
+                "description": milestone.description,
+                "due_at": milestone.due_at,
+                "status": milestone.status.value if hasattr(milestone.status, "value") else milestone.status,
+                "completed_at": milestone.completed_at,
+                "updated_at": milestone.updated_at,
             },
         )
     for conversation in _workspace_conversations(db, project, user, limit=1000):
@@ -287,13 +329,16 @@ def _sync_entities(db: Session, project: Project, user: User) -> tuple[int, str,
         add(
             "decision",
             decision.id,
-            1,
+            decision.version or 1,
             {
                 "id": str(decision.id),
                 "title": decision.title,
                 "decision": decision.decision,
                 "rationale": decision.rationale,
                 "status": decision.status.value if hasattr(decision.status, "value") else decision.status,
+                "epistemic_status": decision.epistemic_status,
+                "origin": decision.origin,
+                "supersedes_id": str(decision.supersedes_id) if decision.supersedes_id else None,
                 "updated_at": decision.updated_at,
             },
         )
@@ -427,6 +472,16 @@ def _apply_sync_entity(
                 WorkspaceDecision.id == item.entity_id,
                 WorkspaceDecision.project_id == project.id,
                 WorkspaceDecision.owner_id == user.id,
+            )
+            .first()
+        )
+    elif item.entity_type == "milestone":
+        current = (
+            db.query(WorkspaceMilestone)
+            .filter(
+                WorkspaceMilestone.id == item.entity_id,
+                WorkspaceMilestone.project_id == project.id,
+                WorkspaceMilestone.owner_id == user.id,
             )
             .first()
         )
@@ -680,6 +735,7 @@ async def _build_context(
 ) -> WorkspaceContextOut:
     sources = _workspace_sources(db, project, user, limit=20)
     tasks = _workspace_tasks(db, project, user, limit=50)
+    milestones = _workspace_milestones(db, project, user, limit=20)
     conversations = _workspace_conversations(db, project, user, limit=10)
     decisions = _workspace_decisions(db, project, user, limit=10)
     activities = _workspace_activities(db, project, user, limit=10)
@@ -742,10 +798,17 @@ async def _build_context(
 
     return WorkspaceContextOut(
         workspace_id=project.id,
+        context_version=project.version or 1,
         objectives=objectives,
+        milestones=[milestone_out(db, item, user.id) for item in milestones],
         source_documents=[KnowledgeSourceOut.model_validate(source) for source in sources],
         decisions=[WorkspaceDecisionOut.model_validate(decision) for decision in decisions],
-        outstanding_tasks=[TaskOut.model_validate(task) for task in tasks if task.status != "done"],
+        outstanding_tasks=[
+            task_out(db, task, user.id)
+            for task in tasks
+            if (task.status.value if hasattr(task.status, "value") else task.status)
+            not in ("done", "cancelled")
+        ],
         past_conversations=[ConversationOut.model_validate(conversation) for conversation in conversations],
         recent_changes=[WorkspaceActivityOut.model_validate(activity) for activity in activities],
         uncertainties=uncertainties,
@@ -757,7 +820,11 @@ async def _build_context(
 def _detail(db: Session, project: Project, user: User, context: WorkspaceContextOut) -> WorkspaceDetailOut:
     return WorkspaceDetailOut(
         **WorkspaceOut.model_validate(project).model_dump(),
-        tasks=[TaskOut.model_validate(task) for task in _workspace_tasks(db, project, user)],
+        tasks=[task_out(db, task, user.id) for task in _workspace_tasks(db, project, user)],
+        milestones=[
+            milestone_out(db, item, user.id)
+            for item in _workspace_milestones(db, project, user)
+        ],
         sources=[KnowledgeSourceOut.model_validate(source) for source in _workspace_sources(db, project, user)],
         conversations=[
             ConversationOut.model_validate(conversation)
@@ -1011,7 +1078,7 @@ def list_workspace_tasks(
 ):
     project = _owned_project(db, project_id, user)
     return [
-        TaskOut.model_validate(task)
+        task_out(db, task, user.id)
         for task in _workspace_tasks(db, project, user, limit=limit, offset=offset)
     ]
 
@@ -1024,12 +1091,18 @@ def create_workspace_task(
     user: User = Depends(require_founder),
 ):
     project = _owned_project(db, project_id, user)
-    task = Task(
-        **payload.model_dump(exclude={"project_id"}),
+    task = create_task(
+        db,
+        owner_id=user.id,
         project_id=project.id,
-        created_by=user.id,
+        title=payload.title,
+        description=payload.description,
+        status=payload.status,
+        priority=payload.priority,
+        due_at=payload.due_at,
+        milestone_id=payload.milestone_id,
+        depends_on_task_ids=payload.depends_on_task_ids,
     )
-    db.add(task)
     _touch_project(project)
     _record_activity(
         db,
@@ -1133,6 +1206,9 @@ def create_workspace_decision(
         decision=payload.decision,
         rationale=payload.rationale,
         status=payload.status,
+        version=1,
+        epistemic_status=payload.epistemic_status,
+        origin=payload.origin,
     )
     db.add(decision)
     _touch_project(project)
@@ -1143,6 +1219,60 @@ def create_workspace_decision(
         kind="decision.recorded",
         summary=f"Beslut registrerades: {decision.title}",
         detail={"decision_id": str(decision.id)},
+    )
+    db.commit()
+    db.refresh(decision)
+    return decision
+
+
+@router.post(
+    "/{project_id}/decisions/{decision_id}/supersede", response_model=WorkspaceDecisionOut
+)
+def supersede_workspace_decision(
+    project_id: uuid.UUID,
+    decision_id: uuid.UUID,
+    payload: WorkspaceDecisionSupersedeIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    project = _owned_project(db, project_id, user)
+    previous = (
+        db.query(WorkspaceDecision)
+        .filter(
+            WorkspaceDecision.id == decision_id,
+            WorkspaceDecision.project_id == project.id,
+            WorkspaceDecision.owner_id == user.id,
+        )
+        .first()
+    )
+    if previous is None:
+        raise HTTPException(status_code=404, detail="Beslutet hittades inte.")
+    if previous.status == WorkspaceDecisionStatus.superseded:
+        raise HTTPException(status_code=409, detail="Beslutet är redan ersatt.")
+    previous.status = WorkspaceDecisionStatus.superseded
+    previous.superseded_at = datetime.utcnow()
+    previous.updated_at = datetime.utcnow()
+    decision = WorkspaceDecision(
+        project_id=project.id,
+        owner_id=user.id,
+        title=payload.title,
+        decision=payload.decision,
+        rationale=payload.rationale,
+        status=payload.status,
+        version=(previous.version or 1) + 1,
+        supersedes_id=previous.id,
+        epistemic_status=payload.epistemic_status,
+        origin=payload.origin,
+    )
+    db.add(decision)
+    _touch_project(project)
+    _record_activity(
+        db,
+        project=project,
+        user=user,
+        kind="decision.superseded",
+        summary=f"Beslut ersattes: {previous.title}",
+        detail={"previous_decision_id": str(previous.id), "decision_id": str(decision.id)},
     )
     db.commit()
     db.refresh(decision)

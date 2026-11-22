@@ -9,6 +9,7 @@ import {
   ConversationItem,
   KnowledgeSourceItem,
   newClientMessageId,
+  WorkspaceDecision,
   WorkspaceDetail,
   WorkspaceSupervised,
   WorkspaceSyncRun,
@@ -59,8 +60,12 @@ export default function WorkspaceDetailPage() {
   const [busy, setBusy] = useState(false);
 
   const [newTask, setNewTask] = useState("");
+  const [newMilestone, setNewMilestone] = useState("");
+  const [newMilestoneDue, setNewMilestoneDue] = useState("");
   const [decisionTitle, setDecisionTitle] = useState("");
   const [decisionText, setDecisionText] = useState("");
+  const [decisionEpistemic, setDecisionEpistemic] = useState("confirmed");
+  const [supersedingId, setSupersedingId] = useState<string | null>(null);
 
   const [conversations, setConversations] = useState<ConversationItem[]>([]);
   const [conversationId, setConversationId] = useState<string | undefined>();
@@ -199,9 +204,51 @@ export default function WorkspaceDetailPage() {
         title: decisionTitle.trim(),
         decision: decisionText.trim(),
         status: "accepted",
+        epistemic_status: decisionEpistemic as "confirmed" | "uncertain" | "proposed",
       });
       setDecisionTitle("");
       setDecisionText("");
+      setDecisionEpistemic("confirmed");
+    });
+  }
+
+  function startSupersede(decision: WorkspaceDecision) {
+    setSupersedingId(decision.id);
+    setDecisionTitle(`Ersätter: ${decision.title}`);
+    setDecisionText(decision.decision);
+    setDecisionEpistemic("confirmed");
+  }
+
+  function cancelSupersede() {
+    setSupersedingId(null);
+    setDecisionTitle("");
+    setDecisionText("");
+    setDecisionEpistemic("confirmed");
+  }
+
+  async function supersedeDecision() {
+    if (!supersedingId || !decisionTitle.trim() || !decisionText.trim()) return;
+    await run(async () => {
+      await api.supersedeWorkspaceDecision(workspaceId, supersedingId, {
+        title: decisionTitle.trim(),
+        decision: decisionText.trim(),
+        status: "accepted",
+        epistemic_status: decisionEpistemic as "confirmed" | "uncertain" | "proposed",
+      });
+      cancelSupersede();
+    });
+  }
+
+  async function addMilestone() {
+    if (!newMilestone.trim()) return;
+    await run(async () => {
+      await api.createMilestone(workspaceId, {
+        title: newMilestone.trim(),
+        due_at: newMilestoneDue ? new Date(newMilestoneDue).toISOString() : null,
+        status: "open",
+      });
+      setNewMilestone("");
+      setNewMilestoneDue("");
     });
   }
 
@@ -575,12 +622,85 @@ export default function WorkspaceDetailPage() {
         </section>
       )}
 
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
         <Stat label="Källor" value={workspace.sources.length} />
         <Stat label="Öppna uppgifter" value={openTasks.length} total={workspace.tasks.length} />
+        <Stat label="Milstolpar" value={workspace.milestones.length} />
         <Stat label="Samtal" value={workspace.conversations.length} />
         <Stat label="Beslut" value={workspace.decisions.length} />
       </div>
+
+      <section aria-labelledby="workspace-milestones" className="rounded-xl border border-border bg-panel p-4">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <div>
+            <h2 id="workspace-milestones" className="text-sm font-medium text-white/70">
+              Milstolpar
+            </h2>
+            <p className="mt-1 text-xs text-white/35">
+              Konkreta delmål i workspaceet. Uppgifter kan kopplas till dem från uppgiftshanteraren.
+            </p>
+          </div>
+          <Link href="/tasks" className="text-xs text-accent2 hover:underline">
+            Uppgiftshanteraren →
+          </Link>
+        </div>
+        <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+          <div className="min-w-0 flex-1">
+            <label htmlFor="workspace-milestone-title" className="sr-only">
+              Ny milstolpe
+            </label>
+            <input
+              id="workspace-milestone-title"
+              value={newMilestone}
+              onChange={(event) => setNewMilestone(event.target.value)}
+              onKeyDown={(event) => event.key === "Enter" && addMilestone()}
+              placeholder="Ny milstolpe…"
+              className="w-full rounded-lg border border-border bg-base px-3 py-2 text-sm outline-none focus:border-accent"
+            />
+          </div>
+          <div>
+            <label htmlFor="workspace-milestone-due" className="sr-only">
+              Deadline
+            </label>
+            <input
+              id="workspace-milestone-due"
+              type="date"
+              value={newMilestoneDue}
+              onChange={(event) => setNewMilestoneDue(event.target.value)}
+              className="rounded-lg border border-border bg-base px-3 py-2 text-sm"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={addMilestone}
+            disabled={busy || !newMilestone.trim()}
+            className="rounded-lg bg-accent px-3 py-2 text-sm disabled:opacity-50"
+          >
+            Lägg till
+          </button>
+        </div>
+        <ul className="mt-3 grid gap-2 md:grid-cols-2">
+          {workspace.milestones.map((milestone) => (
+            <li key={milestone.id} className="rounded-lg border border-border/60 px-3 py-2 text-sm">
+              <div className="flex items-center justify-between gap-2">
+                <span className="min-w-0 truncate text-white/85">{milestone.title}</span>
+                <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-[10px] text-white/50">
+                  {milestone.status}
+                </span>
+              </div>
+              <div className="mt-1 text-xs text-white/40">
+                {milestone.due_at
+                  ? `Deadline ${new Date(milestone.due_at).toLocaleDateString("sv-SE")}`
+                  : "Ingen deadline"}{" "}
+                · {milestone.completed_task_count}/{milestone.task_count} uppgifter klara
+              </div>
+            </li>
+          ))}
+          {workspace.milestones.length === 0 && (
+            <li className="text-sm text-white/30">Inga milstolpar ännu.</li>
+          )}
+        </ul>
+      </section>
 
       <section aria-labelledby="workspace-supervised" className="rounded-xl border border-border bg-panel p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -953,23 +1073,82 @@ export default function WorkspaceDetailPage() {
               placeholder="Vad beslutades, och varför?"
               className="w-full resize-none rounded-lg border border-border bg-base px-3 py-2 text-sm outline-none focus:border-accent"
             />
-            <button
-              type="button"
-              onClick={addDecision}
-              disabled={busy || !decisionTitle.trim() || !decisionText.trim()}
-              className="rounded-lg bg-accent px-3 py-2 text-sm disabled:opacity-50"
-            >
-              Registrera beslut
-            </button>
+            <div>
+              <label htmlFor="decision-epistemic" className="mb-1 block text-xs text-white/40">
+                Kunskapsstatus
+              </label>
+              <select
+                id="decision-epistemic"
+                value={decisionEpistemic}
+                onChange={(event) => setDecisionEpistemic(event.target.value)}
+                className="w-full rounded-lg border border-border bg-base px-3 py-2 text-sm"
+              >
+                <option value="confirmed">Bekräftat</option>
+                <option value="uncertain">Osäkert</option>
+                <option value="proposed">AI-förslag</option>
+              </select>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={supersedingId ? supersedeDecision : addDecision}
+                disabled={busy || !decisionTitle.trim() || !decisionText.trim()}
+                className="rounded-lg bg-accent px-3 py-2 text-sm disabled:opacity-50"
+              >
+                {supersedingId ? "Ersätt beslut" : "Registrera beslut"}
+              </button>
+              {supersedingId && (
+                <button
+                  type="button"
+                  onClick={cancelSupersede}
+                  className="rounded-lg border border-border px-3 py-2 text-sm text-white/60 hover:text-white"
+                >
+                  Avbryt ersättning
+                </button>
+              )}
+            </div>
           </div>
           <ul className="mt-4 space-y-2">
             {workspace.decisions.map((decision) => (
               <li key={decision.id} className="rounded-lg border border-border/60 px-3 py-2 text-sm">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-white/85">{decision.title}</span>
-                  <span className="text-xs text-white/40">{decision.status}</span>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="min-w-0 text-white/85">{decision.title}</span>
+                  <div className="flex shrink-0 flex-wrap items-center gap-1.5 text-[10px]">
+                    <span className="rounded-full border border-border px-2 py-0.5 text-white/50">
+                      v{decision.version}
+                    </span>
+                    <span
+                      className={`rounded-full border px-2 py-0.5 ${
+                        decision.epistemic_status === "confirmed"
+                          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
+                          : decision.epistemic_status === "uncertain"
+                            ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
+                            : "border-accent/30 bg-accent/10 text-accent2"
+                      }`}
+                    >
+                      {decision.epistemic_status === "confirmed"
+                        ? "Bekräftat"
+                        : decision.epistemic_status === "uncertain"
+                          ? "Osäkert"
+                          : "AI-förslag"}
+                    </span>
+                    {decision.superseded_at && (
+                      <span className="rounded-full border border-white/15 px-2 py-0.5 text-white/40">
+                        Ersatt
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <p className="mt-1 whitespace-pre-wrap text-xs text-white/50">{decision.decision}</p>
+                {!decision.superseded_at && decision.status !== "superseded" && (
+                  <button
+                    type="button"
+                    onClick={() => startSupersede(decision)}
+                    className="mt-1 text-xs text-accent2 hover:underline"
+                  >
+                    Ersätt med nytt beslut
+                  </button>
+                )}
               </li>
             ))}
             {workspace.decisions.length === 0 && <li className="text-sm text-white/30">Inga beslut registrerade.</li>}

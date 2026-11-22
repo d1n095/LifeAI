@@ -446,8 +446,128 @@ export type TaskItem = {
   description: string | null;
   status: string;
   priority: string;
+  due_at?: string | null;
+  completed_at?: string | null;
+  blocked_reason?: string | null;
+  milestone_id?: string | null;
+  version?: number;
+  updated_at?: string | null;
+  is_blocked?: boolean;
+  dependency_count?: number;
   suggested_by_ai: boolean;
   created_at: string;
+};
+
+export type MilestoneItem = {
+  id: string;
+  project_id: string;
+  title: string;
+  description: string | null;
+  due_at: string | null;
+  status: "open" | "in_progress" | "completed" | "cancelled";
+  completed_at: string | null;
+  version: number;
+  created_at: string;
+  updated_at: string;
+  task_count: number;
+  completed_task_count: number;
+};
+
+export type TaskDependencyItem = {
+  id: string;
+  task_id: string;
+  depends_on_task_id: string;
+  depends_on_title: string;
+  depends_on_status: string;
+};
+
+export type TaskEventItem = {
+  id: string;
+  event_type: string;
+  from_status: string | null;
+  to_status: string | null;
+  detail: Record<string, unknown>;
+  created_at: string;
+};
+
+export type TaskDetailItem = TaskItem & {
+  dependencies: TaskDependencyItem[];
+  dependents: TaskDependencyItem[];
+  events: TaskEventItem[];
+  milestone: MilestoneItem | null;
+  project_name: string | null;
+  kind: "user_task";
+  execution_authority: "none";
+};
+
+export type CalendarEventItem = {
+  id: string;
+  title: string;
+  description: string | null;
+  location: string | null;
+  starts_at: string;
+  ends_at: string | null;
+  category: "personal" | "work" | "school";
+  timezone: string;
+  recurrence_rule: "none" | "daily" | "weekly" | "monthly";
+  recurrence_until: string | null;
+  series_id: string | null;
+  recurrence_index: number;
+  project_id: string | null;
+  task_id: string | null;
+  milestone_id: string | null;
+  status: string;
+  source: string;
+  version: number;
+  cancelled_at: string | null;
+  cancellation_reason: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type DashboardData = {
+  generated_at: string;
+  counts: {
+    active_projects: number;
+    open_tasks: number;
+    blocked_tasks: number;
+    upcoming_events: number;
+    recent_decisions: number;
+    recent_documents: number;
+    active_conversations: number;
+    active_mainai_goals: number;
+    running_mainai_tasks: number;
+    awaiting_approval_tasks: number;
+  };
+  active_projects: ProjectItem[];
+  outstanding_tasks: TaskItem[];
+  blocked_tasks: TaskItem[];
+  upcoming_events: CalendarEventItem[];
+  recent_decisions: WorkspaceDecision[];
+  recent_documents: KnowledgeSourceItem[];
+  active_conversations: ConversationItem[];
+  supervised_goals: MainAIGoal[];
+  supervised_tasks: MainAITask[];
+};
+
+export type SearchResultItem = {
+  type: "project" | "task" | "document" | "conversation" | "calendar_event";
+  id: string;
+  title: string;
+  snippet: string;
+  project_id: string | null;
+  occurred_at: string | null;
+  updated_at: string | null;
+  href: string;
+};
+
+export type SearchResponse = {
+  query: string;
+  results: SearchResultItem[];
+  total: number;
+  limit: number;
+  offset: number;
+  types: string[];
 };
 
 // A project and only its own tasks/sources. The backend filters both collections by project
@@ -455,6 +575,7 @@ export type TaskItem = {
 // as if it were project-scoped.
 export type ProjectDetail = ProjectItem & {
   tasks: TaskItem[];
+  milestones: MilestoneItem[];
   sources: KnowledgeSourceItem[];
 };
 
@@ -472,13 +593,20 @@ export type WorkspaceDecision = {
   decision: string;
   rationale: string | null;
   status: string;
+  version: number;
+  supersedes_id: string | null;
+  epistemic_status: "confirmed" | "uncertain" | "proposed";
+  origin: "founder" | "ai";
+  superseded_at: string | null;
   created_at: string;
   updated_at: string;
 };
 
 export type WorkspaceContext = {
   workspace_id: string;
+  context_version: number;
   objectives: string[];
+  milestones: MilestoneItem[];
   source_documents: KnowledgeSourceItem[];
   decisions: WorkspaceDecision[];
   outstanding_tasks: TaskItem[];
@@ -498,6 +626,7 @@ export type WorkspaceContext = {
 
 export type WorkspaceDetail = ProjectItem & {
   tasks: TaskItem[];
+  milestones: MilestoneItem[];
   sources: KnowledgeSourceItem[];
   conversations: ConversationItem[];
   activities: WorkspaceActivity[];
@@ -1285,8 +1414,31 @@ export const api = {
   workspaceDecisions: (id: string) => request<WorkspaceDecision[]>(`/api/workspaces/${id}/decisions`),
   createWorkspaceDecision: (
     id: string,
-    payload: { title: string; decision: string; rationale?: string | null; status?: string }
+    payload: {
+      title: string;
+      decision: string;
+      rationale?: string | null;
+      status?: string;
+      epistemic_status?: "confirmed" | "uncertain" | "proposed";
+      origin?: "founder" | "ai";
+    }
   ) => request<WorkspaceDecision>(`/api/workspaces/${id}/decisions`, { method: "POST", body: JSON.stringify(payload) }),
+  supersedeWorkspaceDecision: (
+    workspaceId: string,
+    decisionId: string,
+    payload: {
+      title: string;
+      decision: string;
+      rationale?: string | null;
+      status?: string;
+      epistemic_status?: "confirmed" | "uncertain" | "proposed";
+      origin?: "founder" | "ai";
+    }
+  ) =>
+    request<WorkspaceDecision>(`/api/workspaces/${workspaceId}/decisions/${decisionId}/supersede`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   workspaceContext: (id: string, query?: string) =>
     request<WorkspaceContext>(`/api/workspaces/${id}/context${query ? `?q=${encodeURIComponent(query)}` : ""}`),
   workspaceSupervised: (id: string) =>
@@ -1301,11 +1453,136 @@ export const api = {
   retryWorkspaceSync: (id: string, runId: string) =>
     request<WorkspaceSyncRun>(`/api/workspaces/${id}/sync/${runId}/retry`, { method: "POST" }),
 
-  listTasks: () => request<TaskItem[]>("/api/projects/tasks"),
-  createTask: (payload: Partial<TaskItem>) =>
+  listTasks: (filters: {
+    project_id?: string;
+    status?: string;
+    priority?: string;
+    q?: string;
+    blocked_only?: boolean;
+    include_cancelled?: boolean;
+    limit?: number;
+    offset?: number;
+  } = {}) => {
+    const qs = new URLSearchParams(
+      Object.entries(filters)
+        .filter(([, value]) => value !== undefined && value !== "")
+        .map(([key, value]) => [key, String(value)])
+    ).toString();
+    return request<TaskItem[]>(`/api/projects/tasks${qs ? `?${qs}` : ""}`);
+  },
+  getTask: (id: string) => request<TaskDetailItem>(`/api/projects/tasks/${id}`),
+  createTask: (payload: Partial<TaskItem> & { depends_on_task_ids?: string[] }) =>
     request<TaskItem>("/api/projects/tasks", { method: "POST", body: JSON.stringify(payload) }),
-  updateTask: (id: string, payload: Partial<TaskItem>) =>
-    request<TaskItem>(`/api/projects/tasks/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  updateTask: (
+    id: string,
+    payload: Partial<TaskItem> & { expected_version?: number; depends_on_task_ids?: string[] }
+  ) => request<TaskItem>(`/api/projects/tasks/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteTask: (id: string) => request(`/api/projects/tasks/${id}`, { method: "DELETE" }),
+  addTaskDependency: (taskId: string, dependsOnTaskId: string) =>
+    request<TaskDetailItem>(
+      `/api/projects/tasks/${taskId}/dependencies?depends_on_task_id=${encodeURIComponent(dependsOnTaskId)}`,
+      { method: "POST" }
+    ),
+  removeTaskDependency: (taskId: string, dependsOnTaskId: string) =>
+    request<TaskDetailItem>(`/api/projects/tasks/${taskId}/dependencies/${dependsOnTaskId}`, {
+      method: "DELETE",
+    }),
+  listMilestones: (projectId: string) =>
+    request<MilestoneItem[]>(`/api/projects/${projectId}/milestones`),
+  createMilestone: (projectId: string, payload: Partial<MilestoneItem>) =>
+    request<MilestoneItem>(`/api/projects/${projectId}/milestones`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateMilestone: (id: string, payload: Partial<MilestoneItem> & { expected_version?: number }) =>
+    request<MilestoneItem>(`/api/projects/milestones/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  deleteMilestone: (id: string) => request(`/api/projects/milestones/${id}`, { method: "DELETE" }),
+
+  dashboard: () => request<DashboardData>("/api/dashboard"),
+  searchPersonalWork: (params: {
+    q: string;
+    type?: string;
+    project_id?: string;
+    date_from?: string;
+    date_to?: string;
+    limit?: number;
+    offset?: number;
+  }) => {
+    const qs = new URLSearchParams(
+      Object.entries(params)
+        .filter(([, value]) => value !== undefined && value !== "")
+        .map(([key, value]) => [key, String(value)])
+    ).toString();
+    return request<SearchResponse>(`/api/search?${qs}`);
+  },
+
+  listCalendarEvents: (params: {
+    starts_after: string;
+    starts_before: string;
+    category?: string;
+    project_id?: string;
+  }) => {
+    const qs = new URLSearchParams(
+      Object.entries(params)
+        .filter(([, value]) => value !== undefined && value !== "")
+        .map(([key, value]) => [key, String(value)])
+    ).toString();
+    return request<CalendarEventItem[]>(`/api/calendar/events?${qs}`);
+  },
+  upcomingCalendarEvents: (withinHours = 24 * 14) =>
+    request<CalendarEventItem[]>(`/api/calendar/events/upcoming?within_hours=${withinHours}`),
+  createCalendarEvent: (payload: {
+    title: string;
+    starts_at: string;
+    ends_at?: string | null;
+    description?: string | null;
+    location?: string | null;
+    category?: "personal" | "work" | "school";
+    timezone?: string;
+    recurrence_rule?: "none" | "daily" | "weekly" | "monthly";
+    recurrence_until?: string | null;
+    project_id?: string | null;
+    task_id?: string | null;
+    milestone_id?: string | null;
+  }) =>
+    request<CalendarEventItem>("/api/calendar/events", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateCalendarEvent: (
+    id: string,
+    payload: {
+      title?: string;
+      starts_at?: string;
+      ends_at?: string | null;
+      description?: string | null;
+      location?: string | null;
+      category?: "personal" | "work" | "school";
+      timezone?: string;
+      project_id?: string | null;
+      task_id?: string | null;
+      milestone_id?: string | null;
+      expected_version?: number;
+      apply_to_series?: boolean;
+    }
+  ) =>
+    request<CalendarEventItem>(`/api/calendar/events/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  deleteCalendarEvent: (id: string, applyToSeries = false) =>
+    request(`/api/calendar/events/${id}?apply_to_series=${applyToSeries}`, { method: "DELETE" }),
+  calendarConflicts: (params: { starts_at: string; ends_at?: string; exclude_event_id?: string }) => {
+    const qs = new URLSearchParams(
+      Object.entries(params)
+        .filter(([, value]) => value !== undefined && value !== "")
+        .map(([key, value]) => [key, String(value)])
+    ).toString();
+    return request<CalendarEventItem[]>(`/api/calendar/conflicts?${qs}`);
+  },
 
   searchKnowledge: (query: string) =>
     request<{ document_id: string; title: string; text: string; score: number }[]>("/api/knowledge/search", {

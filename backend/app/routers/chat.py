@@ -64,6 +64,7 @@ from app.mainai_execution.lesson_selection import format_lesson_feedback_instruc
 from app.project_status.service import format_project_status_instructions
 from app.rag.graph_instructions import format_graph_context_instructions
 from app.rag.untrusted_content import UNTRUSTED_CONTENT_POLICY, build_untrusted_context_block
+from app.work_management.context import format_project_context_instructions
 from app.rag.epistemics import epistemic_status_counts_sql, format_epistemic_instructions
 from app.rag.evidence_metadata import summarize_owner_evidence_landscape
 from app.rag.evidence_quality import format_landscape_instructions
@@ -475,6 +476,15 @@ async def _attempt_assistant_reply(
             db, owner_id=user.id, question="\n".join([m.content for m in history if m.role == MessageRole.user][-2:] + [user_message.content]))
     except Exception:
         logger.warning("project status block failed; reply unaffected", exc_info=True)
+    if conversation.project_id is not None:
+        try:
+            project_context = format_project_context_instructions(
+                db, project_id=conversation.project_id, owner_id=user.id
+            )
+            if project_context:
+                system_content += "\n\nPROJEKTKONTEXT:\n" + project_context
+        except Exception:
+            logger.warning("project context block failed; reply unaffected", exc_info=True)
     messages = [Message(role="system", content=system_content)]
     messages += [Message(role=m.role.value, content=m.content) for m in history]
     messages.append(Message(role="user", content=user_message.content))
