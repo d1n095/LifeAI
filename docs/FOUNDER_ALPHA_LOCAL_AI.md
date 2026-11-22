@@ -129,3 +129,175 @@ curl -s localhost:8000/api/chat -H 'content-type: application/json' \
 Real-Ollama CI (`.github/workflows/real-local-ai-verification.yml`) exercises the same
 properties with a throwaway pgvector service container and small models, and fails if the
 runtime is unreachable — never falling back to a paid API.
+
+---
+
+## 2026-11-22 — certification addendum: live discovery, reload and evidence
+
+
+**Branch:** `freebuff/life-workspaces`, based on the Founder Alpha / Personal Work
+checkpoint `04de94db7d7ccf51c23dd68670e789e8e9df6cde`.
+
+**Code SHA:** `4f99518010cdf46df764cf6a9e5a5b6539095a06`
+**Tree SHA:** `46ea9421d87706269fe605eaec6aefa036e7768f`
+
+No push, pull request, merge, deployment or production VPS change was made. GitHub write
+access is not available in this environment. `first_cycle_go=false`.
+
+This round did not start another architecture. It connected and verified the existing
+provider registry, streaming chat, durable document worker, pgvector retrieval, workspaces,
+recovery paths and browser journeys.
+
+## Implemented in this round
+
+1. **Live local-model discovery** — `backend/app/providers/local_discovery.py` reads Ollama's
+   bounded `/api/tags` response, normalizes the implicit `:latest` tag, deduplicates and
+   sorts without trusting arbitrary model metadata. A down runtime fails soft instead of
+   failing the admin page.
+2. **Founder-only discovery API** — `GET /api/admin/providers/local-models` reports installed
+   models, the active chat/embedding identity, whether a tag is already in the catalog and
+   what capabilities are known. `selection_requires_verification` is explicit: discovery is
+   not authorization. Selection still uses the existing verify/activate path.
+3. **Active model identity** — `ProviderStatus` now carries `active_chat_model` and
+   `active_embedding_model`. The chat header shows the actually configured model rather than
+   inferring a model from the last verification, which can refer to a different tag.
+4. **Reload-safe conversations** — `/chat` is URL-addressable as
+   `/chat?conversation=<id>`. A browser refresh reopens the durable conversation from
+   PostgreSQL instead of silently starting a new one.
+5. **Admin local-model UI** — the existing founder admin page lists installed local models,
+   their size and whether they are catalog-known, and fills the exact tag into the existing
+   chat/embedding selection controls. It does not activate a model by itself.
+6. **Test corrections, not product weakening** — the V6 journey's exact marker assertion now
+   includes the suffix the UI actually renders. The resilience network journey now intercepts
+   `/api/dashboard` (the endpoint the dashboard actually calls), and the project creation
+   assertion targets the project link instead of matching both a link and a select option.
+
+## Verified existing behavior
+
+The following was already implemented and was re-verified against real PostgreSQL, Redis,
+backend and worker processes:
+
+- SSE chat streaming, persisted final messages and idempotent replay.
+- Browser cancellation: click **Avbryt** stops the stream, persists an honest terminal state,
+  leaves exactly one user message, and survives reload without duplicating it.
+- Provider failure and browser disconnect handling without a blind second external call.
+- Durable upload → import job → worker indexing → retrieval → cited answer.
+- Duplicate upload detection and idempotent re-import.
+- Deleted, foreign and legacy-space sources are excluded from chat retrieval.
+- Source conflict/confidence classification and claim-level conflict signalling.
+- Owner isolation and restart persistence for the cognitive acceptance path.
+- Workspace/project/task/milestone/calendar/search/dashboard persistence and navigation.
+- Dashboard error surface and recovery after a real failed API request.
+- Keyboard-only chat operation and Enter-to-send.
+- Fault injection for backend termination, worker termination, Redis loss, PostgreSQL outage,
+  provider timeout/malformed response, duplicate job delivery, expired leases and storage
+  failure.
+
+No second memory store, vector database, provider router or workspace module was introduced.
+
+## Work-package status
+
+| Package | Status | Evidence / limitation |
+| --- | --- | --- |
+| 1. Real local AI | **PARTIAL — implementation verified, live model BLOCKED** | Discovery, authorization boundary, active identity, streaming, persistence, reload, cancel, downtime handling and restart recovery are covered. No Ollama runtime is installed (`127.0.0.1:11434` refused), so a real local model was not invoked. |
+| 2. Persistent memory and knowledge | **VERIFIED EXISTING** | 13 source-grounding tests plus duplicate import, owner isolation, deletion, legacy-space isolation and founder citation journey. No new memory database. |
+| 3. Document pipeline | **VERIFIED EXISTING** | Durable upload/import, crash before/after commit, worker resume, duplicate bytes, empty file, blob cleanup, indexing and retrieval. The browser journey exercises TXT end to end; other format validators were not re-audited this round. |
+| 4. Project workspace integration | **VERIFIED EXISTING** | Workspace/project/task/calendar/search/dashboard browser journey and project-detail journey, reload persistence, owner-scoped API and no cross-context selection. |
+| 5. Full-stack user journey | **PASS for the covered journey** | Founder login → project → upload → ingestion → cited chat → persisted conversation → related task → reload/restart. See browser evidence. |
+| 6. Recovery and concurrency | **PASS for the executed matrix** | 11 fault-injection tests and the reliability suite passed, including duplicate delivery, interrupted stream, DB/Redis outage, provider errors and lease fencing. Retries do not blindly repeat an uncertain provider effect. |
+| 7. Performance | **MEASURED, provider-limited** | 45-second isolated soak: chat p50 **57.4 ms**, p95 **121.9 ms**; retrieval chat p50 **64.3 ms**; health p50 **30.1 ms**; RSS **183–186 MB**. Backend used a deterministic fake provider, so this measures application overhead, not real model latency. |
+| 8. Endurance | **BLOCKED** | Only 45 seconds ran. F23 requires 14,400 seconds; the result is explicitly `BLOCKED`, never PASS. |
+| 9. UX and quality | **VERIFIED / IMPROVED** | URL-backed history, truthful active model label, loading/error states, keyboard chat, dashboard network-error recovery, responsive existing layouts. No cosmetic rewrite. |
+| 10. Certification | **PASS locally, external blockers explicit** | 57 backend tests, 13 browser tests, TypeScript, lint, production build and a verified bundle. GitHub CI/PR, real Ollama and four-hour endurance remain blocked. |
+
+## Certification results
+
+| Check | Result |
+| --- | --- |
+| Focused backend suite | **57 passed, 0 failed, 0 skipped** (JUnit `tests="57"`, `failures="0"`, `errors="0"`) |
+| Founder V6 browser journey | **2 passed** |
+| Personal work browser journey | **1 passed** |
+| Model routing / local discovery browser tests | **2 passed** |
+| Resilience browser suite | **8 passed** |
+| Total browser journeys | **13 passed, 0 failed** |
+| TypeScript | **PASS** |
+| ESLint | **0 errors, 1 pre-existing `api.ts` warning** |
+| Production build | **PASS**, 29 routes |
+| Short soak | **BLOCKED for F23**, 0 request failures |
+| Real local Ollama model | **BLOCKED — no runtime** |
+
+The soak used isolated PostgreSQL `lifeos_soak_test` and Redis DB 15. It completed
+**24 chats, 24 streams, 4 document imports with grounded retrieval, 8 MainAI jobs, 16
+concurrent health checks and one backend restart**. Startup took **4.84 s**; database and
+Redis stayed readable at every sample; no incidents, stalled jobs or failures were recorded.
+The run deliberately returned exit 3 because its duration was below four hours.
+
+## Blockers
+
+1. **No Ollama runtime**: `127.0.0.1:11434` refuses connections. Real local-model discovery
+   with an installed model and a real generation cannot be claimed. This is an infrastructure
+   blocker, not a passing local-AI acceptance.
+2. **No four-hour endurance window**: F23 is BLOCKED. The 45-second soak only proves the
+   harness and recovery path work; it is not endurance evidence.
+3. **No GitHub write access**: exact-head CI, a draft PR, merge and deployment cannot be
+   performed. The verified Git bundle is the delivery artifact.
+4. **No production access**: no production VPS, database or credentials were touched.
+
+## Reproduction
+
+Focused backend suite:
+
+```bash
+cd backend
+export DATABASE_URL=postgresql://postgres@127.0.0.1:55432/lifeos_workmgmt_test
+export APP_DATABASE_URL=postgresql://mainai_app:mainai_app_pw@127.0.0.1:55432/lifeos_workmgmt_test
+export REDIS_URL=redis://127.0.0.1:56379/0
+export LIFEAI_TEST_DATABASE_NAME=lifeos_workmgmt_test
+/tmp/r15-venv/bin/python -m pytest \
+  tests/backend/providers/test_local_model_discovery.py \
+  tests/backend/chat/test_chat_streaming.py \
+  tests/backend/test_documents_upload_durable_delivery.py \
+  tests/backend/chat/test_chat_source_grounding.py \
+  tests/backend/rag/test_library_import.py::test_reimporting_identical_content_is_idempotent_marks_duplicate_not_a_second_document \
+  tests/founder_acceptance/test_founder_acceptance_suite.py::test_scenario_2_import_document_and_cite_source \
+  tests/backend/test_v5_fault_injection.py \
+  tests/backend/test_v5_reliability.py \
+  tests/backend/chat/test_chat_request_idempotency.py \
+  tests/backend/test_cognitive_acceptance_e2e.py::test_owner_isolation_failure_handling_and_restart_persistence \
+  tests/backend/test_personal_work_management_api.py::test_dashboard_search_restart_persistence_and_query_budget
+```
+
+Browser journeys:
+
+```bash
+cd frontend
+export LD_LIBRARY_PATH=/tmp/lifeai-testenv/root/usr/lib/x86_64-linux-gnu:/tmp/lifeai-testenv/root/usr/lib
+export E2E_FOUNDER_PASSWORD='TestFounderPassword123!'
+export E2E_INTERNAL_API_URL=http://127.0.0.1:8010
+npx playwright test \
+  e2e/founder-journey-v6.spec.ts \
+  e2e/personal-work.spec.ts \
+  e2e/model-routing.spec.ts \
+  e2e/founder-alpha-resilience.spec.ts \
+  --reporter=list
+```
+
+Short soak (expected exit 3 and `f23_status=BLOCKED`):
+
+```bash
+cd backend
+/tmp/r15-venv/bin/python scripts/acceptance/v5_soak.py \
+  --database-url postgresql://postgres@127.0.0.1:55432/lifeos_soak_test \
+  --app-database-url postgresql://mainai_app:mainai_app_pw@127.0.0.1:55432/lifeos_soak_test \
+  --redis-url redis://127.0.0.1:56379/15 \
+  --duration-seconds 45 --sample-every-seconds 10 --restart-every-seconds 20 \
+  --concurrency 4 \
+  --out ../docs/evidence/founder-alpha-local-ai/soak-short.json
+```
+
+## Evidence
+
+`docs/evidence/founder-alpha-local-ai/` contains the JUnit/XML, backend output, TypeScript,
+lint, build, all browser transcripts, the soak JSON/text and `summary.json`. The verified
+bundle is under `delivery/founder-alpha-local-ai/` with `SHA256SUMS` and a clean-clone
+verification transcript.

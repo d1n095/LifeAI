@@ -1,0 +1,76 @@
+{
+  "captured_at": "2026-11-22",
+  "branch": "freebuff/life-workspaces",
+  "base_sha": "04de94db7d7ccf51c23dd68670e789e8e9df6cde",
+  "code_sha": "4f99518010cdf46df764cf6a9e5a5b6539095a06",
+  "tree_sha": "46ea9421d87706269fe605eaec6aefa036e7768f",
+  "backend": {
+    "passed": 57,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "junit_time_seconds": 104.408,
+    "status": "PASS"
+  },
+  "frontend": {
+    "typescript": "PASS",
+    "eslint_errors": 0,
+    "eslint_warnings": 1,
+    "build": "PASS",
+    "routes": 29
+  },
+  "browser": {
+    "passed": 13,
+    "failed": 0,
+    "journeys": {
+      "founder_journey_v6": 2,
+      "personal_work": 1,
+      "model_routing_and_local_discovery": 2,
+      "resilience": 8
+    },
+    "status": "PASS"
+  },
+  "soak": {
+    "status": "BLOCKED",
+    "f23_status": "BLOCKED",
+    "duration_seconds": 45,
+    "required_seconds": 14400,
+    "counts": {
+      "health": 24,
+      "incident_health": 24,
+      "chat": 24,
+      "chat_stream": 24,
+      "mainai_job": 8,
+      "document_import": 4,
+      "retrieval_chat": 4,
+      "restarts": 1,
+      "concurrent_health": 16,
+      "cycles": 24
+    },
+    "startup_seconds": 4.842,
+    "latency_ms": {
+      "health_p50": 30.12,
+      "health_p95": 51.99,
+      "chat_p50": 57.42,
+      "chat_p95": 121.87,
+      "chat_stream_p50": 816.39,
+      "chat_stream_p95": 838.09,
+      "retrieval_chat_p50": 64.3,
+      "retrieval_chat_p95": 69.21
+    },
+    "rss_mb_range": [183.2, 186.5],
+    "failures": [],
+    "blockers": ["duration_seconds=45 < required 14400; F23 cannot be claimed from this run"]
+  },
+  "blockers": [
+    "Ollama runtime unavailable at 127.0.0.1:11434; no real local model was invoked",
+    "F23 four-hour endurance run not performed",
+    "No GitHub write access for exact-head CI, draft PR, merge or deployment",
+    "No production VPS access; no production changes made"
+  ],
+  "notes": [
+    "The soak used the deterministic fake provider of the isolated E2E harness; latency measures application overhead, not real model generation.",
+    "The live local-model UI path is browser-tested with a mocked discovery response because no local runtime is installed.",
+    "Resilience spec stale-assertion failures were repaired and rerun; the final run is 8/8 green."
+  ]
+}

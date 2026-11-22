@@ -1,0 +1,227 @@
+/tmp/r15-venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:208: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+.........................................................                [100%]
+=============================== warnings summary ===============================
+../../../../../tmp/r15-venv/lib/python3.12/site-packages/starlette/testclient.py:40
+  /tmp/r15-venv/lib/python3.12/site-packages/starlette/testclient.py:40: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = typing.Callable[[], typing.ContextManager[anyio.abc.BlockingPortal]]
+
+tests/backend/providers/test_local_model_discovery.py: 3 warnings
+tests/backend/chat/test_chat_streaming.py: 4 warnings
+tests/backend/test_documents_upload_durable_delivery.py: 6 warnings
+tests/backend/chat/test_chat_source_grounding.py: 13 warnings
+tests/backend/rag/test_library_import.py: 1 warning
+tests/founder_acceptance/test_founder_acceptance_suite.py: 1 warning
+tests/backend/test_v5_fault_injection.py: 7 warnings
+tests/backend/test_v5_reliability.py: 11 warnings
+tests/backend/chat/test_chat_request_idempotency.py: 3 warnings
+tests/backend/test_cognitive_acceptance_e2e.py: 2 warnings
+tests/backend/test_personal_work_management_api.py: 2 warnings
+  /home/lifeai-agent/work/LifeAI/backend/app/security.py:34: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow().replace(microsecond=0)
+
+tests/backend/providers/test_local_model_discovery.py: 13 warnings
+tests/backend/chat/test_chat_streaming.py: 48 warnings
+tests/backend/test_documents_upload_durable_delivery.py: 51 warnings
+tests/backend/chat/test_chat_source_grounding.py: 195 warnings
+tests/backend/rag/test_library_import.py: 25 warnings
+tests/founder_acceptance/test_founder_acceptance_suite.py: 4 warnings
+tests/backend/test_v5_fault_injection.py: 27 warnings
+tests/backend/test_v5_reliability.py: 28 warnings
+tests/backend/chat/test_chat_request_idempotency.py: 36 warnings
+tests/backend/test_cognitive_acceptance_e2e.py: 10 warnings
+tests/backend/test_personal_work_management_api.py: 32 warnings
+  /tmp/r15-venv/lib/python3.12/site-packages/sqlalchemy/sql/schema.py:3596: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore
+
+tests/backend/providers/test_local_model_discovery.py: 2 warnings
+tests/backend/chat/test_chat_streaming.py: 4 warnings
+tests/backend/chat/test_chat_source_grounding.py: 12 warnings
+tests/backend/test_v5_fault_injection.py: 2 warnings
+tests/backend/test_v5_reliability.py: 1 warning
+tests/backend/chat/test_chat_request_idempotency.py: 3 warnings
+tests/backend/test_cognitive_acceptance_e2e.py: 1 warning
+tests/backend/test_personal_work_management_api.py: 3 warnings
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/auth.py:107: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    cutoff = datetime.utcnow() - timedelta(minutes=FAILED_LOGIN_WINDOW_MINUTES)
+
+tests/backend/providers/test_local_model_discovery.py: 2 warnings
+tests/backend/chat/test_chat_streaming.py: 4 warnings
+tests/backend/chat/test_chat_source_grounding.py: 12 warnings
+tests/backend/test_v5_fault_injection.py: 2 warnings
+tests/backend/test_v5_reliability.py: 1 warning
+tests/backend/chat/test_chat_request_idempotency.py: 3 warnings
+tests/backend/test_cognitive_acceptance_e2e.py: 1 warning
+tests/backend/test_personal_work_management_api.py: 3 warnings
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/auth.py:76: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expires_at=datetime.utcnow() + timedelta(days=settings.refresh_token_expire_days),
+
+tests/backend/chat/test_chat_streaming.py: 4 warnings
+tests/backend/chat/test_chat_source_grounding.py: 12 warnings
+tests/backend/chat/test_chat_request_idempotency.py: 3 warnings
+  /home/lifeai-agent/work/LifeAI/backend/app/context/resolver.py:147: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = now or datetime.utcnow()
+
+tests/backend/chat/test_chat_streaming.py: 3 warnings
+tests/backend/chat/test_chat_source_grounding.py: 12 warnings
+tests/backend/chat/test_chat_request_idempotency.py: 3 warnings
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/chat.py:662: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    conversation.updated_at = datetime.utcnow()
+
+tests/backend/chat/test_chat_streaming.py: 1 warning
+tests/backend/test_v5_fault_injection.py: 3 warnings
+tests/backend/test_v5_reliability.py: 9 warnings
+  /home/lifeai-agent/work/LifeAI/backend/app/incidents/service.py:214: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/backend/test_documents_upload_durable_delivery.py::test_documents_upload_commits_durable_import_job_before_indexing
+tests/backend/test_documents_upload_durable_delivery.py::test_documents_upload_survives_process_death_then_worker_indexes
+tests/backend/test_documents_upload_durable_delivery.py::test_documents_upload_identical_bytes_returns_completed_document
+tests/backend/test_documents_upload_durable_delivery.py::test_documents_upload_crash_before_commit_leaves_blob_purgeable
+tests/backend/test_documents_upload_durable_delivery.py::test_documents_upload_committed_reference_retains_blob_against_cleanup
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/documents.py:152: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    stored_at=datetime.utcnow(),
+
+tests/backend/test_documents_upload_durable_delivery.py::test_documents_upload_survives_process_death_then_worker_indexes
+tests/backend/test_documents_upload_durable_delivery.py::test_documents_upload_identical_bytes_returns_completed_document
+tests/backend/rag/test_library_import.py::test_reimporting_identical_content_is_idempotent_marks_duplicate_not_a_second_document
+  /home/lifeai-agent/work/LifeAI/backend/app/providers/verification.py:171: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    started_at = datetime.utcnow()
+
+tests/backend/test_documents_upload_durable_delivery.py::test_documents_upload_survives_process_death_then_worker_indexes
+tests/backend/test_documents_upload_durable_delivery.py::test_documents_upload_identical_bytes_returns_completed_document
+tests/backend/rag/test_library_import.py::test_reimporting_identical_content_is_idempotent_marks_duplicate_not_a_second_document
+tests/backend/rag/test_library_import.py::test_reimporting_identical_content_is_idempotent_marks_duplicate_not_a_second_document
+  /home/lifeai-agent/work/LifeAI/backend/app/rag/library_import.py:1038: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    job.completed_at = datetime.utcnow()
+
+tests/backend/test_documents_upload_durable_delivery.py::test_documents_upload_identical_bytes_returns_completed_document
+tests/backend/rag/test_library_import.py::test_reimporting_identical_content_is_idempotent_marks_duplicate_not_a_second_document
+tests/backend/rag/test_library_import.py::test_reimporting_identical_content_is_idempotent_marks_duplicate_not_a_second_document
+  /home/lifeai-agent/work/LifeAI/backend/app/rag/library_import.py:877: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    job.started_at = job.started_at or datetime.utcnow()
+
+tests/backend/test_documents_upload_durable_delivery.py::test_documents_upload_crash_before_commit_leaves_blob_purgeable
+  /home/lifeai-agent/work/LifeAI/backend/app/account/erasure.py:368: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    task.completed_at = datetime.utcnow()
+
+tests/backend/chat/test_chat_source_grounding.py::test_deleted_source_is_never_used_by_chat
+  /home/lifeai-agent/work/LifeAI/backend/tests/backend/chat/test_chat_source_grounding.py:200: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    doc.deleted_at = datetime.utcnow()
+
+tests/backend/rag/test_library_import.py::test_reimporting_identical_content_is_idempotent_marks_duplicate_not_a_second_document
+  /home/lifeai-agent/work/LifeAI/backend/app/rag/library_import.py:604: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    imported_at=datetime.utcnow(),
+
+tests/backend/rag/test_library_import.py::test_reimporting_identical_content_is_idempotent_marks_duplicate_not_a_second_document
+  /home/lifeai-agent/work/LifeAI/backend/app/rag/library_import.py:672: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    document.stored_at = datetime.utcnow()
+
+tests/backend/test_v5_fault_injection.py::test_02_worker_termination_requeues_idempotent_internal_job
+tests/backend/test_v5_fault_injection.py::test_04_postgresql_outage_degrades_sweep_and_recovers
+tests/backend/test_v5_fault_injection.py::test_09_expired_worker_lease_is_fenced_after_reclaim
+  /home/lifeai-agent/work/LifeAI/backend/tests/backend/test_v5_fault_injection.py:87: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "started_at": datetime.utcnow() - timedelta(seconds=10),
+
+tests/backend/test_v5_fault_injection.py::test_02_worker_termination_requeues_idempotent_internal_job
+tests/backend/test_v5_fault_injection.py::test_04_postgresql_outage_degrades_sweep_and_recovers
+tests/backend/test_v5_fault_injection.py::test_09_expired_worker_lease_is_fenced_after_reclaim
+  /home/lifeai-agent/work/LifeAI/backend/tests/backend/test_v5_fault_injection.py:88: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "last_heartbeat_at": datetime.utcnow() - timedelta(seconds=10),
+
+tests/backend/test_v5_fault_injection.py::test_02_worker_termination_requeues_idempotent_internal_job
+tests/backend/test_v5_fault_injection.py::test_04_postgresql_outage_degrades_sweep_and_recovers
+tests/backend/test_v5_fault_injection.py::test_09_expired_worker_lease_is_fenced_after_reclaim
+  /home/lifeai-agent/work/LifeAI/backend/tests/backend/test_v5_fault_injection.py:89: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "lease_expires_at": datetime.utcnow() - timedelta(seconds=5),
+
+tests/backend/test_v5_fault_injection.py::test_02_worker_termination_requeues_idempotent_internal_job
+tests/backend/test_v5_fault_injection.py::test_04_postgresql_outage_degrades_sweep_and_recovers
+tests/backend/test_v5_fault_injection.py::test_04_postgresql_outage_degrades_sweep_and_recovers
+tests/backend/test_v5_reliability.py::test_expired_internal_job_is_requeued_and_incidented
+tests/backend/test_v5_reliability.py::test_expired_task_execution_is_never_blindly_requeued
+tests/backend/test_v5_reliability.py::test_repeated_sweep_does_not_inflate_the_same_incident
+tests/backend/test_v5_reliability.py::test_repeated_sweep_does_not_inflate_the_same_incident
+tests/backend/test_v5_reliability.py::test_exhausted_internal_job_is_failed_not_retried_forever
+tests/backend/test_v5_reliability.py::test_expired_import_lease_is_visible_but_left_for_the_existing_reclaimer
+  /home/lifeai-agent/work/LifeAI/backend/app/incidents/health.py:299: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = now or datetime.utcnow()
+
+tests/backend/test_v5_reliability.py::test_expired_internal_job_is_requeued_and_incidented
+tests/backend/test_v5_reliability.py::test_expired_task_execution_is_never_blindly_requeued
+tests/backend/test_v5_reliability.py::test_repeated_sweep_does_not_inflate_the_same_incident
+tests/backend/test_v5_reliability.py::test_exhausted_internal_job_is_failed_not_retried_forever
+tests/backend/test_v5_reliability.py::test_claim_never_reclaims_an_exhausted_expired_job
+  /home/lifeai-agent/work/LifeAI/backend/tests/backend/test_v5_reliability.py:49: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "started_at": datetime.utcnow() - timedelta(seconds=10),
+
+tests/backend/test_v5_reliability.py::test_expired_internal_job_is_requeued_and_incidented
+tests/backend/test_v5_reliability.py::test_expired_task_execution_is_never_blindly_requeued
+tests/backend/test_v5_reliability.py::test_repeated_sweep_does_not_inflate_the_same_incident
+tests/backend/test_v5_reliability.py::test_exhausted_internal_job_is_failed_not_retried_forever
+tests/backend/test_v5_reliability.py::test_claim_never_reclaims_an_exhausted_expired_job
+  /home/lifeai-agent/work/LifeAI/backend/tests/backend/test_v5_reliability.py:50: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "last_heartbeat_at": datetime.utcnow() - timedelta(seconds=10),
+
+tests/backend/test_v5_reliability.py::test_expired_internal_job_is_requeued_and_incidented
+tests/backend/test_v5_reliability.py::test_expired_task_execution_is_never_blindly_requeued
+tests/backend/test_v5_reliability.py::test_repeated_sweep_does_not_inflate_the_same_incident
+tests/backend/test_v5_reliability.py::test_exhausted_internal_job_is_failed_not_retried_forever
+tests/backend/test_v5_reliability.py::test_claim_never_reclaims_an_exhausted_expired_job
+  /home/lifeai-agent/work/LifeAI/backend/tests/backend/test_v5_reliability.py:51: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "lease_expires_at": datetime.utcnow() - timedelta(seconds=5),
+
+tests/backend/test_v5_reliability.py::test_expired_import_lease_is_visible_but_left_for_the_existing_reclaimer
+  /home/lifeai-agent/work/LifeAI/backend/tests/backend/test_v5_reliability.py:166: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    lease_expires_at=datetime.utcnow() - timedelta(seconds=5),
+
+tests/backend/test_v5_reliability.py::test_health_api_is_owner_scoped_and_reports_blocked
+tests/backend/test_v5_reliability.py::test_health_summary_recovers_when_only_recent_resolved_incidents_remain
+  /home/lifeai-agent/work/LifeAI/backend/app/incidents/health.py:313: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/backend/test_v5_reliability.py::test_health_summary_recovers_when_only_recent_resolved_incidents_remain
+  /home/lifeai-agent/work/LifeAI/backend/tests/backend/test_v5_reliability.py:344: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.resolved_at = datetime.utcnow()
+
+tests/backend/test_cognitive_acceptance_e2e.py::test_owner_isolation_failure_handling_and_restart_persistence
+  /home/lifeai-agent/work/LifeAI/backend/app/rag/evidence_metadata.py:305: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/backend/test_personal_work_management_api.py::test_dashboard_search_restart_persistence_and_query_budget
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/workspaces.py:874: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    last_activity_at=datetime.utcnow(),
+
+tests/backend/test_personal_work_management_api.py::test_dashboard_search_restart_persistence_and_query_budget
+tests/backend/test_personal_work_management_api.py::test_dashboard_search_restart_persistence_and_query_budget
+tests/backend/test_personal_work_management_api.py::test_dashboard_search_restart_persistence_and_query_budget
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/workspaces.py:118: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    project.last_activity_at = datetime.utcnow()
+
+tests/backend/test_personal_work_management_api.py::test_dashboard_search_restart_persistence_and_query_budget
+tests/backend/test_personal_work_management_api.py::test_dashboard_search_restart_persistence_and_query_budget
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/workspaces.py:127: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    project.last_activity_at = datetime.utcnow()
+
+tests/backend/test_personal_work_management_api.py::test_dashboard_search_restart_persistence_and_query_budget
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/workspaces.py:1253: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    previous.superseded_at = datetime.utcnow()
+
+tests/backend/test_personal_work_management_api.py::test_dashboard_search_restart_persistence_and_query_budget
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/workspaces.py:1254: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    previous.updated_at = datetime.utcnow()
+
+tests/backend/test_personal_work_management_api.py::test_dashboard_search_restart_persistence_and_query_budget
+  /home/lifeai-agent/work/LifeAI/backend/tests/backend/test_personal_work_management_api.py:317: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "starts_at": (datetime.utcnow() + timedelta(days=1)).isoformat(),
+
+tests/backend/test_personal_work_management_api.py::test_dashboard_search_restart_persistence_and_query_budget
+tests/backend/test_personal_work_management_api.py::test_dashboard_search_restart_persistence_and_query_budget
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/dashboard.py:50: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+- generated xml file: /home/lifeai-agent/work/LifeAI/docs/evidence/founder-alpha-local-ai/backend-tests.xml -
+57 passed, 697 warnings in 104.41s (0:01:44)

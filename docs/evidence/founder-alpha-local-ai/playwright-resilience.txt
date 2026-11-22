@@ -1,0 +1,14 @@
+
+Running 8 tests using 1 worker
+
+  ✓  1 [chromium] › e2e/founder-alpha-resilience.spec.ts:20:7 › Founder Alpha resilience › a full reload recovers the session and keeps protected pages usable (6.9s)
+  ✓  2 [chromium] › e2e/founder-alpha-resilience.spec.ts:32:7 › Founder Alpha resilience › a browser-level network interruption is announced and recovers after retry (4.5s)
+  ✓  3 [chromium] › e2e/founder-alpha-resilience.spec.ts:45:7 › Founder Alpha resilience › a dropped chat response resumes the same send without duplicating it (6.1s)
+  ✓  4 [chromium] › e2e/founder-alpha-resilience.spec.ts:91:7 › Founder Alpha resilience › chat streams partial text and then completes without duplicating the message (4.5s)
+  ✓  5 [chromium] › e2e/founder-alpha-resilience.spec.ts:108:7 › Founder Alpha resilience › cancelling a stream stops generation and keeps exactly one saved user message (6.6s)
+  ✓  6 [chromium] › e2e/founder-alpha-resilience.spec.ts:135:7 › Founder Alpha resilience › chat is fully keyboard-operable and sends with Enter (4.1s)
+  ✓  7 [chromium] › e2e/founder-alpha-resilience.spec.ts:155:7 › Founder Alpha resilience › a project and an assignment can be created through the current UI (3.8s)
+  ✓  8 [chromium] › e2e/founder-alpha-resilience.spec.ts:170:7 › Founder Alpha resilience › project detail is reachable from the list and shows only the project's own task (3.3s)
+
+  8 passed (42.3s)
+PLAYWRIGHT_RESILIENCE_EXIT=0

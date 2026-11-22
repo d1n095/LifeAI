@@ -1,0 +1,11 @@
+
+Running 5 tests using 1 worker
+
+  ✓  1 [chromium] › e2e/founder-journey-v6.spec.ts:13:7 › V6 Founder Alpha browser journey › protected routes reject an unauthenticated browser (2.4s)
+  ✓  2 [chromium] › e2e/founder-journey-v6.spec.ts:19:7 › V6 Founder Alpha browser journey › streaming, reload, ingestion, citation and supervised task (16.5s)
+  ✓  3 [chromium] › e2e/model-routing.spec.ts:7:5 › admin verifies and activates the exact selected Z.ai model (2.8s)
+  ✓  4 [chromium] › e2e/model-routing.spec.ts:47:5 › admin discovers installed local models and fills their exact tag (2.4s)
+  ✓  5 [chromium] › e2e/personal-work.spec.ts:9:7 › personal work: tasks, milestones, calendar, search and dashboard › founder creates work, schedules it, finds it and sees it on the dashboard after reload (13.5s)
+
+  5 passed (40.1s)
+PLAYWRIGHT_EXIT=0

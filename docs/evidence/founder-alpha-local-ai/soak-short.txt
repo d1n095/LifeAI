@@ -1,0 +1,21 @@
+{
+  "status": "BLOCKED",
+  "f23_status": "BLOCKED",
+  "duration_seconds": 45,
+  "counts": {
+    "health": 24,
+    "incident_health": 24,
+    "chat": 24,
+    "chat_stream": 24,
+    "mainai_job": 8,
+    "document_import": 4,
+    "retrieval_chat": 4,
+    "restarts": 1,
+    "concurrent_health": 16,
+    "cycles": 24,
+    "jobs_skipped_capability": 0
+  },
+  "blockers": [
+    "duration_seconds=45 < required 14400; F23 cannot be claimed from this run"
+  ]
+}

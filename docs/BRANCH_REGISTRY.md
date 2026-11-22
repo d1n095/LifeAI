@@ -6,6 +6,45 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Founder Alpha local AI — discovery, reload and certification (2026-11-22)
+
+**Branch:** `freebuff/life-workspaces`, bas `04de94db7d7ccf51c23dd68670e789e8e9df6cde`
+(Founder Alpha / Personal Work). Kod-SHA `4f99518010cdf46df764cf6a9e5a5b6539095a06`,
+tree `46ea9421d87706269fe605eaec6aefa036e7768f`; dokumentationscommit ligger ovanpå. Ingen
+PR/push/merge/deploy är gjord; GitHub write-access saknas. `first_cycle_go=false`.
+
+**Scope:** kopplar ihop befintlig providerregistrering, Ollama, streaming, chattpersistens,
+dokumentpipeline, RAG, workspaces och recovery. Lägger till bounded live-discovery av
+installerade lokala modeller, founder-only `GET /api/admin/providers/local-models`, aktiv
+chat-/embeddingmodell i `ProviderStatus`, en lokal modelltabell i admin-UI samt
+URL-adresserbara `/chat?conversation=<id>`-samtal så reload återställer durable historik.
+Ingen ny providerrouter, minnesdatabas, vektordatabas eller workspace-modul infördes.
+
+**Verifiering:** fokuserad backend-svit **57 passed, 0 failed, 0 skipped** mot riktig
+PostgreSQL/runtime-roll; browserjourneys **13 passed, 0 failed** (V6 2, personal work 1,
+model routing/local discovery 2, resilience 8, inklusive explicit cancel, reload,
+idempotent dropped-response-retry, nätverksfel och tangentbord); TypeScript **PASS**; lint
+**0 errors** (en befintlig `api.ts`-varning); produktionsbuild **PASS** med 29 routes. En
+45-sekunders isolerad soak mot `lifeos_soak_test` hade **0 requestfel**, 24 chats, 24
+streams, 4 dokumentimport med grounded retrieval, 8 MainAI-jobb, 16 samtidiga health checks
+och en backend-restart: chat p50 **57,4 ms** / p95 **121,9 ms**, retrieval p50 **64,3 ms**,
+RSS **183–186 MB**. Soakens provider är deterministisk fake; latensen mäter applikations-
+overhead, inte riktig modellgenerering.
+
+**Riktiga fixar:** döda E2E-antaganden rättades i stället för att försvagas — V6-markören
+matchar nu den faktiskt renderade texten, resilience-nätverksfelet träffar `/api/dashboard`
+och projektassertionen träffar projektlänken. Den lokala modellupptäckten är explicit inte
+auktorisation; val kräver fortfarande befintlig verify/activate-väg.
+
+**Kvarstående blockerare:** Ollama saknas (`127.0.0.1:11434` refused), så riktig lokal
+modell kunde inte anropas; F23 är **BLOCKED** eftersom 45 s < 14 400 s och får inte kallas
+endurance-PASS; exakt-head CI/PR/merge/deploy är blockerat av GitHub write-access.
+
+**Merge:** efter Personal Work-checkpointen och efter att Claude hanterat R15/V7-
+integrationen. Oberoende av Z.ai:s Security Kernel-arbete. Inga ändringar i R15,
+Security Kernel eller produktions-VPS. Detaljer och reproducerbara kommandon finns i
+`docs/FOUNDER_ALPHA_LOCAL_AI.md`; evidens i `docs/evidence/founder-alpha-local-ai/`.
+
 ## LifeAI Personal Work — tasks, calendar, search and dashboard (2026-11-22)
 
 **Branch:** `freebuff/life-workspaces`, bas `04c82c3aa4ea411835c48561f6c03cef4bb87999`,
