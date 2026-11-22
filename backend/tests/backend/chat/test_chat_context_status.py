@@ -23,6 +23,7 @@ from app.models.document import ActiveTruthStatus, Document, DocumentSource, Ind
 from app.models.document_chunk import DocumentChunk
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.providers.openai_provider import OpenAIProvider
+from app.providers.ollama_provider import OllamaProvider
 
 FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
@@ -31,7 +32,7 @@ MATCHING_VECTOR = [0.5] * DIM
 # The active embedding space these chunks are stamped with (see app/rag/embedding_space.py):
 # retrieval only ranks chunks whose (model, native_dim) matches the query vector's, so a row
 # inserted WITHOUT this identity is invisible to search.
-EMBED_MODEL = get_settings().default_embedding_model
+EMBED_MODEL = "nomic-embed-text"
 FAKE_SECRET = "sk-super-secret-value-that-must-never-reach-the-chat-response"
 
 
@@ -46,6 +47,8 @@ def _fake_chat_ok(monkeypatch):
     `search_provider_unavailable` from a real embed() failure. Tests 3 and 7 override embed()
     again afterwards to specifically exercise that failure path."""
     from app.providers.base import ChatResult
+    monkeypatch.setattr(get_settings(), "default_embedding_provider", "ollama")
+    monkeypatch.setattr(get_settings(), "default_embedding_model", EMBED_MODEL)
 
     async def _fake_chat(self, messages, model, **kwargs):
         return ChatResult(content="Testsvar.", provider="openai", model=model, raw_usage={"prompt_tokens": 10, "completion_tokens": 5})
@@ -54,7 +57,7 @@ def _fake_chat_ok(monkeypatch):
         return [MATCHING_VECTOR for _ in texts]
 
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat)
-    monkeypatch.setattr(OpenAIProvider, "embed", _fake_embed)
+    monkeypatch.setattr(OllamaProvider, "embed", _fake_embed)
 
 
 def _login(client) -> str:
@@ -176,7 +179,7 @@ def test_search_provider_unavailable_at_query_time(client, superuser_db, monkeyp
     async def _broken_embed(self, texts, model, **kwargs):
         raise ProviderError("OpenAI API-nyckel saknas.")
 
-    monkeypatch.setattr(OpenAIProvider, "embed", _broken_embed)
+    monkeypatch.setattr(OllamaProvider, "embed", _broken_embed)
     csrf = _login(client)
 
     res = _chat(client, csrf)
@@ -329,7 +332,7 @@ def test_raw_http_provider_error_never_500s_or_leaks_secret(client, monkeypatch,
         response = httpx.Response(401, request=request)
         raise httpx.HTTPStatusError(f"401 for url with key={FAKE_SECRET}", request=request, response=response)
 
-    monkeypatch.setattr(OpenAIProvider, "embed", _broken_embed)
+    monkeypatch.setattr(OllamaProvider, "embed", _broken_embed)
     csrf = _login(client)
 
     res = _chat(client, csrf)

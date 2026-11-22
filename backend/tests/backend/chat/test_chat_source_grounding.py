@@ -48,6 +48,9 @@ def _captured_chat_messages(monkeypatch):
     accident if the instruction text were never actually built into what's sent."""
     from app.providers.base import ChatResult
     from app.providers.openai_provider import OpenAIProvider
+    from app.providers.ollama_provider import OllamaProvider
+    monkeypatch.setattr(get_settings(), "default_embedding_provider", "ollama")
+    monkeypatch.setattr(get_settings(), "default_embedding_model", "nomic-embed-text")
 
     captured = []
 
@@ -59,7 +62,7 @@ def _captured_chat_messages(monkeypatch):
         return [MATCHING_VECTOR for _ in texts]
 
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat)
-    monkeypatch.setattr(OpenAIProvider, "embed", _fake_embed)
+    monkeypatch.setattr(OllamaProvider, "embed", _fake_embed)
     return captured
 
 
