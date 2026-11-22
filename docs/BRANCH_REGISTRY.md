@@ -6,6 +6,44 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## LifeAI Personal Work — tasks, calendar, search and dashboard (2026-11-22)
+
+**Branch:** `freebuff/life-workspaces`, bas `04c82c3aa4ea411835c48561f6c03cef4bb87999`,
+vidarebyggd ovanpå Life Workspaces-checkpointen `5f733c2`. Kod-SHA
+`0d917c32f267ab98996f8d517a257d2fa369f065`; dokumentationscommit ligger ovanpå. Ingen
+PR/push/merge/deploy är gjord; GitHub write-access saknas. `first_cycle_go=false`.
+
+**Scope:** package A–H i den godkända tvådagarsbackloggen. Persistiska projektmål,
+milstolpar, beslut med version/ersättning/epistemisk status, uppgifter med beroenden,
+blocked-state, historik och optimistisk version, kalender med redigering/upprepning/
+tidszon/konflikter/kategorier/länkar, en bounded founder-dashboard samt owner-scopad
+sökning över projekt/uppgifter/dokument/konversationer/kalender. Bygger på befintliga
+modeller och API:er; ingen parallell minnes-, exekverings- eller kalendermotor.
+
+**Migration:** `0095_personal_work_management`, additiv efter `0094`. Nya tabeller
+`workspace_milestones`, `task_dependencies`, `task_events`; additiva fält på `tasks`,
+`workspace_decisions` och `calendar_events`. RLS/owner-scope finns på alla nya tabeller.
+
+**API:** `/api/projects/tasks` (CRUD, filter, dependencies, historik, milstolpar),
+`/api/projects/{id}/milestones`, `/api/workspaces/{id}/decisions/{decision_id}/supersede`,
+`/api/calendar/events` (CRUD, serie, conflicts), `/api/dashboard` och `/api/search`.
+Alla är founder-gated; främmande resurser ger 404, en icke-founder får 403.
+
+**Frontend:** `/tasks`, `/calendar`, `/search`, uppdaterad `/`, projektvy med milstolpar,
+workspace-vy med beslutversion/ersättning och milstolpar, samt sidebar-poster. Loading-,
+fel-, tom- och behörighetslägen finns; inga påhittade exempelvärden.
+
+**Verifiering:** ny PostgreSQL-acceptans **3 passed**; workspace/projekt/chat-regression
+**15 passed**; Playwright **1 passed, 0 failed, 0 flaky**; frontend lint **0 errors** (en
+befintlig varning), TypeScript **PASS**, produktionsbuild **PASS** med 29 routes.
+Dashboard **24 SQL-statements** (budget 40), **58,0 ms**; sökning **39,6 ms**. Browserresan
+hittade och stängde en verklig tidszon-naiv/aware-defekt i kalenderkonflikter som gav 500.
+Evidens: `docs/evidence/life-personal-work/`; detaljer: `docs/LIFE_PERSONAL_WORK.md`.
+
+**Merge:** efter Life Workspaces och efter att Claude hanterat R15/V7-integrationen.
+Migrationen måste placeras efter `0094` i den samlade sekvensen. Inga ändringar i R15,
+Security Kernel eller produktions-VPS. Ingen extern kalender eller autonom aktivering.
+
 ## Life Workspaces — persistent project-centered founder experience (2026-11-21)
 
 **Branch:** `freebuff/life-workspaces`, bas `04c82c3aa4ea411835c48561f6c03cef4bb87999`

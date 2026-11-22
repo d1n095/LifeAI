@@ -1,0 +1,57 @@
+{
+  "branch": "freebuff/life-workspaces",
+  "base_sha": "04c82c3aa4ea411835c48561f6c03cef4bb87999",
+  "code_sha": "0d917c32f267ab98996f8d517a257d2fa369f065",
+  "status": "local_verified_bundle_only",
+  "first_cycle_go": false,
+  "migration": "0095_personal_work_management",
+  "packages": {
+    "A_project_context": "implemented_and_verified",
+    "B_task_management": "implemented_and_verified",
+    "C_calendar": "implemented_and_verified",
+    "D_dashboard": "implemented_and_verified",
+    "E_search": "implemented_and_verified",
+    "F_acceptance": "implemented_and_verified",
+    "G_performance_recovery": "bounded_tests_verified_no_long_soak",
+    "H_polish": "implemented_build_and_browser_verified"
+  },
+  "tests": {
+    "personal_work_postgres": {
+      "passed": 3,
+      "failed": 0
+    },
+    "workspace_project_chat_regression": {
+      "passed": 15,
+      "failed": 0
+    },
+    "playwright_personal_work": {
+      "passed": 1,
+      "failed": 0,
+      "flaky": 0
+    },
+    "frontend_lint": {
+      "errors": 0,
+      "warnings": 1,
+      "warning_note": "existing lib/api.ts window.location warning"
+    },
+    "frontend_tsc": "pass",
+    "frontend_build": "pass"
+  },
+  "performance": {
+    "dashboard_sql_statements": 24,
+    "dashboard_budget": 40,
+    "dashboard_ms": 58.0,
+    "search_ms": 39.6,
+    "search_pagination_stable": true
+  },
+  "real_defect_fixed": "timezone-aware calendar conflict bounds compared with naive stored rows returned 500; normalized in app/calendar/service.py",
+  "boundaries": [
+    "no push, PR, merge or deploy",
+    "no production VPS changes",
+    "no new credentials",
+    "no external calendar sync",
+    "no autonomous calendar mutation",
+    "no full four-hour soak",
+    "no real LLM run in the new acceptance suite"
+  ]
+}
