@@ -219,15 +219,25 @@ def test_mark_conflict_records_lesson_conflict_detected_on_tasks_that_actually_a
 
 
 @pytest.mark.asyncio
-async def test_resolve_conflicts_among_disputes_a_real_positive_conflict_and_excludes_it_from_the_result(db_session, owner_id, monkeypatch):
+async def test_resolve_conflicts_among_fails_closed_with_no_backing_egress_authorization_even_for_a_real_conflict(db_session, owner_id, monkeypatch):
+    """Founder directive (Task #60, requirement 5): detect_conflict() now fails closed
+    UNCONDITIONALLY -- EngineeringLesson is ownerless, founder-wide state with no founder-wide
+    (non-goal-scoped) authorization/lease primitive backing this call yet. Proves this holds
+    even for a genuinely contradictory pair whose provider response WOULD have said
+    conflict=True: zero provider calls happen at all (the fake is wired but a spy proves it's
+    never invoked), and both lessons stay `active` -- never silently disputed on an
+    unauthorized judgment."""
     a = _lesson(db_session, component="app.foo", tags=["run_tests"], rule="always do X")
     b = _lesson(db_session, component="app.foo", tags=["run_tests"], rule="never do X")
     unrelated = _lesson(db_session, component="app.bar", tags=["repo_edit"], rule="unrelated")
     db_session.commit()
 
+    calls = {"n": 0}
+
     async def _fake_chat(self, messages, model, **kwargs):
         import json
 
+        calls["n"] += 1
         return ChatResult(content=json.dumps({"conflict": True, "reasoning": "X vs never X"}), provider="openai", model=model, raw_usage={})
 
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat)
@@ -235,11 +245,12 @@ async def test_resolve_conflicts_among_disputes_a_real_positive_conflict_and_exc
     still_active = await resolve_conflicts_among(db_session, lessons=[a, b, unrelated])
     db_session.commit()
 
-    assert {lesson.id for lesson in still_active} == {unrelated.id}
+    assert calls["n"] == 0, "detect_conflict() must deny before ever reaching chat_with_fallback -- zero provider calls"
+    assert {lesson.id for lesson in still_active} == {a.id, b.id, unrelated.id}
     a = db_session.get(EngineeringLesson, a.id)
     b = db_session.get(EngineeringLesson, b.id)
-    assert a.status == EngineeringLessonStatus.disputed
-    assert b.status == EngineeringLessonStatus.disputed
+    assert a.status == EngineeringLessonStatus.active
+    assert b.status == EngineeringLessonStatus.active
 
 
 @pytest.mark.asyncio
@@ -265,19 +276,27 @@ async def test_resolve_conflicts_among_leaves_non_conflicting_lessons_active(db_
 
 
 @pytest.mark.asyncio
-async def test_demo_worker_tick_disputes_conflicting_lessons_and_planner_no_longer_applies_them(db_session, owner_id, monkeypatch):
-    """REQUIRED demo: two genuinely conflicting lessons, recorded via the real record_lesson(),
-    get disputed by the worker's OWN tick (no manual resolve_conflicts_among() call) -- and a
-    real subsequent apply_lessons_to_verification_plan() call (the exact function planner.py's
-    create_plan() calls synchronously) no longer applies either of them. lessons.py/planner.py
-    themselves are untouched by V0.3; this demo proves that's safe."""
+async def test_demo_worker_tick_fails_closed_on_lesson_conflict_detection_pending_founder_wide_egress_authorization(db_session, owner_id, monkeypatch):
+    """REQUIRED demo, updated for the founder directive (Task #60, requirement 5): the
+    worker's OWN autonomous tick (no manual resolve_conflicts_among() call) must NOT silently
+    dispute two genuinely conflicting lessons when there is no founder-wide egress
+    authorization backing the judgment call -- it fails closed instead, zero provider calls,
+    and both lessons stay `active` (never a fabricated/unauthorized dispute). Separately,
+    apply_lessons_to_verification_plan()'s OWN independent, pre-AI-judgment safety net
+    (lessons.py's own deterministic find_conflict_candidate_pairs() check, which skips BOTH
+    sides of any candidate pair regardless of whether a formal dispute was ever recorded)
+    still protects a real planning pass from applying both contradictory lessons at once --
+    this demo proves that safety net holds on its own, independent of detect_conflict()."""
     a = _lesson(db_session, component="app.mainai_execution.verify", tags=["run_tests"], rule="always retry on flake", regression_test="tests/a.py::test_a")
     b = _lesson(db_session, component="app.mainai_execution.verify", tags=["run_tests"], rule="never retry on flake", regression_test="tests/b.py::test_b")
     db_session.commit()
 
+    calls = {"n": 0}
+
     async def _fake_chat(self, messages, model, **kwargs):
         import json
 
+        calls["n"] += 1
         return ChatResult(content=json.dumps({"conflict": True, "reasoning": "always vs never retry"}), provider="openai", model=model, raw_usage={})
 
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat)
@@ -285,12 +304,16 @@ async def test_demo_worker_tick_disputes_conflicting_lessons_and_planner_no_long
     worker = Worker()
     await worker._resolve_engineering_lesson_conflicts(db_session)
 
+    assert calls["n"] == 0, "detect_conflict() must deny before ever reaching chat_with_fallback -- zero provider calls"
     db_session.expire_all()
     a = db_session.get(EngineeringLesson, a.id)
     b = db_session.get(EngineeringLesson, b.id)
-    assert a.status == EngineeringLessonStatus.disputed
-    assert b.status == EngineeringLessonStatus.disputed
+    assert a.status == EngineeringLessonStatus.active
+    assert b.status == EngineeringLessonStatus.active
 
+    # apply_lessons_to_verification_plan()'s own deterministic candidate-pair check still
+    # skips both lessons -- a real planning pass never applies both contradictory sides at
+    # once, independent of whether a formal AI-judged dispute was ever recorded.
     augmented, applied_ids = lessons.apply_lessons_to_verification_plan(db_session, task_type="run_tests", verification_plan=[])
     assert augmented == []
     assert applied_ids == []
