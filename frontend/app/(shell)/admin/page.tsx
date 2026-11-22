@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, ModelCatalog, ProviderStatus, ProviderVerification, UsageSummaryRow } from "@/lib/api";
+import { api, LocalModels, ModelCatalog, ProviderStatus, ProviderVerification, UsageSummaryRow } from "@/lib/api";
 
 
 export default function AdminPage() {
@@ -22,6 +22,7 @@ export default function AdminPage() {
       : null;
   };
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
+  const [localModels, setLocalModels] = useState<LocalModels | null>(null);
   const [usage, setUsage] = useState<UsageSummaryRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
@@ -31,10 +32,16 @@ export default function AdminPage() {
 
   async function refresh() {
     try {
-      const [p, u, m] = await Promise.all([api.providerStatus(), api.usageSummary(), api.modelCatalog()]);
+      const [p, u, m, l] = await Promise.all([
+        api.providerStatus(),
+        api.usageSummary(),
+        api.modelCatalog(),
+        api.localModels(),
+      ]);
       setModels(m);
       setProviders(p);
       setUsage(u);
+      setLocalModels(l);
     } catch (e: any) {
       setError(e.message);
     }
@@ -72,6 +79,10 @@ export default function AdminPage() {
     } finally {
       setVerifying(null);
     }
+  }
+
+  function chooseLocalModel(name: string, role: "chat" | "embedding") {
+    setChoices((prev) => ({ ...prev, [`ollama:${role}`]: name }));
   }
 
   const totalKnownCost = usage.reduce((sum, row) => sum + (row.cost_usd ?? 0), 0);
@@ -221,6 +232,79 @@ export default function AdminPage() {
             </tbody>
           </table>
         </div>
+      </section>
+
+      <section aria-labelledby="local-models-heading" className="space-y-3">
+        <h2 id="local-models-heading" className="text-sm font-medium text-white/70">
+          Lokala modeller
+        </h2>
+        <p className="text-white/50 text-sm">
+          Modeller som faktiskt finns i den lokala Ollama-runtimen. Att välja en modell här
+          fyller bara i valet ovan — den måste fortfarande verifieras innan den kan aktiveras.
+        </p>
+        {localModels === null && <p className="text-white/40 text-sm">Kontrollerar lokal runtime…</p>}
+        {localModels && !localModels.reachable && (
+          <p role="status" className="text-amber-300 text-sm">
+            Den lokala modellruntimen svarar inte. Kontrollera att Ollama körs och att
+            modeller har hämtats. Aktiva modellval finns kvar:{" "}
+            {localModels.active_chat_provider}/{localModels.active_chat_model}.
+          </p>
+        )}
+        {localModels?.reachable && localModels.models.length === 0 && (
+          <p className="text-white/40 text-sm">Inga lokala modeller är installerade ännu.</p>
+        )}
+        {localModels?.reachable && localModels.models.length > 0 && (
+          <div className="rounded-xl border border-border overflow-x-auto">
+            <table className="w-full text-sm">
+              <caption className="sr-only">Installerade lokala modeller</caption>
+              <thead className="bg-panel text-white/50 text-xs uppercase">
+                <tr>
+                  <th scope="col" className="text-left px-4 py-3">Modell</th>
+                  <th scope="col" className="text-left px-4 py-3">Storlek</th>
+                  <th scope="col" className="text-left px-4 py-3">Katalogstatus</th>
+                  <th scope="col" className="px-4 py-3"><span className="sr-only">Välj roll</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                {localModels.models.map((model) => (
+                  <tr key={model.name} className="border-t border-border/60">
+                    <td className="px-4 py-3 font-mono text-xs">{model.name}</td>
+                    <td className="px-4 py-3 text-white/60">
+                      {model.size_bytes === null
+                        ? "okänd"
+                        : `${Math.round(model.size_bytes / 1_000_000)} MB`}
+                    </td>
+                    <td className="px-4 py-3 text-white/60">
+                      {model.catalog_known
+                        ? model.declared_capabilities.join(", ") || "känd"
+                        : "okänd lokal tagg — kräver verifiering"}
+                    </td>
+                    <td className="px-4 py-3 text-right space-x-2 whitespace-nowrap">
+                      <button
+                        type="button"
+                        className="text-xs rounded border border-border px-2 py-1 disabled:opacity-30"
+                        disabled={verifying !== null || saving !== null}
+                        onClick={() => chooseLocalModel(model.name, "chat")}
+                        aria-label={`Använd ${model.name} som chat-modell`}
+                      >
+                        Chat
+                      </button>
+                      <button
+                        type="button"
+                        className="text-xs rounded border border-border px-2 py-1 disabled:opacity-30"
+                        disabled={verifying !== null || saving !== null}
+                        onClick={() => chooseLocalModel(model.name, "embedding")}
+                        aria-label={`Använd ${model.name} som embedding-modell`}
+                      >
+                        Embedding
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       <section aria-labelledby="usage-heading" className="space-y-3">

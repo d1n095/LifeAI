@@ -750,8 +750,31 @@ export type ProviderStatus = {
   configured: boolean;
   active_chat: boolean;
   active_embedding: boolean;
+  active_chat_model: string | null;
+  active_embedding_model: string | null;
   chat_verification: ProviderVerification | null;
   embedding_verification: ProviderVerification | null;
+};
+
+export type LocalModel = {
+  name: string;
+  size_bytes: number | null;
+  modified_at: string | null;
+  digest: string | null;
+  catalog_known: boolean;
+  declared_capabilities: string[];
+};
+
+export type LocalModels = {
+  runtime: string;
+  reachable: boolean;
+  active_chat_provider: string | null;
+  active_chat_model: string | null;
+  active_embedding_provider: string | null;
+  active_embedding_model: string | null;
+  selection_requires_verification: boolean;
+  authority_note: string;
+  models: LocalModel[];
 };
 
 export type UsageSummaryRow = {
@@ -1591,6 +1614,7 @@ export const api = {
     }),
 
   modelCatalog: () => request<ModelCatalog[]>("/api/admin/providers/models"),
+  localModels: () => request<LocalModels>("/api/admin/providers/local-models"),
   providerStatus: () => request<ProviderStatus[]>("/api/admin/providers/status"),
   listIncidents: (status?: string) =>
     request<RuntimeIncident[]>(`/api/incidents${status ? `?status=${encodeURIComponent(status)}` : ""}`),

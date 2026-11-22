@@ -32,14 +32,14 @@ test.describe("V6 Founder Alpha browser journey", () => {
     await expect(page.getByRole("button", { name: "Avbryt", exact: true })).toBeVisible({
       timeout: 15_000,
     });
-    await expect(transcript.getByText(marker, { exact: true })).toHaveCount(1);
+    await expect(transcript.getByText(`${marker}: svara kort.`, { exact: true })).toHaveCount(1);
     await expect(page.getByRole("button", { name: "Avbryt", exact: true })).toHaveCount(0, {
       timeout: 30_000,
     });
 
     // Reopen from durable history after a real page reload.
     await page.reload({ waitUntil: "networkidle" });
-    await expect(transcript.getByText(marker, { exact: true })).toHaveCount(1, {
+    await expect(transcript.getByText(`${marker}: svara kort.`, { exact: true })).toHaveCount(1, {
       timeout: 15_000,
     });
 
@@ -78,6 +78,8 @@ test.describe("V6 Founder Alpha browser journey", () => {
       .getByPlaceholder("Acceptanskriterier…")
       .fill("An audit result is recorded and no repository files are modified.");
     await page.getByRole("button", { name: "Skapa uppdrag" }).click();
-    await expect(page.locator("text=" + taskTitle)).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole("cell", { name: taskTitle, exact: true }).first()).toBeVisible({
+      timeout: 10_000,
+    });
   });
 });

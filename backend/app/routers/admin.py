@@ -1,3 +1,4 @@
+import logging
 import uuid
 from decimal import Decimal
 
@@ -19,6 +20,7 @@ from app.providers.catalog import (
     model_specs,
     resolve_model_spec,
 )
+from app.providers.local_discovery import discover_local_models
 from app.providers.registry import get_provider, provider_names, select_model
 from app.providers.verification import latest_check, verify_now
 from app.models.memory_source_backfill_run import BackfillRunMode, MemorySourceBackfillFailure, MemorySourceBackfillRun
@@ -36,6 +38,8 @@ from app.schemas import (
     BackfillRunCreateIn,
     BackfillRunFailureOut,
     BackfillRunOut,
+    LocalModelOut,
+    LocalModelsOut,
     ModelCatalogOut,
     ModelSelectionPreviewIn,
     ModelSelectionPreviewOut,
@@ -46,6 +50,8 @@ from app.schemas import (
     ProviderVerifyIn,
     UsageSummaryRow,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_founder)])
 
@@ -64,18 +70,28 @@ def provider_status(db: Session = Depends(get_db)):
     active_chat = db.query(ProviderConfig).filter_by(role="chat", is_active=True).first()
     active_embedding = db.query(ProviderConfig).filter_by(role="embedding", is_active=True).first()
     settings = get_settings()
+    active_chat_provider = active_chat.provider if active_chat else settings.default_llm_provider
+    active_chat_model = active_chat.model if active_chat else settings.default_llm_model
+    active_embedding_provider = (
+        active_embedding.provider if active_embedding else settings.default_embedding_provider
+    )
+    active_embedding_model = (
+        active_embedding.model if active_embedding else settings.default_embedding_model
+    )
 
     statuses = []
     for name in provider_names():
         provider = get_provider(name)
-        is_chat_active = (active_chat.provider if active_chat else settings.default_llm_provider) == name
-        is_embedding_active = (active_embedding.provider if active_embedding else settings.default_embedding_provider) == name
+        is_chat_active = active_chat_provider == name
+        is_embedding_active = active_embedding_provider == name
         statuses.append(
             ProviderStatus(
                 name=name,
                 configured=provider.is_configured(),
                 active_chat=is_chat_active,
                 active_embedding=is_embedding_active,
+                active_chat_model=active_chat_model if is_chat_active else None,
+                active_embedding_model=active_embedding_model if is_embedding_active else None,
                 # P1: the latest REAL verification result, regardless of whether this
                 # provider is active right now — so a founder can check a provider before
                 # switching to it. `None` means "never verified", shown neutrally, not as
@@ -128,6 +144,69 @@ def provider_model_catalog(db: Session = Depends(get_db)):
             )
         )
     return rows
+
+
+@router.get("/providers/local-models", response_model=LocalModelsOut)
+async def local_model_catalog(db: Session = Depends(get_db)):
+    """Discover the exact model tags installed in the local runtime.
+
+    This is deliberately separate from the static catalog: a model can be listed in
+    catalog.py but not pulled, and a pulled local tag can be newer than the catalog. A
+    runtime outage is a normal, founder-visible state (reachable=false), not a 500.
+    """
+
+    settings = get_settings()
+    active_chat = db.query(ProviderConfig).filter_by(role="chat", is_active=True).first()
+    active_embedding = db.query(ProviderConfig).filter_by(role="embedding", is_active=True).first()
+    active_chat_provider = active_chat.provider if active_chat else settings.default_llm_provider
+    active_chat_model = active_chat.model if active_chat else settings.default_llm_model
+    active_embedding_provider = (
+        active_embedding.provider if active_embedding else settings.default_embedding_provider
+    )
+    active_embedding_model = (
+        active_embedding.model if active_embedding else settings.default_embedding_model
+    )
+
+    try:
+        installed = await discover_local_models(settings.ollama_base_url)
+        reachable = True
+    except Exception:
+        # No URL, exception text or response body is exposed to the founder.
+        logger.warning("Local model discovery failed", exc_info=True)
+        installed = []
+        reachable = False
+
+    capabilities: dict[str, list[str]] = {}
+    for spec in model_specs():
+        if spec.provider != "ollama":
+            continue
+        capabilities.setdefault(spec.model_id, []).extend(spec.supported_capabilities)
+        # Ollama reports the implicit default tag as `name:latest`. The catalog stores
+        # `name`; both identify the same installed model for discovery purposes.
+        if ":" not in spec.model_id:
+            capabilities.setdefault(f"{spec.model_id}:latest", []).extend(
+                spec.supported_capabilities
+            )
+
+    return LocalModelsOut(
+        runtime="ollama",
+        reachable=reachable,
+        active_chat_provider=active_chat_provider,
+        active_chat_model=active_chat_model,
+        active_embedding_provider=active_embedding_provider,
+        active_embedding_model=active_embedding_model,
+        models=[
+            LocalModelOut(
+                name=model.name,
+                size_bytes=model.size_bytes,
+                modified_at=model.modified_at,
+                digest=model.digest,
+                catalog_known=model.name in capabilities,
+                declared_capabilities=sorted(set(capabilities.get(model.name, []))),
+            )
+            for model in installed
+        ],
+    )
 
 
 @router.post("/providers/select/preview", response_model=ModelSelectionPreviewOut)

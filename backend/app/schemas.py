@@ -599,8 +599,37 @@ class ProviderStatus(BaseModel):
     configured: bool
     active_chat: bool
     active_embedding: bool
+    # The exact model the active configuration will call. A provider's latest verification
+    # may be for a different tag, so the UI must not infer the live model from that row.
+    active_chat_model: str | None = None
+    active_embedding_model: str | None = None
     chat_verification: ProviderVerificationOut | None = None
     embedding_verification: ProviderVerificationOut | None = None
+
+
+class LocalModelOut(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+    name: str
+    size_bytes: int | None = None
+    modified_at: str | None = None
+    digest: str | None = None
+    catalog_known: bool
+    declared_capabilities: list[str]
+
+
+class LocalModelsOut(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+    runtime: str
+    reachable: bool
+    active_chat_provider: str | None = None
+    active_chat_model: str | None = None
+    active_embedding_provider: str | None = None
+    active_embedding_model: str | None = None
+    selection_requires_verification: bool = True
+    authority_note: str = (
+        "discovery is not verification, spend, egress, execution or activation authority"
+    )
+    models: list[LocalModelOut]
 
 
 class ProviderVerifyIn(BaseModel):

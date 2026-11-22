@@ -123,11 +123,17 @@ export default function ChatPage() {
   }
 
   useEffect(() => {
-    // See justification in app/(shell)/documents/page.tsx — documented fetch-on-mount
-    // pattern, setState happens after an await inside refreshConversations().
+    // The active thread is addressable as /chat?conversation=<id>, so a browser refresh
+    // (or a shared/back-forward navigation) restores the durable transcript instead of
+    // silently starting a new empty conversation. The list is loaded in parallel so the
+    // history panel still works when the URL names a thread.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     refreshConversations();
-  }, []);
+    const requested = new URLSearchParams(window.location.search).get("conversation");
+    if (requested) {
+      openConversation(requested);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     let cancelled = false;
@@ -141,7 +147,9 @@ export default function ChatPage() {
           setModelLabel(null);
           return;
         }
-        const model = active.chat_verification?.model;
+        // The live selection is the exact configured model. The latest verification may
+        // belong to a different tag, so it is only a fallback for older backends.
+        const model = active.active_chat_model ?? active.chat_verification?.model;
         setModelLabel(`${active.name}${model ? ` · ${model}` : ""}`);
         setModelState("ready");
       })
@@ -159,11 +167,17 @@ export default function ChatPage() {
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
+  function rememberConversation(id: string | undefined) {
+    const next = id ? `/chat?conversation=${encodeURIComponent(id)}` : "/chat";
+    window.history.replaceState(null, "", next);
+  }
+
   async function openConversation(id: string) {
     setHistoryOpen(false);
     try {
       const detail = await api.getConversation(id);
       setConversationId(detail.id);
+      rememberConversation(detail.id);
       const restored: ChatEntry[] = [];
       for (const m of detail.messages) {
         if (m.role === "system") continue;
@@ -221,6 +235,7 @@ export default function ChatPage() {
     setEntries([]);
     setFailedSend(null);
     setHistoryOpen(false);
+    rememberConversation(undefined);
   }
 
   async function deleteConversation(id: string, e: React.MouseEvent) {
@@ -237,6 +252,7 @@ export default function ChatPage() {
 
   function applyChatResponse(res: ChatResponse, message: string) {
     setConversationId(res.conversation_id);
+    rememberConversation(res.conversation_id);
     // The user's message is ALWAYS saved by this point (backend commits it before ever
     // calling a provider) — attach the real id to the optimistic bubble we already
     // rendered, then append the assistant's reply (or its failure) as its own entry. A
