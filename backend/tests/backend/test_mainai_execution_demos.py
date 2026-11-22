@@ -228,10 +228,21 @@ _DEMO1_EDIT_JSON = json.dumps(
 
 @pytest.mark.asyncio
 async def test_demo_1_full_success_path_end_to_end_through_the_real_worker_poll_loop(db_session, superuser_db, owner_id, monkeypatch, tmp_path):
+    import subprocess
+
     from app.mainai_execution import execution_job
 
-    monkeypatch.setattr(execution_job, "_repo_root", lambda: tmp_path)
-    (tmp_path / "backend" / "tests").mkdir(parents=True)
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    subprocess.run(["git", "init", "-q", "."], cwd=repo_root, check=True)
+    subprocess.run(["git", "config", "user.email", "test@lifeai.invalid"], cwd=repo_root, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_root, check=True)
+    (repo_root / "backend" / "tests").mkdir(parents=True)
+    (repo_root / "backend" / "tests" / ".keep").write_text("")
+    subprocess.run(["git", "add", "-A"], cwd=repo_root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=repo_root, check=True)
+
+    monkeypatch.setattr(execution_job, "_repo_root", lambda: repo_root)
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_router(plan_json=_DEMO1_PLAN_JSON, edit_json=_DEMO1_EDIT_JSON))
 
     goal = _goal(
@@ -256,9 +267,26 @@ async def test_demo_1_full_success_path_end_to_end_through_the_real_worker_poll_
     for task_type, task in by_type.items():
         assert task.status == MainAITaskStatus.completed, f"{task_type} ended as {task.status.value}, not completed"
 
-    written = tmp_path / "backend" / "tests" / "test_demo_doc_fix.py"
-    assert written.exists()
-    assert "assert True" in written.read_text()
+    # BEHAVIOR CHANGE (founder directive, independent-review finding PI-1d): this used to
+    # assert the proposed test file landed directly inside `tmp_path` (the fake repo root) --
+    # the original, now-fixed defect PI-1d exists to close. It now asserts the opposite: the
+    # real repo root was never touched, which is only possible if the full real chain still
+    # worked end to end across THREE separate tasks sharing one disposable checkout --
+    # repo_edit wrote it, run_tests verified it there too (not against _backend_root()), and
+    # by the time this goal closed, its checkout is already cleaned up (see below).
+    from pathlib import Path
+
+    assert not (repo_root / "backend" / "tests" / "test_demo_doc_fix.py").exists()
+
+    repo_edit_completed_event = superuser_db.execute(
+        sa_text("SELECT detail FROM mainai_task_events WHERE task_id = :t AND event_type = 'completed'"),
+        {"t": str(by_type["repo_edit"].id)},
+    ).scalar_one()
+    checkout_path = Path(repo_edit_completed_event["work_result"]["proposal_worktree_path"])
+    assert not checkout_path.parent.exists(), (
+        "PI-1d: the goal is fully terminal now (every task completed) -- its repo_edit "
+        "sibling's isolated checkout must be cleaned up, not left on disk"
+    )
 
     open_pr_event = superuser_db.execute(
         sa_text("SELECT detail FROM mainai_task_events WHERE task_id = :t AND event_type = 'completed'"), {"t": str(by_type["open_pr"].id)}

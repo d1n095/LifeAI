@@ -103,26 +103,37 @@ def check_single_prompt_fence() -> Result:
     * it can *redeclare* the marker literals (a second definition that drifts), and
     * it can name the fence but append the markers around raw text, so the excerpt's own content
       decides where the boundary falls. That variant still counts the markers correctly and still
-      looks fenced, which is why it survived until this check existed: `blueprint.py` did exactly
-      that, and a document containing END UNTRUSTED SOURCE EXCERPT could close its own fence.
+      looks fenced, which is why this check exists at all: `blueprint.py` did exactly that before
+      the Phase 3 Founder Alpha staging integration, and a document containing the real end
+      marker could close its own fence.
 
-    So naming the fence obliges the module to use `fence_untrusted()`, which defuses forged
-    markers before wrapping.
+    So naming the fence obliges the module to go through one of app.rag.untrusted_content's own
+    functions (`frame_untrusted_source_content`/`build_untrusted_context_block`), which defuse
+    forged markers before wrapping.
+
+    The canonical module used to be app/rag/prompt_fencing.py (two markers, BEGIN/END). The R15
+    staging merge brought chat.py and workbench.py onto app/rag/untrusted_content.py instead (the
+    R9 M4 -> R11 Phase 7 "unified prompt-fencing boundary" lineage, three markers: open/rule/
+    close) without updating this check or blueprint.py to match — a drift this check now follows
+    rather than repeats. prompt_fencing.py itself is untouched and still correct; it simply has no
+    remaining router caller, so it is not the fence this check verifies against.
     """
-    fence = APP / "rag" / "prompt_fencing.py"
+    fence = APP / "rag" / "untrusted_content.py"
     if not fence.is_file():
         return Result("single_prompt_fence", "one canonical prompt-injection fence", "enforced", UNVERIFIABLE, {"missing": _rel(fence)})
 
     markers = sorted(
-        s for s in _string_literals(fence) if "UNTRUSTED SOURCE EXCERPT" in s and s.lstrip().startswith((">>>", "<<<"))
+        s
+        for s in _string_literals(fence)
+        if ("DOKUMENTINNEHÅLL" in s or "DATA, INTE INSTRUKTIONER" in s) and s.lstrip().startswith(("=====", "—"))
     )
-    if len(markers) != 2:
+    if len(markers) != 3:
         return Result(
             "single_prompt_fence",
             "one canonical prompt-injection fence",
             "enforced",
             UNVERIFIABLE,
-            {"reason": "the fence module no longer declares exactly two markers", "found": markers},
+            {"reason": "the fence module no longer declares exactly three markers", "found": markers},
         )
 
     duplicated = {
@@ -133,11 +144,15 @@ def check_single_prompt_fence() -> Result:
     naming = [
         path
         for path in _python_files(APP)
-        if path != fence and any("UNTRUSTED SOURCE EXCERPT" in s for s in _string_literals(path))
+        if path != fence and any("DOKUMENTINNEHÅLL" in s for s in _string_literals(path))
     ]
-    unfenced = sorted(_rel(p) for p in naming if "app.rag.prompt_fencing.fence_untrusted" not in _imports(p))
-    callers = {_rel(p) for p in _python_files(APP) if "app.rag.prompt_fencing.fence_untrusted" in _imports(p)}
-    required = {"backend/app/routers/chat.py", "backend/app/routers/blueprint.py"}
+    fence_functions = (
+        "app.rag.untrusted_content.frame_untrusted_source_content",
+        "app.rag.untrusted_content.build_untrusted_context_block",
+    )
+    unfenced = sorted(_rel(p) for p in naming if not (_imports(p) & set(fence_functions)))
+    callers = {_rel(p) for p in _python_files(APP) if _imports(p) & set(fence_functions)}
+    required = {"backend/app/routers/chat.py", "backend/app/routers/workbench.py", "backend/app/routers/blueprint.py"}
     missing_callers = sorted(required - callers)
     ok = not duplicated and not unfenced and not missing_callers
     return Result(
