@@ -36,9 +36,11 @@ end
 class JobLockUnavailable(Exception):
     """Redis itself couldn't be reached — distinct from "another worker holds the lock"
     (LockHeld below, a normal and expected outcome). Callers must decide explicitly how to
-    degrade (see app/rag/library_import.py's docstring on why it proceeds without a lock
-    rather than blocking every import whenever Redis happens to be down) — this exception
-    exists so that decision is made deliberately, never silently."""
+    degrade: app/rag/library_import.py's run_import_job FAILS CLOSED on this (re-raises, so
+    app/worker.py's existing retry/backoff loop retries once Redis returns) rather than
+    proceeding without the lock, which used to be this app's behavior until it was found to
+    let two byte-identical uploads race past the duplicate-checksum check — this exception
+    exists so a caller's degrade choice is made deliberately, never silently."""
 
 
 class LockHeld(Exception):
