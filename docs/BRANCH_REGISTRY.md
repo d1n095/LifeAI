@@ -9753,3 +9753,30 @@ content while they're still open.
 
 **Blocks nothing; blocked by nothing.** Pure documentation; safe to merge independently of #440/
 #443/#445/#446/#447/#450's own merge order. `first_cycle_go=false`, no merge/deploy/activation.
+
+## PR #463 — model routing security hardening (2026-11-19)
+
+Existing branch `codex/model-capability-routing-foundation`, base `69dc5ea5a9cfc750303ea1a9b335c78612bc8f39`.
+Active hardening of exact-model verification, catalog/adapter compatibility and Founder configuration.
+Reuses #458's runner pin and dependency updates; no competing CI implementation and no new advisory exceptions.
+#457 overlaps `providers/verification.py`; preserve its local timeout contract during integration.
+R12 has a different eval-only `providers/zai_provider.py` and global `zai` registration lifecycle; do not substitute it for this HTTP adapter.
+Freebuff R15 was subsequently supplied at `transfer/freebuff-r15-20261119` / `16a6bd301a8a389e7648b8a3c1cdd80a3d115662`: read-only compatibility review is recorded in `docs/MODEL_ROUTING_HARDENING.md`; its branch is untouched.
+No merge/rebase/deploy/provider activation. `first_cycle_go=false`.
+
+#463 integration checkpoint: targeted sharp/PostCSS patches now overlap #458's lockfile.
+A synthetic merge reports package-lock.json conflict; retain patches and regenerate the composed lock.
+#457 still conflicts in verification.py; R12 still conflicts in registry.py and the Z.ai adapter.
+
+R15 checkpoint review: adds `gemma3:4b` to #463's local model catalog without runtime guarantees.
+Combined activation remains blocked on Z.ai eval/HTTP identity separation, verifier contract composition and R15 billing's per-attempt/ambiguous-failure accounting. No merge or Freebuff branch changes performed.
+
+## Codex R15 integration hardening — isolated candidate
+
+Branch `codex/r15-routing-integration-hardening`, parent R15 checkpoint `16a6bd301a8a389e7648b8a3c1cdd80a3d115662`.
+Imports #463's exact hardening delta from `dbd7680d267ae56b57e4a823c7cb1657f2308287` by source patch, preserving both source branches unchanged; no branch merge/rebase.
+Scope: eval/HTTP identity isolation, composed verification contracts and retry/accounting boundaries.
+Remote R15 checkpoint still equals the supplied SHA; no newer R15 head was advertised at baseline.
+Independent security acceptance remains external; `first_cycle_go=false`. No deployment or provider activation.
+
+Draft [PR #464](https://github.com/d1n095/LifeAI/pull/464) carries the isolated R15/#463 candidate against the exact transfer checkpoint. #463 stays frozen at `dbd7680d`; Freebuff R15 and Z.ai source heads were rechecked unchanged. Final targeted reply/nonce/intent/accounting regressions pass (48); full exact-head CI and independent acceptance remain separate gates. No merge/deploy/provider activation.
