@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import uuid
@@ -27,7 +28,25 @@ from app.providers.registry import embed_with_policy, resolve_active
 from app.providers.verification import classify_provider_exception
 from app.rag.embedding_space import native_dim_of
 from app.rag.query_embedding import prepare_embedding_query
+from app.models.audit import AuditLog
+from app.models.claim_relationship import ClaimRelationship
+from app.rag.claim_graph import (
+    EpistemicShift,
+    record_claim_relationship,
+    shifts_to_audit_detail,
+    trace_evidence_chain,
+)
+from app.rag.intellectual_adversary import review_conclusion
+from app.rag.epistemics import cross_domain_claim_overlaps, second_order_consequences
 from app.rag.library_import import maybe_purge_blob
+from app.rag.epistemics import classify_claim
+from app.rag.evidence_metadata import (
+    ClaimNotFoundError,
+    NothingDeclaredError,
+    cap_from_row,
+    quality_metadata_for_claims,
+    record_claim_evidence_metadata,
+)
 from app.rag.trust import assess_claim_confidence
 from app.rag.vector_store import hybrid_search
 from app.storage import get_storage
@@ -40,6 +59,11 @@ from app.storage.references import (
     get_storage_cleanup_ops_status,
 )
 from app.schemas import (
+    ClaimEvidenceMetadataIn,
+    ClaimEvidenceMetadataOut,
+    ClaimEvidenceChainOut,
+    ClaimGraphEdgeIn,
+    ClaimGraphEdgeOut,
     DeleteConfirmIn,
     ImportJobOut,
     KnowledgeClaimOut,
@@ -53,6 +77,8 @@ from app.schemas import (
     SourceRelationshipIn,
     SourceRelationshipOut,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/library", tags=["library"], dependencies=[Depends(require_founder)])
 settings = get_settings()
@@ -373,6 +399,11 @@ def get_source(source_id: uuid.UUID, db: Session = Depends(get_db), user: User =
     # confidence is recomputed live (assess_claim_confidence), not read from the stored
     # extraction-time value — see app/rag/trust.py's docstring for why (a relationship added
     # after extraction must be reflected immediately).
+    # Evidence-quality caps (app/rag/evidence_metadata.py): ONE batch read for the page,
+    # then each claim's ladder verdict runs under its stamped cap — the same
+    # classify_claim(quality_cap=...) contract the SQL rollup mirrors, so the detail view
+    # and the chat/workbench instruction rollup can never disagree about a capped claim.
+    quality_rows = quality_metadata_for_claims(db, user.id, [c.id for c in claims])
     detail.claims = [
         KnowledgeClaimOut(
             id=c.id,
@@ -383,6 +414,16 @@ def get_source(source_id: uuid.UUID, db: Session = Depends(get_db), user: User =
             grounding_score=c.grounding_score,
             chunk_id=c.chunk_id,
             created_at=c.created_at,
+            # Evidence-aware epistemics (app/rag/epistemics.py): the five-state ladder
+            # verdict rides ADDITIVELY on the existing per-claim row — same cost shape as
+            # the live-confidence recomputation beside it, and the founder sees WHY each
+            # claim sits where it sits in the Library detail view.
+            epistemic_status=classify_claim(
+                db, user.id, c, quality_cap=cap_from_row(quality_rows.get(c.id))
+            ).status.value,
+            quality_grade=quality_rows[c.id].quality_grade if c.id in quality_rows else None,
+            quality_cap=quality_rows[c.id].quality_cap if c.id in quality_rows else None,
+            quality_caveats=list(quality_rows[c.id].quality_caveats) if c.id in quality_rows else [],
         )
         for c in claims
     ]
@@ -592,6 +633,232 @@ def create_relationship(
     db.commit()
     db.refresh(relationship)
     return relationship
+
+
+@router.put("/claims/{claim_id}/evidence-metadata", response_model=ClaimEvidenceMetadataOut)
+def stamp_claim_evidence_metadata(
+    claim_id: uuid.UUID,
+    payload: ClaimEvidenceMetadataIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Founder-declared study metadata for ONE claim — the producer side of the
+    evidence-quality layer (app/rag/evidence_metadata.py). Fail-closed: keys outside the
+    declared vocabulary are rejected with a named reason (and reported back in
+    `rejected_keys`, alongside the materialized verdict that only the ACCEPTED keys
+    produced); a declaration with zero valid keys is refused outright, so an honest
+    absence can never become a stored grade. Re-stamping updates the row in place — a
+    corrected declaration moves the materialized verdict with it."""
+    claim = db.query(KnowledgeClaim).filter(KnowledgeClaim.id == claim_id, KnowledgeClaim.owner_id == user.id).first()
+    if claim is None:
+        raise HTTPException(status_code=404, detail="Påståendet hittades inte.")
+    try:
+        stamped = record_claim_evidence_metadata(
+            db, user.id, claim_id, payload.metadata, declared_via=payload.declared_via
+        )
+    except NothingDeclaredError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ClaimNotFoundError as exc:  # unreachable behind the visibility check; kept for contract symmetry
+        raise HTTPException(status_code=404, detail="Påståendet hittades inte.") from exc
+    db.commit()
+    return ClaimEvidenceMetadataOut(
+        claim_id=stamped.claim_id,
+        declared=stamped.declared,
+        rejected=stamped.rejected,
+        quality_grade=stamped.grade.value,
+        quality_cap=stamped.cap.value,
+        quality_caveats=list(stamped.assessment.caveats),
+        axis_findings=[
+            {"axis": f.axis, "direction": f.direction, "finding": str(f.finding), "reason": f.reason}
+            for f in stamped.assessment.axes
+        ],
+        declared_via=stamped.declared_via,
+        recorded_at=stamped.recorded_at,
+    )
+
+
+@router.post("/claims/{claim_id}/relationships", response_model=ClaimGraphEdgeOut)
+def create_claim_relationship(
+    claim_id: uuid.UUID,
+    payload: ClaimGraphEdgeIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Founder-declared claim-graph edge (Round 8 M3) — the production input path the claim
+    graph never had. Both endpoints must belong to this owner; an exact duplicate edge is
+    idempotent (the ladder counts edge EXISTENCE, not edge copies). On a contradicts edge,
+    the epistemic shift of BOTH endpoints (prior verdict with the edge excluded vs live
+    verdict) is computed in-transaction and written to the audit trail: the old conclusion
+    is never overwritten, it is superseded WITH its provenance. No winner is chosen — the
+    conflict lives in the ladder's conflicting_evidence verdict."""
+    try:
+        edge, shifts = record_claim_relationship(
+            db,
+            user.id,
+            from_claim_id=claim_id,
+            to_claim_id=payload.to_claim_id,
+            relationship_type=payload.relationship_type,
+            note=payload.note,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if shifts:
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                action="epistemic_shift",
+                entity_type="claim_relationship",
+                entity_id=str(edge.id),
+                detail=shifts_to_audit_detail(shifts),
+            )
+        )
+        # Round 9 M6 ("remember important findings"): a conclusion that actually CHANGED is
+        # worth remembering — recorded as a CANDIDATE learning signal (SIGNAL != TRUTH
+        # WRITER: a candidate the founder later promotes or dismisses, never an auto-written
+        # memory note). Idempotent on the edge id, so replays never duplicate the memory.
+        if any(sh.changed for sh in shifts):
+            from app.founder_memory_signals.service import record_candidate_signal
+
+            # Migration 0053's closed vocabulary is REUSED, not extended: a conclusion
+            # correction IS a correction_candidate (source_type stays 'message' — the
+            # provenance dict carries the claim-graph specifics). Extending the enum for a
+            # new producer kind is a schema-policy decision, not this endpoint's to make.
+            record_candidate_signal(
+                db,
+                owner_id=user.id,
+                signal_kind="correction_candidate",
+                idempotency_key=f"epistemic-shift:{edge.id}",
+                source_type="message",
+                classifier_strategy="epistemic_shift_detection",
+                classifier_confidence="high",
+                classifier_reasoning=(
+                    "a founder-declared contradicts edge changed a claim's ladder verdict; "
+                    "prior and current statuses are on the audit trail"
+                ),
+                provenance={
+                    "relationship_id": str(edge.id),
+                    "shifts": [
+                        {
+                            "claim_id": str(sh.claim_id),
+                            "prior": sh.prior_status,
+                            "current": sh.current_status,
+                        }
+                        for sh in shifts
+                        if sh.changed
+                    ],
+                },
+            )
+    db.commit()
+    return ClaimGraphEdgeOut(
+        id=edge.id,
+        from_claim_id=edge.from_claim_id,
+        to_claim_id=edge.to_claim_id,
+        relationship_type=edge.relationship_type.value,
+        note=edge.note,
+        epistemic_shifts=[
+            {
+                "claim_id": str(sh.claim_id),
+                "prior_status": sh.prior_status,
+                "current_status": sh.current_status,
+                "changed": sh.changed,
+                "prior_reasons": sh.prior_reasons,
+                "current_reasons": sh.current_reasons,
+            }
+            for sh in shifts
+        ],
+    )
+
+
+@router.get("/claims/{claim_id}/evidence-chain", response_model=ClaimEvidenceChainOut)
+def get_claim_evidence_chain(
+    claim_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Why does MainAI believe/dispute THIS claim? The bounded, structured answer: verdict
+    + reasons + source trust state + chunk grounding + stamped metadata verdict + BOTH
+    sides of every contradicting edge (presented, never adjudicated) + the second-order
+    consequences of the claim's source. Owner-scoped end to end."""
+    try:
+        chain = trace_evidence_chain(db, user.id, claim_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Påståendet hittades inte.")
+    # Round 10 M4: the bounded intellectual adversary rides the SAME production response
+    # (fail-open: a review failure degrades the field to {reviewed: False}, never the call).
+    try:
+        review = review_conclusion(db, user.id, claim_id)
+        review_dict = review.to_dict()
+    except Exception:
+        logger.warning("adversarial review failed; field degrades honestly", exc_info=True)
+        review_dict = {"claim_id": str(claim_id), "reviewed": False, "verdict_status": None, "objections": [], "error": "review_unavailable"}
+    return ClaimEvidenceChainOut(
+        claim_id=chain.claim_id,
+        claim_text=chain.claim_text,
+        claim_type=chain.claim_type,
+        claim_status=chain.claim_status,
+        confidence=chain.confidence,
+        epistemic_status=chain.verdict.status.value,
+        verdict_reasons=chain.verdict.reasons,
+        source=chain.source,
+        chunk_grounded=chain.chunk_grounded,
+        quality_metadata=chain.quality_metadata,
+        supporting_edges=chain.supporting_edges,
+        contradicting_edges=chain.contradicting_edges,
+        other_edges=chain.other_edges,
+        second_order_consequences=chain.second_order_consequences,
+        adversarial_review=review_dict,
+    )
+
+
+@router.get("/graph/cross-domain-overlaps")
+def get_cross_domain_overlaps(
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """The same statement surfacing in 2+ projects — the cross-domain discovery signal
+    (app/rag/epistemics.py). Deterministic SQL, owner-scoped, LIMIT-bounded."""
+    overlaps = cross_domain_claim_overlaps(db, user.id, limit=min(max(1, int(limit)), 200))
+    return [
+        {
+            "claim_text": o.claim_text,
+            "claim_ids": [str(c) for c in o.claim_ids],
+            "source_ids": [str(s) for s in o.source_ids],
+            "project_ids": [str(p) if p else None for p in o.project_ids],
+        }
+        for o in overlaps
+    ]
+
+
+@router.get("/sources/{source_id}/consequences")
+def get_source_consequences(
+    source_id: uuid.UUID,
+    max_depth: int = 3,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Second-order consequences of THIS source's supersedes/contradicts edges through the
+    derived_from/supports dependency closure — owner-scoped, cycle-safe, depth-capped
+    (app/rag/epistemics.second_order_consequences). A source with no incident trigger
+    edges returns [] — never an error."""
+    if _visible_document_query(db, user.id).filter(Document.id == source_id).first() is None:
+        raise HTTPException(status_code=404, detail="Källan hittades inte.")
+    consequences = second_order_consequences(db, user.id, [source_id], max_depth=max_depth)
+    return [
+        {
+            "kind": c.kind,
+            "root_source_id": str(c.root_source_id),
+            "trigger_edge": [str(x) for x in c.trigger_edge],
+            "dependent_source_id": str(c.dependent_source_id),
+            "dependent_project_id": str(c.dependent_project_id) if c.dependent_project_id else None,
+            "depth": c.depth,
+            "path": [str(p) for p in c.path],
+        }
+        for c in consequences
+    ]
 
 
 @router.get("/search/hybrid", response_model=LibrarySearchResponseOut)

@@ -47,6 +47,8 @@ from app.models.mainai_recovery import AUTO_SALVAGEABLE_CLASSIFICATIONS, MainAIR
 from app.models.mainai_wait import MainAITaskWait
 from app.models.user import User
 from app.db_clock import db_now
+from app.providers.base import ProviderError
+from app.providers.verification import classify_provider_exception
 from app.schemas import (
     EngineeringLessonOut,
     MainAICheckpointOut,
@@ -138,6 +140,15 @@ async def propose_and_create_plan(request: Request, goal_id: uuid.UUID, db: Sess
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     except PlanCycleError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    except ProviderError as exc:
+        # propose_plan_via_ai()'s chat_with_fallback() call had no caller-side handling here —
+        # every configured provider failing (e.g. no reachable local model) previously surfaced
+        # as a raw 500 instead of the same classified, safe-to-show message chat.py already
+        # gives for the identical underlying failure (see app/rag/context_status.py's
+        # search_provider_unavailable). classify_provider_exception() never returns a raw
+        # exception string for an httpx-originated error, only for a ProviderError a provider
+        # module raised itself.
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=classify_provider_exception(exc).message) from exc
     db.commit()
     return plan
 

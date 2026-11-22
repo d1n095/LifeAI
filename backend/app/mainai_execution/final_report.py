@@ -320,6 +320,24 @@ def record_final_report(db: Session, *, goal: MainAIGoal) -> dict:
         goal.completed_at = datetime.utcnow()
         goal.status = MainAIGoalStatus.completed if all(s == MainAITaskStatus.completed for s in task_statuses) else MainAIGoalStatus.failed
         db.flush()
+        # PI-1d (founder directive, "RESUME LIFEAI FIRST-CYCLE REMEDIATION" /
+        # "FOUNDER DECISION — EGRESS AUTHORIZATION & FIRST-CYCLE INTEGRATION"): proposal-mode
+        # repo_edit tasks (execution_job.py's _propose_repo_edit(), M4 isolation) write into a
+        # disposable, per-JOB isolated git checkout rather than the live backend checkout --
+        # but that checkout is a GOAL-level shared resource while the goal runs: a sibling
+        # run_tests task (dispatched LATER, as its own separate task/job) reads it via
+        # _handle_run_tests()'s own `proposal_worktree_path` lookup. Cleaning it up at the
+        # repo_edit task's OWN finalization (tried first, in an earlier version of this exact
+        # fix: a real regression reproduced it) deleted it out from under that still-pending
+        # sibling. THIS is the one point that's actually safe: every task under the goal,
+        # repo_edit's sibling run_tests included, is confirmed genuinely terminal right here, so
+        # nothing can still need it. Local import avoids a circular import -- execution_job.py
+        # imports record_final_report from this module.
+        from app.mainai_execution.proposal_worktree import remove_isolated_proposal_checkout_for_attempt
+
+        for t in report["tasks"]:
+            if t["task_type"] == "repo_edit" and t["execution_attempt"] is not None:
+                remove_isolated_proposal_checkout_for_attempt(t["execution_attempt"]["mainai_job_id"])
     else:
         has_waiting = any(s in _WAITING_TASK_STATUSES for s in task_statuses)
         has_actionable = any(s in _IMMEDIATELY_ACTIONABLE_TASK_STATUSES for s in task_statuses)

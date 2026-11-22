@@ -1,5 +1,6 @@
 import httpx
 
+from app.providers.base import chat_token_limit
 from app.config import get_settings
 from app.providers.base import ChatResult, LLMProvider, Message, ProviderError, looks_like_placeholder_secret
 
@@ -29,7 +30,7 @@ class AnthropicProvider(LLMProvider):
         chat_messages = [{"role": m.role, "content": m.content} for m in messages if m.role != "system"]
         payload = {
             "model": model,
-            "max_tokens": kwargs.get("max_tokens", 2048),
+            "max_tokens": chat_token_limit(kwargs, default=2048),
             "messages": chat_messages,
         }
         if system:
