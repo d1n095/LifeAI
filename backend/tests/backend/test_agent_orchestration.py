@@ -26,6 +26,7 @@ either are neither possible nor desirable in an automated test suite."""
 import uuid
 
 import pytest
+from sqlalchemy import text
 
 from app.agent_orchestration import (
     attempt_auto_merge,
@@ -61,6 +62,21 @@ def _fake_chat(response_text: str):
         return ChatResult(content=response_text, provider="openai", model=model, raw_usage={})
 
     return _chat
+
+
+@pytest.fixture
+def founder_id(db_session, make_verified_user):
+    """Founder directive (Task #60): dispatch_task()/review_task() now REQUIRE
+    `authorized_by_user_id` -- a real, existing user id, since it is threaded through to
+    chat_with_fallback()'s owner_id, which writes a real, RLS-protected ProviderDisclosureEvent
+    row (FK to users.id). Same `_set_rls_user`-equivalent convention as
+    tests/backend/mainai/test_egress_policy.py's own `owner_id` fixture."""
+    from app.request_context import current_user_id as current_user_id_var
+
+    user, _password = make_verified_user()
+    current_user_id_var.set(str(user.id))
+    db_session.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user.id)})
+    return user.id
 
 
 def _make_task(db_session, **overrides):
@@ -99,11 +115,11 @@ def test_get_task_raises_for_unknown_id(db_session):
 
 
 @pytest.mark.asyncio
-async def test_dispatch_task_records_event_and_advances_status(db_session, monkeypatch):
+async def test_dispatch_task_records_event_and_advances_status(db_session, founder_id, monkeypatch):
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat("--- a/frontend/package.json\n+++ b/frontend/package.json\n(diff)"))
     task = _make_task(db_session)
 
-    event = await dispatch_task(db_session, task.id, dispatched_by="test")
+    event = await dispatch_task(db_session, task.id, dispatched_by="test", authorized_by_user_id=founder_id)
 
     assert event.event_type == AgentTaskEventType.dispatched
     assert "diff" in event.payload["response"]
@@ -116,51 +132,51 @@ async def test_dispatch_task_records_event_and_advances_status(db_session, monke
 
 
 @pytest.mark.asyncio
-async def test_review_task_blocked_without_recorded_test_results(db_session, monkeypatch):
+async def test_review_task_blocked_without_recorded_test_results(db_session, founder_id, monkeypatch):
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat("VERDICT: approved\nSer bra ut."))
     task = _make_task(db_session)
-    await dispatch_task(db_session, task.id, dispatched_by="test")
+    await dispatch_task(db_session, task.id, dispatched_by="test", authorized_by_user_id=founder_id)
 
     with pytest.raises(ValueError, match="testresultat"):
-        await review_task(db_session, task.id, reviewed_by="test")
+        await review_task(db_session, task.id, reviewed_by="test", authorized_by_user_id=founder_id)
 
 
 @pytest.mark.asyncio
-async def test_review_task_approves_with_green_tests_and_approved_verdict(db_session, monkeypatch):
+async def test_review_task_approves_with_green_tests_and_approved_verdict(db_session, founder_id, monkeypatch):
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat("VERDICT: approved\nDiffen håller sig inom scope."))
     task = _make_task(db_session)
-    await dispatch_task(db_session, task.id, dispatched_by="test")
+    await dispatch_task(db_session, task.id, dispatched_by="test", authorized_by_user_id=founder_id)
     record_test_results(db_session, task.id, passed=True, output="npm audit: 0 sårbarheter", recorded_by="test")
 
-    event = await review_task(db_session, task.id, reviewed_by="test")
+    event = await review_task(db_session, task.id, reviewed_by="test", authorized_by_user_id=founder_id)
 
     assert event.payload["verdict"] == "approved"
     assert get_task(db_session, task.id).status == AgentTaskStatus.reviewed_approved
 
 
 @pytest.mark.asyncio
-async def test_review_task_never_approves_on_red_tests_even_if_verdict_says_approved(db_session, monkeypatch):
+async def test_review_task_never_approves_on_red_tests_even_if_verdict_says_approved(db_session, founder_id, monkeypatch):
     """The hard backstop: MainAI must not self-approve without verifiable green tests,
     regardless of what the review agent's own text says (CLAUDE.md section 6)."""
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat("VERDICT: approved\nSer bra ut (felaktigt, testerna är röda)."))
     task = _make_task(db_session)
-    await dispatch_task(db_session, task.id, dispatched_by="test")
+    await dispatch_task(db_session, task.id, dispatched_by="test", authorized_by_user_id=founder_id)
     record_test_results(db_session, task.id, passed=False, output="npm audit: 3 sårbarheter kvarstår", recorded_by="test")
 
-    event = await review_task(db_session, task.id, reviewed_by="test")
+    event = await review_task(db_session, task.id, reviewed_by="test", authorized_by_user_id=founder_id)
 
     assert event.payload["verdict"] == "needs_correction"
     assert get_task(db_session, task.id).status == AgentTaskStatus.reviewed_needs_correction
 
 
 @pytest.mark.asyncio
-async def test_review_task_records_rejected_verdict(db_session, monkeypatch):
+async def test_review_task_records_rejected_verdict(db_session, founder_id, monkeypatch):
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat("VERDICT: rejected\nDiffen ändrar filer utanför scope."))
     task = _make_task(db_session)
-    await dispatch_task(db_session, task.id, dispatched_by="test")
+    await dispatch_task(db_session, task.id, dispatched_by="test", authorized_by_user_id=founder_id)
     record_test_results(db_session, task.id, passed=True, output="ok", recorded_by="test")
 
-    event = await review_task(db_session, task.id, reviewed_by="test")
+    event = await review_task(db_session, task.id, reviewed_by="test", authorized_by_user_id=founder_id)
 
     assert event.payload["verdict"] == "rejected"
     assert get_task(db_session, task.id).status == AgentTaskStatus.reviewed_rejected
@@ -178,15 +194,15 @@ async def test_review_task_records_rejected_verdict(db_session, monkeypatch):
     ],
 )
 @pytest.mark.asyncio
-async def test_review_task_fail_closed_on_non_exact_approved_phrasing(db_session, monkeypatch, first_line):
+async def test_review_task_fail_closed_on_non_exact_approved_phrasing(db_session, founder_id, monkeypatch, first_line):
     """Substring 'approved' must never grant reviewed_approved — only exact VERDICT: approved."""
     body = first_line if first_line else "(no verdict line)"
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat(f"{body}\nLooks fine."))
     task = _make_task(db_session)
-    await dispatch_task(db_session, task.id, dispatched_by="test")
+    await dispatch_task(db_session, task.id, dispatched_by="test", authorized_by_user_id=founder_id)
     record_test_results(db_session, task.id, passed=True, output="ok", recorded_by="test")
 
-    event = await review_task(db_session, task.id, reviewed_by="test")
+    event = await review_task(db_session, task.id, reviewed_by="test", authorized_by_user_id=founder_id)
 
     assert event.payload["verdict"] == "needs_correction"
     assert get_task(db_session, task.id).status == AgentTaskStatus.reviewed_needs_correction
@@ -203,7 +219,7 @@ async def test_prepare_github_pr_requires_approved_status(db_session):
 
 
 @pytest.mark.asyncio
-async def test_prepare_github_pr_only_proposes_when_write_disabled(db_session, monkeypatch):
+async def test_prepare_github_pr_only_proposes_when_write_disabled(db_session, founder_id, monkeypatch):
     assert get_settings().github_write_enabled is False  # the default this test relies on
 
     async def _fail_if_called(*args, **kwargs):
@@ -214,9 +230,9 @@ async def test_prepare_github_pr_only_proposes_when_write_disabled(db_session, m
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat("VERDICT: approved\nOk."))
 
     task = _make_task(db_session)
-    await dispatch_task(db_session, task.id, dispatched_by="test")
+    await dispatch_task(db_session, task.id, dispatched_by="test", authorized_by_user_id=founder_id)
     record_test_results(db_session, task.id, passed=True, output="ok", recorded_by="test")
-    await review_task(db_session, task.id, reviewed_by="test")
+    await review_task(db_session, task.id, reviewed_by="test", authorized_by_user_id=founder_id)
 
     result = await prepare_github_pr(db_session, task.id, branch_name="mainai/fix-npm-audit", base_branch="main", prepared_by="test")
 
@@ -231,7 +247,7 @@ async def test_prepare_github_pr_only_proposes_when_write_disabled(db_session, m
 
 
 @pytest.mark.asyncio
-async def test_prepare_github_pr_calls_github_when_write_enabled(db_session, monkeypatch):
+async def test_prepare_github_pr_calls_github_when_write_enabled(db_session, founder_id, monkeypatch):
     monkeypatch.setattr(get_settings(), "github_write_enabled", True)
     monkeypatch.setattr(get_settings(), "github_token", "fake-token")
     monkeypatch.setattr(get_settings(), "github_repo", "d1n095/LifeAI")
@@ -255,9 +271,9 @@ async def test_prepare_github_pr_calls_github_when_write_enabled(db_session, mon
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat("VERDICT: approved\nOk."))
 
     task = _make_task(db_session)
-    await dispatch_task(db_session, task.id, dispatched_by="test")
+    await dispatch_task(db_session, task.id, dispatched_by="test", authorized_by_user_id=founder_id)
     record_test_results(db_session, task.id, passed=True, output="ok", recorded_by="test")
-    await review_task(db_session, task.id, reviewed_by="test")
+    await review_task(db_session, task.id, reviewed_by="test", authorized_by_user_id=founder_id)
 
     result = await prepare_github_pr(db_session, task.id, branch_name="mainai/fix-npm-audit", base_branch="main", prepared_by="test")
 
@@ -376,7 +392,7 @@ def test_dispatch_returns_clean_503_when_every_provider_fails(client, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_full_vertical_chain_note_to_pr_proposal_to_cold_resumption(client, db_session, monkeypatch):
+async def test_full_vertical_chain_note_to_pr_proposal_to_cold_resumption(client, db_session, founder_id, monkeypatch):
     """The concrete proof CLAUDE.md's 2026-07-26 MainAI Core direction asks for: a real
     problem (a ProjectNote), a real agent task derived from it, a real (faked-provider)
     dispatch, recorded test results, a real review verdict, a real PR proposal, a checkpoint —
@@ -403,9 +419,9 @@ async def test_full_vertical_chain_note_to_pr_proposal_to_cold_resumption(client
         source_note_id=note.id,
         created_by="test",
     )
-    await dispatch_task(db_session, task.id, dispatched_by="test")
+    await dispatch_task(db_session, task.id, dispatched_by="test", authorized_by_user_id=founder_id)
     record_test_results(db_session, task.id, passed=True, output="npm audit: 0 sårbarheter", recorded_by="test")
-    review_event = await review_task(db_session, task.id, reviewed_by="test")
+    review_event = await review_task(db_session, task.id, reviewed_by="test", authorized_by_user_id=founder_id)
     assert review_event.payload["verdict"] == "approved"
     pr_proposal = await prepare_github_pr(db_session, task.id, branch_name="mainai/fix-next-pinning", base_branch="claude/det-kommer-mer-879lcm", prepared_by="test")
     assert pr_proposal["mode"] == "proposed"

@@ -377,3 +377,18 @@ def test_no_bootstrap_path_grants_all_privileges_on_tables():
     assert offenders == [], (
         "a table-wide ALL PRIVILEGES grant to mainai_app was reintroduced: " + "; ".join(offenders)
     )
+
+
+# --------------------------------------------------------------------------------------
+# NOTE: SFA-1 (alembic_version's migration-bookkeeping privileges) had an independently
+# built section here (R15's own test suite, codex/r15-routing-integration-hardening) that
+# asserted mainai_app ends up with exactly {SELECT} on alembic_version. That assumed a
+# parallel, SELECT-only fix (commit db7cdf9c) that was reconciled away in favor of the
+# stricter, already-integrated zero-privilege policy (commit 67c7311d,
+# `_MIGRATION_STATE_TABLES` in s1a_privilege_policy.py — see that file's comment for the
+# full reconciliation note) — asserting SELECT-only here would now fail against the real,
+# authoritative policy. The equivalent (and more complete: idempotency, legacy-grant
+# repair, a real `alembic upgrade head` round-trip) coverage already exists in
+# tests/backend/test_migration_state_privileges.py, so this section was removed rather
+# than adapted to avoid duplicate SFA-1 test ownership.
+# --------------------------------------------------------------------------------------
