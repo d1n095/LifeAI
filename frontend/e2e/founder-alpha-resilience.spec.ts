@@ -30,11 +30,13 @@ test.describe("Founder Alpha resilience", () => {
   });
 
   test("a browser-level network interruption is announced and recovers after retry", async ({ page }) => {
-    await page.route("**/api/documents", (route) => route.abort("failed"));
+    // The dashboard reads its aggregated data from /api/dashboard; intercepting the old
+    // /api/documents request proved nothing because that request no longer exists here.
+    await page.route("**/api/dashboard", (route) => route.abort("failed"));
     await page.goto(`${FRONTEND_URL}/`, { waitUntil: "networkidle" });
     await expect(page.getByRole("alert").filter({ hasText: /Fel|kunde|nätverk|anslut/i })).toBeVisible({ timeout: 5000 });
 
-    await page.unroute("**/api/documents");
+    await page.unroute("**/api/dashboard");
     await page.reload({ waitUntil: "networkidle" });
     await expect(page.getByRole("alert").filter({ hasText: /Fel|kunde|nätverk|anslut/i })).toHaveCount(0);
     await expect(page.locator("text=God kväll")).toBeVisible({ timeout: 5000 }).catch(() => {});
@@ -158,7 +160,7 @@ test.describe("Founder Alpha resilience", () => {
     await page.goto(`${FRONTEND_URL}/projects`, { waitUntil: "networkidle" });
     await page.getByLabel("Nytt projektnamn").fill(project);
     await page.getByRole("button", { name: "Lägg till" }).first().click();
-    await expect(page.locator("text=" + project)).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole("link", { name: project, exact: true })).toBeVisible({ timeout: 5000 });
 
     await page.getByLabel("Ny uppgiftstitel").fill(task);
     await page.getByRole("button", { name: "Lägg till" }).nth(1).click();
