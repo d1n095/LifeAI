@@ -1,5 +1,6 @@
 import httpx
 
+from app.providers.base import chat_token_limit
 from app.config import get_settings
 from app.providers.base import ChatResult, LLMProvider, Message, ProviderError, looks_like_placeholder_secret
 
@@ -32,6 +33,9 @@ class OpenRouterProvider(LLMProvider):
             "messages": [{"role": m.role, "content": m.content} for m in messages],
             "temperature": kwargs.get("temperature", 0.4),
         }
+        token_limit = chat_token_limit(kwargs)
+        if token_limit is not None:
+            payload["max_tokens"] = token_limit
         async with httpx.AsyncClient(timeout=timeout or 60) as client:
             resp = await client.post(f"{BASE_URL}/chat/completions", headers=self._headers(), json=payload)
             resp.raise_for_status()

@@ -9,3 +9,6 @@ pytest-timeout==2.3.1
 # (app/development_operator/service.py) — must be on PATH for tests that exercise that
 # governed capability for real, not just import it.
 ruff==0.15.8
+
+# R15 consultation budget tests (test-only Redis emulator with Lua support).
+fakeredis[lua]==2.32.1

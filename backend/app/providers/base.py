@@ -67,6 +67,24 @@ class ChatResult:
     raw_usage: dict = field(default_factory=dict)
 
 
+@dataclass
+class StreamChunk:
+    """One increment of a streamed chat response.
+
+    `delta` is the incremental text to append (empty on the final chunk). `done=True` marks
+    the last chunk — it, and only it, carries `usage`/`provider`/`model`, mirroring
+    `ChatResult`'s fields so a caller can build one from the other without a second shape to
+    track. A provider that cannot stream natively still yields this same shape (see
+    `LLMProvider.chat_stream`'s default below) so callers never need a provider-specific
+    branch."""
+
+    delta: str
+    done: bool = False
+    usage: dict | None = None
+    provider: str | None = None
+    model: str | None = None
+
+
 class LLMProvider(ABC):
     """Common interface every AI provider must implement.
 
@@ -85,6 +103,18 @@ class LLMProvider(ABC):
 
     @abstractmethod
     def is_configured(self) -> bool: ...
+
+    async def chat_stream(self, messages: list[Message], model: str, *, timeout: float | None = None, **kwargs):
+        """Default: no real incremental streaming — await the whole reply, then yield it as
+        one chunk followed by the `done` sentinel. Every provider is therefore usable through
+        the streaming endpoint even before it grows a real streaming implementation (today
+        only `OllamaProvider` overrides this with genuine token-by-token output); callers must
+        not assume a non-final chunk means real incremental progress was made on the wire —
+        only that content is now available to show."""
+        result = await self.chat(messages, model, timeout=timeout, **kwargs)
+        if result.content:
+            yield StreamChunk(delta=result.content)
+        yield StreamChunk(delta="", done=True, usage=result.raw_usage, provider=result.provider, model=result.model)
 
 
 class ProviderError(RuntimeError):
@@ -107,3 +137,12 @@ class ProviderError(RuntimeError):
         # After adapter.propose() is entered: None/True → treat as ambiguous (do not
         # release spend). False → proven pre-external-effect; release is allowed.
         self.provider_request_may_have_left = provider_request_may_have_left
+
+
+def chat_token_limit(kwargs, default=None):
+    """Explicit output bounds are never silently ignored by a transport."""
+    value = kwargs.get("max_tokens", default)
+    if value is not None and (type(value) is not int or value <= 0):
+        raise ProviderError("Invalid output token bound.", category="unsupported",
+                            provider_request_may_have_left=False)
+    return value

@@ -235,6 +235,105 @@ def require_live_task_authorization_for_workforce_dispatch(db: Session, *, owner
         require_task_approval(db, task=task, goal_approval_policy=goal.approval_policy)
     except ApprovalRequiredError as exc:
         raise ProviderActivationBlocked(f"task {task.id} requires founder approval before workforce dispatch") from exc
+def _execute_consultation_assignment(
+    db: Session,
+    *,
+    owner_id: uuid.UUID,
+    assignment: WorkforceAssignment,
+    profile: WorkforceAgentProfile,
+    envelope: WorkerRequestEnvelope,
+    goal_text: str,
+    instructions: str | None,
+    goal_id: uuid.UUID | None,
+    task_id: uuid.UUID | None,
+    job_id: uuid.UUID | None,
+    notes: list[str],
+) -> WorkerExecutionReceipt:
+    """Consultation branch of execute_workforce_assignment — a thin adapter over
+    app/openai_consult/mainai.consult_for_mainai_sync. NO second invocation stack: the
+    answer comes back through the same scrub → broker-ingestion → checkpoint pipeline as
+    any other worker output, and the egress disclosure ledger (with this assignment's
+    goal/task/job ids) is written by the consultation core itself.
+
+    Controlled error recovery: a PROVIDER-infrastructure failure (timeout, unreachable,
+    provider 5xx, contract-invalid answer → ConsultationServiceError) falls back to the
+    LOCAL in-process worker so the assignment still completes on the primary execution
+    path. Policy and authorization refusals (disabled, unauthorized, activation gates,
+    kill switch, recursion, budget, egress) are NOT caught — they fail closed."""
+    from app.openai_consult.mainai import consult_for_mainai_sync
+    from app.openai_consult.service import ConsultationServiceError
+
+    provider_invoked = False
+    provider_name = None
+    model_id = None
+    spend_reserved = False
+    spend_settled = False
+    try:
+        result, _stats = consult_for_mainai_sync(
+            db,
+            owner_id=owner_id,
+            goal_text=goal_text,
+            instructions=instructions,
+            goal_id=goal_id,
+            task_id=task_id,
+            job_id=job_id,
+            agent_key=profile.agent_key if profile is not None else None,
+        )
+        provider_invoked = True
+        provider_name = "openai"
+        model_id = result.model
+        spend_reserved = True
+        spend_settled = True
+        raw: dict[str, Any] = {
+            "answer": result.output_text,
+            "model": result.model,
+            "cost_usd": result.cost_usd,
+            "usage": {
+                "input_tokens": result.usage.input_tokens,
+                "output_tokens": result.usage.output_tokens,
+                "total_tokens": result.usage.total_tokens,
+            },
+        }
+        notes.append("consultation_completed")
+    except ConsultationServiceError:
+        notes.append("consultation_unavailable_local_fallback")
+
+        # The answer (or the absence of one) is UNTRUSTED DATA either way — same pipeline.
+        raw = _in_process_worker(envelope)
+
+    cleaned, stripped = scrub_authority_mutations(raw)
+    if stripped:
+        notes.append(f"scrubbed:{','.join(stripped)}")
+
+    ingest_untrusted_result(db, owner_id=owner_id, assignment=assignment, payload=cleaned)
+    record_checkpoint(
+        db,
+        owner_id=owner_id,
+        assignment=assignment,
+        checkpoint_kind="progress",
+        partial_result=cleaned,
+        external_effect_state="none_proven",
+        provenance={"provider_invoked": provider_invoked, "consultation": provider_invoked},
+    )
+
+    receipt_notes = notes + ["consultation_egress_ledger_recorded"] if provider_invoked else notes
+    return WorkerExecutionReceipt(
+        assignment_id=assignment.id,
+        provider_invoked=provider_invoked,
+        provider_name=provider_name,
+        model_id=model_id,
+        timeout=False,
+        cancelled=False,
+        raw_output_scrubbed=cleaned,
+        verification_status=assignment.verification_status,
+        # Budget reserve/settle happened inside the consultation core against the owner's
+        # shared daily consultation budget (not the goal-bound spend-authorization kernel,
+        # which stays reserved for goal-bound agent execution).
+        spend_reserved=spend_reserved,
+        spend_settled=spend_settled,
+        external_effect_state="none_proven",
+        notes=receipt_notes,
+    )
 
 
 def execute_workforce_assignment(
@@ -249,6 +348,15 @@ def execute_workforce_assignment(
     model_id: str | None = None,
     timeout_seconds: float = 60.0,
     cancel: bool = False,
+    # Additive, independently authorized consultation path (app/openai_consult/mainai.py).
+    # consultation_mode=False keeps this function byte-for-byte identical to its
+    # pre-consultation behavior: the in-process worker stays the primary execution path
+    # and the staged provider path below is untouched.
+    consultation_mode: bool = False,
+    consultation_instructions: str | None = None,
+    consultation_goal_id: uuid.UUID | None = None,
+    consultation_task_id: uuid.UUID | None = None,
+    consultation_job_id: uuid.UUID | None = None,
 ) -> WorkerExecutionReceipt:
     """Run worker for an assignment.
 
@@ -318,6 +426,26 @@ def execute_workforce_assignment(
             spend_settled=False,
             external_effect_state="none_proven",
             notes=["cancelled_before_invoke"],
+        )
+
+    if consultation_mode:
+        # MainAI-invoked OpenAI consultation via app/openai_consult/mainai.py — reuses the
+        # SAME gates as the founder path (egress ledger, budgets, safe errors) PLUS this
+        # orchestration's own authorization (mainai flag + activation gates + recursion
+        # guards). Consultation refusals raise (fail loud — nothing was invoked); the
+        # answer is ingested as UNTRUSTED DATA exactly like every other worker output.
+        return _execute_consultation_assignment(
+            db,
+            owner_id=owner_id,
+            assignment=assignment,
+            profile=profile,
+            envelope=envelope,
+            goal_text=goal_text,
+            instructions=consultation_instructions,
+            goal_id=consultation_goal_id,
+            task_id=consultation_task_id,
+            job_id=consultation_job_id,
+            notes=notes,
         )
 
     if activate_provider:
