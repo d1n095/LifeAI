@@ -95,11 +95,22 @@ async def fake_chat_stream(self, messages, model, *, timeout=None, **kwargs):
                       usage={"prompt_tokens": 180, "completion_tokens": 55})
 
 
-async def fake_embed(self, texts, model):
+async def fake_embed(self, texts, model, *, timeout=None, **kwargs):
     # Must match app/config.py's embedding_dim exactly — pgvector's document_chunks.embedding
     # column is a fixed vector(1536) (see the 0004 migration), unlike Qdrant's old
     # dynamically-sized collection. A shorter fake vector here would raise a dimension
     # mismatch the moment anything actually tried to insert it.
+    #
+    # `timeout`/`**kwargs` must be accepted even though unused: OllamaProvider.embed()'s real
+    # signature (app/providers/ollama_provider.py) takes a keyword-only `timeout`, and
+    # app/providers/verification.py's verify_provider() always passes it on the pre-flight
+    # probe every import makes before indexing. Without this, every library import silently
+    # landed `blocked` with a generic "unknown provider error" (classify_provider_exception's
+    # catch-all for an unrecognized exception type — a bare TypeError from the mismatched
+    # signature, swallowed exactly as designed so no provider detail ever leaks) instead of
+    # actually indexing. Never caught by CI (founder-knowledge-studio.spec.ts and
+    # library-upload-queue.spec.ts are not in any CI job), only found by actually running the
+    # document-ingestion journey against this harness.
     return [[0.05] * _EMBEDDING_DIM for _ in texts]
 
 
