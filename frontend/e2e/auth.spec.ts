@@ -52,16 +52,28 @@ test.describe("baseline app flow", () => {
 
     await expect(page.locator(`text=${FOUNDER_EMAIL}`).first()).toBeVisible();
 
-    // Chat round-trip through the real backend (AI provider call faked, everything else real).
+    // Chat round-trip through the real backend (AI provider call faked, everything else real),
+    // over the real streaming endpoint (see run_e2e_backend.py's fake_chat_stream — a genuine
+    // multi-chunk stream with real delays between chunks, not a single-shot canned response).
     await page.getByRole("link", { name: "Chat", exact: true }).click();
     await page.waitForURL(FRONTEND_URL + "/chat");
     const chatInput = page.getByLabel("Meddelande till MainAI");
     await expect(chatInput).toHaveCount(1);
     await chatInput.fill("Vad kostar prenumerationen?");
     await page.getByRole("button", { name: "Skicka" }).click();
-    await expect(page.locator("text=Detta ar ett riktigt svar")).toBeVisible({ timeout: 8000 });
+    // Real incremental rendering, not just the final state: the reply's first words must be
+    // visible on their own, with the later words of the same reply NOT yet present — proving
+    // this is genuinely partial text arriving over time, not the complete response rendered
+    // all at once and merely asserted on late. "Stoppa" replacing "Skicka" confirms the UI
+    // is actually in the middle of a live stream at this point, not between two round-trips.
+    await expect(page.locator("text=Hej! Detta ar ett")).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole("button", { name: "Stoppa" })).toBeVisible();
+    await expect(page.locator("text=riktiga API-vagarna.")).toHaveCount(0);
+    await expect(page.locator("text=riktiga API-vagarna.")).toBeVisible({ timeout: 8000 });
+    await expect(page.locator("text=Detta ar ett riktigt svar")).toBeVisible();
     await expect(page.locator("text=tillförlitlighet")).toBeVisible();
     await expect(page.locator("text=Personalhandbok.pdf")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Skicka" })).toBeVisible();
 
     // New conversation appears in the history panel.
     await page.waitForTimeout(500);

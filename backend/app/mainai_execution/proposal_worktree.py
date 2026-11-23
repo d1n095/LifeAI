@@ -232,3 +232,26 @@ def remove_isolated_proposal_checkout(checkout: IsolatedProposalCheckout) -> Non
             shutil.rmtree(checkout.root, ignore_errors=True)
     except OSError:  # pragma: no cover - defensive
         pass
+
+
+def remove_isolated_proposal_checkout_for_attempt(attempt_id) -> None:
+    """Same best-effort removal as `remove_isolated_proposal_checkout()`, but reachable from a
+    caller that only has the durable `attempt_id` (the job id a repo_edit task's proposal
+    checkout was created under — see `execution_job._propose_repo_edit()`'s own
+    `attempt_id=job.id` call) and not a live `IsolatedProposalCheckout` object — e.g.
+    `final_report.py`'s goal-finalization cleanup, which runs long after the job that created
+    the checkout, and the task, have both finished. Reconciliation finding (PI-1d merge): this
+    mechanism's own success path never cleaned up a completed proposal's checkout at all before
+    this helper existed — only the write-failure path inside `_propose_repo_edit()` did.
+    Deliberately a no-op (never raises) for an attempt_id that was never a real checkout, or
+    whose directory name fails `_attempt_root()`'s own validation — cleanup must never fail a
+    goal's finalization over a directory that may never have existed."""
+    try:
+        root = _attempt_root(attempt_id)
+    except ProposalWorktreeError:
+        return
+    try:
+        if root.exists():
+            shutil.rmtree(root, ignore_errors=True)
+    except OSError:  # pragma: no cover - defensive
+        pass

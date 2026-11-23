@@ -1,0 +1,18 @@
+# Freebuff integration run — /tmp/lane.bundle
+
+- ✅ bundle ingested (base-seeded if needed); refs: refs/heads/lane-fixture 8cc487501cba5eb0c032e65ff4f136d9131c86ed
+- ❌ candidate e392022 NOT present in ingested objects — gate refuses candidate production
+
+_VALIDATION-ONLY FIXTURE RUN — no candidate produced by design._
+- ✅ history DISJOINT from base (expected for founder-alpha lanes) — content-level integration
+- ❌ migration conflict: revision 0069 exists in both lanes with different content (0069_founder_email_recovery.py vs 0069_workforce_authority_epoch.py)
+- ❌ migration conflict: filename clashes (alembic loads by path; renumber one lineage): ['0069_founder_email_recovery.py']
+- ⚠️ resolution: renumber/re-chain the Z.AI lineage migrations at composition (their lane owns 0069..0079 numbering); run alembic heads check post-merge
+- ✅ models: mine-only (must keep): ['founder_email_change.py']
+- ✅ routers: mine-only (must register): ['founder_recovery.py']
+- ⚠️ settings: 64 shared keys (verify no semantic drift), 0 candidate-only keys to add at composition
+- ✅ frontend /api calls: 33 mine / 33 candidate, 0 candidate-only (verify endpoints exist post-composition)
+- ✅ openai_consult package: zero collision with candidate tree
+- ✅ candidate kill switch is OWNER-SCOPED: assert_not_killed(db, owner_id) — isolated adaptation patch REQUIRED (lifeai-isolated-killswitch-sig-adaptation.patch)
+
+**RESULT: validation complete (fixture run) — no candidate, by design.**
