@@ -150,6 +150,54 @@ async def test_max_tokens_maps_to_num_predict_for_streaming(monkeypatch):
     assert captured["payload"]["stream"] is True
 
 
+class _DropsMidStream(httpx.AsyncByteStream):
+    """Yields real bytes, then raises as if the TCP connection died — the actual shape of a
+    local Ollama process restarting mid-generation (not a clean HTTP error response, since the
+    server is gone, not merely unhappy)."""
+
+    def __init__(self, lines: list[str]):
+        self._lines = lines
+
+    async def __aiter__(self):
+        for line in self._lines:
+            yield (line + "\n").encode()
+        raise httpx.ReadError("connection reset by peer")
+
+
+@pytest.mark.asyncio
+async def test_connection_drops_mid_stream_fails_closed_as_unreachable_after_partial_deltas(monkeypatch):
+    """Restart-recovery scenario: the local Ollama process dies mid-generation. Already-yielded
+    deltas must not be lost or retracted, and the drop itself must classify as `unreachable`
+    (not `unsupported`) so the app's existing retry path treats this as "try again", matching
+    `_http_error_category()`'s contract for every other transport failure — the local-restart
+    case must not require a second, parallel classification scheme."""
+    real_async_client = httpx.AsyncClient
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            stream=_DropsMidStream([
+                json.dumps({"message": {"content": "Hej"}, "done": False}),
+                json.dumps({"message": {"content": "san"}, "done": False}),
+            ]),
+            headers={"content-type": "application/x-ndjson"},
+        )
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr("app.providers.ollama_provider.httpx.AsyncClient", factory)
+
+    received: list[StreamChunk] = []
+    with pytest.raises(ProviderError) as exc_info:
+        async for chunk in OllamaProvider().chat_stream([Message(role="user", content="hej")], model="qwen2.5:0.5b"):
+            received.append(chunk)
+
+    assert [c.delta for c in received] == ["Hej", "san"]
+    assert exc_info.value.category == "unreachable"
+
+
 @pytest.mark.asyncio
 async def test_early_generator_close_does_not_raise(mock_ollama_stream):
     """The SSE endpoint stops iterating early on client disconnect — closing the async

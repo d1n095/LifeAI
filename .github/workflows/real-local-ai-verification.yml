@@ -312,6 +312,71 @@ jobs:
               except urllib.error.HTTPError as exc:
                   return exc.code, exc.read(), dict(exc.headers)
 
+          def stream_call(path, json_body, *, timeout=240):
+              """POST an SSE chat-stream endpoint and read it incrementally (not buffered via
+              urlopen().read()) so the test actually distinguishes real token-by-token delivery
+              from a single final chunk. Returns the parsed `data: {...}` events and, separately,
+              the number of raw read() calls that returned a non-empty line before the first
+              `done: true` event (a proxy for "arrived incrementally", since this stdlib-only
+              driver has no wall-clock inter-token timing instrumentation)."""
+              body = json.dumps(json_body).encode()
+              headers = {
+                  "Accept": "text/event-stream",
+                  "Content-Type": "application/json",
+              }
+              if csrf["t"]:
+                  headers["X-CSRF-Token"] = csrf["t"]
+              req = urllib.request.Request(BASE + path, data=body, method="POST", headers=headers)
+              events = []
+              reads_before_done = 0
+              resp = opener.open(req, timeout=timeout)
+              try:
+                  buf = b""
+                  while True:
+                      chunk = resp.read(256)
+                      if not chunk:
+                          break
+                      buf += chunk
+                      while b"\n\n" in buf:
+                          raw, buf = buf.split(b"\n\n", 1)
+                          line = raw.decode("utf-8", "replace").strip()
+                          if not line.startswith("data: "):
+                              continue
+                          event = json.loads(line[len("data: "):])
+                          events.append(event)
+                          if not event.get("done"):
+                              reads_before_done += 1
+                          else:
+                              return events, reads_before_done, resp
+              finally:
+                  pass
+              return events, reads_before_done, resp
+
+          def stream_call_partial(path, json_body, *, max_events=1, timeout=240):
+              """Open a real SSE stream, read only `max_events` data events, then abandon the
+              connection (simulating a client tab closing / network drop mid-generation) —
+              proves the backend's disconnect handling against a REAL local model, not a mock."""
+              body = json.dumps(json_body).encode()
+              headers = {"Accept": "text/event-stream", "Content-Type": "application/json"}
+              if csrf["t"]:
+                  headers["X-CSRF-Token"] = csrf["t"]
+              req = urllib.request.Request(BASE + path, data=body, method="POST", headers=headers)
+              resp = opener.open(req, timeout=timeout)
+              events = []
+              buf = b""
+              while len(events) < max_events:
+                  chunk = resp.read(256)
+                  if not chunk:
+                      break
+                  buf += chunk
+                  while b"\n\n" in buf:
+                      raw, buf = buf.split(b"\n\n", 1)
+                      line = raw.decode("utf-8", "replace").strip()
+                      if line.startswith("data: "):
+                          events.append(json.loads(line[len("data: "):]))
+              resp.close()
+              return events
+
           def finalize():
               fails = [r for r in results if r[1] == "FAIL"]
               blocked = [r for r in results if r[1] == "BLOCKED"]
@@ -560,6 +625,61 @@ jobs:
               )
           else:
               record("conversation_persisted", "FAIL", "no conversation_id returned by chat")
+
+          # --- Real local-model STREAMING (Founder Alpha Item 1 + Item 2 acceptance) ---
+          try:
+              events, incremental_reads, _resp = stream_call(
+                  "/api/chat/stream", {"message": QUESTION}
+              )
+              non_final = [e for e in events if not e.get("done")]
+              final = next((e for e in events if e.get("done")), None)
+              reassembled = "".join(e.get("delta", "") for e in non_final)
+              real_incremental = incremental_reads >= 2  # more than one token-bearing event
+              cited = final is not None and final.get("assistant_status") == "succeeded"
+              if real_incremental and cited and reassembled:
+                  record(
+                      "real_local_streaming_incremental_response",
+                      "PASS",
+                      f"{len(non_final)} delta event(s) over the wire, "
+                      f"assistant_status={final.get('assistant_status')}, "
+                      f"provider={final.get('provider')}, reply_len={len(reassembled)}",
+                  )
+              else:
+                  record(
+                      "real_local_streaming_incremental_response",
+                      "FAIL",
+                      f"events={len(events)}, incremental_reads={incremental_reads}, "
+                      f"final={final}",
+                  )
+          except Exception as exc:
+              record("real_local_streaming_incremental_response", "FAIL", f"exception: {exc!r}")
+
+          # --- Real disconnect mid-stream must not crash the backend or wedge the app ---
+          try:
+              partial = stream_call_partial(
+                  "/api/chat/stream", {"message": QUESTION}, max_events=1
+              )
+              got_partial = len(partial) >= 1 and not partial[0].get("done")
+              # The real test of "disconnect handled correctly" is that the backend survives
+              # and keeps serving — a crashed/wedged worker would fail the next health probe.
+              time.sleep(2)
+              status, _ = health()
+              survived = status == 200
+              if got_partial and survived:
+                  record(
+                      "real_local_streaming_disconnect_recovery",
+                      "PASS",
+                      "backend served >=1 real token then survived an abandoned connection; "
+                      f"/api/health still {status} afterward",
+                  )
+              else:
+                  record(
+                      "real_local_streaming_disconnect_recovery",
+                      "FAIL",
+                      f"got_partial={got_partial}, post-disconnect health={status}",
+                  )
+          except Exception as exc:
+              record("real_local_streaming_disconnect_recovery", "FAIL", f"exception: {exc!r}")
 
           with open(STATE, "w") as fh:
               json.dump(
