@@ -180,6 +180,18 @@ class MessageOut(BaseModel):
     provider: str | None
     model: str | None
     created_at: datetime
+    # Added for streaming recovery (Item 3): a `stream_interrupted` assistant row (see
+    # app/routers/chat.py's `_ClientDisconnected` handling) has non-empty, genuinely partial
+    # `content` -- unlike a pre-streaming provider failure, which always saved empty content.
+    # Without these three fields the frontend could not tell a reloaded partial-stream message
+    # apart from a complete, successful one, and would silently render truncated text as if it
+    # were the full answer. `status`/`error_category` mirror MessageStatus/the same
+    # VerificationResult categories chat.py's live SSE error event already carries;
+    # `in_reply_to_id` lets the frontend target a retry at the correct user message after a
+    # fresh page load, the same way the live stream_interrupted/error paths already do.
+    status: str
+    error_category: str | None
+    in_reply_to_id: uuid.UUID | None
 
 
 class ConversationOut(BaseModel):

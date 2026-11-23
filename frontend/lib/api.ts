@@ -223,6 +223,20 @@ export type ChatStreamError = {
   assistant_message_id?: string | null;
 };
 
+// Mirrors backend/app/routers/chat.py's `_claim_reply_attempt()` blocking set -- the only
+// failed-reply states a retry attempt actually gets refused (409) for. Used when rendering a
+// reloaded conversation (ConversationMessage.error_category), where the backend doesn't send a
+// precomputed `retryable` boolean the way the live SSE error event does. `stream_interrupted`
+// is deliberately retryable here even though chat.py's own comment says the live error event
+// does NOT mark it retryable from the page that was already open when it disconnected --
+// on reload the founder IS on a fresh page looking at the real persisted state, where retrying
+// is exactly as safe as any other failed-and-reloaded message.
+export function isReloadedMessageRetryable(errorCategory: string | null): boolean {
+  if (errorCategory === null) return false;
+  if (errorCategory.startsWith("provider_inflight") || errorCategory.startsWith("inflight:")) return false;
+  return errorCategory !== "external_effect_unknown" && errorCategory !== "billing_outcome_unknown";
+}
+
 export type ChatStreamHandlers = {
   onDelta: (delta: string) => void;
   onDone: (result: ChatStreamDone) => void;
@@ -397,6 +411,13 @@ export type ConversationMessage = {
   provider: string | null;
   model: string | null;
   created_at: string;
+  // "succeeded" | "failed" (MessageStatus) -- added alongside error_category/in_reply_to_id so
+  // a reloaded `stream_interrupted` message (non-empty, genuinely partial content) can be told
+  // apart from a complete, successful one. Before these fields existed, the only failure shape
+  // was empty content, so the page could safely hide every failed row outright.
+  status: string;
+  error_category: string | null;
+  in_reply_to_id: string | null;
 };
 
 export type ConversationDetail = ConversationItem & {
