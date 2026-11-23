@@ -196,6 +196,30 @@ def dispatch_ready_task(db: Session, *, task: MainAITask, goal: MainAIGoal, disp
 
     require_task_approval(db, task=task, goal_approval_policy=goal.approval_policy)
 
+    # R15 (2026-11-19): the attempts budget is a real database CHECK constraint
+    # (ck_mainai_tasks_attempts_within_budget). Dispatch used to increment unconditionally, so a
+    # task whose job died in a way that skipped _finalize_task_outcome() (leaving it `running`)
+    # could be re-dispatched by auto-recovery past its budget: the UPDATE then violated the
+    # constraint, the recovery transaction rolled back, and the task stayed `running` forever
+    # while the same error repeated every poll. Exhausted budget is now a durable, terminal
+    # failure with an event saying exactly why -- never a silent over-budget attempt.
+    if task.attempts >= task.max_attempts:
+        task.status = MainAITaskStatus.failed
+        task.completed_at = datetime.utcnow()
+        task.next_retry_at = None
+        db.add(
+            MainAITaskEvent(
+                task_id=task.id,
+                owner_id=task.owner_id,
+                event_type=MainAITaskEventType.failed,
+                detail={"reason": "attempts_exhausted_at_dispatch", "attempts": task.attempts, "max_attempts": task.max_attempts},
+            )
+        )
+        db.commit()
+        raise ValueError(
+            f"MainAITask {task.id} has used {task.attempts}/{task.max_attempts} attempts -- refusing to dispatch again."
+        )
+
     job_id = uuid.uuid4()
     idempotency_key = f"mainai_task_execution:{task.id}:{task.attempts}"
 
