@@ -1,0 +1,140 @@
+{
+  "captured_at": "2026-11-23",
+  "branch": "freebuff/life-workspaces",
+  "base_sha": "04de94db7d7ccf51c23dd68670e789e8e9df6cde",
+  "supersedes_scope_of": "summary.json (2026-11-22, local model BLOCKED)",
+  "runtime": {
+    "provider": "ollama",
+    "version": "0.40.15",
+    "install": "official release archive, SHA-256 verified (628c018404a4206493efd38e46251c154ede5141b8b8dc85c659b3b027c47379), extracted to a user-writable prefix because sudo is unavailable",
+    "chat_model": "qwen2.5:0.5b",
+    "embedding_model": "all-minilm",
+    "embedding_native_dim": 384,
+    "storage_dim": 1536,
+    "fallback_order": "",
+    "host_cpu": 2,
+    "model_rss_mb": 511
+  },
+  "real_local_acceptance": {
+    "driver": "real_local_acceptance.py extracted from .github/workflows/real-local-ai-verification.yml, run unmodified",
+    "database": "lifeos_reallocal (migration head 0095)",
+    "phase_pre": {
+      "checks": 7,
+      "fail": 0,
+      "blocked": 0,
+      "results": {
+        "authentication": "PASS",
+        "local_model_health": "PASS reachable=true, missing_models=[]",
+        "document_upload": "PASS",
+        "real_local_embedding_and_indexing": "PASS status=indexed chunk_count=1",
+        "authorized_retrieval": "PASS cited uploaded document",
+        "real_local_chat_and_grounded_answer": "PASS provider=ollama reply_len=171",
+        "conversation_persisted": "PASS"
+      }
+    },
+    "restart": "backend and worker killed and restarted (new PIDs)",
+    "phase_post": {
+      "checks": 5,
+      "fail": 0,
+      "blocked": 0,
+      "results": {
+        "authentication": "PASS",
+        "local_model_health": "PASS",
+        "conversation_persistence_after_restart": "PASS",
+        "memory_source_persistence_after_restart": "PASS status=indexed chunk_count=1",
+        "live_retrieval_after_restart": "PASS cited uploaded source"
+      }
+    },
+    "real_streaming": {
+      "status": "PASS",
+      "content_type": "text/event-stream; charset=utf-8",
+      "delta_events": 22,
+      "total_events": 24,
+      "assistant_status": "succeeded",
+      "provider": "ollama",
+      "model": "qwen2.5:0.5b",
+      "reply_len": 75,
+      "cites_uploaded_source": true,
+      "persisted": true
+    },
+    "runtime_outage": {
+      "status": "PASS (honest failure)",
+      "health": "status=ok, local_model.reachable=false, missing_models omitted",
+      "chat": "assistant_status=failed, provider=null, sources=0",
+      "fallback_to_cloud": false
+    },
+    "recovery_without_backend_restart": {
+      "status": "PASS",
+      "health_after": "reachable=true, missing_models=[]",
+      "chat_after": "assistant_status=succeeded, provider=ollama, reply_len=775",
+      "backend_pid_changed": false
+    },
+    "observed_generation_latency": {
+      "prompt_tokens": 1219,
+      "seconds": 31.11,
+      "source": "ollama access log for POST /api/chat",
+      "note": "measured on 2 vCPU; this is a latency budget, not a correctness signal"
+    }
+  },
+  "browser_journeys_real_model": {
+    "environment_requirements": [
+      "COOKIE_SECURE must remain true: Chromium rejects SameSite=None cookies without Secure, so COOKIE_SECURE=false (used only by non-browser CI jobs) silently breaks every authenticated journey",
+      "LD_LIBRARY_PATH must include the extracted GTK/ATK libraries for the bundled Chromium"
+    ],
+    "founder_journey_v6": "PASS (2/2) against the real model: streaming, reload from durable history, upload, worker indexing, citation link, supervised agent task",
+    "model_routing_and_local_discovery": "PASS (2/2) against the real model",
+    "personal_work": "PASS (1/1)",
+    "resilience_against_real_model": {
+      "status": "NOT APPLICABLE BY CONSTRUCTION",
+      "passing": 4,
+      "failing": 4,
+      "reasons": [
+        "two tests assert the deterministic fake provider's canned strings (Hej! Detta ar ett riktigt svar / Detta är ett långsamt strömmande svar)",
+        "one test waits 10 s for an error alert while a real stream takes 31 s, and its route.fetch() cannot resolve until the live SSE stream ends",
+        "one test waits 10 s for the streaming indicator to disappear, which a 31 s real generation exceeds"
+      ],
+      "note": "these specs certify the fake-provider harness; the real-model equivalents are the acceptance checks above"
+    },
+    "spec_defects_fixed": [
+      "model-routing.spec.ts: discovery assertion scoped to the Lokala modeller section (ambiguous once a real qwen2.5:0.5b row exists in the usage table)",
+      "founder-journey-v6.spec.ts: waits for the upload queue item to report Klar before asking for a citation (indexing is asynchronous)",
+      "founder-journey-v6.spec.ts: stream-completion and citation budgets raised to 120 s for real local models (assertions unchanged)"
+    ]
+  },
+  "soak": {
+    "status": "RUNNING",
+    "required_seconds": 14400,
+    "started_at": "2026-11-23T12:46Z",
+    "database": "lifeos_v5_soak (fresh, migration head 0095)",
+    "redis": "redis://127.0.0.1:56379/15",
+    "sample_every_seconds": 30,
+    "restart_every_seconds": 3600,
+    "concurrency": 4,
+    "provider": "deterministic fake (isolated E2E harness) — measures application overhead, not model generation",
+    "out": "docs/evidence/founder-alpha-local-ai/soak-4h.json",
+    "note": "a shortened run is never reported as endurance; status stays RUNNING until the harness writes its own verdict"
+  },
+  "pr471_compatibility": {
+    "pr": 471,
+    "head": "9938fd25fda6828204c76181379dc92871c5bf55",
+    "base": "integration/founder-alpha-20261121",
+    "state": "open draft, 83 commits, 248 files",
+    "contains_local_models_feature": false,
+    "contains_local_discovery_module": false,
+    "shared_files": 6,
+    "conflict_surface": [
+      "backend/app/routers/admin.py — import block only",
+      "frontend/lib/api.ts — around line 750",
+      "frontend/app/(shell)/admin/page.tsx — around line 22"
+    ],
+    "recommendation": "rebase only after #471 merges, per the merge rule in CLAUDE.md"
+  },
+  "blockers": [
+    "GitHub write access unavailable: no credential helper and no token; git push --dry-run cannot authenticate, so exact-head CI, a draft PR, merge and deployment cannot be performed",
+    "No production access; no production VPS, database or credentials were touched"
+  ],
+  "reproduction": [
+    "docs/FOUNDER_ALPHA_LOCAL_AI.md §7 (readiness, ingest, retrieval, chat, outage/recovery)",
+    "docs/FOUNDER_ALPHA_LOCAL_AI.md 2026-11-23 addendum (pinned install without sudo, acceptance driver, browser environment requirements)"
+  ]
+}

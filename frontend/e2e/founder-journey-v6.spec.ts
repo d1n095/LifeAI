@@ -33,14 +33,16 @@ test.describe("V6 Founder Alpha browser journey", () => {
       timeout: 15_000,
     });
     await expect(transcript.getByText(`${marker}: svara kort.`, { exact: true })).toHaveCount(1);
+    // Budget for a real local model: a small model on 2 CPU cores needs ~30 s for a
+    // retrieval-sized prompt, so a 30 s window fails on latency rather than on behaviour.
     await expect(page.getByRole("button", { name: "Avbryt", exact: true })).toHaveCount(0, {
-      timeout: 30_000,
+      timeout: 120_000,
     });
 
     // Reopen from durable history after a real page reload.
     await page.reload({ waitUntil: "networkidle" });
     await expect(transcript.getByText(`${marker}: svara kort.`, { exact: true })).toHaveCount(1, {
-      timeout: 15_000,
+      timeout: 60_000,
     });
 
     // Upload through the real security-validated import path; the durable worker indexes it.
@@ -60,11 +62,21 @@ test.describe("V6 Founder Alpha browser journey", () => {
     const href = await sourceLink.getAttribute("href");
     expect(href).toMatch(/^\/library\/[0-9a-f-]+$/);
 
+    // The document row exists as soon as the import is accepted; retrieval can only cite it
+    // once the worker has actually indexed it. Waiting for the queue item to report Klar is
+    // the real precondition — with a local embedding model indexing takes long enough that
+    // asking immediately would race it (and cite nothing).
+    const queueItem = page
+      .getByLabel("Uppladdningskö")
+      .getByRole("listitem")
+      .filter({ hasText: filename });
+    await expect(queueItem.getByText("Klar", { exact: true })).toBeVisible({ timeout: 60_000 });
+
     // Ask through the real chat/retrieval path and verify the exact uploaded source is cited.
     await page.goto(`${FRONTEND_URL}/chat`, { waitUntil: "networkidle" });
     await page.getByLabel("Meddelande till MainAI").fill(`Berätta om ${knowledgeMarker}`);
     await page.getByRole("button", { name: "Skicka" }).click();
-    await expect(page.locator("text=Källor:")).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator("text=Källor:")).toBeVisible({ timeout: 120_000 });
     await expect(page.locator(`a[href="${href}"]`)).toBeVisible({ timeout: 10_000 });
 
     // Supervised agent task creation through the current founder-only UI.

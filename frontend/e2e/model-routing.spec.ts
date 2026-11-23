@@ -73,7 +73,13 @@ test("admin discovers installed local models and fills their exact tag", async (
 
   await page.goto(`${FRONTEND_URL}/admin`);
   await expect(page.getByRole("heading", { name: "Lokala modeller" })).toBeVisible();
-  await expect(page.getByText("qwen2.5:0.5b", { exact: true })).toBeVisible();
+  // Scoped to the discovery table: once a real local runtime is configured, the same tag also
+  // appears in the "Användning & kostnad" table, so an unscoped text locator is ambiguous.
+  await expect(
+    page
+      .getByLabel("Lokala modeller")
+      .getByRole("cell", { name: "qwen2.5:0.5b", exact: true })
+  ).toBeVisible();
   await page.getByRole("button", { name: "Använd qwen2.5:0.5b som chat-modell" }).click();
   await expect(page.getByLabel("Egen modell för ollama chat")).toHaveValue("qwen2.5:0.5b");
 });

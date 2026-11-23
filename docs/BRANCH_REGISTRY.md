@@ -6,6 +6,64 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Founder Alpha local AI — riktig lokal modell verifierad (2026-11-23)
+
+**Branch:** `freebuff/life-workspaces`, bas `04de94db7d7ccf51c23dd68670e789e8e9df6cde`.
+Ingen PR/push/merge/deploy; GitHub write-access saknas fortfarande (ingen credential helper,
+ingen token, `git push --dry-run` kan inte autentisera). `first_cycle_go=false`.
+
+**Vad som ändrades:** blockeraren "Ollama saknas" är stängd. Ollama **0.40.15** installerades
+från repots egen pinnade release med verifierat SHA-256
+(`628c018404a4206493efd38e46251c154ede5141b8b8dc85c659b3b027c47379`) till ett
+användarskrivbart prefix, eftersom `sudo` saknas — samma arkiv och samma digest-kontrakt som
+`backend/scripts/ci/install_pinned_ollama.sh`, bara utan `sudo tar -C /usr/local`. Modeller:
+`qwen2.5:0.5b` (chat) och `all-minilm` (embedding, native 384 → nollpaddas till 1536, ingen
+destruktiv migration). Inga produktändringar krävdes för att köra riktig modell.
+
+**Verifierat mot riktig runtime** (acceptansdrivrutinen från
+`.github/workflows/real-local-ai-verification.yml`, oförändrad, mot riktig backend + worker,
+`CHAT_FALLBACK_ORDER=""` så ingen tyst fallback kunde dölja ett lokalt fel):
+`local_model` reachable=true utan saknade modeller; **7/7** före restart (inloggning, upload,
+riktig `all-minilm`-indexering `chunk_count=1`, citerad retrieval, `provider=ollama`,
+persisterat samtal); **5/5** efter riktig restart av backend + worker (samtal, indexerad källa
+och live-retrieval överlevde); **riktig SSE-streaming** med 22 delta-händelser och korrekt
+`done`; **utfall**: Ollama stoppad → health `reachable=false` utan `missing_models`, API
+fortsatt `ok` (ingen 503), chat `failed` utan fallback; **återhämtning utan backend-restart**
+(chat `succeeded`, backend-PID oförändrad). En enda grundad tur med 1219-tokens prompt tog
+**31,1 s** på 2 vCPU (modellen 511 MB RSS) — det är en latensbudget, inte en
+korrekthetssignal.
+
+**Browserjourneys mot riktig modell:** `founder-journey-v6` **2/2 PASS** (streaming, reload
+från durable historik, upload, worker-indexering, citeringslänk, supervised agent-uppgift)
+och `model-routing` **2/2 PASS**; `personal-work` **1/1 PASS**. Två riktiga testfel rättades
+i stället för att försvagas: den lokala modellassertionen scopades till `Lokala modeller`
+(annars tvetydig när en riktig `qwen2.5:0.5b`-rad även finns i användningstabellen), och V6
+väntar nu på att uppladdningen faktiskt är `Klar` innan den begär en citering. Fyra
+resilience-tester fallerar **mot riktig modell av konstruktion** (två assertar fake-providerns
+inbakade strängar, två har 10–30 s fönster för en ström som tar 31 s här) — de certifierar
+fake-harnessen och lämnades orörda.
+
+**Viktig miljöfälla:** webbläsarkörningar kräver `COOKIE_SECURE=true` (standard). Kakorna är
+`SameSite=None` och Chromium kastar dem utan `Secure`, så `COOKIE_SECURE=false` — som bara
+används av CI-jobb utan webbläsare — gör att varje autentiserad journey studsar tillbaka till
+`/login` trots 200 på login.
+
+**Endurance:** den äkta fyratimmarssöken (14 400 s, isolerad `lifeos_v5_soak`, Redis DB 15,
+egen backend, restart varje timme, concurrency 4) **kördes igång 2026-11-23 12:46Z** och
+rapporteras först när den själv skrivit sitt utfall. En förkortad körning kallas aldrig
+endurance-PASS.
+
+**Kompatibilitet med Claudes PR #471** (`claude/founder-alpha-phase3-staging`, head
+`9938fd2`, bas `integration/founder-alpha-20261121`, öppen draft, 83 commits, 248 filer):
+PR #471 innehåller **ingen** `local-models`-endpoint, **ingen** `Lokala modeller`-sektion och
+**ingen** `providers/local_discovery.py` — den här rundans upptäcktsfunktion dubbleras alltså
+inte. Sex filer delas till namnet, men konfliktytan är liten och semantiskt åtskild:
+`admin.py` (endast importblocket), `lib/api.ts` (kring rad 750) och admin-sidan (kring rad
+22). Rebase sker först **efter** att #471 mergats, enligt merge-regeln i `CLAUDE.md`.
+
+**Kvarstående blockerare:** GitHub write-access (exakt-head CI, draft PR, merge, deploy) samt
+avsaknad av produktionsåtkomst. Ingen produktionsändring är gjord.
+
 ## Founder Alpha local AI — discovery, reload and certification (2026-11-22)
 
 **Branch:** `freebuff/life-workspaces`, bas `04de94db7d7ccf51c23dd68670e789e8e9df6cde`
