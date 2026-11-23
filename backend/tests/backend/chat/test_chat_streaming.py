@@ -136,6 +136,46 @@ def test_stream_default_non_streaming_provider_degrades_to_one_chunk(monkeypatch
     assert row.content == "hela svaret på en gång"
 
 
+def test_stream_default_degrade_classifies_raw_provider_exception_not_stuck(monkeypatch, client, superuser_db):
+    """Real, reproduced bug (Founder Alpha Item 6 extended verification): a provider with no
+    `chat_stream()` override (every provider except Ollama today) uses the base class's
+    default one-shot-degrade implementation, which used to call `self.chat()` with zero
+    exception handling. A raw transport-level exception from `self.chat()` (e.g. the real
+    `httpx.ProxyError` a live OpenAI call hit against this sandbox's network policy) then
+    propagated straight out of the generator — `_generate_stream_events()` only catches
+    `ProviderError`/`_ClientDisconnected` around `provider.chat_stream()`, by design, so the
+    stream closed with zero bytes and no error event, AND the claimed reply row was left
+    stuck on its `inflight:<token>` marker forever (`_claim_reply_attempt()` permanently
+    blocks any further attempt once that marker is set — the founder could not even retry).
+    Fixed in `LLMProvider.chat_stream()`'s default implementation: any non-`ProviderError`
+    exception from `self.chat()` is now classified via `classify_provider_exception()` (the
+    same helper `chat_with_fallback()`'s own per-provider catch-all already uses) and
+    re-raised as a safely-classified `ProviderError`, which the router's existing
+    `except ProviderError` branch already handles correctly."""
+    async def _chat(self, messages, model, *, timeout=None, **kwargs):
+        import httpx
+        raise httpx.ConnectError("Connection refused")
+
+    monkeypatch.setattr(OpenAIProvider, "chat", _chat)
+    csrf = _login(client)
+    res = client.post("/api/chat/stream", json={"message": "test"}, headers={"X-CSRF-Token": csrf})
+    assert res.status_code == 200
+    events = _sse_events(res.text)
+    assert len(events) == 1, "a raw transport exception must surface as exactly one error event, not silence"
+    error_event = events[0]
+    assert error_event["error"] is True
+    assert error_event["category"] == "unreachable"
+    assert error_event["retryable"] is True
+    row = _latest_message(superuser_db, MessageRole.assistant)
+    assert row.status == MessageStatus.failed
+    assert row.error_category == "unreachable", "must not be left on its inflight:<token> claim marker"
+    # The founder must actually be able to retry — the bug's second half was that the stuck
+    # inflight marker made every future attempt permanently 409.
+    retry_res = client.post(f"/api/chat/messages/{row.in_reply_to_id}/retry/stream",
+                             headers={"X-CSRF-Token": csrf})
+    assert retry_res.status_code == 200
+
+
 # ------------------------------------------------------------------------------- failure modes
 
 def test_stream_provider_error_mid_stream_persists_failed_not_stuck(monkeypatch, client, superuser_db):
