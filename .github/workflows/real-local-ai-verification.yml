@@ -204,8 +204,12 @@ jobs:
         env:
           # Dedicated database: tests/conftest.py force-DROPs the DB it derives from
           # DATABASE_URL, so it must never point at lifeos_reallocal.
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_reallocal_pytest
-          APP_DATABASE_URL: postgresql://mainai_app:mainai_app_reallocal_pw@localhost:5432/lifeos_reallocal_pytest
+          # Must match tests/conftest.py's DISPOSABLE_DATABASE_NAME pattern
+          # (^lifeos_test(?:_[A-Za-z0-9]+)*$) — pytest refuses to drop any database whose name
+          # doesn't match it, as a guard against ever dropping an installed application's real
+          # database. `lifeos_reallocal_pytest` predates that guard and no longer matches it.
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_test_reallocal
+          APP_DATABASE_URL: postgresql://mainai_app:mainai_app_reallocal_pw@localhost:5432/lifeos_test_reallocal
         run: |
           set -eo pipefail
           python -m pytest tests/backend/rag/test_embedding_space.py -q \
