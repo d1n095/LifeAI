@@ -141,6 +141,33 @@ def test_api_create_read_plan_and_report_a_goal(client, db_session):
     assert report_res.json()["goal"]["id"] == goal_id
 
 
+def test_api_plan_returns_502_not_500_when_every_provider_is_unreachable(client):
+    """Phase D (founder-acceptance walkthrough) regression: propose_plan_via_ai()'s
+    chat_with_fallback() call raises app.providers.base.ProviderError once every configured
+    provider fails (e.g. no reachable local model) -- previously uncaught here, surfacing as a
+    raw 500 instead of the same classified, safe-to-show message chat.py already gives for the
+    identical underlying failure."""
+    csrf = _login(client)
+    headers = {"X-CSRF-Token": csrf}
+
+    create_res = client.post(
+        "/api/mainai/execution/goals",
+        json={"title": "Unreachable provider goal", "original_instruction": "Irrelevant -- planning must fail closed."},
+        headers=headers,
+    )
+    assert create_res.status_code == 201, create_res.text
+    goal_id = create_res.json()["id"]
+
+    async def _fake_chat_fails(self, messages, model, **kwargs):
+        raise ConnectionError("simulated: no reachable local model")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(OpenAIProvider, "chat", _fake_chat_fails)
+        plan_res = client.post(f"/api/mainai/execution/goals/{goal_id}/plan", headers=headers)
+    assert plan_res.status_code == 502, plan_res.text
+    assert "simulated" not in plan_res.json()["detail"]
+
+
 def test_api_get_goal_returns_404_for_an_unknown_goal(client):
     _login(client)
     res = client.get(f"/api/mainai/execution/goals/{uuid.uuid4()}")

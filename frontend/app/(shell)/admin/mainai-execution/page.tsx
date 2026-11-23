@@ -12,6 +12,13 @@ import { api, EngineeringLesson, MainAIGoal, MainAIGoalDetail, MainAIGoalReport,
 // task is already terminal (same `record_final_report` path as GET report). There is no
 // "run now" button here because those clocks already own unattended progress.
 
+const TASK_TYPE_LABELS: Record<string, string> = {
+  read_only_audit: "Granskning (läs)",
+  repo_edit: "Kodändring",
+  run_tests: "Verifiering (tester)",
+  open_pr: "Öppna PR",
+};
+
 const TASK_STATUS_LABELS: Record<string, string> = {
   pending: "Väntar på beroende",
   ready: "Redo",
@@ -46,6 +53,17 @@ const LIVENESS_COLORS: Record<string, string> = {
 };
 
 const POLL_INTERVAL_MS = 4000;
+
+// A completed open_pr task's real GitHub draft-PR link lives in its `completed` event's
+// detail.work_result (see backend/app/mainai_execution/execution_job.py's _handle_open_pr()) --
+// the one piece of "founder inspects results" (step 9 of the supervised lifecycle) this view
+// never actually surfaced. `detail` is untyped wire JSON, so every level is read defensively.
+function pullRequestUrlFromEvent(detail: Record<string, unknown>): string | null {
+  const workResult = detail?.work_result;
+  if (!workResult || typeof workResult !== "object") return null;
+  const url = (workResult as Record<string, unknown>).pull_request_url;
+  return typeof url === "string" && url.length > 0 ? url : null;
+}
 
 export default function MainAIExecutionPage() {
   const [goals, setGoals] = useState<MainAIGoal[]>([]);
@@ -341,7 +359,7 @@ export default function MainAIExecutionPage() {
                       className={`rounded-lg border border-border/60 p-3 text-xs cursor-pointer hover:bg-white/5 ${selectedTask?.id === t.id ? "bg-white/5" : ""}`}
                     >
                       <div className="flex justify-between">
-                        <span>{t.task_type}</span>
+                        <span>{TASK_TYPE_LABELS[t.task_type] ?? t.task_type}</span>
                         <span className={LIVENESS_COLORS[t.liveness] ?? ""}>{LIVENESS_LABELS[t.liveness] ?? t.liveness}</span>
                       </div>
                       <div className="text-white/50 mt-1">{TASK_STATUS_LABELS[t.status] ?? t.status}</div>
@@ -397,7 +415,7 @@ export default function MainAIExecutionPage() {
               <div>
                 <div className="text-sm font-medium">{selectedTask.description}</div>
                 <div className="text-xs text-white/40 mt-1 space-y-0.5">
-                  <div>Typ: {selectedTask.task_type}</div>
+                  <div>Typ: {TASK_TYPE_LABELS[selectedTask.task_type] ?? selectedTask.task_type}</div>
                   <div>Status: {TASK_STATUS_LABELS[selectedTask.status] ?? selectedTask.status}</div>
                   <div className={LIVENESS_COLORS[selectedTask.liveness] ?? ""}>
                     Aktivitet: {LIVENESS_LABELS[selectedTask.liveness] ?? selectedTask.liveness}
@@ -497,14 +515,27 @@ export default function MainAIExecutionPage() {
               <div className="space-y-2">
                 <div className="text-xs uppercase tracking-wide text-white/40">Händelsehistorik</div>
                 <ul className="space-y-2 max-h-64 overflow-y-auto">
-                  {selectedTask.events.map((ev) => (
-                    <li key={ev.id} className="rounded-lg border border-border/60 p-3 text-xs">
-                      <div className="flex justify-between text-white/50">
-                        <span>{ev.event_type}</span>
-                        <span>{new Date(ev.created_at).toLocaleString("sv-SE")}</span>
-                      </div>
-                    </li>
-                  ))}
+                  {selectedTask.events.map((ev) => {
+                    const prUrl = pullRequestUrlFromEvent(ev.detail);
+                    return (
+                      <li key={ev.id} className="rounded-lg border border-border/60 p-3 text-xs">
+                        <div className="flex justify-between text-white/50">
+                          <span>{ev.event_type}</span>
+                          <span>{new Date(ev.created_at).toLocaleString("sv-SE")}</span>
+                        </div>
+                        {prUrl && (
+                          <a
+                            href={prUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="mt-1 inline-block text-blue-300 hover:underline"
+                          >
+                            Öppna draft-PR &rarr;
+                          </a>
+                        )}
+                      </li>
+                    );
+                  })}
                   {selectedTask.events.length === 0 && <li className="text-white/30">Inga händelser ännu.</li>}
                 </ul>
               </div>

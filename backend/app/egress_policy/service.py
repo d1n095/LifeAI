@@ -45,6 +45,11 @@ class EgressDeniedError(RuntimeError):
     already durably committed to the session (flushed, not yet committed by this function --
     see enforce_egress_policy()'s own docstring) before this is ever raised."""
 
+    # A stable semantic marker lets central transport code preserve this hard denial even
+    # if development/test reloads create a second class identity. Treating a forged marker
+    # as a denial is fail-closed: it can only stop egress, never authorize or disclose it.
+    is_egress_denial = True
+
     def __init__(self, reason: str):
         self.reason = reason
         super().__init__(f"egress denied: {reason}")

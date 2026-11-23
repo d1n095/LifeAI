@@ -152,10 +152,32 @@ def _self_test_connection(app_database_url: str, *, attempts: int = 5, base_dela
 def _derive_app_database_url(database_url: str, app_password: str) -> str:
     """Pure computation, no I/O: the exact same `APP_DATABASE_URL` the full mutating path
     below derives, from DATABASE_URL + MAINAI_APP_PASSWORD alone. Shared by both `main()`'s
-    full path and `--derive-only` so the two can never silently diverge."""
+    full path and `--derive-only` so the two can never silently diverge.
+
+    Fail-closed on an empty MAINAI_APP_PASSWORD — same contract as
+    .cursor/derive_app_database_url.py, whose docstring claims parity with this function.
+    An empty password used to be derived silently into APP_DATABASE_URL (and, via
+    --derive-only, written into $RENDER_ENV_FILE), only to surface later as a confusing
+    "password authentication failed" instead of a clear configuration error.
+    """
     parts = urlsplit(database_url)
     if not parts.hostname or not parts.username:
-        print(f"DATABASE_URL saknar host eller användarnamn: {database_url!r}", file=sys.stderr)
+        # Never echo the URL here: a malformed URL can still carry the lifeos password,
+        # and stderr lands in container/deploy logs (same stance as
+        # .cursor/parse_database_url.py: "a leaked connection string here would be a
+        # secret in install/start logs").
+        print(
+            "DATABASE_URL saknar host eller användarnamn — URL:en skrivs inte ut "
+            "(kan innehålla lösenord).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not app_password:
+        print(
+            "MAINAI_APP_PASSWORD är tom — vägrar härleda APP_DATABASE_URL "
+            "(fail-closed, jmf .cursor/derive_app_database_url.py).",
+            file=sys.stderr,
+        )
         sys.exit(1)
     app_username = _app_username(parts.username)
     app_netloc = f"{quote(app_username, safe='.')}:{quote(app_password, safe='')}@{parts.hostname}:{parts.port or 5432}"

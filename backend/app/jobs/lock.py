@@ -12,6 +12,7 @@ import uuid
 import redis
 
 from app.config import get_settings
+from app.redis_client import get_redis_client
 
 logger = logging.getLogger("mainai.jobs.lock")
 
@@ -35,9 +36,11 @@ end
 class JobLockUnavailable(Exception):
     """Redis itself couldn't be reached — distinct from "another worker holds the lock"
     (LockHeld below, a normal and expected outcome). Callers must decide explicitly how to
-    degrade (see app/rag/library_import.py's docstring on why it proceeds without a lock
-    rather than blocking every import whenever Redis happens to be down) — this exception
-    exists so that decision is made deliberately, never silently."""
+    degrade: app/rag/library_import.py's run_import_job FAILS CLOSED on this (re-raises, so
+    app/worker.py's existing retry/backoff loop retries once Redis returns) rather than
+    proceeding without the lock, which used to be this app's behavior until it was found to
+    let two byte-identical uploads race past the duplicate-checksum check — this exception
+    exists so a caller's degrade choice is made deliberately, never silently."""
 
 
 class LockHeld(Exception):
@@ -61,15 +64,15 @@ class JobLock:
         self.key = f"joblock:{key}"
         self.token = str(uuid.uuid4())
         self.lease_seconds = lease_seconds
-        self._client: redis.Redis | None = None
 
     def _get_client(self) -> redis.Redis:
-        if self._client is None:
-            settings = get_settings()
-            if not settings.redis_url:
-                raise JobLockUnavailable("REDIS_URL är inte konfigurerad — jobblås kan inte användas.")
-            self._client = redis.from_url(settings.redis_url, socket_connect_timeout=3, socket_timeout=3)
-        return self._client
+        # The shared process-wide client (app/redis_client.py): a soak creates one JobLock
+        # per job, and one from_url() per JobLock churned a connection per instance until
+        # long runs degraded. The shared client keeps the same per-call behavior otherwise.
+        settings = get_settings()
+        if not settings.redis_url:
+            raise JobLockUnavailable("REDIS_URL är inte konfigurerad — jobblås kan inte användas.")
+        return get_redis_client()
 
     def acquire(self) -> bool:
         """True if this call acquired the lock, False if another holder already has it
