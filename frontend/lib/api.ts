@@ -195,6 +195,194 @@ export type ChatResponse = {
   retryable: boolean;
 };
 
+// The streamed counterpart of ChatResponse's "done" shape — backend/app/routers/chat.py's
+// _generate_stream_events() final SSE event. Optional fields are genuinely absent (not just
+// empty) when the reply came back from the already-succeeded cache path (no retrieval was
+// re-run, so there's nothing new to report for them) — see that function's `_cached()` branch.
+export type ChatStreamDone = {
+  done: true;
+  assistant_status: AssistantStatus;
+  assistant_message_id: string;
+  conversation_id: string;
+  user_message_id: string;
+  provider: string | null;
+  model: string | null;
+  sources?: ChatSource[];
+  confidence?: Confidence | null;
+  confidence_score?: number | null;
+  context_status?: ContextStatus | null;
+};
+
+export type ChatStreamError = {
+  error: true;
+  category: string | null;
+  message: string;
+  retryable: boolean;
+  conversation_id?: string;
+  user_message_id?: string;
+  assistant_message_id?: string | null;
+};
+
+export type ChatStreamHandlers = {
+  onDelta: (delta: string) => void;
+  onDone: (result: ChatStreamDone) => void;
+  onError: (error: ChatStreamError) => void;
+  // The connection ended (network drop, server restart, or this client's own cancel()) with
+  // neither a "done" nor an "error" event ever arriving — e.g. the server-side
+  // stream_interrupted path, which intentionally sends nothing further once the client is
+  // already gone (see _generate_stream_events()'s _ClientDisconnected handling). The assistant
+  // row was still safely persisted server-side (status=failed, error_category=
+  // "stream_interrupted", with whatever partial content had already streamed) — reloading the
+  // conversation shows it; this callback is only for giving the live UI an immediate, honest
+  // "this didn't finish" state instead of hanging on "MainAI skriver…" forever.
+  onIncomplete: () => void;
+};
+
+/** Parses one already-decoded `text/event-stream` body (newline-delimited `data: {...}` frames,
+ * blank-line separated) into individual JSON payloads. Kept pure/standalone so it can be unit
+ * tested without a real network stream. */
+export function parseSseFrames(buffer: string): { events: unknown[]; remainder: string } {
+  const events: unknown[] = [];
+  const parts = buffer.split("\n\n");
+  // The last part is either empty (buffer ended exactly on a frame boundary) or an incomplete
+  // frame still waiting on more bytes — either way, it is not consumed here.
+  const remainder = parts.pop() ?? "";
+  for (const part of parts) {
+    for (const line of part.split("\n")) {
+      if (line.startsWith("data: ")) {
+        try {
+          events.push(JSON.parse(line.slice("data: ".length)));
+        } catch {
+          // A malformed frame is dropped rather than crashing the whole stream — the backend
+          // never emits one, so this only guards against a genuinely corrupted transport.
+        }
+      }
+    }
+  }
+  return { events, remainder };
+}
+
+async function streamChatRequest(
+  path: string,
+  body: Record<string, unknown> | undefined,
+  handlers: ChatStreamHandlers,
+  signal?: AbortSignal
+): Promise<void> {
+  const headers: Record<string, string> = { ...csrfHeader() };
+  if (body) headers["Content-Type"] = "application/json";
+
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${path}`, {
+      method: "POST",
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+      credentials: "include",
+      cache: "no-store",
+      signal,
+    });
+  } catch (err) {
+    // AbortError means the CALLER cancelled (e.g. a "stop generating" button) — that is not a
+    // failure to report as one; every other fetch-level failure (network down, DNS, etc.) is
+    // reported as an honest incomplete state, same as a mid-stream disconnect.
+    if (err instanceof DOMException && err.name === "AbortError") return;
+    handlers.onIncomplete();
+    return;
+  }
+
+  if (res.status === 401) {
+    const refreshed = await attemptRefresh();
+    if (refreshed) {
+      return streamChatRequest(path, body, handlers, signal);
+    }
+    if (typeof window !== "undefined") window.location.href = "/login";
+    return;
+  }
+
+  const contentType = res.headers.get("content-type") || "";
+  if (!contentType.startsWith("text/event-stream")) {
+    // A pre-attempt denial (egress/lease/LOCAL_ONLY_MODE/billing) never opens a stream at all —
+    // see _stream_chat_reply()'s own contract. Reported through onError/onDone exactly like a
+    // real streamed failure/success would be, so the UI needs only one code path either way.
+    let payload: unknown = null;
+    try {
+      payload = await res.json();
+    } catch {
+      handlers.onIncomplete();
+      return;
+    }
+    const data = payload as Partial<ChatResponse> & { detail?: string };
+    if (data && data.assistant_status === "succeeded") {
+      handlers.onDone({
+        done: true,
+        assistant_status: "succeeded",
+        assistant_message_id: data.assistant_message_id ?? "",
+        conversation_id: data.conversation_id ?? "",
+        user_message_id: data.user_message_id ?? "",
+        provider: data.provider ?? null,
+        model: data.model ?? null,
+        sources: data.sources,
+        confidence: data.confidence,
+        confidence_score: data.confidence_score,
+        context_status: data.context_status,
+      });
+      if (data.reply) handlers.onDelta(data.reply);
+    } else if (data && data.assistant_status === "failed") {
+      handlers.onError({
+        error: true,
+        category: data.error_category ?? null,
+        message: data.error_message ?? "Okänt fel.",
+        retryable: Boolean(data.retryable),
+        conversation_id: data.conversation_id,
+        user_message_id: data.user_message_id,
+        assistant_message_id: data.assistant_message_id,
+      });
+    } else {
+      // An HTTPException body (billing refusal, etc.) — detail is already a safe,
+      // founder-facing string (see frontend/lib/api.ts's own request() helper for the same
+      // FastAPI-detail convention used everywhere else in this file).
+      handlers.onError({ error: true, category: null, message: data?.detail ?? "Okänt fel.", retryable: false });
+    }
+    return;
+  }
+
+  if (!res.body) {
+    handlers.onIncomplete();
+    return;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let sawTerminalEvent = false;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const { events, remainder } = parseSseFrames(buffer);
+      buffer = remainder;
+      for (const event of events) {
+        const e = event as Record<string, unknown>;
+        if (e.done) {
+          sawTerminalEvent = true;
+          handlers.onDone(e as unknown as ChatStreamDone);
+        } else if (e.error) {
+          sawTerminalEvent = true;
+          handlers.onError(e as unknown as ChatStreamError);
+        } else if (typeof e.delta === "string" && e.delta) {
+          handlers.onDelta(e.delta);
+        }
+      }
+    }
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") return;
+    if (!sawTerminalEvent) handlers.onIncomplete();
+    return;
+  }
+  if (!sawTerminalEvent) handlers.onIncomplete();
+}
+
 export type ConversationItem = {
   id: string;
   title: string;
@@ -928,6 +1116,10 @@ export const api = {
     }),
   retryChatMessage: (userMessageId: string) =>
     request<ChatResponse>(`/api/chat/messages/${userMessageId}/retry`, { method: "POST" }),
+  streamChat: (message: string, conversationId: string | undefined, handlers: ChatStreamHandlers, signal?: AbortSignal) =>
+    streamChatRequest("/api/chat/stream", { message, conversation_id: conversationId }, handlers, signal),
+  streamRetryChatMessage: (userMessageId: string, handlers: ChatStreamHandlers, signal?: AbortSignal) =>
+    streamChatRequest(`/api/chat/messages/${userMessageId}/retry/stream`, undefined, handlers, signal),
 
   listConversations: () => request<ConversationItem[]>("/api/conversations"),
   getConversation: (id: string) => request<ConversationDetail>(`/api/conversations/${id}`),

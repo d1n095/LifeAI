@@ -333,6 +333,118 @@ def resolve_chat_chain(
     return chain
 
 
+def _verify_lease_assertion(
+    db: Session,
+    *,
+    job_id: uuid.UUID | None,
+    lease_worker_id: str | None,
+    lease_generation: int | None,
+) -> None:
+    """Shared by `chat_with_fallback()` and `prepare_single_provider_chat()` — see
+    `chat_with_fallback()`'s own docstring (requirement 2) for the full rationale. Raises
+    `EgressDeniedError` on an incomplete or dead lease assertion; returns None otherwise
+    (including the "no assertion at all" case, which is unchanged legacy behavior)."""
+    from app.egress_policy.service import EgressDeniedError
+    from app.jobs.mainai_job_lease import verify_active_lease
+
+    lease_assertion_fields = [lease_worker_id is not None, lease_generation is not None]
+    if any(lease_assertion_fields) and not (all(lease_assertion_fields) and job_id is not None):
+        raise EgressDeniedError(
+            "incomplete worker-lease assertion: job_id/lease_worker_id/lease_generation must be given "
+            "all together or not at all -- refusing to guess which ones were meant."
+        )
+    if all(lease_assertion_fields):
+        if not verify_active_lease(db, job_id=job_id, worker_id=lease_worker_id, lease_generation=lease_generation):
+            raise EgressDeniedError(
+                f"worker lease for job {job_id} (worker={lease_worker_id!r}, generation={lease_generation}) "
+                "is no longer active -- reclaimed, expired, or never existed. Refusing egress under a dead "
+                "job's claimed identity."
+            )
+
+
+def _filter_local_only(chain: list[tuple[LLMProvider, str]]) -> list[tuple[LLMProvider, str]]:
+    """Shared LOCAL_ONLY_MODE enforcement (Task #60, requirement 8) — see
+    `chat_with_fallback()`'s own docstring for the full rationale. A no-op unless the setting
+    is on; raises `ProviderError` if it filters the chain down to nothing."""
+    if not get_settings().local_only_mode:
+        return chain
+    filtered = [(provider, model) for provider, model in chain if provider.name in _LOCAL_PROVIDERS]
+    if not filtered:
+        raise ProviderError(
+            "LOCAL_ONLY_MODE is enabled and no local provider is configured/reachable -- refusing to "
+            "fall back to an external provider.",
+            # Found via the streaming endpoint's own test suite (the first caller to actually
+            # persist this category to a real DB row rather than just assert the exception):
+            # "local_only_mode_no_local_provider" is 33 characters, one over Message.error_category's
+            # String(32) column -- every call through _finalize_failed_reply() would have crashed
+            # with a raw DataError instead of the intended clean failed-reply response, on BOTH the
+            # streaming and non-streaming chat endpoints, the moment LOCAL_ONLY_MODE was ever
+            # actually enabled with no local provider reachable. Shortened to fit; not referenced by
+            # exact string anywhere else in the codebase (verified by search) before this fix.
+            category="local_only_mode_no_provider",
+        )
+    return filtered
+
+
+async def prepare_single_provider_chat(
+    db: Session,
+    messages: list[Message],
+    *,
+    owner_id: uuid.UUID,
+    purpose: str | None = None,
+    requested_by: str | None = None,
+    task_id: uuid.UUID | None = None,
+    goal_id: uuid.UUID | None = None,
+    job_id: uuid.UUID | None = None,
+    lease_worker_id: str | None = None,
+    lease_generation: int | None = None,
+) -> tuple[LLMProvider, str, list[Message]]:
+    """The streaming equivalent of `chat_with_fallback()`'s pre-attempt gate, for exactly ONE
+    provider rather than a fallback chain.
+
+    Streaming cannot fall back across providers mid-response: once tokens from provider A have
+    already reached the client, silently restarting the same turn against provider B would
+    either duplicate visible text or require discarding what the founder already saw — neither
+    is an improvement over a single, clearly-failed attempt they can retry. So this resolves
+    and gates ONLY the primary candidate (`resolve_chat_chain()`'s first entry, after the same
+    LOCAL_ONLY_MODE filter `chat_with_fallback()` applies), through the exact same two central
+    checks (worker-lease re-verification, LOCAL_ONLY_MODE), and the exact same egress
+    enforcement, BEFORE the caller ever opens a streaming connection to it — `owner_id` is
+    required here (unlike `chat_with_fallback()`'s optional legacy-compatible default) because
+    every streaming call site is a live, authenticated founder request, never one of the
+    pre-existing unauthenticated-context callers that justified that default there.
+
+    Raises `EgressDeniedError`/`ProviderError`/`ModelSelectionError` exactly as
+    `chat_with_fallback()` would for the same candidate — callers should handle them
+    identically (see `app/routers/chat.py`'s shared `_finalize_failed_reply()`).
+    """
+    from app.egress_policy.service import enforce_egress_policy
+
+    _verify_lease_assertion(db, job_id=job_id, lease_worker_id=lease_worker_id, lease_generation=lease_generation)
+
+    chain = _filter_local_only(resolve_chat_chain(db))
+    provider, model = chain[0]
+
+    payload = [{"role": m.role, "content": m.content} for m in messages]
+    redacted = enforce_egress_policy(
+        db,
+        owner_id=owner_id,
+        provider=provider.name,
+        model=model,
+        purpose=purpose or "chat",
+        requested_by=requested_by or "providers.registry.prepare_single_provider_chat",
+        payload=payload,
+        task_id=task_id,
+        goal_id=goal_id,
+        job_id=job_id,
+    )
+    outbound_messages = [Message(role=m["role"], content=m["content"]) for m in redacted]
+    if not provider.is_configured():
+        raise ProviderError("Provider is not configured.", category="not_configured",
+                            provider_request_may_have_left=False)
+    return provider, model, outbound_messages
+
+
 async def chat_with_fallback(
     db: Session,
     messages: list[Message],
@@ -412,9 +524,6 @@ async def chat_with_fallback(
     # Bind the transport boundary to the canonical implementation module, not the package
     # re-export, which can become a stale alias under development/test module reloads.
     from app.egress_policy.service import EgressDeniedError, enforce_egress_policy
-    from app.jobs.mainai_job_lease import verify_active_lease
-
-    settings = get_settings()
 
     # Task #60 worker-lease re-verification (requirement 2) -- evaluated before anything else,
     # including selection_policy/LOCAL_ONLY_MODE below, since a dead job's claimed identity
@@ -426,33 +535,13 @@ async def chat_with_fallback(
     # denied every caller that only ever passed job_id for attribution, which is most of
     # them. The lease assertion is specifically about lease_worker_id/lease_generation;
     # job_id only joins the "incomplete" check once at least one of those two is present.
-    lease_assertion_fields = [lease_worker_id is not None, lease_generation is not None]
-    if any(lease_assertion_fields) and not (all(lease_assertion_fields) and job_id is not None):
-        raise EgressDeniedError(
-            "incomplete worker-lease assertion: job_id/lease_worker_id/lease_generation must be given "
-            "all together or not at all -- refusing to guess which ones were meant."
-        )
-    if all(lease_assertion_fields):
-        if not verify_active_lease(db, job_id=job_id, worker_id=lease_worker_id, lease_generation=lease_generation):
-            raise EgressDeniedError(
-                f"worker lease for job {job_id} (worker={lease_worker_id!r}, generation={lease_generation}) "
-                "is no longer active -- reclaimed, expired, or never existed. Refusing egress under a dead "
-                "job's claimed identity."
-            )
+    _verify_lease_assertion(db, job_id=job_id, lease_worker_id=lease_worker_id, lease_generation=lease_generation)
 
     if selection_policy is not None and owner_id is None:
         # New controlled-routing calls must carry authoritative caller context; selection
         # permission alone must never opt into the legacy egress bypass.
         raise ModelSelectionError("controlled chat routing requires owner_id for egress")
-    chain = resolve_chat_chain(db, selection_policy=selection_policy)
-    if settings.local_only_mode:
-        chain = [(provider, model) for provider, model in chain if provider.name in _LOCAL_PROVIDERS]
-        if not chain:
-            raise ProviderError(
-                "LOCAL_ONLY_MODE is enabled and no local provider is configured/reachable -- refusing to "
-                "fall back to an external provider.",
-                category="local_only_mode_no_local_provider",
-            )
+    chain = _filter_local_only(resolve_chat_chain(db, selection_policy=selection_policy))
     attempted: list[str] = []
     last_error: Exception | None = None
 

@@ -8,13 +8,17 @@ one assistant `MessageModel` row (enforced by migration 0016's partial unique in
 `in_reply_to_id`), never a second, duplicate reply."""
 
 from base64 import urlsafe_b64encode
+from dataclasses import dataclass
 
+import asyncio
+import json
 import logging
 import uuid
 from datetime import datetime
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -38,8 +42,8 @@ from app.billing.enforcement import BillingBudgetExceededError, BillingEnforceme
 from app.billing.limits import effective_limits
 from app.billing.reservation import ChatAttemptBudget
 from app.models.user import User
-from app.providers.base import Message, ProviderError
-from app.providers.registry import chat_with_fallback
+from app.providers.base import ChatResult, Message, ProviderError, StreamChunk
+from app.providers.registry import chat_with_fallback, prepare_single_provider_chat
 from app.providers.verification import classify_provider_exception
 from app.rag.context_status import build_context_status
 from app.rag.message_source import MessageSourceLocator, get_or_create_message_source_unit
@@ -139,10 +143,26 @@ def _record_candidate_signal_if_worth_noticing(
         logger.warning("failed to record candidate learning signal for message %s (non-fatal)", user_message.id, exc_info=True)
 
 
-async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, user_message: MessageModel, user: User) -> ChatMessageOut:
-    """Generates the assistant's reply for `user_message` (already committed). Used by both
-    the initial send and the retry endpoint — a retry runs this exact same path, not a
-    parallel one, so its behavior can never drift from the first attempt's."""
+@dataclass
+class _ChatContext:
+    """Everything needed to actually call a provider for `user_message`, built once and shared
+    by the non-streaming (`_attempt_assistant_reply`) and streaming (`stream_chat`/
+    `retry_assistant_reply_stream`) reply paths so their context/retrieval/system-prompt
+    behavior can never drift from each other — see `_build_chat_context()`."""
+
+    messages: list[Message]
+    hits: list[dict]
+    trust: object
+    context_status_out: ContextStatusOut | None
+    context_resolution: ContextResolution
+
+
+async def _build_chat_context(db: Session, *, conversation: Conversation, user_message: MessageModel, user: User) -> _ChatContext:
+    """Retrieval, trust assessment, context-status classification and full system-prompt
+    assembly for `user_message` — extracted from `_attempt_assistant_reply()` so the streaming
+    reply path (which must perform the exact same egress-gated retrieval and build the exact
+    same prompt before it ever opens a provider connection) reuses this verbatim rather than
+    maintaining a second, driftable copy."""
     # Incident 2026-07-26: retrieve_context() calls the EMBEDDING provider, a separate call
     # from chat_with_fallback()'s CHAT provider below — an unconfigured/failing embedding
     # provider previously crashed the whole request with an unhandled 500 before the chat
@@ -161,11 +181,6 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     # MainAI 0.1 in the first place, see resolve_active()'s own docstring), and it degrades
     # exactly the same way a provider failure already does here: zero grounding, an accurate
     # degraded reason, the chat turn still completes ungrounded rather than crashing.
-    assistant_row = _claim_reply_attempt(db, conversation=conversation, user_message=user_message, user=user)
-    if assistant_row.status == MessageStatus.succeeded:
-        return ChatMessageOut(conversation_id=conversation.id, user_message_id=user_message.id,
-                              assistant_status="succeeded", assistant_message_id=assistant_row.id,
-                              reply=assistant_row.content, provider=assistant_row.provider, model=assistant_row.model)
     retrieval_degraded_reason: str | None = None
     try:
         hits = await retrieve_context(db, user.id, user_message.content, top_k=5, effect_guard=True)
@@ -315,6 +330,26 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
     messages += [Message(role=m.role.value, content=m.content) for m in history]
     messages.append(Message(role="user", content=user_message.content))
 
+    return _ChatContext(
+        messages=messages, hits=hits, trust=trust,
+        context_status_out=context_status_out, context_resolution=context_resolution,
+    )
+
+
+async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, user_message: MessageModel, user: User) -> ChatMessageOut:
+    """Generates the assistant's reply for `user_message` (already committed). Used by both
+    the initial send and the retry endpoint — a retry runs this exact same path, not a
+    parallel one, so its behavior can never drift from the first attempt's."""
+    assistant_row = _claim_reply_attempt(db, conversation=conversation, user_message=user_message, user=user)
+    if assistant_row.status == MessageStatus.succeeded:
+        return ChatMessageOut(conversation_id=conversation.id, user_message_id=user_message.id,
+                              assistant_status="succeeded", assistant_message_id=assistant_row.id,
+                              reply=assistant_row.content, provider=assistant_row.provider, model=assistant_row.model)
+    ctx = await _build_chat_context(db, conversation=conversation, user_message=user_message, user=user)
+    hits, trust, context_status_out, context_resolution, messages = (
+        ctx.hits, ctx.trust, ctx.context_status_out, ctx.context_resolution, ctx.messages
+    )
+
     limits = effective_limits(db, user)
     attempt_budget = ChatAttemptBudget(db, user=user, limits=limits,
                                       estimated_tokens=sum(len(m.content.encode("utf-8")) for m in messages) + 1024,
@@ -343,42 +378,71 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
         db.commit()
         raise HTTPException(status_code=503, detail="Provider budget could not be verified.") from None
     except (ProviderError, EgressDeniedError) as exc:
-        # Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V1): an
-        # EgressDeniedError means the gate refused the WHOLE call before any provider was ever
-        # reached (never a provider outage) -- always non-retryable, since the content that
-        # triggered the denial (this conversation's own history/retrieval) is unchanged on
-        # retry and would be denied identically again.
-        category = "egress_denied" if isinstance(exc, EgressDeniedError) else (exc.category or "unreachable")
-        if assistant_row is None:
-            assistant_row = MessageModel(
-                conversation_id=conversation.id,
-                role=MessageRole.assistant,
-                content="",
-                in_reply_to_id=user_message.id,
-                status=MessageStatus.failed,
-                error_category=category,
-            )
-            db.add(assistant_row)
-        else:
-            assistant_row.status = MessageStatus.failed
-            assistant_row.error_category = category
-            assistant_row.content = ""
-        db.commit()
-        db.refresh(assistant_row)
-        # The failed reply row is still an honest part of the founder's history — capture
-        # its provenance too (fail-open, same helper as the success path).
-        _capture_message_source(db, message=assistant_row, conversation=conversation)
-        return ChatMessageOut(
-            conversation_id=conversation.id,
-            user_message_id=user_message.id,
-            assistant_status="failed",
-            assistant_message_id=assistant_row.id,
-            error_category=category,
-            error_message=str(exc),
-            retryable=category in _RETRYABLE_ERROR_CATEGORIES,
-            context_status=context_status_out,
+        return _finalize_failed_reply(
+            db, conversation=conversation, user_message=user_message, assistant_row=assistant_row,
+            exc=exc, context_status_out=context_status_out,
         )
 
+    return _finalize_successful_reply(
+        db, conversation=conversation, user_message=user_message, assistant_row=assistant_row,
+        result=result, attempted=attempted, hits=hits, trust=trust,
+        context_resolution=context_resolution, context_status_out=context_status_out, user=user,
+    )
+
+
+def _finalize_failed_reply(
+    db: Session, *, conversation: Conversation, user_message: MessageModel,
+    assistant_row: MessageModel | None, exc: Exception, context_status_out: ContextStatusOut | None,
+) -> ChatMessageOut:
+    """Shared by the non-streaming and streaming reply paths — persists a failed attempt
+    exactly once (never a second, duplicate failure row — see `_claim_reply_attempt()`'s
+    partial-unique-index invariant) and returns the one `ChatMessageOut` shape both transports
+    report it in.
+
+    Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V1): an
+    `EgressDeniedError` means the gate refused the WHOLE call before any provider was ever
+    reached (never a provider outage) -- always non-retryable, since the content that
+    triggered the denial (this conversation's own history/retrieval) is unchanged on retry
+    and would be denied identically again."""
+    category = "egress_denied" if isinstance(exc, EgressDeniedError) else (getattr(exc, "category", None) or "unreachable")
+    if assistant_row is None:
+        assistant_row = MessageModel(
+            conversation_id=conversation.id,
+            role=MessageRole.assistant,
+            content="",
+            in_reply_to_id=user_message.id,
+            status=MessageStatus.failed,
+            error_category=category,
+        )
+        db.add(assistant_row)
+    else:
+        assistant_row.status = MessageStatus.failed
+        assistant_row.error_category = category
+        assistant_row.content = ""
+    db.commit()
+    db.refresh(assistant_row)
+    # The failed reply row is still an honest part of the founder's history — capture
+    # its provenance too (fail-open, same helper as the success path).
+    _capture_message_source(db, message=assistant_row, conversation=conversation)
+    return ChatMessageOut(
+        conversation_id=conversation.id,
+        user_message_id=user_message.id,
+        assistant_status="failed",
+        assistant_message_id=assistant_row.id,
+        error_category=category,
+        error_message=str(exc),
+        retryable=category in _RETRYABLE_ERROR_CATEGORIES,
+        context_status=context_status_out,
+    )
+
+
+def _finalize_successful_reply(
+    db: Session, *, conversation: Conversation, user_message: MessageModel, assistant_row: MessageModel | None,
+    result, attempted: list[str], hits: list[dict], trust, context_resolution, context_status_out, user: User,
+) -> ChatMessageOut:
+    """Shared by the non-streaming and streaming reply paths — the single place a successful
+    provider result becomes one committed assistant `MessageModel` row and the one
+    `ChatMessageOut` shape both transports report it in."""
     usage = result.raw_usage or {}
     prompt_tokens = usage.get("prompt_tokens", 0)
     completion_tokens = usage.get("completion_tokens", 0)
@@ -493,14 +557,14 @@ def _capture_message_source(db: Session, *, message, conversation) -> None:
         db.rollback()
 
 
-@router.post("", response_model=ChatMessageOut)
-@limiter.limit(f"{settings.rate_limit_chat_per_minute}/minute")
-async def chat(
-    request: Request,
-    payload: ChatMessageIn,
-    db: Session = Depends(get_db),
-    user: User = Depends(require_founder),
-):
+def _create_or_get_conversation_and_user_message(
+    db: Session, *, payload: ChatMessageIn, user: User
+) -> tuple[Conversation, MessageModel]:
+    """Shared by `chat()` and `stream_chat()` — resolves/creates the conversation and commits
+    the user's message BEFORE any provider is ever called (see this module's docstring and
+    docs/BRANCH_REGISTRY.md's audit finding #1), so both entry points give the founder the
+    exact same durability guarantee for the one part that must never depend on which transport
+    they happened to use."""
     conversation = None
     if payload.conversation_id:
         # RLS on `conversations` already prevents cross-user reads, but we check
@@ -517,15 +581,23 @@ async def chat(
         # at flush (see app/models/conversation.py defaults), so the object is already
         # fully populated — a refresh would just be an unnecessary extra round-trip.
 
-    # THE FIX: persisted and committed on its own, before any provider is ever called. If
-    # everything after this point fails, the founder's message is still safely in the
-    # database — see this module's docstring and docs/BRANCH_REGISTRY.md's audit finding #1.
     user_message = MessageModel(conversation_id=conversation.id, role=MessageRole.user, content=payload.message)
     db.add(user_message)
     db.commit()
     db.refresh(user_message)
     _capture_message_source(db, message=user_message, conversation=conversation)
+    return conversation, user_message
 
+
+@router.post("", response_model=ChatMessageOut)
+@limiter.limit(f"{settings.rate_limit_chat_per_minute}/minute")
+async def chat(
+    request: Request,
+    payload: ChatMessageIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    conversation, user_message = _create_or_get_conversation_and_user_message(db, payload=payload, user=user)
     return await _attempt_assistant_reply(db, conversation=conversation, user_message=user_message, user=user)
 
 
@@ -562,3 +634,274 @@ async def retry_assistant_reply(
         )
 
     return await _attempt_assistant_reply(db, conversation=conversation, user_message=user_message, user=user)
+
+
+# ----------------------------------------------------------------------------------- streaming
+#
+# Transport choice: Server-Sent Events over the existing POST endpoint shape, not WebSockets.
+# The data flow here is one-directional (tokens server->client; cancellation is just the client
+# closing the connection, which SSE/HTTP already supports natively) and reuses the exact same
+# cookie-based auth, CSRF header and same-origin Next.js proxy (frontend/app/api/[...path]/
+# route.ts already forwards a streamed body byte-for-byte, no proxy change needed) that every
+# other endpoint already relies on. A WebSocket would need its own auth handshake and its own
+# proxy upgrade-handling path for no benefit this feature actually needs — SSE is the smallest
+# change that fits the existing architecture.
+#
+# Streaming deliberately does NOT use `chat_with_fallback()`'s multi-provider fallback: once
+# tokens from provider A have already reached the client, silently restarting the turn against
+# provider B would either duplicate visible text or require discarding what the founder already
+# saw. `prepare_single_provider_chat()` (app/providers/registry.py) gates exactly one candidate
+# through the same central checks (lease re-verification, LOCAL_ONLY_MODE, egress policy)
+# `chat_with_fallback()` applies to its own first candidate — see that function's docstring.
+
+_STREAM_HARD_CHAR_LIMIT = 200_000  # backstop only -- max_tokens=1024 (passed to chat_stream same
+# as the non-streaming call) already bounds a well-behaved provider far below this; this exists
+# so a misbehaving/runaway runtime can't grow the in-memory accumulation buffer unboundedly
+# before the loop ever gets a chance to see an done sentinel.
+
+
+class _ClientDisconnected(Exception):
+    """Raised internally to unwind the streaming loop the moment a disconnect is observed —
+    never raised across the generator's own boundary, never logged as an application error."""
+
+
+def _sse(data: dict) -> bytes:
+    return f"data: {json.dumps(data)}\n\n".encode("utf-8")
+
+
+async def _generate_stream_events(
+    *,
+    conversation_id: uuid.UUID,
+    user_message_id: uuid.UUID,
+    assistant_row_id: uuid.UUID,
+    user_id: uuid.UUID,
+    provider,
+    model: str,
+    outbound_messages: list[Message],
+    attempt_budget,
+    ctx: "_ChatContext",
+    request: Request,
+):
+    """Runs as the `StreamingResponse` body — i.e. AFTER `stream_chat()`/
+    `retry_assistant_reply_stream()` has already returned. FastAPI's `Depends(get_db)` closes
+    its session right after the endpoint function returns, not after the streamed body
+    finishes (a well-known FastAPI/Starlette StreamingResponse caveat) — so this function
+    deliberately does NOT reuse the request-scoped `db`/`user`/`conversation`/`user_message`/
+    `assistant_row` objects for anything beyond what was already done before the stream opened.
+    It opens its own session and re-fetches everything it needs by id instead, scoped to this
+    generator's own lifetime. `app.current_user_id` (set once per request in app/deps.py, never
+    reset) is a contextvar that survives into this same async task regardless, so RLS on the
+    fresh session still applies correctly — see app/db.py's `_bind_rls_user`."""
+    from app.db import SessionLocal
+
+    db = SessionLocal()
+    accumulated = ""
+    final_usage: dict | None = None
+    try:
+        conversation = db.get(Conversation, conversation_id)
+        user_message = db.get(MessageModel, user_message_id)
+        assistant_row = db.get(MessageModel, assistant_row_id)
+        user = db.get(User, user_id)
+
+        try:
+            async for chunk in provider.chat_stream(outbound_messages, model=model, max_tokens=1024, timeout=120):
+                # Checked every chunk, not just once: the client can disconnect at any point
+                # mid-generation. Closing this async generator (via `break`, which propagates
+                # as GeneratorExit into `provider.chat_stream()`) is what actually stops the
+                # local model from continuing — see OllamaProvider.chat_stream()'s own
+                # docstring — not just stops us from writing more bytes to an absent client.
+                if await request.is_disconnected():
+                    raise _ClientDisconnected()
+                if chunk.done:
+                    final_usage = chunk.usage or {}
+                    break
+                if chunk.delta:
+                    accumulated += chunk.delta
+                    if len(accumulated) > _STREAM_HARD_CHAR_LIMIT:
+                        raise ProviderError(
+                            "Streamat svar överskred den tillåtna längden.",
+                            category="unsupported", provider_request_may_have_left=True,
+                        )
+                    yield _sse({"delta": chunk.delta})
+            else:
+                # The provider's generator ended without ever yielding a done=True chunk.
+                # OllamaProvider.chat_stream() already raises ProviderError itself for this
+                # case (so this branch is unreachable for it) -- kept as defense in depth for
+                # any future provider whose chat_stream() override might not uphold that
+                # same contract.
+                raise ProviderError(
+                    "Leverantören avslutade strömmen utan en slutsignal.",
+                    category="unsupported", provider_request_may_have_left=True,
+                )
+
+            # Same post-call integrity checks chat_with_fallback()'s effect_guard applies to a
+            # non-streaming result -- a streaming call is exactly as real an external effect,
+            # and must not be trusted for billing/history just because it arrived incrementally.
+            if not accumulated.strip():
+                raise ProviderError("Provider returned no valid reply.",
+                                    category="external_effect_unknown", provider_request_may_have_left=True)
+            if (attempt_budget.requires_usage
+                    and (type(final_usage.get("prompt_tokens")) is not int or final_usage["prompt_tokens"] < 0
+                         or type(final_usage.get("completion_tokens")) is not int or final_usage["completion_tokens"] <= 0)):
+                raise ProviderError("Provider usage is unverified.",
+                                    category="external_effect_unknown", provider_request_may_have_left=True)
+        except _ClientDisconnected:
+            # Persist exactly what the founder already saw, explicitly marked incomplete --
+            # never silently discarded (they watched it arrive), never pretended to be a full,
+            # retryable success (`_RETRYABLE_ERROR_CATEGORIES` deliberately does not include
+            # this category: a disconnect isn't a provider failure the founder should be
+            # offered a one-click retry for from a page that already navigated away).
+            attempt_budget.failed(ProviderError("client disconnected",
+                                                provider_request_may_have_left=accumulated == ""))
+            assistant_row.status = MessageStatus.failed
+            assistant_row.error_category = "stream_interrupted"
+            assistant_row.content = accumulated
+            assistant_row.provider = provider.name
+            assistant_row.model = model
+            db.commit()
+            return  # client is gone -- nothing left to send
+        except ProviderError as exc:
+            attempt_budget.failed(exc)
+            finalized = _finalize_failed_reply(
+                db, conversation=conversation, user_message=user_message, assistant_row=assistant_row,
+                exc=exc, context_status_out=ctx.context_status_out,
+            )
+            yield _sse({
+                "error": True, "category": finalized.error_category, "message": finalized.error_message,
+                "retryable": finalized.retryable,
+                # Same identifiers the non-streaming ChatMessageOut failure shape already
+                # carries — without these a client has no way to target a retry at the
+                # already-durably-saved user message (see this module's docstring: the user's
+                # message is never lost to a provider failure, streamed or not).
+                "conversation_id": str(finalized.conversation_id), "user_message_id": str(finalized.user_message_id),
+                "assistant_message_id": str(finalized.assistant_message_id) if finalized.assistant_message_id else None,
+            })
+            return
+
+        result = ChatResult(content=accumulated, provider=provider.name, model=model, raw_usage=final_usage or {})
+        attempt_budget.succeeded(result)
+        finalized = _finalize_successful_reply(
+            db, conversation=conversation, user_message=user_message, assistant_row=assistant_row,
+            result=result, attempted=[provider.name], hits=ctx.hits, trust=ctx.trust,
+            context_resolution=ctx.context_resolution, context_status_out=ctx.context_status_out, user=user,
+        )
+        yield _sse({
+            "done": True,
+            "assistant_status": finalized.assistant_status,
+            "assistant_message_id": str(finalized.assistant_message_id),
+            "conversation_id": str(finalized.conversation_id),
+            "user_message_id": str(finalized.user_message_id),
+            "provider": finalized.provider,
+            "model": finalized.model,
+            "sources": [s.model_dump(mode="json") for s in finalized.sources],
+            "confidence": finalized.confidence,
+            "confidence_score": finalized.confidence_score,
+            "context_status": finalized.context_status.model_dump(mode="json") if finalized.context_status else None,
+        })
+    finally:
+        db.close()
+
+
+_STREAM_HEADERS = {
+    # Nginx (and some other reverse proxies) buffer proxied responses by default, which would
+    # silently turn this back into one big delayed chunk instead of real incremental delivery.
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no",
+}
+
+
+async def _stream_chat_reply(
+    db: Session, *, conversation: Conversation, user_message: MessageModel, user: User, request: Request,
+) -> StreamingResponse | JSONResponse:
+    """Shared core for `stream_chat()` and `retry_assistant_reply_stream()` — mirrors
+    `_attempt_assistant_reply()`'s own structure (claim -> build context -> gate the provider
+    -> reserve budget -> attempt) but gates and attempts exactly one provider via
+    `prepare_single_provider_chat()`/`provider.chat_stream()` instead of
+    `chat_with_fallback()`, and only ever opens the actual `StreamingResponse` once that gate
+    has already succeeded -- every pre-attempt denial (egress, lease, LOCAL_ONLY_MODE, billing)
+    is still reported as a plain JSON body or HTTPException, exactly like the non-streaming
+    endpoint, never as a stream that opens and then immediately errors."""
+    assistant_row = _claim_reply_attempt(db, conversation=conversation, user_message=user_message, user=user)
+    if assistant_row.status == MessageStatus.succeeded:
+        async def _cached():
+            if assistant_row.content:
+                yield _sse({"delta": assistant_row.content})
+            yield _sse({
+                "done": True, "assistant_status": "succeeded",
+                "assistant_message_id": str(assistant_row.id),
+                "conversation_id": str(conversation.id), "user_message_id": str(user_message.id),
+                "provider": assistant_row.provider, "model": assistant_row.model,
+            })
+        return StreamingResponse(_cached(), media_type="text/event-stream", headers=_STREAM_HEADERS)
+
+    ctx = await _build_chat_context(db, conversation=conversation, user_message=user_message, user=user)
+    limits = effective_limits(db, user)
+    attempt_budget = ChatAttemptBudget(
+        db, user=user, limits=limits,
+        estimated_tokens=sum(len(m.content.encode("utf-8")) for m in ctx.messages) + 1024,
+        source_ref=f"chat:{user_message.id}:{assistant_row.error_category}",
+        reply_slot=assistant_row, enforce=get_settings().billing_enforcement_enabled,
+    )
+
+    try:
+        provider, model, outbound_messages = await prepare_single_provider_chat(
+            db, ctx.messages, owner_id=user.id, purpose="chat",
+            requested_by="routers.chat.stream_chat",
+        )
+    except (ProviderError, EgressDeniedError) as exc:
+        finalized = _finalize_failed_reply(
+            db, conversation=conversation, user_message=user_message, assistant_row=assistant_row,
+            exc=exc, context_status_out=ctx.context_status_out,
+        )
+        return JSONResponse(json.loads(finalized.model_dump_json()))
+
+    try:
+        attempt_budget.before(provider.name, model)
+    except BillingBudgetExceededError as exc:
+        assistant_row.error_category = "billing_refused"
+        db.commit()
+        raise HTTPException(status_code=402, detail=str(exc)) from None
+    except BillingEnforcementUnavailableError as exc:
+        assistant_row.error_category = ("billing_outcome_unknown" if getattr(exc, "reservation_outcome_unknown", True)
+                                        else "billing_refused")
+        db.commit()
+        raise HTTPException(status_code=503, detail="Provider budget could not be verified.") from None
+
+    return StreamingResponse(
+        _generate_stream_events(
+            conversation_id=conversation.id, user_message_id=user_message.id, assistant_row_id=assistant_row.id,
+            user_id=user.id, provider=provider, model=model, outbound_messages=outbound_messages,
+            attempt_budget=attempt_budget, ctx=ctx, request=request,
+        ),
+        media_type="text/event-stream",
+        headers=_STREAM_HEADERS,
+    )
+
+
+@router.post("/stream")
+@limiter.limit(f"{settings.rate_limit_chat_per_minute}/minute")
+async def stream_chat(
+    request: Request,
+    payload: ChatMessageIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    conversation, user_message = _create_or_get_conversation_and_user_message(db, payload=payload, user=user)
+    return await _stream_chat_reply(db, conversation=conversation, user_message=user_message, user=user, request=request)
+
+
+@router.post("/messages/{message_id}/retry/stream")
+@limiter.limit(f"{settings.rate_limit_chat_per_minute}/minute")
+async def retry_assistant_reply_stream(
+    request: Request,
+    message_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    user_message = db.get(MessageModel, message_id)
+    if user_message is None or user_message.role != MessageRole.user:
+        raise HTTPException(status_code=404, detail="Meddelandet hittades inte.")
+    conversation = db.get(Conversation, user_message.conversation_id)
+    if conversation is None or conversation.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Meddelandet hittades inte.")
+    return await _stream_chat_reply(db, conversation=conversation, user_message=user_message, user=user, request=request)
