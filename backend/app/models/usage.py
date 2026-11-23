@@ -32,4 +32,16 @@ class UsageLog(Base):
     # NULL when pricing for this provider/model isn't in app/providers/pricing.py yet —
     # never a fabricated 0, so the admin usage view can distinguish "free" from "unknown".
     cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
+    # Revenue & Compute Engine extensions (migration 0070). Written ONLY by
+    # app/billing/accounting.record_usage() — never directly — so the per-call audit
+    # record and the enforcement rollups can never diverge.
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    agent: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    task: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    tier: Mapped[str] = mapped_column(String(16), default="free")  # policy snapshot at call time
+    kind: Mapped[str] = mapped_column(String(16), default="consumption")  # consumption | refund
+    # Migration 0072: optional de-dup key. NULL = ordinary event (each retry of a FAILED
+    # call is a distinct billable event); non-NULL = at most ONE audit row + ONE rollup
+    # increment per key, race-safe via the unique index (accounting.record_usage).
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
