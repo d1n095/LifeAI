@@ -107,3 +107,12 @@ class ProviderError(RuntimeError):
         # After adapter.propose() is entered: None/True → treat as ambiguous (do not
         # release spend). False → proven pre-external-effect; release is allowed.
         self.provider_request_may_have_left = provider_request_may_have_left
+
+
+def chat_token_limit(kwargs, default=None):
+    """Explicit output bounds are never silently ignored by a transport."""
+    value = kwargs.get("max_tokens", default)
+    if value is not None and (type(value) is not int or value <= 0):
+        raise ProviderError("Invalid output token bound.", category="unsupported",
+                            provider_request_may_have_left=False)
+    return value
