@@ -230,6 +230,40 @@ async def test_6_local_only_mode_never_falls_back_to_an_external_provider(db_ses
 
 
 @pytest.mark.asyncio
+async def test_6b_local_only_mode_actually_succeeds_through_the_local_provider(db_session, owner_id, monkeypatch):
+    """Stream 7, item 3 (PR #478's named gap): test 6 above only proves LOCAL_ONLY_MODE's
+    negative path (a failing local provider never escalates). This is the positive control it
+    was missing -- with LOCAL_ONLY_MODE on and the local (ollama) provider actually reachable,
+    a real request must succeed end to end through it, and the external provider must never
+    even be considered, not just never actually called on failure."""
+    external_calls: dict = {}
+    local_calls: dict = {}
+    monkeypatch.setattr(OpenAIProvider, "chat", _spy_chat(external_calls))
+    monkeypatch.setattr(OllamaProvider, "chat", _spy_chat(local_calls))
+    monkeypatch.setattr(get_settings(), "default_llm_provider", "ollama")
+    monkeypatch.setattr(get_settings(), "openai_api_key", "irrelevant-but-configured")
+    monkeypatch.setattr(get_settings(), "chat_fallback_order", "openai")
+    monkeypatch.setattr(get_settings(), "local_only_mode", True)
+
+    result, attempted = await chat_with_fallback(
+        db_session, [Message(role="user", content="hej, helt ofarligt meddelande")],
+        owner_id=owner_id, purpose="test_local_only_positive", requested_by="test",
+    )
+    db_session.commit()
+
+    assert result.content == "ok"
+    assert attempted == ["ollama"]
+    assert local_calls.get("n", 0) == 1
+    assert external_calls.get("n", 0) == 0, "LOCAL_ONLY_MODE must never even attempt an external provider when the local one succeeds"
+
+    events = db_session.execute(
+        select(ProviderDisclosureEvent).where(ProviderDisclosureEvent.purpose == "test_local_only_positive")
+    ).scalars().all()
+    assert len(events) == 1
+    assert events[0].decision == "allowed"
+
+
+@pytest.mark.asyncio
 async def test_7_cross_tenant_attempt_is_denied_by_rls(db_session, make_verified_user, monkeypatch):
     """The RLS session is set to user B, but the call claims owner_id=user A -- the
     disclosure-ledger INSERT itself (owner_id must match the session's own
