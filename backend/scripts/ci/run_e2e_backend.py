@@ -32,6 +32,7 @@ from app.providers.base import ChatResult, StreamChunk
 from app.providers.openai_provider import OpenAIProvider
 from app.providers.ollama_provider import OllamaProvider
 from app.rag.claims import CLAIM_EXTRACTION_SYSTEM_PROMPT
+from app.mainai_execution.planner import PLANNER_SYSTEM_PROMPT
 import app.rag.vector_store as vector_store
 import app.rag.retrieve as retrieve_mod
 import app.routers.auth as auth_router
@@ -57,6 +58,30 @@ async def fake_chat(self, messages, model, **kwargs):
         claim = chunk_text[:200] if chunk_text else ""
         content = json.dumps([claim]) if claim else "[]"
         return ChatResult(content=content, provider="openai", model=model, raw_usage={"prompt_tokens": 40, "completion_tokens": 10})
+
+    # Same discipline as the claim-extraction branch above: detected by the exact system
+    # prompt app/mainai_execution/planner.py sends (never a heuristic), so it can never
+    # misfire against a real chat turn. Without this branch, MainAI's own plan-proposal step
+    # (chat_with_fallback(purpose="mainai_planning")) got the generic conversational reply
+    # above, which app/mainai_execution/planner.py's _parse_plan_specs() correctly rejects as
+    # invalid JSON — making the founder's full goal -> plan -> approve -> execute journey
+    # untestable end-to-end through a real browser in this harness, only provable at the
+    # pytest layer. A single read_only_audit task is deterministic, requires an empty
+    # verification_plan (the only kind _parse_plan_specs() accepts for that task_type), and
+    # sets approval_required so the UI's approve/reject path is exercised for real too.
+    if messages and messages[0].role == "system" and messages[0].content == PLANNER_SYSTEM_PROMPT:
+        plan = {
+            "tasks": [
+                {
+                    "description": "E2E-faked read-only audit for plan/approval round-trip verification.",
+                    "task_type": "read_only_audit",
+                    "risk_level": "low",
+                    "approval_required": True,
+                    "verification_plan": [],
+                }
+            ]
+        }
+        return ChatResult(content=json.dumps(plan), provider="openai", model=model, raw_usage={"prompt_tokens": 60, "completion_tokens": 40})
 
     return ChatResult(
         content="Hej! Detta ar ett riktigt svar fran den simulerade AI-motorn under E2E-testet. "

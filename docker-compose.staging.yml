@@ -1,24 +1,27 @@
 # Reproducible staging topology — Workstream 3 of the "Founder Alpha Staging Activation"
-# program. Deliberately NOT docker-compose.vps.yml (production) and NOT docker-compose.yml
-# (local dev): it borrows production's container hardening (security_opt/cap_drop/read_only/
-# tmpfs/pids_limit/mem_limit/cpus, see docker-compose.vps.yml's own header comment for the
-# full rationale) but adds its own isolated Postgres+pgvector instead of touching any real
-# Supabase project, and gates its one public entrypoint behind HTTP Basic Auth in addition to
-# the app's own founder login, since this candidate has not been through independent security
-# review yet (see docs/STAGING_DEPLOYMENT.md's recommendation and resource math for why).
+# program, revised for the Pre-VPS Consolidation task against the actual target hardware: a
+# dedicated VPS XL (16GB RAM / 8 vCPU / 480GB NVMe, no GPU), ordered but not yet available.
+# Deliberately NOT docker-compose.vps.yml (production, a *different*, already-running 2GB host
+# that must stay completely untouched) and NOT docker-compose.yml (local dev): it borrows
+# production's container hardening (security_opt/cap_drop/read_only/tmpfs/pids_limit/
+# mem_limit/cpus, see docker-compose.vps.yml's own header comment for the full rationale) but
+# adds its own isolated Postgres+pgvector instead of touching any real Supabase project, and
+# gates its one public entrypoint behind HTTP Basic Auth in addition to the app's own founder
+# login, since this candidate has not been through independent security review yet (see
+# docs/STAGING_DEPLOYMENT.md's recommendation and resource math for why).
 #
 # Run with its own Compose project name so it can never collide with a production deployment
 # on the same host: `docker compose -f docker-compose.staging.yml -p lifeai-staging up -d`.
 # Every volume/network name below is scoped under that project automatically — nothing here
 # can be confused with `lifeai_*` (production's prefix under `-p lifeai`).
 #
-# OLLAMA_BASE_URL deliberately has NO default pointing at a bundled local `ollama` service —
-# see docs/STAGING_DEPLOYMENT.md's resource math: a 2GB host already has no headroom for a
-# second full application stack, let alone one that also runs model weights. Point it at a
-# remote, already-approved Ollama-compatible endpoint (the `remote-ollama` option in that
-# doc). The `ollama` service below exists ONLY for a dedicated staging host with real spare
-# RAM (profile `local-llm`, same opt-in pattern docker-compose.yml already uses) — it is never
-# started by a plain `up`.
+# `ollama` now runs LOCALLY by default (no longer an opt-in profile) — the original 2GB-host
+# math in docs/STAGING_DEPLOYMENT.md ruled this out, but 16GB/8 vCPU has real headroom for a
+# CPU-only quantized model alongside the rest of this stack (full arithmetic in that doc's
+# "Revised for the dedicated 16GB VPS" section). It is reachable ONLY on the internal
+# `staging_data` network — never published, same isolation property as Postgres/Redis.
+# STAGING_OLLAMA_BASE_URL can still override this (e.g. to point at a remote endpoint instead)
+# but now defaults to the bundled service rather than requiring an operator to set it.
 
 services:
   postgres:
@@ -28,6 +31,18 @@ services:
       - "no-new-privileges:true"
     cap_drop:
       - ALL
+    # The official postgres image's entrypoint starts as root, chowns/chmods the data
+    # directory to the `postgres` user, then de-escalates via gosu — a bare `cap_drop: ALL`
+    # breaks that boot sequence entirely (confirmed live: "chmod: ... Operation not permitted" /
+    # "failed switching to 'postgres': operation not permitted", crash-looping on every start).
+    # This is the minimal capability set its own entrypoint needs; everything else stays
+    # dropped.
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
     # Postgres needs to write its own data directory — unlike the stateless services below,
     # this one is NOT read_only; the named volume is its only persistent write target.
     environment:
@@ -38,9 +53,9 @@ services:
     volumes:
       - staging_postgres_data:/var/lib/postgresql/data
       - ./backend/db-init:/docker-entrypoint-initdb.d:ro
-    pids_limit: 100
-    mem_limit: 256m
-    cpus: "0.50"
+    pids_limit: 150
+    mem_limit: 1024m
+    cpus: "1.00"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U lifeos_staging"]
       interval: 5s
@@ -58,18 +73,41 @@ services:
     # its own disposable Postgres so a staging run can never touch real founder data.
 
   ollama:
-    # Opt-in only (`--profile local-llm`) — see this file's header comment. Only sane on a
-    # dedicated host with real spare RAM beyond the ~1GB the rest of this stack needs; never
-    # on the production VPS's 2GB.
+    # Runs by default on this target hardware (16GB/8 vCPU, no GPU) — see this file's header
+    # comment and docs/STAGING_DEPLOYMENT.md's revised resource math. CPU-only inference: do
+    # NOT point this at a large/unquantized model. OLLAMA_NUM_PARALLEL=1 and a modest
+    # OLLAMA_MAX_LOADED_MODELS keep a single small quantized model (see that doc for the
+    # specific recommendation) from being pushed out of its mem_limit by a second one loading.
     image: ollama/ollama:latest
     restart: unless-stopped
+    security_opt:
+      - "no-new-privileges:true"
+    pids_limit: 200
+    mem_limit: 6144m
+    cpus: "3.50"
+    environment:
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_KEEP_ALIVE: "30m"
     volumes:
       - staging_ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     networks:
       - staging_data
-    profiles: ["local-llm"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # No `ports:` published — reached over staging_data by backend/worker only, same as every
-    # other internal-only service in this file.
+    # other internal-only service in this file. Not `read_only`: Ollama writes model blobs
+    # under /root/.ollama (the named volume), the one exception to this file's otherwise
+    # read-only containers, same reasoning as the postgres service above.
 
   redis:
     image: valkey/valkey:8.1.9-alpine@sha256:a038175878d66b9d274fbf8be73c0305e93798b83917647f167e18cef3c71eec
@@ -82,7 +120,7 @@ services:
     tmpfs:
       - /data
     pids_limit: 50
-    mem_limit: 96m
+    mem_limit: 256m
     cpus: "0.25"
     environment:
       REDIS_PASSWORD: ${STAGING_REDIS_PASSWORD:?sätt STAGING_REDIS_PASSWORD}
@@ -121,17 +159,17 @@ services:
       - /tmp
     volumes:
       - staging_uploads:/var/lib/lifeai/uploads
-    pids_limit: 200
-    mem_limit: 384m
-    cpus: "0.75"
+    pids_limit: 300
+    mem_limit: 1024m
+    cpus: "1.50"
     environment:
       ENVIRONMENT: staging
       DATABASE_URL: postgresql://lifeos_staging:${STAGING_POSTGRES_PASSWORD:?sätt STAGING_POSTGRES_PASSWORD}@postgres:5432/lifeos_staging
       APP_DATABASE_URL: postgresql://mainai_app:${STAGING_MAINAI_APP_PASSWORD:?sätt STAGING_MAINAI_APP_PASSWORD}@postgres:5432/lifeos_staging
-      # No default: see this file's header comment. Point at a remote, already-approved
-      # Ollama-compatible endpoint, or set to http://ollama:11434 only if running with
-      # `--profile local-llm` on a host that can actually afford it.
-      OLLAMA_BASE_URL: ${STAGING_OLLAMA_BASE_URL:?sätt STAGING_OLLAMA_BASE_URL — se docs/STAGING_DEPLOYMENT.md}
+      # Defaults to the bundled local ollama service (see this file's header comment) — this
+      # target host has real headroom for it. Override via STAGING_OLLAMA_BASE_URL only if
+      # pointing at a remote endpoint instead.
+      OLLAMA_BASE_URL: ${STAGING_OLLAMA_BASE_URL:-http://ollama:11434}
       REDIS_URL: redis://:${STAGING_REDIS_PASSWORD:?sätt STAGING_REDIS_PASSWORD}@redis:6379/0
       FRONTEND_ORIGINS: ${STAGING_FRONTEND_ORIGINS:?sätt STAGING_FRONTEND_ORIGINS, t.ex. https://staging.exempel.se}
       SECRET_KEY: ${STAGING_SECRET_KEY:?sätt STAGING_SECRET_KEY}
@@ -139,6 +177,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      ollama:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/api/health"]
@@ -170,14 +210,14 @@ services:
       - /tmp
     volumes:
       - staging_uploads:/var/lib/lifeai/uploads
-    pids_limit: 100
-    mem_limit: 256m
-    cpus: "0.50"
+    pids_limit: 150
+    mem_limit: 768m
+    cpus: "1.00"
     environment:
       ENVIRONMENT: staging
       DATABASE_URL: postgresql://lifeos_staging:${STAGING_POSTGRES_PASSWORD:?sätt STAGING_POSTGRES_PASSWORD}@postgres:5432/lifeos_staging
       APP_DATABASE_URL: postgresql://mainai_app:${STAGING_MAINAI_APP_PASSWORD:?sätt STAGING_MAINAI_APP_PASSWORD}@postgres:5432/lifeos_staging
-      OLLAMA_BASE_URL: ${STAGING_OLLAMA_BASE_URL:?sätt STAGING_OLLAMA_BASE_URL — se docs/STAGING_DEPLOYMENT.md}
+      OLLAMA_BASE_URL: ${STAGING_OLLAMA_BASE_URL:-http://ollama:11434}
       REDIS_URL: redis://:${STAGING_REDIS_PASSWORD:?sätt STAGING_REDIS_PASSWORD}@redis:6379/0
       # Same reasoning as docker-compose.vps.yml's worker service: only `backend` runs
       # migrations and mutates mainai_app's privileges; worker verifies read-only.
@@ -187,6 +227,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      ollama:
         condition: service_healthy
       backend:
         condition: service_healthy
@@ -211,8 +253,8 @@ services:
     tmpfs:
       - /tmp
     pids_limit: 200
-    mem_limit: 384m
-    cpus: "0.75"
+    mem_limit: 512m
+    cpus: "0.50"
     environment:
       INTERNAL_API_URL: http://backend:8000
       HOSTNAME: "0.0.0.0"
