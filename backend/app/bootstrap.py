@@ -1,10 +1,22 @@
+import logging
+
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.email_utils import normalize_email
 from app.founder import FOUNDER_USER_ID
+from app.founder_memory.service import record_founder_memory
 from app.models.user import User, UserRole
 from app.security import hash_password, utcnow_seconds_baseline
+
+logger = logging.getLogger(__name__)
+
+# The founder's locked priority, registered once at bootstrap so it can never live only in a
+# conversation. `note_type="decision"`, `authority="founder"`, `basis="manual"` are the
+# schema's own closed vocabulary (migration 0049); nothing is inferred here.
+LOCKED_PRIORITY = "Prioritering (låst): Founder Alpha först, utökad autonomi senare."
+LOCKED_PRIORITY_KEY = "locked-priority:founder-alpha-first"
 
 
 def bootstrap_founder_user(db: Session) -> None:
@@ -37,3 +49,34 @@ def bootstrap_founder_user(db: Session) -> None:
     )
     db.add(founder)
     db.commit()
+
+
+def bootstrap_founder_priorities(db: Session) -> None:
+    """Registers the founder's locked priority once, as a durable founder DECISION.
+
+    Idempotent by key (`founder_memory_notes` has a unique (owner_id, idempotency_key)).
+    Runs under the SAME RLS identity the request middleware sets — without it, FORCE RLS
+    silently turns the insert into a no-op, which is exactly the R14 finding this function
+    fixes. Failures are logged rather than raised: a missing priority note must not stop the
+    API from starting, but it must also never disappear without a trace.
+    """
+    founder = db.get(User, FOUNDER_USER_ID)
+    if founder is None:
+        return
+    try:
+        db.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": str(founder.id)})
+        record_founder_memory(
+            db,
+            owner_id=founder.id,
+            note_type="decision",
+            content=LOCKED_PRIORITY,
+            idempotency_key=LOCKED_PRIORITY_KEY,
+            authority="founder",
+            basis="manual",
+            source="bootstrap",
+            provenance={"registered_by": "bootstrap_founder_priorities"},
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.warning("could not register the locked founder priority (non-fatal)", exc_info=True)
