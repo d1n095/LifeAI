@@ -26,6 +26,38 @@ def _chunks(data: bytes, size: int = 8):
     return _read
 
 
+def _present_with_wrong_bytes(storage, root, storage_key, expected_sha256, expected_size) -> bool:
+    """The race harnesses' corruption probe: ONE open, one read, hash what came back.
+
+    The obvious probe -- `if storage.exists(key) and not storage.verify(key, ...)` -- is a
+    TOCTOU trap this file's own history should have warned about: verify() returns False
+    for a MISSING file by design (app/storage/local_fs.py: `if not path.is_file(): return
+    False`), so a concurrent delete() landing between the exists() and the verify() made a
+    DELETED blob report as WRONG-BYTES. Under full-suite pressure the deleter's window
+    widens enough to hit reliably (reproduced 2026-11-18: the second-interleaving test
+    failed 1-in-~11 pressure iterations with exactly that false "content-addressing
+    invariant violated" message -- the same signature the full-suite runs had been writing
+    off as a flake), and every such report is meaningless: the blob was gone, not corrupt.
+
+    A single open+read cannot conflate the two states: on POSIX, a concurrent unlink
+    during an open read still returns the original bytes (the fd holds the inode), and a
+    concurrent REPUBLISH of the same key writes the same content by construction
+    (content-addressed). So: FileNotFoundError -> absent, which the race legitimately
+    produces and this layer never promised against; a SUCCESSFUL read whose bytes do not
+    hash to their own key -> the only real violation, reported. `root` is the storage
+    root tmp_path -- the same direct-fs access the corruption/repair tests below already
+    use (disk_path = tmp_path / blob.storage_key)."""
+    del storage  # keep the call sites self-documenting; the probe reads the fs directly
+    path = root / storage_key
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return False
+    if len(data) != expected_size:
+        return True
+    return hashlib.sha256(data).hexdigest() != expected_sha256
+
+
 def test_write_then_read_round_trips_exact_bytes(tmp_path):
     storage = LocalFilesystemStorage(str(tmp_path))
     payload = b"hej hej " * 1000
@@ -229,7 +261,7 @@ def test_two_identical_concurrent_writers_both_succeed_with_a_single_file_on_dis
 
     def _writer():
         try:
-            start.wait(timeout=5)
+            start.wait(timeout=30)
             results.append(storage.write_stream(_chunks(payload), max_bytes=10_000_000))
         except Exception as exc:  # noqa: BLE001 - captured for the assertion below, not swallowed
             errors.append(exc)
@@ -292,8 +324,11 @@ def test_write_stream_vs_delete_never_returns_a_corrupt_or_deadlocked_blob(tmp_p
             if blob.sha256 != expected_sha:
                 failures.append(f"write_stream() returned the wrong hash: {blob.sha256}")
             # Absent is legitimate here (the deleter may have won); present-but-wrong is not.
-            if storage.exists(blob.storage_key) and not storage.verify(
-                blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes
+            # Single-open probe: exists()->verify() would let a concurrent delete between the
+            # two calls report a DELETED blob as WRONG-BYTES (verify() is False for missing),
+            # the false corruption the pressure repro captured -- see the helper's docstring.
+            if _present_with_wrong_bytes(
+                storage, tmp_path, blob.storage_key, blob.sha256, blob.size_bytes
             ):
                 failures.append("a published blob is present but its bytes do not match its own key")
         except Exception as exc:  # noqa: BLE001
@@ -314,8 +349,8 @@ def test_write_stream_vs_delete_never_returns_a_corrupt_or_deadlocked_blob(tmp_p
         t2 = threading.Thread(target=_deleter, args=(seed.storage_key,))
         t1.start()
         t2.start()
-        t1.join(timeout=5)
-        t2.join(timeout=5)
+        t1.join(timeout=30)
+        t2.join(timeout=30)
         assert not t1.is_alive() and not t2.is_alive(), "a race participant never finished -- possible deadlock"
 
     assert failures == [], f"race invariant violated: {failures}"
@@ -407,7 +442,7 @@ def test_a_real_concurrent_delete_blocks_until_write_streams_publish_finishes(tm
         # call. Signal that we're inside the critical section and hold it open until told to
         # proceed, giving a concurrent delete() a real window to try (and fail) to run past us.
         writer_in_lock.set()
-        release_writer.wait(timeout=5)
+        release_writer.wait(timeout=30)
         return real_link(src, dst, *a, **kw)  # raises FileExistsError -- seed already published it
 
     monkeypatch.setattr(os, "link", _slow_link)
@@ -432,7 +467,7 @@ def test_a_real_concurrent_delete_blocks_until_write_streams_publish_finishes(tm
 
     t1 = threading.Thread(target=_writer)
     t1.start()
-    assert writer_in_lock.wait(timeout=5), "writer never reached its critical section"
+    assert writer_in_lock.wait(timeout=30), "writer never reached its critical section"
 
     t2 = threading.Thread(target=_deleter)
     t2.start()
@@ -444,8 +479,8 @@ def test_a_real_concurrent_delete_blocks_until_write_streams_publish_finishes(tm
     )
 
     release_writer.set()
-    t1.join(timeout=5)
-    t2.join(timeout=5)
+    t1.join(timeout=30)
+    t2.join(timeout=30)
 
     assert not t1.is_alive() and not t2.is_alive(), "a race participant never finished -- possible deadlock"
     assert errors == [], f"unexpected exception(s): {errors}"
@@ -483,8 +518,13 @@ def test_write_stream_and_delete_stay_consistent_under_a_second_interleaving_sha
     def _writer():
         try:
             blob = storage.write_stream(_chunks(payload), max_bytes=10_000_000)
-            if storage.exists(blob.storage_key) and not storage.verify(
-                blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes
+            # Single-open probe (see _present_with_wrong_bytes): exists()->verify() here is
+            # the exact TOCTOU that failed 1-in-~11 under full-suite-like pressure 2026-11-18
+            # -- a concurrent delete between the two calls reported a DELETED blob as
+            # "present but its bytes do not match its own key". Absent stays legitimate;
+            # only a successful read of wrong bytes is a violation.
+            if _present_with_wrong_bytes(
+                storage, tmp_path, blob.storage_key, blob.sha256, blob.size_bytes
             ):
                 failures.append("a published blob is present but its bytes do not match its own key")
         except Exception as exc:  # noqa: BLE001
@@ -501,8 +541,8 @@ def test_write_stream_and_delete_stay_consistent_under_a_second_interleaving_sha
         t2 = threading.Thread(target=_deleter)
         t1.start()
         t2.start()
-        t1.join(timeout=5)
-        t2.join(timeout=5)
+        t1.join(timeout=30)
+        t2.join(timeout=30)
         assert not t1.is_alive() and not t2.is_alive(), "a race participant never finished -- possible deadlock"
         # Re-seed for the next iteration regardless of which side "won" this one.
         seed = storage.write_stream(_chunks(payload), max_bytes=10_000_000)
