@@ -798,6 +798,23 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             try:
                 renew_mainai_job_lease(db, job_id, worker_id, lease_generation, lease_seconds)
             except JobLeaseLostError:
+                # Stream 7 hardening finding: a repo_edit proposal written to the SHARED
+                # checkout (isolation disabled/unavailable -- the isolated-worktree default
+                # never populates `previous_contents`, so this is a no-op there, exactly like
+                # the verification-failure rollback below) must not survive losing the lease
+                # right here, before verification ever runs. Before this fix, the only
+                # `_rollback_proposal_writes()` call site was gated on a failed verification --
+                # unreachable on this early-return path, so a stale worker's provisional write
+                # could outlive the task it was for with no way back, the exact state PI-1d's
+                # own docstring says proposal mode must never produce.
+                if task.task_type == "repo_edit":
+                    rolled_back = _rollback_proposal_writes(work_result)
+                    if rolled_back:
+                        logger.warning(
+                            "task_execution job %s: lease lost before work_result checkpoint; "
+                            "shared-checkout proposal edits rolled back: %s",
+                            job_id, ", ".join(rolled_back),
+                        )
                 logger.warning("task_execution job %s: lease lost before work_result checkpoint commit.", job_id)
                 db.rollback()
                 return
