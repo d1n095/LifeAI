@@ -233,6 +233,25 @@ def _login(client: httpx.Client, args: argparse.Namespace) -> str:
     return response.json()["csrf_token"]
 
 
+def _authed(client: httpx.Client, session: dict, method: str, path: str, **kwargs) -> httpx.Response:
+    """Send an authenticated request, renewing the session once when the token expired.
+
+    Access tokens live ``settings.access_token_expire_minutes`` (15 minutes by default), so a
+    multi-hour soak must re-authenticate. Without this the loop keeps running on 401 responses
+    and silently produces no evidence for the rest of the run.
+    """
+
+    headers = dict(kwargs.pop("headers", {}))
+    headers["X-CSRF-Token"] = session["csrf"]
+    response = client.request(method, path, headers=headers, **kwargs)
+    if response.status_code == 401:
+        session["refreshes"] += 1
+        session["csrf"] = _login(client, session["args"])
+        headers["X-CSRF-Token"] = session["csrf"]
+        response = client.request(method, path, headers=headers, **kwargs)
+    return response
+
+
 def _parse_sse(text: str) -> dict:
     events = 0
     deltas = 0
@@ -315,8 +334,8 @@ def _redis_metrics(redis_url: str) -> dict:
         return {"status": "BLOCKED", "reason": f"{type(exc).__name__}: {exc}"}
 
 
-def _incident_health(client: httpx.Client, csrf: str) -> dict:
-    response = client.get("/api/incidents/health", headers={"X-CSRF-Token": csrf})
+def _incident_health(client: httpx.Client, session: dict) -> dict:
+    response = _authed(client, session, "GET", "/api/incidents/health")
     if response.status_code != 200:
         return {"state": "unavailable", "http_status": response.status_code}
     return response.json()
@@ -332,22 +351,24 @@ def _record_failure(failures: list[dict], name: str, status: int | None, detail:
     failures.append({"operation": name, "status": status, "detail": detail[:300], "at": _now()})
 
 
-def _run_job(client: httpx.Client, csrf: str, cycle: int) -> dict:
-    response = client.post(
+def _run_job(client: httpx.Client, session: dict, cycle: int) -> dict:
+    response = _authed(
+        client,
+        session,
+        "POST",
         "/api/mainai/jobs",
         json={
             "job_type": "message_sequence_backfill",
             "input_refs": [],
             "idempotency_key": f"v5-soak-job-{uuid.uuid4()}",
         },
-        headers={"X-CSRF-Token": csrf},
     )
     if response.status_code == 409:
         return {"status": "SKIPPED", "http_status": 409, "detail": response.text[:300]}
     if response.status_code != 201:
         return {"status": "FAIL", "http_status": response.status_code, "detail": response.text[:300]}
     job_id = response.json()["id"]
-    cancelled = client.post(f"/api/mainai/jobs/{job_id}/cancel", headers={"X-CSRF-Token": csrf})
+    cancelled = _authed(client, session, "POST", f"/api/mainai/jobs/{job_id}/cancel")
     return {
         "status": "PASS" if cancelled.status_code in (200, 409) else "FAIL",
         "http_status": cancelled.status_code,
@@ -355,12 +376,14 @@ def _run_job(client: httpx.Client, csrf: str, cycle: int) -> dict:
     }
 
 
-def _import_document(client: httpx.Client, csrf: str, cycle: int) -> dict:
+def _import_document(client: httpx.Client, session: dict, cycle: int) -> dict:
     content = f"V5 soak document {cycle} {uuid.uuid4()}. Semantiskt innehall for retrieval.".encode()
-    response = client.post(
+    response = _authed(
+        client,
+        session,
+        "POST",
         "/api/library/import",
         files={"file": (f"v5-soak-{cycle}.txt", content, "text/plain")},
-        headers={"X-CSRF-Token": csrf},
     )
     if response.status_code != 200:
         return {"status": "FAIL", "http_status": response.status_code, "detail": response.text[:300]}
@@ -368,7 +391,7 @@ def _import_document(client: httpx.Client, csrf: str, cycle: int) -> dict:
     deadline = time.monotonic() + 30
     last = None
     while time.monotonic() < deadline:
-        poll = client.get(f"/api/library/jobs/{job_id}", headers={"X-CSRF-Token": csrf})
+        poll = _authed(client, session, "GET", f"/api/library/jobs/{job_id}")
         if poll.status_code != 200:
             return {"status": "FAIL", "http_status": poll.status_code, "detail": poll.text[:300]}
         last = poll.json()
@@ -435,7 +458,7 @@ def main() -> int:
         result["log_path"] = str(log_path)
         with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=120.0) as client:
             result["startup_latency_s"] = round(_wait_health(client, proc), 3)
-            csrf = _login(client, args)
+            session = {"csrf": _login(client, args), "args": args, "refreshes": 0}
             result["login_status"] = 200
             last_sample = 0.0
             last_restart = time.monotonic()
@@ -448,17 +471,19 @@ def main() -> int:
                 cycle += 1
                 for name, path in (("health", "/api/health"), ("incident_health", "/api/incidents/health")):
                     t0 = time.perf_counter()
-                    response = client.get(path, headers={"X-CSRF-Token": csrf})
+                    response = _authed(client, session, "GET", path)
                     _record(result["latencies_ms"], name, t0)
                     result["counts"][name] = result["counts"].get(name, 0) + 1
                     if response.status_code != 200:
                         _record_failure(result["failures"], name, response.status_code, response.text)
 
                 t0 = time.perf_counter()
-                chat = client.post(
+                chat = _authed(
+                    client,
+                    session,
+                    "POST",
                     "/api/chat",
                     json={"message": f"V5 soak cycle {cycle}: svara kort.", "client_message_id": f"v5-soak-chat-{uuid.uuid4()}"},
-                    headers={"X-CSRF-Token": csrf},
                 )
                 _record(result["latencies_ms"], "chat", t0)
                 result["counts"]["chat"] = result["counts"].get("chat", 0) + 1
@@ -466,10 +491,12 @@ def main() -> int:
                     _record_failure(result["failures"], "chat", chat.status_code, chat.text)
 
                 t0 = time.perf_counter()
-                stream = client.post(
+                stream = _authed(
+                    client,
+                    session,
+                    "POST",
                     "/api/chat/stream",
                     json={"message": f"V5 soak stream {cycle}: svara kort.", "client_message_id": f"v5-soak-stream-{uuid.uuid4()}"},
-                    headers={"X-CSRF-Token": csrf},
                 )
                 _record(result["latencies_ms"], "chat_stream", t0)
                 result["counts"]["chat_stream"] = result["counts"].get("chat_stream", 0) + 1
@@ -483,17 +510,19 @@ def main() -> int:
                     )
 
                 if cycle % 5 == 0:
-                    imported = _import_document(client, csrf, cycle)
+                    imported = _import_document(client, session, cycle)
                     result["counts"]["document_import"] = result["counts"].get("document_import", 0) + 1
                     if imported["status"] != "PASS":
                         _record_failure(result["failures"], "document_import", imported.get("http_status"), json.dumps(imported))
                     else:
                         # Retrieval after ingestion is the real pgvector-backed chat path.
                         t0 = time.perf_counter()
-                        grounded = client.post(
+                        grounded = _authed(
+                            client,
+                            session,
+                            "POST",
                             "/api/chat",
                             json={"message": "Vilket innehall finns i det importerade V5 soak-dokumentet?", "client_message_id": f"v5-soak-ground-{uuid.uuid4()}"},
-                            headers={"X-CSRF-Token": csrf},
                         )
                         _record(result["latencies_ms"], "retrieval_chat", t0)
                         result["counts"]["retrieval_chat"] = result["counts"].get("retrieval_chat", 0) + 1
@@ -501,7 +530,7 @@ def main() -> int:
                             _record_failure(result["failures"], "retrieval_chat", grounded.status_code, grounded.text)
 
                 if cycle % 3 == 0:
-                    job = _run_job(client, csrf, cycle)
+                    job = _run_job(client, session, cycle)
                     result["counts"]["mainai_job"] = result["counts"].get("mainai_job", 0) + 1
                     if job["status"] == "SKIPPED":
                         jobs_skipped += 1
@@ -526,7 +555,7 @@ def main() -> int:
                                 "process": _sample_process(proc.pid),
                                 "database": _db_metrics(args.database_url),
                                 "redis": _redis_metrics(args.redis_url),
-                                "incidents": _incident_health(client, csrf),
+                                "incidents": _incident_health(client, session),
                             }
                         )
 
@@ -534,7 +563,7 @@ def main() -> int:
                     _stop(proc)
                     proc, log_path = _start_backend(args, port, temp)
                     _wait_health(client, proc)
-                    csrf = _login(client, args)
+                    session["csrf"] = _login(client, session["args"])
                     restarts += 1
                     last_restart = time.monotonic()
                     result["counts"]["restarts"] = restarts
@@ -544,7 +573,8 @@ def main() -> int:
             result["counts"]["cycles"] = cycle
             result["counts"]["jobs_skipped_capability"] = jobs_skipped
             result["counts"]["restarts"] = restarts
-            result["incident_health_last"] = _incident_health(client, csrf)
+            result["counts"]["session_refreshes"] = session["refreshes"]
+            result["incident_health_last"] = _incident_health(client, session)
     except Exception as exc:
         result["blockers"].append(f"{type(exc).__name__}: {exc}")
     finally:
