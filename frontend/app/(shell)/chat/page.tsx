@@ -467,11 +467,15 @@ export default function ChatPage() {
                   <div className="mt-1 text-white/50 text-xs">{entry.errorMessage}</div>
                   <button
                     type="button"
-                    onClick={() => entry.userMessageId && retry(entry.userMessageId)}
+                    onClick={() =>
+                      entry.userMessageId
+                        ? retry(entry.userMessageId)
+                        : conversationId && openConversation(conversationId)
+                    }
                     disabled={loading}
                     className="mt-2 rounded border border-red-500/30 px-3 py-1 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-30"
                   >
-                    Försök igen
+                    {entry.userMessageId ? "Försök igen" : "Ladda om konversationen"}
                   </button>
                 </div>
               ) : (
