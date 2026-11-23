@@ -8,6 +8,7 @@ Expects the schema to already be migrated (`alembic upgrade head` — see
 .github/workflows/ci.yml and docs/OPERATIONS.md). Deliberately does NOT create tables
 itself; that's the whole point of no longer using Base.metadata.create_all in this app.
 """
+import asyncio
 import json
 import os
 import sys
@@ -27,14 +28,18 @@ PORT = int(os.environ.get("E2E_BACKEND_PORT", "8010"))
 open(EMAIL_LOG_PATH, "w").close()
 
 from app.config import get_settings
-from app.providers.base import ChatResult
+from app.providers.base import ChatResult, StreamChunk
 from app.providers.openai_provider import OpenAIProvider
+from app.providers.ollama_provider import OllamaProvider
 from app.rag.claims import CLAIM_EXTRACTION_SYSTEM_PROMPT
 import app.rag.vector_store as vector_store
 import app.rag.retrieve as retrieve_mod
 import app.routers.auth as auth_router
 
 _EMBEDDING_DIM = get_settings().embedding_dim
+# Guarded chat permits local query embedding; its transport alone is faked here.
+get_settings().default_embedding_provider = "ollama"
+get_settings().default_embedding_model = "nomic-embed-text"
 
 
 async def fake_chat(self, messages, model, **kwargs):
@@ -60,6 +65,34 @@ async def fake_chat(self, messages, model, **kwargs):
         model=model,
         raw_usage={"prompt_tokens": 180, "completion_tokens": 55},
     )
+
+
+_FAKE_REPLY_WORDS = (
+    "Hej! Detta ar ett riktigt svar fran den simulerade AI-motorn under E2E-testet. "
+    "Kostnadsloggning, Trust Engine och konversationshistorik gar via de riktiga API-vagarna."
+).split(" ")
+
+
+async def fake_chat_stream(self, messages, model, *, timeout=None, **kwargs):
+    """Real multi-chunk streaming for the E2E suite's chat flow — lets a Playwright test
+    observe genuine incremental rendering (a partial substring visible before the full reply
+    lands), not just the final state a single-shot fake would produce. Splits the same
+    deterministic reply fake_chat() returns into several word-group chunks with a small real
+    delay between them, so the frontend's SSE consumption is exercised against an actual
+    multi-event stream, matching how OllamaProvider.chat_stream() behaves against a real model."""
+    if messages and messages[0].role == "system" and messages[0].content == CLAIM_EXTRACTION_SYSTEM_PROMPT:
+        result = await fake_chat(self, messages, model, **kwargs)
+        yield StreamChunk(delta=result.content)
+        yield StreamChunk(delta="", done=True, usage=result.raw_usage, provider=result.provider, model=result.model)
+        return
+    for i in range(0, len(_FAKE_REPLY_WORDS), 4):
+        chunk = " ".join(_FAKE_REPLY_WORDS[i : i + 4])
+        if i > 0:
+            chunk = " " + chunk
+        yield StreamChunk(delta=chunk)
+        await asyncio.sleep(0.15)
+    yield StreamChunk(delta="", done=True, provider="openai", model=model,
+                      usage={"prompt_tokens": 180, "completion_tokens": 55})
 
 
 async def fake_embed(self, texts, model):
@@ -107,7 +140,8 @@ def fake_send_email(to: str, subject: str, body_text: str) -> None:
 
 
 OpenAIProvider.chat = fake_chat
-OpenAIProvider.embed = fake_embed
+OpenAIProvider.chat_stream = fake_chat_stream
+OllamaProvider.embed = fake_embed
 vector_store.search = fake_search
 retrieve_mod.search = fake_search
 auth_router.send_email = fake_send_email
