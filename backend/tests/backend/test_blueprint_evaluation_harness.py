@@ -196,11 +196,7 @@ def test_token_budget_prompt_size_stays_within_documented_bound(client, superuse
     character bound — the existing trimming (routers/blueprint.py's _SYNTH_PROMPT_MAX_SOURCES/
     _SYNTH_EXCERPT_CHARS) must still be doing its job, measured directly on the real prompt
     text rather than assumed from reading the constants."""
-    from app.routers.blueprint import (
-        _SYNTH_EXCERPT_CHARS,
-        _SYNTH_PROMPT_MAX_SOURCES,
-        _UNTRUSTED_SOURCE_BEGIN,
-    )
+    from app.routers.blueprint import _SYNTH_EXCERPT_CHARS, _SYNTH_PROMPT_MAX_SOURCES
 
     founder_id = _founder_id(superuser_db)
     title = f"TokenBudget {uuid.uuid4().hex[:6]}"
@@ -222,6 +218,10 @@ def test_token_budget_prompt_size_stays_within_documented_bound(client, superuse
     # ...but the actual prompt sent to the model only ever contains the bounded subset.
     sent_messages = _fake_model["messages"][-1]
     user_msg = next(m.content for m in sent_messages if m.role == "user")
-    assert user_msg.count(_UNTRUSTED_SOURCE_BEGIN) == _SYNTH_PROMPT_MAX_SOURCES
+    # Phase 3 Founder Alpha staging integration: blueprint.py now frames sources through
+    # app.rag.untrusted_content (same mechanism as chat.py/workbench.py), not the older
+    # prompt_fencing.py markers — "DOKUMENTINNEHÅLL BÖRJAR" is that frame's fixed open-marker
+    # substring (the title portion varies per excerpt, this prefix does not).
+    assert user_msg.count("DOKUMENTINNEHÅLL BÖRJAR") == _SYNTH_PROMPT_MAX_SOURCES
     for excerpt_line in (line for line in user_msg.split("\n") if line.startswith("Detta är")):
         assert len(excerpt_line) <= _SYNTH_EXCERPT_CHARS
