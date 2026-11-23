@@ -114,6 +114,20 @@ _PROTECTED_TABLES = [
     ("document_source_units", ["SELECT", "INSERT"]),
     ("memory_source_lifecycle_events", ["SELECT"]),
     ("storage_deletion_tasks", []),
+    # NOTE: alembic_version is deliberately NOT narrowed here. R15 (codex/r15-routing-
+    # integration-hardening, commit db7cdf9c) independently added a SELECT-only entry for it
+    # in this list, in parallel with and unaware of this same SFA-1 finding already being
+    # fixed on the integration base (commit 67c7311d) via the stricter, separate
+    # `_MIGRATION_STATE_TABLES` mechanism below (zero privileges, not SELECT-only). Because
+    # this loop runs AFTER the `_MIGRATION_STATE_TABLES` REVOKE ALL in
+    # `apply_privilege_policy()`, keeping both meant this list's GRANT SELECT silently undid
+    # that REVOKE ALL every boot — verified by reproducing it against a real Postgres: the
+    # policy's own re-verification then reported `alembic_version.SELECT: mainai_app holds
+    # it` as a policy violation. Reconciling R15 into this branch: kept the stricter,
+    # already-integrated zero-privilege policy and its dedicated test coverage
+    # (tests/backend/test_migration_state_privileges.py); removed this now-superseded entry
+    # and R15's own SFA-1 test section (tests/backend/test_runtime_table_privileges.py),
+    # which asserted the SELECT-only behavior this entry granted.
     # Life Source Foundation Bootstrap (migration 0037, docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md
     # §D/§L) — message_source_units is S1C, the exact same exclusive-arc pattern as
     # document_source_units above (every field guarded immutable by trg_msgsu_guard_update,
