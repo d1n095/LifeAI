@@ -82,6 +82,37 @@ services:
     ports:
       - "8000:8000"
 
+  worker:
+    # Durable-worker package (app/worker.py's module docstring): document chunking/embedding
+    # and MainAI execution job processing both run ONLY through this process's claim loop —
+    # "No second queue. No in-process BackgroundTasks." (see app/routers/documents.py). Without
+    # this service, `docker compose up --build` boots a fully working API that accepts
+    # document uploads and creates MainAI jobs, but nothing ever indexes a document or
+    # executes a job — a hidden manual-setup gap this service closes. Same image as `backend`,
+    # different command, exactly like docker-compose.vps.yml's production topology.
+    build: ./backend
+    command: ["python", "-m", "app.worker"]
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://lifeos:lifeos@postgres:5432/lifeos
+      APP_DATABASE_URL: postgresql://mainai_app:${MAINAI_APP_PASSWORD:-mainai_app}@postgres:5432/lifeos
+      OLLAMA_BASE_URL: http://ollama:11434
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      # See backend/docker-entrypoint.sh: only `backend` runs migrations and mutates
+      # mainai_app's privileges. The worker shares backend's image/entrypoint but must not
+      # race the same boot steps against the same database — it verifies the privilege state
+      # read-only instead (apply_runtime_privileges.py --verify-only) and fails closed if it's
+      # wrong, exactly like the VPS deploy's worker service.
+      RUN_MIGRATIONS: "false"
+      RUN_PRIVILEGE_BOOT: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   frontend:
     build:
       context: ./frontend

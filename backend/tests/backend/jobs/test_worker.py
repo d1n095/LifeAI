@@ -203,6 +203,95 @@ async def test_worker_run_once_claims_and_processes_a_real_job_end_to_end(db_ses
     assert refreshed.succeeded_count == 1
 
 
+@pytest.mark.asyncio
+async def test_process_claimed_job_retries_through_a_redis_blip_then_succeeds(superuser_db, make_verified_user, monkeypatch):
+    """Recovery scenario (Redis unavailability + interrupted ingestion): each piece here is
+    already unit-tested in isolation -- is_transient_error classifies JobLockUnavailable as
+    transient (tests/backend/jobs/test_job_retry.py), and run_import_job itself fails closed
+    by re-raising it (tests/backend/rag/test_library_import_job_lock_fail_closed.py) -- but
+    nothing exercises app/worker.py's process_claimed_job LOOP that is supposed to glue those
+    two together: catch the transient failure, bump attempt_count, go back to `pending`, back
+    off, and retry once Redis returns, rather than either looping forever or permanently
+    failing a job that would have succeeded on retry. This proves the glue, not the pieces."""
+    import app.worker as worker_module
+    from app.jobs.lock import JobLock, JobLockUnavailable
+    from app.providers.base import ChatResult
+    from app.providers.openai_provider import OpenAIProvider
+    from app.storage import get_storage
+    from app.worker import process_claimed_job
+
+    # No real backoff delay in a test -- just prove sleep was actually called (i.e. the
+    # transient path was taken), without spending the real seconds on it.
+    sleep_calls = []
+
+    async def _fast_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(worker_module.asyncio, "sleep", _fast_sleep)
+
+    async def _fake_embed(self, texts, model, **kwargs):
+        return [[0.02] * get_settings().embedding_dim for _ in texts]
+
+    async def _fake_chat(self, messages, model, **kwargs):
+        return ChatResult(content="[]", provider="openai", model=model, raw_usage={"prompt_tokens": 5, "completion_tokens": 2})
+
+    monkeypatch.setattr(OpenAIProvider, "embed", _fake_embed)
+    monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat)
+
+    user, _ = make_verified_user()
+    raw = b"content the worker must still index once redis comes back"
+
+    def _read_chunk():
+        nonlocal raw
+        chunk, raw = raw[:1 << 16], raw[1 << 16 :]
+        return chunk
+
+    blob = get_storage().write_stream(_read_chunk, max_bytes=1 << 16)
+    job = ImportJob(
+        owner_id=user.id,
+        status=ImportJobStatus.running,
+        source_filename="redis-blip.txt",
+        source_checksum=blob.sha256,
+        source_storage_key=blob.storage_key,
+        source_size_bytes=blob.size_bytes,
+        max_attempts=3,
+    )
+    superuser_db.add(job)
+    superuser_db.commit()
+    job_id = job.id
+    owner_id = user.id
+
+    # Redis is unreachable for exactly the first acquire() call (the blip), then recovers.
+    real_acquire = JobLock.acquire
+    call_count = {"n": 0}
+
+    def _flaky_acquire(self):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise JobLockUnavailable("redis down")
+        return real_acquire(self)
+
+    monkeypatch.setattr(JobLock, "acquire", _flaky_acquire)
+
+    process_db = _ClaimSession()
+    try:
+        await process_claimed_job(process_db, job_id, owner_id)
+    finally:
+        process_db.close()
+
+    assert call_count["n"] == 2, "must retry the lock acquisition, not give up after the first failure"
+    assert len(sleep_calls) == 1, "the transient failure must back off before retrying, not spin immediately"
+
+    superuser_db.expire_all()
+    refreshed = superuser_db.get(ImportJob, job_id)
+    assert refreshed.status == ImportJobStatus.completed, (
+        f"a job that succeeds on retry must end up completed, not {refreshed.status} "
+        f"(failure_reason={refreshed.failure_reason!r})"
+    )
+    assert refreshed.attempt_count == 1, "exactly one retry attempt was needed, not more"
+    assert refreshed.last_failure_transient is True
+
+
 def test_request_shutdown_stops_the_poll_loop_without_claiming_further_work(superuser_db, make_verified_user):
     """Graceful shutdown: once requested, run() must return promptly instead of polling
     forever, even with nothing claimable — the actual mechanism (an asyncio.Event checked at
