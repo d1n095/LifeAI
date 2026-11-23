@@ -1,7 +1,8 @@
+from decimal import Decimal
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.email_utils import EMAIL_PATTERN, normalize_email
 
@@ -179,6 +180,18 @@ class MessageOut(BaseModel):
     provider: str | None
     model: str | None
     created_at: datetime
+    # Added for streaming recovery (Item 3): a `stream_interrupted` assistant row (see
+    # app/routers/chat.py's `_ClientDisconnected` handling) has non-empty, genuinely partial
+    # `content` -- unlike a pre-streaming provider failure, which always saved empty content.
+    # Without these three fields the frontend could not tell a reloaded partial-stream message
+    # apart from a complete, successful one, and would silently render truncated text as if it
+    # were the full answer. `status`/`error_category` mirror MessageStatus/the same
+    # VerificationResult categories chat.py's live SSE error event already carries;
+    # `in_reply_to_id` lets the frontend target a retry at the correct user message after a
+    # fresh page load, the same way the live stream_interrupted/error paths already do.
+    status: str
+    error_category: str | None
+    in_reply_to_id: uuid.UUID | None
 
 
 class ConversationOut(BaseModel):
@@ -249,11 +262,95 @@ class ProviderConfigIn(BaseModel):
     provider: str
     model: str
 
+    @field_validator("role")
+    @classmethod
+    def valid_role(cls, value: str) -> str:
+        if value not in ("chat", "embedding"):
+            raise ValueError("role måste vara 'chat' eller 'embedding'.")
+        return value
+
+    @field_validator("provider", "model")
+    @classmethod
+    def non_empty_identifier(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("provider och model måste vara icke-tomma.")
+        return normalized
+
 
 class ProviderConfigOut(ProviderConfigIn):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     is_active: bool
+
+
+class ModelCatalogOut(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+    supported_capabilities: list[str]
+    metadata_note: str = "declared metadata; not runtime, price, quota or version guarantees"
+    provider: str
+    model_id: str
+    version: str
+    capabilities: list[str]
+    context_window_tokens: int | None
+    locality: str
+    license_name: str
+    license_url: str | None
+    input_price_per_million_usd: float | None
+    output_price_per_million_usd: float | None
+    pricing_source: str
+    pricing_as_of: str | None
+    requests_per_minute: int | None
+    tokens_per_minute: int | None
+    quota_note: str
+    availability: str
+    configured: bool
+    verification_result: str | None = None
+    verification_checked_at: datetime | None = None
+
+
+class ModelSelectionPreviewIn(BaseModel):
+    role: str = "chat"
+    required_capabilities: list[str] = []
+    minimum_context_tokens: int = 0
+    estimated_input_tokens: int = 0
+    allow_external: bool = False
+    prefer_local: bool = True
+    allowed_providers: list[str] = []
+    allowed_models: list[str] = []
+    max_input_price_per_million_usd: Decimal | None = Field(default=None, ge=0, allow_inf_nan=False)
+    max_output_price_per_million_usd: Decimal | None = Field(default=None, ge=0, allow_inf_nan=False)
+    estimated_output_tokens: int = Field(default=0, ge=0)
+    max_pricing_age_days: int = Field(default=30, ge=0, le=365)
+    require_verified: bool = True
+    requested_provider: str | None = None
+    requested_model: str | None = None
+
+    @field_validator("role")
+    @classmethod
+    def valid_selection_role(cls, value: str) -> str:
+        if value not in ("chat", "embedding"):
+            raise ValueError("role måste vara 'chat' eller 'embedding'.")
+        return value
+
+    @field_validator("minimum_context_tokens", "estimated_input_tokens")
+    @classmethod
+    def non_negative_tokens(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("tokenvärden måste vara icke-negativa.")
+        return value
+
+
+class ModelSelectionPreviewOut(BaseModel):
+    provider: str
+    model: str
+    version: str
+    capabilities: list[str]
+    locality: str
+    verified_required: bool
+    authority_note: str = (
+        "selection is not spend, egress, execution, merge, deploy, or activation authority"
+    )
 
 
 class ProviderVerificationOut(BaseModel):
@@ -266,6 +363,7 @@ class ProviderVerificationOut(BaseModel):
     message: str
     checked_by: str  # "system" | "founder"
     checked_at: datetime
+    model: str | None = None
 
 
 class ProviderStatus(BaseModel):
@@ -280,6 +378,17 @@ class ProviderStatus(BaseModel):
 class ProviderVerifyIn(BaseModel):
     provider: str
     role: str  # "chat" | "embedding"
+    model: str | None = None
+
+    @field_validator("provider", "model")
+    @classmethod
+    def valid_identifier(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        value = value.strip()
+        if not value or len(value) > 128 or any(ord(c) < 32 for c in value):
+            raise ValueError("ogiltigt provider-/modellnamn")
+        return value
 
     @field_validator("role")
     @classmethod
@@ -369,6 +478,85 @@ class KnowledgeClaimOut(BaseModel):
     grounding_score: float
     chunk_id: uuid.UUID | None
     created_at: datetime
+    # Evidence-aware epistemics (app/rag/epistemics.py): verified_fact |
+    # conflicting_evidence | hypothesis | assumption | unknown — additive; None only for
+    # constructors that predate the ladder (every live read path sets it).
+    epistemic_status: str | None = None
+    # Evidence-quality metadata (app/rag/evidence_metadata.py): the founder-declared study
+    # facts and the MATERIALIZED verdict the pure grader computed from them. None/[] when
+    # nothing has been stamped for the claim — an honest absence, never a guess.
+    quality_grade: str | None = None
+    quality_cap: str | None = None
+    quality_caveats: list[str] = []
+
+
+class ClaimEvidenceMetadataIn(BaseModel):
+    """A founder-declared structured study-metadata block for one claim (the producer
+    input to app/rag/evidence_metadata.record_claim_evidence_metadata). Keys outside the
+    declared vocabulary come back in `rejected_keys` — fail-closed, never stored."""
+
+    metadata: dict = {}
+    declared_via: str = "founder_api"
+
+
+class ClaimEvidenceMetadataOut(BaseModel):
+    claim_id: uuid.UUID
+    declared: dict
+    rejected: dict[str, str]
+    quality_grade: str
+    quality_cap: str
+    quality_caveats: list[str]
+    axis_findings: list[dict]
+    declared_via: str
+    recorded_at: datetime
+
+
+class ClaimGraphEdgeIn(BaseModel):
+    """A founder-declared claim-graph edge (Round 8 M3): the production input path for
+    connecting claims across domains. The type vocabulary is the table's own closed enum;
+    an unknown type is refused, never guessed."""
+
+    to_claim_id: uuid.UUID
+    relationship_type: str  # supports | contradicts | supersedes | duplicates
+    note: str | None = None
+
+
+class ClaimGraphEdgeOut(BaseModel):
+    id: uuid.UUID
+    from_claim_id: uuid.UUID
+    to_claim_id: uuid.UUID
+    relationship_type: str
+    note: str | None = None
+    # Epistemic-shift records (Round 8 M3): prior vs current ladder verdict for each
+    # endpoint, computed when a contradicts edge lands — "new information changed an
+    # earlier conclusion", with the reasons on both sides. Empty for non-contradicts edges.
+    epistemic_shifts: list[dict] = []
+
+
+class ClaimEvidenceChainOut(BaseModel):
+    """The full traceability record for one claim (Round 8 M3): verdict + reasons + the
+    source/chunk grounding + BOTH sides of every contradicting edge (a conflict is
+    presented, never adjudicated here) + the stamped study-metadata verdict + the
+    bounded second-order consequences of the claim's source. Round 10 M4 adds the
+    bounded INTELLECTUAL ADVERSARY review: evidence-backed objections when justified,
+    each with its epistemic category and provenance pointers; reviewed=False means no
+    justified objection — never silent approval."""
+
+    claim_id: uuid.UUID
+    claim_text: str
+    claim_type: str
+    claim_status: str
+    confidence: str
+    epistemic_status: str
+    verdict_reasons: list[str]
+    source: dict
+    chunk_grounded: bool
+    adversarial_review: dict
+    quality_metadata: dict | None = None
+    supporting_edges: list[dict] = []
+    contradicting_edges: list[dict] = []
+    other_edges: list[dict] = []
+    second_order_consequences: list[dict] = []
 
 
 class MediaSegmentOut(BaseModel):
