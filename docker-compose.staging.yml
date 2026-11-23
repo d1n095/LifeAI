@@ -1,0 +1,302 @@
+# Reproducible staging topology — Workstream 3 of the "Founder Alpha Staging Activation"
+# program. Deliberately NOT docker-compose.vps.yml (production) and NOT docker-compose.yml
+# (local dev): it borrows production's container hardening (security_opt/cap_drop/read_only/
+# tmpfs/pids_limit/mem_limit/cpus, see docker-compose.vps.yml's own header comment for the
+# full rationale) but adds its own isolated Postgres+pgvector instead of touching any real
+# Supabase project, and gates its one public entrypoint behind HTTP Basic Auth in addition to
+# the app's own founder login, since this candidate has not been through independent security
+# review yet (see docs/STAGING_DEPLOYMENT.md's recommendation and resource math for why).
+#
+# Run with its own Compose project name so it can never collide with a production deployment
+# on the same host: `docker compose -f docker-compose.staging.yml -p lifeai-staging up -d`.
+# Every volume/network name below is scoped under that project automatically — nothing here
+# can be confused with `lifeai_*` (production's prefix under `-p lifeai`).
+#
+# OLLAMA_BASE_URL deliberately has NO default pointing at a bundled local `ollama` service —
+# see docs/STAGING_DEPLOYMENT.md's resource math: a 2GB host already has no headroom for a
+# second full application stack, let alone one that also runs model weights. Point it at a
+# remote, already-approved Ollama-compatible endpoint (the `remote-ollama` option in that
+# doc). The `ollama` service below exists ONLY for a dedicated staging host with real spare
+# RAM (profile `local-llm`, same opt-in pattern docker-compose.yml already uses) — it is never
+# started by a plain `up`.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    # Postgres needs to write its own data directory — unlike the stateless services below,
+    # this one is NOT read_only; the named volume is its only persistent write target.
+    environment:
+      POSTGRES_USER: lifeos_staging
+      POSTGRES_PASSWORD: ${STAGING_POSTGRES_PASSWORD:?sätt STAGING_POSTGRES_PASSWORD}
+      POSTGRES_DB: lifeos_staging
+      MAINAI_APP_PASSWORD: ${STAGING_MAINAI_APP_PASSWORD:?sätt STAGING_MAINAI_APP_PASSWORD}
+    volumes:
+      - staging_postgres_data:/var/lib/postgresql/data
+      - ./backend/db-init:/docker-entrypoint-initdb.d:ro
+    pids_limit: 100
+    mem_limit: 256m
+    cpus: "0.50"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lifeos_staging"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - staging_data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # No `ports:` — only backend/worker, over staging_data, ever reach this. Unlike
+    # production (Supabase-hosted, see docker-compose.vps.yml's header comment), staging runs
+    # its own disposable Postgres so a staging run can never touch real founder data.
+
+  ollama:
+    # Opt-in only (`--profile local-llm`) — see this file's header comment. Only sane on a
+    # dedicated host with real spare RAM beyond the ~1GB the rest of this stack needs; never
+    # on the production VPS's 2GB.
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - staging_ollama_data:/root/.ollama
+    networks:
+      - staging_data
+    profiles: ["local-llm"]
+    # No `ports:` published — reached over staging_data by backend/worker only, same as every
+    # other internal-only service in this file.
+
+  redis:
+    image: valkey/valkey:8.1.9-alpine@sha256:a038175878d66b9d274fbf8be73c0305e93798b83917647f167e18cef3c71eec
+    restart: unless-stopped
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /data
+    pids_limit: 50
+    mem_limit: 96m
+    cpus: "0.25"
+    environment:
+      REDIS_PASSWORD: ${STAGING_REDIS_PASSWORD:?sätt STAGING_REDIS_PASSWORD}
+    entrypoint: ["sh", "-c"]
+    command:
+      - 'exec redis-server --requirepass "$$REDIS_PASSWORD" --save "" --appendonly no'
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli --no-auth-warning ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - staging_data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Same reasoning as docker-compose.vps.yml's redis service (ephemeral rate-limit/job-lock
+    # cache only, nothing that needs disk persistence) — see that file for the full writeup.
+
+  backend:
+    # Built from source, not a pinned digest like production — staging exists to test an
+    # unreleased candidate commit, not a tagged release. Swap to
+    # `image: ${STAGING_BACKEND_IMAGE}` once this candidate has an image built by
+    # .github/workflows/build-images.yml, mirroring docker-compose.vps.yml.
+    build: ./backend
+    restart: unless-stopped
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - staging_uploads:/var/lib/lifeai/uploads
+    pids_limit: 200
+    mem_limit: 384m
+    cpus: "0.75"
+    environment:
+      ENVIRONMENT: staging
+      DATABASE_URL: postgresql://lifeos_staging:${STAGING_POSTGRES_PASSWORD:?sätt STAGING_POSTGRES_PASSWORD}@postgres:5432/lifeos_staging
+      APP_DATABASE_URL: postgresql://mainai_app:${STAGING_MAINAI_APP_PASSWORD:?sätt STAGING_MAINAI_APP_PASSWORD}@postgres:5432/lifeos_staging
+      # No default: see this file's header comment. Point at a remote, already-approved
+      # Ollama-compatible endpoint, or set to http://ollama:11434 only if running with
+      # `--profile local-llm` on a host that can actually afford it.
+      OLLAMA_BASE_URL: ${STAGING_OLLAMA_BASE_URL:?sätt STAGING_OLLAMA_BASE_URL — se docs/STAGING_DEPLOYMENT.md}
+      REDIS_URL: redis://:${STAGING_REDIS_PASSWORD:?sätt STAGING_REDIS_PASSWORD}@redis:6379/0
+      FRONTEND_ORIGINS: ${STAGING_FRONTEND_ORIGINS:?sätt STAGING_FRONTEND_ORIGINS, t.ex. https://staging.exempel.se}
+      SECRET_KEY: ${STAGING_SECRET_KEY:?sätt STAGING_SECRET_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - staging_internal
+      - staging_data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # No `ports:` — never reachable except via Caddy on staging_internal, same isolation
+    # property as production.
+
+  worker:
+    build: ./backend
+    command: ["python", "-m", "app.worker"]
+    restart: unless-stopped
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - staging_uploads:/var/lib/lifeai/uploads
+    pids_limit: 100
+    mem_limit: 256m
+    cpus: "0.50"
+    environment:
+      ENVIRONMENT: staging
+      DATABASE_URL: postgresql://lifeos_staging:${STAGING_POSTGRES_PASSWORD:?sätt STAGING_POSTGRES_PASSWORD}@postgres:5432/lifeos_staging
+      APP_DATABASE_URL: postgresql://mainai_app:${STAGING_MAINAI_APP_PASSWORD:?sätt STAGING_MAINAI_APP_PASSWORD}@postgres:5432/lifeos_staging
+      OLLAMA_BASE_URL: ${STAGING_OLLAMA_BASE_URL:?sätt STAGING_OLLAMA_BASE_URL — se docs/STAGING_DEPLOYMENT.md}
+      REDIS_URL: redis://:${STAGING_REDIS_PASSWORD:?sätt STAGING_REDIS_PASSWORD}@redis:6379/0
+      # Same reasoning as docker-compose.vps.yml's worker service: only `backend` runs
+      # migrations and mutates mainai_app's privileges; worker verifies read-only.
+      RUN_MIGRATIONS: "false"
+      RUN_PRIVILEGE_BOOT: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    networks:
+      - staging_internal
+      - staging_data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    pids_limit: 200
+    mem_limit: 384m
+    cpus: "0.75"
+    environment:
+      INTERNAL_API_URL: http://backend:8000
+      HOSTNAME: "0.0.0.0"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "const r=require('http').get({host:'127.0.0.1',port:3000,path:'/api/health',timeout:3000},res=>{console.log('status',res.statusCode);process.exit(res.statusCode===200?0:1)});r.on('timeout',()=>{console.error('timeout');r.destroy();process.exit(1)});r.on('error',e=>{console.error('error',e.message);process.exit(1)})",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - staging_internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # No `ports:` — only Caddy, over staging_internal, ever reaches this.
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    tmpfs:
+      - /tmp
+    pids_limit: 100
+    mem_limit: 96m
+    cpus: "0.25"
+    environment:
+      STAGING_DOMAIN: ${STAGING_DOMAIN:?sätt STAGING_DOMAIN, t.ex. staging.exempel.se (eller :8443 för en ren IP-adress)}
+      STAGING_BASIC_AUTH_USER: ${STAGING_BASIC_AUTH_USER:?sätt STAGING_BASIC_AUTH_USER}
+      # Caddy's own `basic_auth` directive wants a bcrypt hash, never a plaintext password —
+      # generate it with `docker run --rm caddy:2-alpine caddy hash-password --plaintext
+      # '<lösenord>'` and put ONLY the resulting hash here, never the plaintext.
+      STAGING_BASIC_AUTH_HASH: ${STAGING_BASIC_AUTH_HASH:?sätt STAGING_BASIC_AUTH_HASH — se kommentaren ovan}
+    # Published on 8443/8080, deliberately NOT 443/80 — never collides with a production
+    # Caddy already bound to the standard ports on the same host. An operator putting
+    # staging on its own dedicated instance (this file's recommended option — see
+    # docs/STAGING_DEPLOYMENT.md) may re-map these back to 443/80 in an override file, but the
+    # default here is chosen so this compose file is safe to bring up even on a host that
+    # ALSO runs docker-compose.vps.yml, without a port collision — isolation does not depend
+    # on an operator remembering to change a port.
+    ports:
+      - "8443:8443"
+      - "8080:8080"
+    volumes:
+      - ./Caddyfile.staging:/etc/caddy/Caddyfile:ro
+      - staging_caddy_data:/data
+      - staging_caddy_config:/config
+    depends_on:
+      frontend:
+        condition: service_healthy
+    networks:
+      - staging_internal
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  staging_internal:
+    driver: bridge
+  staging_data:
+    driver: bridge
+    internal: true
+
+volumes:
+  staging_postgres_data:
+  staging_ollama_data:
+  staging_uploads:
+  staging_caddy_data:
+  staging_caddy_config:
