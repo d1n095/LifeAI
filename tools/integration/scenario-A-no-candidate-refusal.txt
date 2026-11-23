@@ -1,0 +1,6 @@
+# Freebuff integration run — lifeai-openai-integration-v4.bundle
+
+- ✅ bundle ingested (base-seeded if needed); refs: (none)
+- ❌ candidate e392022 NOT present in ingested objects — gate refuses candidate production
+
+**RESULT: NO-GO — the actual candidate commit is absent. Nothing was produced.**
