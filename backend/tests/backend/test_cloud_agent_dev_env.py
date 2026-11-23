@@ -146,6 +146,37 @@ def test_derive_app_database_url_matches_ensure_app_role():
     )
 
 
+def test_derive_app_database_url_fail_closed_on_empty_password_in_both_implementations():
+    """Empty MAINAI_APP_PASSWORD must never yield a derived URL with an empty password —
+    .cursor raises ValueError; ensure_app_role exits 1. Before the fix, the production
+    derivation silently produced postgresql://mainai_app:@host/db, which only surfaced as
+    a confusing connection failure (or, via --derive-only, was written into RENDER_ENV_FILE)."""
+    security_dir = REPO_ROOT / "backend" / "scripts" / "security"
+    sys.path.insert(0, str(security_dir))
+    import ensure_app_role  # noqa: E402
+
+    database_url = "postgresql://lifeos:lifeos@localhost:5432/lifeos"
+    with pytest.raises(ValueError):
+        derive_app_database_url(database_url, "")
+    with pytest.raises(SystemExit):
+        ensure_app_role._derive_app_database_url(database_url, "")
+
+
+def test_ensure_app_role_derivation_never_echoes_credentials_on_malformed_url(capsys):
+    """The malformed-DATABASE_URL error path must not print the URL: it can still contain
+    the lifeos password, and stderr lands in container/deploy logs (same stance as
+    .cursor/parse_database_url.py)."""
+    security_dir = REPO_ROOT / "backend" / "scripts" / "security"
+    sys.path.insert(0, str(security_dir))
+    import ensure_app_role  # noqa: E402
+
+    with pytest.raises(SystemExit):
+        ensure_app_role._derive_app_database_url("postgresql://:super-secret@host/db", "app-pw")
+    captured = capsys.readouterr()
+    assert "super-secret" not in captured.err
+    assert "super-secret" not in captured.out
+
+
 def test_sync_env_file_rewrites_drifted_app_database_url_without_logging_secrets(tmp_path):
     env_path = tmp_path / ".env"
     env_path.write_text(

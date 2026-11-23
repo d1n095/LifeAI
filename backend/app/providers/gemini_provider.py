@@ -2,6 +2,7 @@ import logging
 
 import httpx
 
+from app.providers.base import chat_token_limit
 from app.config import get_settings
 from app.providers.base import ChatResult, LLMProvider, Message, ProviderError, looks_like_placeholder_secret
 
@@ -117,6 +118,9 @@ class GeminiProvider(LLMProvider):
             if m.role != "system"
         ]
         payload: dict = {"contents": contents}
+        token_limit = chat_token_limit(kwargs)
+        if token_limit is not None:
+            payload["generationConfig"] = {"maxOutputTokens": token_limit}
         if system:
             payload["systemInstruction"] = {"parts": [{"text": system}]}
         data = await self._post("generateContent", model, payload, timeout)

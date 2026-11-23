@@ -19,6 +19,7 @@ from app.mainai_execution.checkpoint import (
     record_checkpoint,
 )
 from app.models.mainai_execution import MainAIGoal, MainAITask
+from app.billing import record_usage as record_usage_event
 from app.models.usage import UsageLog
 from app.models.work_intelligence import WorkStrategyExecution
 from app.providers.base import Message, ProviderError
@@ -508,19 +509,18 @@ def _record_participation(
         usage = response.raw_usage or {}
         prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
         completion_tokens = int(usage.get("completion_tokens", 0) or 0)
-        db.add(
-            UsageLog(
-                user_id=request.owner_id,
-                conversation_id=None,
-                role="planning",
-                provider=response.provider,
-                model=response.model,
-                prompt_tokens=max(prompt_tokens, 0),
-                completion_tokens=max(completion_tokens, 0),
-                cost_usd=estimate_cost(
-                    response.provider, response.model, prompt_tokens, completion_tokens
-                ),
-            )
+        # Revenue & Compute Engine: the SINGLE accounting writer (audit row + rollups).
+        record_usage_event(
+            db,
+            user_id=request.owner_id,
+            tenant_id=None,
+            role="planning",
+            provider=response.provider,
+            model=response.model,
+            prompt_tokens=max(prompt_tokens, 0),
+            completion_tokens=max(completion_tokens, 0),
+            agent="provider-specialist",
+            task=getattr(request, "task_kind", None) or "provider_planning",
         )
     return specialist, evidence, idea_ids
 

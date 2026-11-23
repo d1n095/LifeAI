@@ -179,14 +179,31 @@ def _build_task_prompt(task: AgentTask) -> str:
     return "\n".join(lines)
 
 
-async def dispatch_task(db: Session, task_id: uuid.UUID, *, dispatched_by: str) -> AgentTaskEvent:
+async def dispatch_task(db: Session, task_id: uuid.UUID, *, dispatched_by: str, authorized_by_user_id: uuid.UUID) -> AgentTaskEvent:
     """Sends the task to the code agent (a chat_with_fallback() call, same provider chain as
     ordinary chat) and records the raw response as an event. Does not parse/apply the diff —
     that is a deliberately separate, later increment (see module docstring's scope note); this
-    slice proves the dispatch -> record -> review -> propose chain end to end."""
+    slice proves the dispatch -> record -> review -> propose chain end to end.
+
+    Founder directive ("RESUME LIFEAI FIRST-CYCLE REMEDIATION" -> "FOUNDER DECISION -- EGRESS
+    AUTHORIZATION & FIRST-CYCLE INTEGRATION", Task #60, requirements 1/3/7): `AgentTask` is
+    genuinely ownerless, founder-wide state (see its own model docstring: "Not RLS-protected").
+    But this function has exactly ONE real caller in the whole codebase --
+    app/routers/agents.py's `dispatch_task_route()`, gated by `Depends(require_founder)` and
+    already recording an audit-log entry for this exact call. That IS a live, authenticated
+    Founder authorization for this exact operation, right now -- the strongest authorization
+    context this directive names, not a weaker stand-in for it. `authorized_by_user_id` is
+    REQUIRED (no default) specifically so this can never be silently reintroduced as an
+    optional, skippable gate the way the old `owner_id=None` default was for `chat_with_fallback()`
+    itself -- and it must be the real authenticated principal's own id (`user.id` from
+    `require_founder`), never a hardcoded `FOUNDER_USER_ID` constant or any other resolved
+    stand-in for actual authentication."""
     task = get_task(db, task_id)
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=_build_task_prompt(task))]
-    result, attempted = await chat_with_fallback(db, messages)
+    result, attempted = await chat_with_fallback(
+        db, messages, owner_id=authorized_by_user_id, purpose="agent_orchestration_dispatch_task",
+        requested_by="agent_orchestration.dispatch_task (live founder-authenticated request)",
+    )
     return _record_event(
         db,
         task,
@@ -232,11 +249,15 @@ def _latest_test_result_passed(db: Session, task_id: uuid.UUID) -> bool | None:
     return None
 
 
-async def review_task(db: Session, task_id: uuid.UUID, *, reviewed_by: str) -> AgentTaskEvent:
+async def review_task(db: Session, task_id: uuid.UUID, *, reviewed_by: str, authorized_by_user_id: uuid.UUID) -> AgentTaskEvent:
     """The review agent's verdict is BLOCKED (raises) if no test results have been recorded
     yet — MainAI may not fabricate or skip verification (CLAUDE.md section 6's explicit
     prohibition). The verdict itself always comes from the provider's own answer, parsed from
-    a fixed 'VERDICT: <x>' first line — never inferred or defaulted to approved."""
+    a fixed 'VERDICT: <x>' first line — never inferred or defaulted to approved.
+
+    `authorized_by_user_id` -- see dispatch_task()'s matching docstring for why this is
+    required and must be the real, live, authenticated founder's own id (`require_founder`'s
+    `user.id`), never a resolved stand-in."""
     task = get_task(db, task_id)
     if not _has_recorded_tests(db, task_id):
         raise ValueError("Kan inte granska ett uppdrag utan registrerade testresultat (record_test_results() krävs först).")
@@ -249,7 +270,10 @@ async def review_task(db: Session, task_id: uuid.UUID, *, reviewed_by: str) -> A
         f"## Testresultat\n{'GRÖNA' if tests_passed else 'RÖDA/EJ GRÖNA'}"
     )
     messages = [Message(role="system", content=REVIEW_AGENT_SYSTEM_PROMPT), Message(role="user", content=review_prompt)]
-    result, attempted = await chat_with_fallback(db, messages)
+    result, attempted = await chat_with_fallback(
+        db, messages, owner_id=authorized_by_user_id, purpose="agent_orchestration_review_task",
+        requested_by="agent_orchestration.review_task (live founder-authenticated request)",
+    )
 
     first_line = result.content.strip().splitlines()[0].strip() if result.content.strip() else ""
     verdict = _parse_review_verdict(first_line)
