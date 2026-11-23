@@ -1,5 +1,6 @@
 import httpx
 
+from app.providers.base import chat_token_limit
 from app.config import get_settings
 from app.providers.base import ChatResult, LLMProvider, Message, ProviderError
 
@@ -108,10 +109,13 @@ class OllamaProvider(LLMProvider):
         # ignored it entirely, so a local generation could run until the model's full context
         # and exceed the client's 120s timeout — observed as a corpus_review job failing after
         # exactly 2m0s with an empty "unreachable" error. Mapping it to Ollama's own
-        # `options.num_predict` makes a bounded-output request actually bounded on this provider.
-        max_tokens = kwargs.get("max_tokens")
-        if max_tokens is not None:
-            payload["options"] = {"num_predict": int(max_tokens)}
+        # `options.num_predict` makes a bounded-output request actually bounded on this
+        # provider. Uses the shared `chat_token_limit()` helper (R15) rather than a bare
+        # `int(max_tokens)` cast, so an invalid bound fails closed as a proper `ProviderError`
+        # instead of a raw ValueError/TypeError, consistent with every other provider.
+        token_limit = chat_token_limit(kwargs)
+        if token_limit is not None:
+            payload["options"] = {"num_predict": token_limit}
         try:
             async with httpx.AsyncClient(timeout=timeout or 120) as client:
                 resp = await client.post(f"{self.settings.ollama_base_url}/api/chat", json=payload)

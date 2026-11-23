@@ -10,7 +10,7 @@ logger = logging.getLogger("mainai.email")
 settings = get_settings()
 
 
-def send_email(to: str, subject: str, body_text: str) -> None:
+def send_email(to: str, subject: str, body_text: str) -> bool:
     """Sends via SMTP if configured; otherwise falls back to a local dev-only outbox — the
     same graceful-degradation pattern used for unconfigured AI providers elsewhere in this
     app.
@@ -18,7 +18,10 @@ def send_email(to: str, subject: str, body_text: str) -> None:
     Never raises: a bounced or misconfigured mail server must not turn into a 500 for the
     caller (registration/reset must still succeed — the account and token already exist
     regardless of whether delivery worked), but a failure IS logged loudly so it's not
-    silently swallowed in production.
+    silently swallowed in production. Returns True when the message was actually handed to
+    an SMTP server (or written to the dev outbox), False when nothing was sent — callers
+    whose UX depends on delivery truth (e.g. founder recovery) audit this; existing
+    callers may ignore the return value.
 
     Verification and password-reset links carry a high-entropy, one-time credential in
     plain text (by necessity — that's how an email link works). It must never end up in the
@@ -26,8 +29,7 @@ def send_email(to: str, subject: str, body_text: str) -> None:
     far broader read-access and far longer retention than an actual mailbox would have. See
     docs/AUTH_THREAT_MODEL.md and docs/OPERATIONS.md."""
     if settings.smtp_host:
-        _send_via_smtp(to, subject, body_text)
-        return
+        return _send_via_smtp(to, subject, body_text)
 
     # No SMTP configured. Never write the token/body to the application logger. Only write
     # it anywhere at all if the operator has explicitly opted in via dev_mail_outbox_dir
@@ -43,9 +45,11 @@ def send_email(to: str, subject: str, body_text: str) -> None:
     )
     if settings.dev_mail_outbox_dir and settings.environment != "production":
         _write_dev_outbox(to, subject, body_text)
+        return True
+    return False
 
 
-def _send_via_smtp(to: str, subject: str, body_text: str) -> None:
+def _send_via_smtp(to: str, subject: str, body_text: str) -> bool:
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = f"{settings.smtp_from_name} <{settings.smtp_from_email}>"
@@ -75,6 +79,8 @@ def _send_via_smtp(to: str, subject: str, body_text: str) -> None:
         # Deliberately no email body/token in this log line either — only what's needed to
         # notice and investigate a delivery outage.
         logger.exception("Kunde inte skicka e-post till %s", to)
+        return False
+    return True
 
 
 def _write_dev_outbox(to: str, subject: str, body_text: str) -> None:

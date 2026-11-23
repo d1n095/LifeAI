@@ -28,6 +28,12 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(256))
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.member)
+    # Optional tenant membership (migration 0070). NULL = personal account, billed as an
+    # individual subject. Tenants exist so enterprise billing/compute allocation can be
+    # scoped and isolated per subject — see app/billing/.
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

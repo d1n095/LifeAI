@@ -21,10 +21,16 @@ PRICING_PER_1K_TOKENS: dict[str, dict[str, tuple[Decimal, Decimal]]] = {
     },
     "deepseek": {
         "deepseek-chat": (Decimal("0.00027"), Decimal("0.0011")),
+        # Conservative peak/cache-miss list price from the official API pricing page.
+        "deepseek-flash": (Decimal("0.0003"), Decimal("0.0012")),
     },
     "ollama": {
         # Local inference — always free regardless of model.
     },
+    # Z.ai pricing is intentionally unknown until a stable public list-price source is
+    # captured. Unknown pricing returns None and therefore cannot satisfy a bounded spend
+    # authorization without an explicit max_cost_per_request_usd.
+    "zai": {},
 }
 
 
