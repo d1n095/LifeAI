@@ -80,7 +80,7 @@ from app.models.mainai_execution import (
 from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory
 from app.models.mainai_recovery import MainAITaskWorktree
 from app.models.mainai_wait import MainAITaskWait, MainAITaskWaitStatus
-from app.providers.base import Message
+from app.providers.base import Message, ProviderError
 from app.providers.registry import chat_with_fallback
 
 logger = logging.getLogger("mainai.execution")
@@ -973,7 +973,18 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             return
         return
 
-    except (TaskExecutionError, VerificationStepError, GitHubClientError, WorktreeError) as exc:
+    except (TaskExecutionError, VerificationStepError, GitHubClientError, WorktreeError, ProviderError) as exc:
+        # Stream 7 hardening finding: every configured AI provider being unreachable --
+        # chat_with_fallback()'s real, everyday final-failure shape, not a bug -- used to
+        # escape this function entirely (ProviderError was not in this tuple), reaching only
+        # app/worker.py's outer, deliberately generic `except Exception` ("to catch anything
+        # that escapes unexpectedly, a bug, not a designed failure path" per its own
+        # docstring). That outer handler marks the JOB failed but never finalizes the TASK,
+        # leaving it stuck `running` forever next to an already-terminal job -- confirmed by
+        # reproduction before this fix. A total-provider-failure is exactly the kind of
+        # ordinary, designed failure this function's own finalize-task+mark_failed path below
+        # already handles correctly for every other failure shape; it belongs in this tuple,
+        # not the worker's bug-catching fallback.
         logger.warning("task_execution job %s (task %s): %s", job_id, task.id, exc)
         db.rollback()
         job = db.get(MainAIJob, job_id)
