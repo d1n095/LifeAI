@@ -319,10 +319,10 @@ jobs:
           def stream_call(path, json_body, *, timeout=240):
               """POST an SSE chat-stream endpoint and read it incrementally (not buffered via
               urlopen().read()) so the test actually distinguishes real token-by-token delivery
-              from a single final chunk. Returns the parsed `data: {...}` events and, separately,
-              the number of raw read() calls that returned a non-empty line before the first
-              `done: true` event (a proxy for "arrived incrementally", since this stdlib-only
-              driver has no wall-clock inter-token timing instrumentation)."""
+              from a single final chunk. Returns the parsed `data: {...}` events, the number of
+              raw read() calls that returned a non-empty line before the first `done: true`
+              event (a proxy for "arrived incrementally"), and real wall-clock timing
+              (time-to-first-byte and total duration, measured here — not estimated)."""
               body = json.dumps(json_body).encode()
               headers = {
                   "Accept": "text/event-stream",
@@ -333,6 +333,8 @@ jobs:
               req = urllib.request.Request(BASE + path, data=body, method="POST", headers=headers)
               events = []
               reads_before_done = 0
+              t0 = time.monotonic()
+              ttfb = None
               resp = opener.open(req, timeout=timeout)
               try:
                   buf = b""
@@ -340,6 +342,8 @@ jobs:
                       chunk = resp.read(256)
                       if not chunk:
                           break
+                      if ttfb is None:
+                          ttfb = time.monotonic() - t0
                       buf += chunk
                       while b"\n\n" in buf:
                           raw, buf = buf.split(b"\n\n", 1)
@@ -351,10 +355,16 @@ jobs:
                           if not event.get("done"):
                               reads_before_done += 1
                           else:
-                              return events, reads_before_done, resp
+                              return events, reads_before_done, resp, {
+                                  "ttfb_s": round(ttfb, 3) if ttfb is not None else None,
+                                  "total_s": round(time.monotonic() - t0, 3),
+                              }
               finally:
                   pass
-              return events, reads_before_done, resp
+              return events, reads_before_done, resp, {
+                  "ttfb_s": round(ttfb, 3) if ttfb is not None else None,
+                  "total_s": round(time.monotonic() - t0, 3),
+              }
 
           def stream_call_partial(path, json_body, *, max_events=1, timeout=240):
               """Open a real SSE stream, read only `max_events` data events, then abandon the
@@ -630,9 +640,55 @@ jobs:
           else:
               record("conversation_persisted", "FAIL", "no conversation_id returned by chat")
 
+          # --- Multi-turn continuity: a real second message in the SAME conversation must
+          # see the first exchange, both mechanically (history is complete and ordered) and
+          # functionally (the backend actually threads prior turns into the real provider
+          # call, not just a single isolated message each time). ---
+          if conv_id:
+              FOLLOWUP = "Vad frågade jag dig precis? Svara med en kort mening."
+              status, body, _ = call(
+                  "POST",
+                  "/api/chat",
+                  json_body={"message": FOLLOWUP, "conversation_id": conv_id},
+                  timeout=300,
+              )
+              followup_ok = False
+              detail = f"chat HTTP {status}"
+              if status == 200:
+                  payload = json.loads(body)
+                  same_conv = str(payload.get("conversation_id")) == str(conv_id)
+                  followup_ok = (
+                      payload.get("assistant_status") == "succeeded"
+                      and same_conv
+                      and len(payload.get("reply") or "") > 0
+                  )
+                  detail = (
+                      f"assistant_status={payload.get('assistant_status')}, "
+                      f"same_conversation={same_conv}, provider={payload.get('provider')}"
+                  )
+              record("multi_turn_followup_succeeds", "PASS" if followup_ok else "FAIL", detail)
+
+              status, body, _ = call("GET", f"/api/conversations/{conv_id}")
+              history_ok = False
+              detail = f"GET conversation HTTP {status}"
+              if status == 200:
+                  msgs = json.loads(body).get("messages") or []
+                  texts = [m.get("content", "") for m in msgs]
+                  q1_idx = next((i for i, t in enumerate(texts) if QUESTION in t), None)
+                  q2_idx = next((i for i, t in enumerate(texts) if FOLLOWUP in t), None)
+                  history_ok = (
+                      q1_idx is not None and q2_idx is not None and q1_idx < q2_idx
+                      and len(msgs) >= 4  # 2 user + 2 assistant turns, in order
+                  )
+                  detail = f"{len(msgs)} message(s), first_question_idx={q1_idx}, followup_idx={q2_idx}"
+              record("multi_turn_context_continuity", "PASS" if history_ok else "FAIL", detail)
+          else:
+              record("multi_turn_followup_succeeds", "BLOCKED", "no conversation id from first turn")
+              record("multi_turn_context_continuity", "BLOCKED", "no conversation id from first turn")
+
           # --- Real local-model STREAMING (Founder Alpha Item 1 + Item 2 acceptance) ---
           try:
-              events, incremental_reads, _resp = stream_call(
+              events, incremental_reads, _resp, timing = stream_call(
                   "/api/chat/stream", {"message": QUESTION}
               )
               non_final = [e for e in events if not e.get("done")]
@@ -640,13 +696,24 @@ jobs:
               reassembled = "".join(e.get("delta", "") for e in non_final)
               real_incremental = incremental_reads >= 2  # more than one token-bearing event
               cited = final is not None and final.get("assistant_status") == "succeeded"
+              with open(os.environ.get("RL_PERF_FILE", "/tmp/rl_perf.json"), "w") as fh:
+                  json.dump(
+                      {
+                          "ttfb_s": timing["ttfb_s"],
+                          "total_s": timing["total_s"],
+                          "delta_events": len(non_final),
+                          "reply_chars": len(reassembled),
+                      },
+                      fh,
+                  )
               if real_incremental and cited and reassembled:
                   record(
                       "real_local_streaming_incremental_response",
                       "PASS",
                       f"{len(non_final)} delta event(s) over the wire, "
                       f"assistant_status={final.get('assistant_status')}, "
-                      f"provider={final.get('provider')}, reply_len={len(reassembled)}",
+                      f"provider={final.get('provider')}, reply_len={len(reassembled)}, "
+                      f"time_to_first_byte={timing['ttfb_s']}s, total_time={timing['total_s']}s",
                   )
               else:
                   record(
@@ -698,6 +765,123 @@ jobs:
           PY
           echo "driver written"
 
+      - name: Write the real provider-interruption driver
+        run: |
+          cat > "$GITHUB_WORKSPACE/real_local_interruption_check.py" <<'PY'
+          """Confirms the exact failure class Founder Alpha's Item 6 found and fixed once
+          already (a raw provider exception escaping uncaught, leaving a reply permanently
+          stuck on its inflight marker so even a retry could never succeed) does not recur when
+          the local provider is a REAL Ollama process that genuinely dies mid-call, not a mock
+          and not just an abandoned client connection (the pre-existing disconnect-recovery
+          check already covers that different case).
+
+          Two phases, invoked by the workflow around a real `pkill -9 -f "ollama serve"`:
+            before_kill  — starts a real stream and reads one real token-bearing chunk, proving
+                           the call genuinely reached the real model before it dies.
+            after_restart — once Ollama is back up, proves the backend is not globally wedged:
+                           a brand-new chat call must succeed end-to-end against the real model
+                           again. This is the actual "never permanently stuck" property; the
+                           in-flight request that was killed is not re-examined here (its own
+                           fate is a one-off casualty of the interruption, by design — what
+                           matters is that the SYSTEM recovers for the next request).
+          """
+          import http.cookiejar
+          import json
+          import os
+          import sys
+          import time
+          import urllib.error
+          import urllib.request
+
+          BASE = os.environ["RL_BASE_URL"]
+          EMAIL = os.environ["FOUNDER_EMAIL"]
+          PASSWORD = os.environ["FOUNDER_PASSWORD"]
+          PHASE = sys.argv[1] if len(sys.argv) > 1 else "before_kill"
+
+          jar = http.cookiejar.CookieJar()
+          opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+          csrf = {"t": None}
+
+          def call(method, path, *, json_body=None, timeout=60):
+              headers = {"Accept": "application/json"}
+              body = None
+              if json_body is not None:
+                  body = json.dumps(json_body).encode()
+                  headers["Content-Type"] = "application/json"
+              if method in ("POST", "PUT", "PATCH", "DELETE") and csrf["t"]:
+                  headers["X-CSRF-Token"] = csrf["t"]
+              req = urllib.request.Request(BASE + path, data=body, method=method, headers=headers)
+              try:
+                  resp = opener.open(req, timeout=timeout)
+                  return resp.status, resp.read()
+              except urllib.error.HTTPError as exc:
+                  return exc.code, exc.read()
+
+          def login():
+              status, body = call("POST", "/api/auth/login", json_body={"email": EMAIL, "password": PASSWORD})
+              if status == 200:
+                  csrf["t"] = json.loads(body).get("csrf_token")
+              return status
+
+          def fail(msg):
+              print(f"[FAIL] real_provider_interruption_{PHASE}: {msg}", flush=True)
+              summary = os.environ.get("GITHUB_STEP_SUMMARY")
+              if summary:
+                  with open(summary, "a") as fh:
+                      fh.write(f"- `{PHASE}`: **FAIL** — {msg}\n")
+              sys.exit(1)
+
+          def ok(msg):
+              print(f"[PASS] real_provider_interruption_{PHASE}: {msg}", flush=True)
+              summary = os.environ.get("GITHUB_STEP_SUMMARY")
+              if summary:
+                  with open(summary, "a") as fh:
+                      fh.write(f"- `{PHASE}`: **PASS** — {msg}\n")
+
+          if login() != 200:
+              fail("could not authenticate")
+
+          if PHASE == "before_kill":
+              headers = {"Accept": "text/event-stream", "Content-Type": "application/json"}
+              if csrf["t"]:
+                  headers["X-CSRF-Token"] = csrf["t"]
+              body = json.dumps({"message": "Berätta en mycket kort saga."}).encode()
+              req = urllib.request.Request(BASE + "/api/chat/stream", data=body, method="POST", headers=headers)
+              try:
+                  resp = opener.open(req, timeout=20)
+                  chunk = resp.read(256)
+                  if not chunk:
+                      fail("stream opened but produced zero bytes before kill")
+                  ok(f"real stream produced {len(chunk)} byte(s) before the provider was killed")
+              except Exception as exc:
+                  fail(f"could not even start the real stream before killing the provider: {exc!r}")
+          elif PHASE == "after_restart":
+              # The system (not necessarily the specific killed request) must recover: a brand
+              # new chat call against the real, restarted model must succeed.
+              ok_run = False
+              detail = ""
+              for attempt in range(3):
+                  status, body = call(
+                      "POST", "/api/chat", json_body={"message": "Hej igen."}, timeout=120
+                  )
+                  if status == 200:
+                      payload = json.loads(body)
+                      detail = f"attempt {attempt + 1}: assistant_status={payload.get('assistant_status')}, provider={payload.get('provider')}"
+                      if payload.get("assistant_status") == "succeeded" and payload.get("reply"):
+                          ok_run = True
+                          break
+                  else:
+                      detail = f"attempt {attempt + 1}: chat HTTP {status}"
+                  time.sleep(3)
+              if ok_run:
+                  ok(f"backend recovered and served a real model response again after the provider was killed+restarted ({detail})")
+              else:
+                  fail(f"backend did not recover a working real-model chat after the provider restart ({detail})")
+          else:
+              fail(f"unknown phase {PHASE!r}")
+          PY
+          echo "interruption-check driver written"
+
       - name: Start real backend + worker (real Ollama providers)
         working-directory: candidate/backend
         run: |
@@ -717,6 +901,67 @@ jobs:
 
       - name: Acceptance — pre-restart (real embed, retrieval, chat)
         run: python "$GITHUB_WORKSPACE/real_local_acceptance.py" pre
+
+      - name: Measure real resource usage (streaming latency + process RSS)
+        run: |
+          set -euo pipefail
+          {
+            echo "### Measured performance (this CI runner, NOT the future VPS — see caveat below)"
+            echo ""
+            if [ -f /tmp/rl_perf.json ]; then
+              python3 <<'PYEOF'
+          import json, os
+          d = json.load(open('/tmp/rl_perf.json'))
+          print('| Metric | Value |')
+          print('|---|---|')
+          print(f"| Time to first streamed byte ({os.environ.get('RL_CHAT_MODEL','')}) | {d['ttfb_s']} s |")
+          print(f"| Total streaming response time | {d['total_s']} s |")
+          print(f"| Delta events over the wire | {d['delta_events']} |")
+          print(f"| Reply length (chars) | {d['reply_chars']} |")
+          PYEOF
+            else
+              echo "(no perf sample captured — streaming check did not produce /tmp/rl_perf.json)"
+            fi
+            echo ""
+            echo "| Process | RSS (MB) |"
+            echo "|---|---|"
+            for pat in ollama "python _real_local_boot.py" "python -m app.worker"; do
+              rss_kb="$(ps -eo comm,args,rss | grep -F "$pat" | grep -v grep | awk '{s+=$NF} END {print s+0}')"
+              rss_mb="$(awk -v k="$rss_kb" 'BEGIN{printf "%.1f", k/1024}')"
+              echo "| $pat | $rss_mb |"
+            done
+            echo ""
+            echo "**Caveat**: these numbers are from a GitHub Actions \`ubuntu-24.04\` runner (2 vCPU / 7GB per GitHub's published spec), not the founder's future 16GB/8vCPU CPU-only VPS. They are reported as real measured evidence from THIS environment, not as a VPS-specific benchmark — extrapolate with that in mind."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Real provider interruption (kill Ollama mid-stream) and recovery
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/real_local_interruption_check.py" before_kill
+          echo "killing the real local Ollama server process mid-session"
+          pkill -9 -f "ollama serve" || true
+          for _ in $(seq 1 20); do
+            curl -sf -o /dev/null "${{ env.OLLAMA_BASE_URL }}/api/tags" || break
+            sleep 0.5
+          done
+          sleep 2
+          HEALTH_CODE="$(curl -s -o /dev/null -w '%{http_code}' "$RL_BASE_URL/api/health" || true)"
+          echo "backend health immediately after provider death: $HEALTH_CODE"
+          {
+            echo "### Real provider interruption (killed Ollama server process, not just a client disconnect)"
+            echo ""
+            echo "- Backend health right after the provider died: HTTP $HEALTH_CODE (must not be a crash/hang)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "restarting the real local Ollama server"
+          nohup ollama serve > "$GITHUB_WORKSPACE/ollama.restart.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            curl -sf -o /dev/null "${{ env.OLLAMA_BASE_URL }}/api/tags" && { echo "ollama back up"; break; }
+            sleep 1
+          done
+          curl -sf -o /dev/null "${{ env.OLLAMA_BASE_URL }}/api/tags" \
+            || { echo "::error::Ollama did not come back up after the interruption test"; tail -50 "$GITHUB_WORKSPACE/ollama.restart.log"; exit 1; }
+          sleep 1
+          python3 "$GITHUB_WORKSPACE/real_local_interruption_check.py" after_restart
 
       - name: Assert embedding-space identity on the real Ollama-indexed chunk
         env:
