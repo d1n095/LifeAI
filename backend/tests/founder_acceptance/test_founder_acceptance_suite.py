@@ -49,6 +49,10 @@ from app.models.memory_source_unit import MemorySourceUnit
 from app.models.project_memory import ProjectBranchPRStatus, ProjectSource
 from app.models.source_relationship import SourceRelationship
 from app.models.user import User, UserRole
+from app.models.knowledge_claim import ClaimConfidence, ClaimStatus, ClaimType, KnowledgeClaim
+from app.rag.claim_graph import record_claim_relationship, trace_evidence_chain
+from app.rag.claims import EXTRACTION_VERSION
+from app.rag.epistemics import epistemic_status_counts_sql, format_epistemic_instructions
 from app.rag.vector_store import hybrid_search
 from app.request_context import current_user_id as current_user_id_var
 from app.security import hash_password
@@ -125,6 +129,23 @@ def _make_chunk(session, owner_id, document_id, text_value, index=0) -> Document
     session.add(chunk)
     session.commit()
     return chunk
+
+
+def _make_claim(session, owner_id, document_id, chunk_id, claim_text, *, confidence=ClaimConfidence.likely) -> KnowledgeClaim:
+    """The claim-level row extract_claims_for_document() (app/rag/claims.py) would create
+    for one chunk during real ingestion — built directly here (no live extraction model in
+    this suite) with the same production columns, consistent with test_claim_graph_integration
+    .py's own _claimed_source helper."""
+    _set_rls_user(session, owner_id)
+    claim = KnowledgeClaim(
+        owner_id=owner_id, source_id=document_id, chunk_id=chunk_id,
+        claim_text=claim_text, confidence=confidence,
+        claim_type=ClaimType.historical, status=ClaimStatus.active,
+        extraction_version=EXTRACTION_VERSION,
+    )
+    session.add(claim)
+    session.commit()
+    return claim
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +446,76 @@ def test_scenario_11_memory_recall_correction_survives_restart(db):
             "superseding must never rewrite the old row's content"
         assert by_id[decision_b_id].status == "active"
         assert by_id[decision_b_id].supersedes_note_id == decision_a_id
+    finally:
+        fresh.close()
+        restart_engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Scenario 12 — Two documents disagree; the system surfaces the conflict (never
+# silently picks a side), cites both real sources, and this survives a real restart.
+#
+# Founder Alpha Capability Development Program, Workstream B acceptance test. The
+# underlying claim-graph (app/rag/claim_graph.py), epistemic rollup (app/rag/epistemics.py)
+# and chat/workbench wiring were found ALREADY correct and extensively tested by the gap
+# assessment this scenario's dispatch required — this closes the one real, narrow gap: no
+# existing test exercises the full chain (two real documents -> extracted claims -> a
+# declared contradiction -> the live retrieval+citation surface -> a genuine restart) in
+# one place. Contradiction DETECTION itself stays a declared act (record_claim_relationship,
+# the one production writer — app/routers/library.py's POST .../relationships), exactly as
+# designed: auto-inferring semantic contradictions from raw text would be exactly the kind
+# of unverified AI judgment this effort's own security model refuses to promote into a
+# trusted signal without one. This scenario proves the DECLARED path is trustworthy end to
+# end, not that declaration should become automatic.
+# ---------------------------------------------------------------------------
+def test_scenario_12_document_contradiction_citation_survives_restart(db):
+    founder = _make_founder(db)
+
+    doc_v1 = _make_document(db, founder.id, title="Prissättningsnotis A (2026-11-10)")
+    doc_v2 = _make_document(db, founder.id, title="Prissättningsnotis B (2026-11-20)")
+    chunk_v1 = _make_chunk(db, founder.id, doc_v1.id, "Priset för Founder Alpha är 499 kr/mån enligt notis A.")
+    chunk_v2 = _make_chunk(db, founder.id, doc_v2.id, "Priset för Founder Alpha är 799 kr/mån enligt notis B.")
+    claim_v1 = _make_claim(db, founder.id, doc_v1.id, chunk_v1.id, chunk_v1.text)
+    claim_v2 = _make_claim(db, founder.id, doc_v2.id, chunk_v2.id, chunk_v2.text)
+
+    # A reviewer declares the real contradiction through the one production writer —
+    # never inferred automatically. Both endpoint claims move to conflicting_evidence.
+    _, shifts = record_claim_relationship(
+        db, founder.id, from_claim_id=claim_v1.id, to_claim_id=claim_v2.id,
+        relationship_type="contradicts", note="Olika prisuppgifter, ej ännu löst.",
+    )
+    db.commit()
+    assert len(shifts) == 2, "a contradicts edge must move BOTH endpoint claims' verdicts"
+    claim_v1_id, claim_v2_id, doc_v1_id, doc_v2_id = claim_v1.id, claim_v2.id, doc_v1.id, doc_v2.id
+
+    # Real restart (this suite's established convention, see scenario 8/11): a brand-new
+    # engine and connection, never the session that wrote the edge.
+    restart_engine = create_engine(get_settings().database_url)
+    fresh = sessionmaker(bind=restart_engine, expire_on_commit=False)()
+    try:
+        _set_rls_user(fresh, founder.id)
+
+        # Retrieval still finds BOTH chunks — the conflict suppresses nothing. Each hit
+        # cites its own REAL, still-existing document; no citation is fabricated, since
+        # app/routers/chat.py builds `sources` directly from retrieve_context()'s own hits,
+        # never from model-generated text.
+        hits = hybrid_search(fresh, founder.id, None, "Founder Alpha", top_k=10)
+        hit_doc_ids = {h["document_id"] for h in hits}
+        assert str(doc_v1_id) in hit_doc_ids and str(doc_v2_id) in hit_doc_ids, \
+            "both conflicting sources must remain retrievable -- neither is silently dropped"
+
+        # The epistemic rollup, read fresh, counts the conflict and the instruction line
+        # tells the model to present it as a conflict, never pick a winner.
+        counts = epistemic_status_counts_sql(fresh, founder.id)
+        assert counts["conflicting_evidence"] >= 2, "both claims must land in the conflicting bucket after restart"
+        instructions = format_epistemic_instructions(counts)
+        assert "motstridiga" in instructions and "aldrig som en sanning" in instructions
+
+        # The evidence chain for EITHER claim shows the conflict from BOTH sides -- it is
+        # presented, never adjudicated into a single "winning" claim.
+        chain = trace_evidence_chain(fresh, founder.id, claim_v1_id)
+        contradicting_ids = {e["other_claim_id"] for e in chain.contradicting_edges}
+        assert str(claim_v2_id) in contradicting_ids
     finally:
         fresh.close()
         restart_engine.dispose()
