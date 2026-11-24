@@ -6,6 +6,46 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## System Intelligence Runtime — gemensam read-only runtime-yta (2026-11-24)
+
+**Branch:** `freebuff/system-intelligence-runtime-20261124`, bas
+`d1c631be26985a8b2ed19f833ecbfe6a1c076a6d` (System Intelligence 2.0). Kodcommit
+`21c608efba868006c1eab7d9968b068de0e8860c`. Ingen PR/push/merge/deploy; GitHub
+write-access saknas fortfarande. `first_cycle_go=false`. Inga VPS-tjänster,
+produktionsresurser eller `security/POLICY_LOCK.json` rörda.
+
+**Scope:** `backend/app/context_atlas/runtime.py` komponerar befintliga atlasanalyser till en
+programmatisk `SystemIntelligence`-service: capability-evidens, dependency impact,
+traceability, assessment, integration status, recovery, overlap, deterministisk
+self-knowledge och en explicit gräns för opålitlig källtext. CLI:t har `query`, `status`,
+`trace` och `assess`. `system_map.py` fick en snävare testträffsortering (exakt modul före
+kort filnamn). Inga nya tabeller, migrationer, köer, nätverksanrop, modellkedjor eller
+agentdispatchers; ingen ändring av `app/main.py`.
+
+**Faktiska resultat:** **132 passed, 354 warnings in 325.42s** över hela atlas-sviten,
+inklusive **18 nya runtime-tester**. `test_context_atlas_system_map.py`: 7 passed. `ruff
+check`: All checks passed. Uppmätt cache: första fullscan **17 412,9 ms**; 100 cachade
+capability-frågor **0,63 ms** (0,006 ms/anrop); 100 self-knowledge-frågor **3,63 ms**
+(0,036 ms/anrop). Det är en lokal testmiljömätning, inte ett produktionsbenchmark.
+
+**Evidens:** `docs/SYSTEM_INTELLIGENCE_RUNTIME.md`;
+`docs/evidence/system-intelligence-runtime/*.json` för capability, dependencies, trace,
+assessment, integration status, self-knowledge, untrusted source och snapshot. Alla
+payloads har `execution_authorized=false`.
+
+**Beroenden:** bygger direkt på `d1c631be` (som i sin tur bygger på atlasens `5b8c4630`).
+Inga filer överlappar #499–#506 enligt GitHub-fillistan; branchen är opublicerad. Ingen
+migration; `app/main.py` är orörd eftersom den är en delad entry point. Mergeordning: efter
+System Intelligence 2.0, oberoende av staging-stacken.
+
+**Kvarstående blockerare/begränsningar:** GitHub write-access; ingen HTTP-router/UI (medvetet
+inte lagd i Claudes `main.py`); statisk analys, inte runtime-observation eller täckning;
+`integration_status` gör inget nätverksanrop; `self_knowledge` är en granskad intent-router,
+inte fri textgenerering; recovery använder dispatch-heartbeat, inte OS-probe; cachen är
+processlokal och inte inkrementell per fil; prestandasiffrorna är lokala. `Task #61` och
+founder-wide authorization assumptions är inte implementerade. Bundle exporteras efter
+registret till `/tmp/system-intelligence-runtime-transfer` med manifest och `SHA256SUMS`.
+
 ## System Intelligence 2.0 — projektgränser, utvecklingstillstånd och konsistens (2026-11-24)
 
 **Branch:** `freebuff/system-intelligence-2-20261124`, bas
