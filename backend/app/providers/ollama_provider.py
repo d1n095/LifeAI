@@ -1,7 +1,10 @@
+import json
+
 import httpx
 
+from app.providers.base import chat_token_limit
 from app.config import get_settings
-from app.providers.base import ChatResult, LLMProvider, Message, ProviderError
+from app.providers.base import ChatResult, LLMProvider, Message, ProviderError, StreamChunk
 
 
 def _http_error_category(exc: httpx.HTTPError) -> str:
@@ -108,10 +111,13 @@ class OllamaProvider(LLMProvider):
         # ignored it entirely, so a local generation could run until the model's full context
         # and exceed the client's 120s timeout — observed as a corpus_review job failing after
         # exactly 2m0s with an empty "unreachable" error. Mapping it to Ollama's own
-        # `options.num_predict` makes a bounded-output request actually bounded on this provider.
-        max_tokens = kwargs.get("max_tokens")
-        if max_tokens is not None:
-            payload["options"] = {"num_predict": int(max_tokens)}
+        # `options.num_predict` makes a bounded-output request actually bounded on this
+        # provider. Uses the shared `chat_token_limit()` helper (R15) rather than a bare
+        # `int(max_tokens)` cast, so an invalid bound fails closed as a proper `ProviderError`
+        # instead of a raw ValueError/TypeError, consistent with every other provider.
+        token_limit = chat_token_limit(kwargs)
+        if token_limit is not None:
+            payload["options"] = {"num_predict": token_limit}
         try:
             async with httpx.AsyncClient(timeout=timeout or 120) as client:
                 resp = await client.post(f"{self.settings.ollama_base_url}/api/chat", json=payload)
@@ -148,6 +154,90 @@ class OllamaProvider(LLMProvider):
                 "completion_tokens": data.get("eval_count", 0) if isinstance(data, dict) else 0,
             },
         )
+
+    async def chat_stream(self, messages: list[Message], model: str, *, timeout: float | None = None, **kwargs):
+        """Real token-by-token streaming via Ollama's native `stream: true` NDJSON wire format
+        (one JSON object per line: `{"message": {"content": "<delta>"}, "done": false}`, ending
+        with a `"done": true` object carrying the same `prompt_eval_count`/`eval_count` usage
+        fields `chat()` already normalizes above). Same fail-closed contract as `chat()`:
+        a malformed line, a 200-with-error-object, or a transport failure raises `ProviderError`
+        with the same category rules — streaming must never surface a raw exception a caller's
+        `except ProviderError` can't already handle.
+
+        Closing this generator early (the consuming SSE endpoint stops iterating, e.g. because
+        the client disconnected) exits the `async with` block below, which closes the
+        connection to Ollama — Ollama itself stops generating once its client connection drops,
+        so an abandoned stream does not keep the local model computing unboundedly."""
+        payload = {
+            "model": model,
+            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "stream": True,
+        }
+        token_limit = chat_token_limit(kwargs)
+        if token_limit is not None:
+            payload["options"] = {"num_predict": token_limit}
+        try:
+            async with httpx.AsyncClient(timeout=timeout or 120) as client:
+                async with client.stream("POST", f"{self.settings.ollama_base_url}/api/chat", json=payload) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            data = json.loads(line)
+                        except ValueError as exc:
+                            raise ProviderError(
+                                "Lokal modell (Ollama) gav ett svar som inte är giltig JSON under strömning.",
+                                category="unsupported",
+                            ) from exc
+                        error_text = _ollama_error_text(data)
+                        if error_text is not None:
+                            raise ProviderError(
+                                f"Lokal modell (Ollama) svarade med fel: {error_text}", category="unsupported"
+                            )
+                        if not isinstance(data, dict):
+                            raise ProviderError(
+                                "Lokal modell (Ollama) gav ett strömningssvar som inte är ett objekt.",
+                                category="unsupported",
+                            )
+                        done = bool(data.get("done"))
+                        content = ""
+                        message = data.get("message")
+                        if isinstance(message, dict):
+                            raw_content = message.get("content", "")
+                            if raw_content and not isinstance(raw_content, str):
+                                raise ProviderError(
+                                    "Lokal modell (Ollama) gav ett 'message.content' som inte är text.",
+                                    category="unsupported",
+                                )
+                            content = raw_content or ""
+                        if done:
+                            yield StreamChunk(
+                                delta="",
+                                done=True,
+                                usage={
+                                    "prompt_tokens": data.get("prompt_eval_count", 0),
+                                    "completion_tokens": data.get("eval_count", 0),
+                                },
+                                provider=self.name,
+                                model=model,
+                            )
+                            return
+                        if content:
+                            yield StreamChunk(delta=content)
+                    # The server closed the stream without ever sending a "done": true object —
+                    # an incomplete/malformed stream, not a successful completion. Never let the
+                    # caller mistake "the loop just ended" for a real done sentinel.
+                    raise ProviderError(
+                        "Lokal modell (Ollama) avslutade strömmen utan en slutsignal.",
+                        category="unsupported",
+                        provider_request_may_have_left=True,
+                    )
+        except httpx.HTTPError as exc:
+            raise ProviderError(
+                f"Lokal modell (Ollama) inte nåbar: {exc}", category=_http_error_category(exc)
+            ) from exc
 
     async def embed(self, texts: list[str], model: str, *, timeout: float | None = None) -> list[list[float]]:
         """Embed a whole batch in ONE `/api/embed` call, at the model's NATIVE width.

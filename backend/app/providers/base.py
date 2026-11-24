@@ -67,6 +67,24 @@ class ChatResult:
     raw_usage: dict = field(default_factory=dict)
 
 
+@dataclass
+class StreamChunk:
+    """One increment of a streamed chat response.
+
+    `delta` is the incremental text to append (empty on the final chunk). `done=True` marks
+    the last chunk — it, and only it, carries `usage`/`provider`/`model`, mirroring
+    `ChatResult`'s fields so a caller can build one from the other without a second shape to
+    track. A provider that cannot stream natively still yields this same shape (see
+    `LLMProvider.chat_stream`'s default below) so callers never need a provider-specific
+    branch."""
+
+    delta: str
+    done: bool = False
+    usage: dict | None = None
+    provider: str | None = None
+    model: str | None = None
+
+
 class LLMProvider(ABC):
     """Common interface every AI provider must implement.
 
@@ -85,6 +103,41 @@ class LLMProvider(ABC):
 
     @abstractmethod
     def is_configured(self) -> bool: ...
+
+    async def chat_stream(self, messages: list[Message], model: str, *, timeout: float | None = None, **kwargs):
+        """Default: no real incremental streaming — await the whole reply, then yield it as
+        one chunk followed by the `done` sentinel. Every provider is therefore usable through
+        the streaming endpoint even before it grows a real streaming implementation (today
+        only `OllamaProvider` overrides this with genuine token-by-token output); callers must
+        not assume a non-final chunk means real incremental progress was made on the wire —
+        only that content is now available to show.
+
+        `self.chat()` is wrapped here, not left to raise a raw exception into the caller's
+        generator: `app/routers/chat.py`'s `_generate_stream_events()` only catches
+        `ProviderError`/`_ClientDisconnected` around `provider.chat_stream()` (by design — see
+        that function's docstring) the same way `chat_with_fallback()`'s own per-provider loop
+        only expects `ProviderError`-shaped failures, never a raw `httpx` exception. Real,
+        reproduced case: an `OpenAIProvider.chat()` call blocked by the network proxy raised
+        `httpx.ProxyError` straight through this default implementation, which the router did
+        not catch — the stream closed with zero bytes and no error event, and the claimed
+        reply row was left stuck on its `inflight:<token>` marker forever (`_claim_reply_attempt`
+        permanently blocks any further attempt on that marker, so the founder could not even
+        retry). `provider_request_may_have_left=True` is the conservative default here, same as
+        `chat_with_fallback()`'s own `getattr(exc, "provider_request_may_have_left", None) is
+        not False` check — an exception this generic does not prove the request never reached
+        the provider."""
+        try:
+            result = await self.chat(messages, model, timeout=timeout, **kwargs)
+        except ProviderError:
+            raise
+        except Exception as exc:
+            from app.providers.verification import classify_provider_exception
+
+            safe = classify_provider_exception(exc)
+            raise ProviderError(safe.message, category=safe.result.value, provider_request_may_have_left=True) from exc
+        if result.content:
+            yield StreamChunk(delta=result.content)
+        yield StreamChunk(delta="", done=True, usage=result.raw_usage, provider=result.provider, model=result.model)
 
 
 class ProviderError(RuntimeError):
@@ -107,3 +160,12 @@ class ProviderError(RuntimeError):
         # After adapter.propose() is entered: None/True → treat as ambiguous (do not
         # release spend). False → proven pre-external-effect; release is allowed.
         self.provider_request_may_have_left = provider_request_may_have_left
+
+
+def chat_token_limit(kwargs, default=None):
+    """Explicit output bounds are never silently ignored by a transport."""
+    value = kwargs.get("max_tokens", default)
+    if value is not None and (type(value) is not int or value <= 0):
+        raise ProviderError("Invalid output token bound.", category="unsupported",
+                            provider_request_may_have_left=False)
+    return value

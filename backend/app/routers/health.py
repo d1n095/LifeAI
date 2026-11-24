@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db import get_db
 from app.jobs.heartbeat import worker_process_alive
+from app.redis_client import get_redis_client
 
 logger = logging.getLogger("mainai.health")
 settings = get_settings()
@@ -42,14 +43,13 @@ def _check_redis() -> bool:
         # No Redis configured is a valid deployment mode (single instance, in-memory rate
         # limiting — see app/limiter.py), not a failure to report as unhealthy.
         return True
-    import redis
 
     try:
-        client = redis.from_url(settings.redis_url, socket_connect_timeout=3, socket_timeout=3)
-        try:
-            client.ping()
-        finally:
-            client.close()
+        # The shared process-wide client (app/redis_client.py): the health endpoint runs
+        # on every monitoring poll, and the old per-request from_url()+close() churned
+        # one TCP connection per check — the same pattern app/jobs/heartbeat.py's fix
+        # (2026-11-18) removed for the worker loop.
+        get_redis_client().ping()
         return True
     except Exception:
         logger.exception("Health check: Redis svarade inte.")

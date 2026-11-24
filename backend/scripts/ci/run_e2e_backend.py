@@ -8,6 +8,7 @@ Expects the schema to already be migrated (`alembic upgrade head` — see
 .github/workflows/ci.yml and docs/OPERATIONS.md). Deliberately does NOT create tables
 itself; that's the whole point of no longer using Base.metadata.create_all in this app.
 """
+import asyncio
 import json
 import os
 import sys
@@ -27,14 +28,19 @@ PORT = int(os.environ.get("E2E_BACKEND_PORT", "8010"))
 open(EMAIL_LOG_PATH, "w").close()
 
 from app.config import get_settings
-from app.providers.base import ChatResult
+from app.providers.base import ChatResult, StreamChunk
 from app.providers.openai_provider import OpenAIProvider
+from app.providers.ollama_provider import OllamaProvider
 from app.rag.claims import CLAIM_EXTRACTION_SYSTEM_PROMPT
+from app.mainai_execution.planner import PLANNER_SYSTEM_PROMPT
 import app.rag.vector_store as vector_store
 import app.rag.retrieve as retrieve_mod
 import app.routers.auth as auth_router
 
 _EMBEDDING_DIM = get_settings().embedding_dim
+# Guarded chat permits local query embedding; its transport alone is faked here.
+get_settings().default_embedding_provider = "ollama"
+get_settings().default_embedding_model = "nomic-embed-text"
 
 
 async def fake_chat(self, messages, model, **kwargs):
@@ -53,6 +59,30 @@ async def fake_chat(self, messages, model, **kwargs):
         content = json.dumps([claim]) if claim else "[]"
         return ChatResult(content=content, provider="openai", model=model, raw_usage={"prompt_tokens": 40, "completion_tokens": 10})
 
+    # Same discipline as the claim-extraction branch above: detected by the exact system
+    # prompt app/mainai_execution/planner.py sends (never a heuristic), so it can never
+    # misfire against a real chat turn. Without this branch, MainAI's own plan-proposal step
+    # (chat_with_fallback(purpose="mainai_planning")) got the generic conversational reply
+    # above, which app/mainai_execution/planner.py's _parse_plan_specs() correctly rejects as
+    # invalid JSON — making the founder's full goal -> plan -> approve -> execute journey
+    # untestable end-to-end through a real browser in this harness, only provable at the
+    # pytest layer. A single read_only_audit task is deterministic, requires an empty
+    # verification_plan (the only kind _parse_plan_specs() accepts for that task_type), and
+    # sets approval_required so the UI's approve/reject path is exercised for real too.
+    if messages and messages[0].role == "system" and messages[0].content == PLANNER_SYSTEM_PROMPT:
+        plan = {
+            "tasks": [
+                {
+                    "description": "E2E-faked read-only audit for plan/approval round-trip verification.",
+                    "task_type": "read_only_audit",
+                    "risk_level": "low",
+                    "approval_required": True,
+                    "verification_plan": [],
+                }
+            ]
+        }
+        return ChatResult(content=json.dumps(plan), provider="openai", model=model, raw_usage={"prompt_tokens": 60, "completion_tokens": 40})
+
     return ChatResult(
         content="Hej! Detta ar ett riktigt svar fran den simulerade AI-motorn under E2E-testet. "
         "Kostnadsloggning, Trust Engine och konversationshistorik gar via de riktiga API-vagarna.",
@@ -62,11 +92,50 @@ async def fake_chat(self, messages, model, **kwargs):
     )
 
 
-async def fake_embed(self, texts, model):
+_FAKE_REPLY_WORDS = (
+    "Hej! Detta ar ett riktigt svar fran den simulerade AI-motorn under E2E-testet. "
+    "Kostnadsloggning, Trust Engine och konversationshistorik gar via de riktiga API-vagarna."
+).split(" ")
+
+
+async def fake_chat_stream(self, messages, model, *, timeout=None, **kwargs):
+    """Real multi-chunk streaming for the E2E suite's chat flow — lets a Playwright test
+    observe genuine incremental rendering (a partial substring visible before the full reply
+    lands), not just the final state a single-shot fake would produce. Splits the same
+    deterministic reply fake_chat() returns into several word-group chunks with a small real
+    delay between them, so the frontend's SSE consumption is exercised against an actual
+    multi-event stream, matching how OllamaProvider.chat_stream() behaves against a real model."""
+    if messages and messages[0].role == "system" and messages[0].content == CLAIM_EXTRACTION_SYSTEM_PROMPT:
+        result = await fake_chat(self, messages, model, **kwargs)
+        yield StreamChunk(delta=result.content)
+        yield StreamChunk(delta="", done=True, usage=result.raw_usage, provider=result.provider, model=result.model)
+        return
+    for i in range(0, len(_FAKE_REPLY_WORDS), 4):
+        chunk = " ".join(_FAKE_REPLY_WORDS[i : i + 4])
+        if i > 0:
+            chunk = " " + chunk
+        yield StreamChunk(delta=chunk)
+        await asyncio.sleep(0.15)
+    yield StreamChunk(delta="", done=True, provider="openai", model=model,
+                      usage={"prompt_tokens": 180, "completion_tokens": 55})
+
+
+async def fake_embed(self, texts, model, *, timeout=None, **kwargs):
     # Must match app/config.py's embedding_dim exactly — pgvector's document_chunks.embedding
     # column is a fixed vector(1536) (see the 0004 migration), unlike Qdrant's old
     # dynamically-sized collection. A shorter fake vector here would raise a dimension
     # mismatch the moment anything actually tried to insert it.
+    #
+    # `timeout`/`**kwargs` must be accepted even though unused: OllamaProvider.embed()'s real
+    # signature (app/providers/ollama_provider.py) takes a keyword-only `timeout`, and
+    # app/providers/verification.py's verify_provider() always passes it on the pre-flight
+    # probe every import makes before indexing. Without this, every library import silently
+    # landed `blocked` with a generic "unknown provider error" (classify_provider_exception's
+    # catch-all for an unrecognized exception type — a bare TypeError from the mismatched
+    # signature, swallowed exactly as designed so no provider detail ever leaks) instead of
+    # actually indexing. Never caught by CI (founder-knowledge-studio.spec.ts and
+    # library-upload-queue.spec.ts are not in any CI job), only found by actually running the
+    # document-ingestion journey against this harness.
     return [[0.05] * _EMBEDDING_DIM for _ in texts]
 
 
@@ -107,7 +176,8 @@ def fake_send_email(to: str, subject: str, body_text: str) -> None:
 
 
 OpenAIProvider.chat = fake_chat
-OpenAIProvider.embed = fake_embed
+OpenAIProvider.chat_stream = fake_chat_stream
+OllamaProvider.embed = fake_embed
 vector_store.search = fake_search
 retrieve_mod.search = fake_search
 auth_router.send_email = fake_send_email
