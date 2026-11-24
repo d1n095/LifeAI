@@ -31,6 +31,7 @@ from app.routers import (
     conversations,
     documents,
     execution_envelopes,
+    founder_dev_status,
     founder_recovery,
     health,
     inspectable_memory,
@@ -76,6 +77,7 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(founder_recovery.router)
+app.include_router(founder_dev_status.router)
 app.include_router(account.router)
 app.include_router(blueprint.router)
 app.include_router(calendar.router)
