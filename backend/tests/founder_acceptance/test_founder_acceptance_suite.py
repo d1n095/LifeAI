@@ -355,3 +355,76 @@ def test_scenario_10_supervised_agent_task_record(db):
     assert task["target_files"] and task["required_tests"], "supervised task carries its verification contract"
     # The full PR-creation leg is proven upstream in a real run: PR #443's
     # crash->takeover->PR-created-once vertical slice test (GitHub-credentialed CI).
+
+
+# ---------------------------------------------------------------------------
+# Scenario 11 — Memory recall, correction and supersession survive a real restart
+#
+# Founder Alpha Capability Development Program, Workstream A acceptance test: record a
+# project decision as the founder (not via the AI-suggestion candidate-signal path — a
+# model's own output must never become an authorization source, so this intentionally uses
+# the explicit record_founder_memory() API a human/founder action would call), correct it
+# from a SEPARATE later interaction, dispose the engine to force a real reconnect (this
+# suite's own established restart simulation — see test_scenario_8 above), then build the
+# project-status prompt for a THIRD, brand-new conversation and assert it carries the
+# CURRENT decision with its source citation, never the superseded one, while the superseded
+# row remains permanently queryable as audit history.
+# ---------------------------------------------------------------------------
+def test_scenario_11_memory_recall_correction_survives_restart(db):
+    from app.founder_memory.service import list_founder_memory, record_founder_memory
+    from app.project_status.service import format_project_status_instructions
+
+    founder = _make_founder(db)
+
+    decision_a = record_founder_memory(
+        db, owner_id=founder.id, note_type="decision",
+        content="Vi bygger embedding-pipelinen med Ollama lokalt, inte en extern leverantör.",
+        idempotency_key=_run_id("ws-a-decision"), authority="founder", basis="manual",
+        source="conversation:samtal-1-2026-11-24",
+    )
+    db.commit()
+
+    # A LATER, separate interaction corrects it. The old row's content is never touched;
+    # only its status flips, and the new row is the one that becomes current.
+    decision_b = record_founder_memory(
+        db, owner_id=founder.id, note_type="decision",
+        content="Uppdatering: vi kör embedding-pipelinen mot en fjärransluten Ollama-endpoint "
+                "(16GB-servern räcker inte för både app och modell samtidigt).",
+        idempotency_key=_run_id("ws-a-correction"), authority="founder", basis="manual",
+        source="conversation:samtal-2-2026-11-24", supersedes_note_id=decision_a.id,
+    )
+    db.commit()
+    decision_a_id, decision_b_id = decision_a.id, decision_b.id
+
+    # Real restart simulation (same convention as scenario 8 above, which disposes its own
+    # dedicated engine rather than the shared session-scoped fixture): a brand-new engine and
+    # connection, never trusting the same session/connection that wrote the data.
+    db.commit()
+    restart_engine = create_engine(get_settings().database_url)
+
+    fresh = sessionmaker(bind=restart_engine, expire_on_commit=False)()
+    try:
+        _set_rls_user(fresh, founder.id)
+
+        # A brand-new, third conversation asks a project-status-relevant question.
+        prompt = format_project_status_instructions(
+            fresh, owner_id=founder.id, question="Vad är projektstatusen för embedding-pipelinen?"
+        )
+        assert "Uppdatering: vi kör embedding-pipelinen" in prompt, \
+            "the new conversation must see the CURRENT (corrected) decision"
+        assert "conversation:samtal-2-2026-11-24" in prompt, \
+            "the current decision's source must be citeable, not just its content"
+        assert "Vi bygger embedding-pipelinen med Ollama lokalt" not in prompt, \
+            "a superseded decision must never be presented as current"
+
+        # The superseded row is never deleted — it remains real audit history.
+        history = list_founder_memory(fresh, owner_id=founder.id)
+        by_id = {n.id: n for n in history}
+        assert by_id[decision_a_id].status == "superseded"
+        assert by_id[decision_a_id].content == "Vi bygger embedding-pipelinen med Ollama lokalt, inte en extern leverantör.", \
+            "superseding must never rewrite the old row's content"
+        assert by_id[decision_b_id].status == "active"
+        assert by_id[decision_b_id].supersedes_note_id == decision_a_id
+    finally:
+        fresh.close()
+        restart_engine.dispose()

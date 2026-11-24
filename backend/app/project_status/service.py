@@ -200,9 +200,11 @@ def _memory(db: Session, owner_id: uuid.UUID) -> list[dict[str, Any]]:
     notes = list_current_founder_memory(db, owner_id=owner_id)
     return [
         {
+            "id": str(n.id),
             "type": n.note_type,
             "content": (n.content or "")[:280],
             "authority": n.authority,
+            "source": n.source,
             "created_at": _iso(n.created_at),
         }
         for n in notes[: _MAX_EXAMPLES * 2]
@@ -516,7 +518,10 @@ def format_project_status_instructions(db: Session, *, owner_id: uuid.UUID, ques
         lines += [f"  - \"{g['title']}\" → {g['status']}" for g in recent_goals[:5]]
     if status["priorities"]:
         lines.append("- Låsta prioriteringar (grundarens beslut):")
-        lines += [f"  - {p['content']}" for p in status["priorities"][:3]]
+        lines += [
+            f"  - {p['content']}" + (f" (källa: {p['source']})" if p.get("source") else "")
+            for p in status["priorities"][:3]
+        ]
     if status["warnings"]:
         lines.append("- OSÄKERHET/DATAKVALITET (säg det hellre än att gissa):")
         lines += [f"  - {w}" for w in status["warnings"]]
