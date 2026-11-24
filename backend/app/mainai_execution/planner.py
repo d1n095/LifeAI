@@ -19,6 +19,7 @@ patch), which is called out explicitly in docs/MAINAI_EXECUTION_LOOP_V0_1.md's L
 """
 
 import json
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -27,7 +28,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.mainai_execution.graph import recompute_task_readiness
-from app.mainai_execution.lessons import apply_lessons_to_verification_plan
+from app.mainai_execution.lesson_selection import LessonSelection, select_lessons_for_planning
+from app.mainai_execution.lessons import (
+    apply_lessons_to_verification_plan,
+    record_lesson_guard_advisory,
+    record_lesson_plan_decisions,
+)
 from app.mainai_execution.verify import VerificationStepError, validate_targeted_tests_target
 from app.models.mainai_execution import (
     TERMINAL_MAINAI_TASK_STATUSES,
@@ -43,6 +49,8 @@ from app.models.mainai_execution import (
     MainAITaskStatus,
 )
 from app.providers.base import Message
+
+logger = logging.getLogger(__name__)
 from app.providers.registry import chat_with_fallback
 
 
@@ -313,13 +321,34 @@ def create_plan(
 
     persisted: list[MainAITask] = []
     applied_lessons_by_task: list[list[uuid.UUID]] = []
+    selections_by_task: list[LessonSelection | None] = []
     for spec in tasks:
         # Engineering-lesson influence (app/mainai_execution/lessons.py): a previously recorded
         # lesson tagged for this task_type can add a targeted_tests step the spec itself didn't
         # already have -- real influence on what gets verified, not a loose suggestion. Only
         # ever ADDS to verification_plan, never removes a step the planner/founder specified.
+        #
+        # M1 (Round 8): the candidate set is ranked by MEASURED standing for THIS owner
+        # (select_lessons_for_planning -- proven lessons first, single-failure lessons
+        # flagged but still applied, failed-majority / unusable-guard lessons excluded for
+        # this pass with their reasons on the record). The full decision block rides on the
+        # created event below, so every plan explains which rules influenced it and why.
+        selection = select_lessons_for_planning(db, owner_id=goal.owner_id, task_type=spec.task_type)
         verification_plan, applied_lesson_ids = apply_lessons_to_verification_plan(
-            db, task_type=spec.task_type, verification_plan=spec.verification_plan
+            db, task_type=spec.task_type, verification_plan=spec.verification_plan, selection=selection
+        )
+        selections_by_task.append(selection)
+        # Anti-overcorrection advisory (app/mainai_execution/lessons.py): records the
+        # signal when past-lesson guards dominate this task's plan — advisory only, the
+        # plan above stands.
+        record_lesson_guard_advisory(
+            db,
+            owner_id=goal.owner_id,
+            goal_id=goal.id,
+            task_type=spec.task_type,
+            spec_verification_plan=spec.verification_plan,
+            augmented_verification_plan=verification_plan,
+            applied_lesson_ids=applied_lesson_ids,
         )
         task = MainAITask(
             goal_id=goal.id,
@@ -349,10 +378,22 @@ def create_plan(
                 )
             )
 
-    for task, applied_lesson_ids in zip(persisted, applied_lessons_by_task):
+    for i, (task, applied_lesson_ids) in enumerate(zip(persisted, applied_lessons_by_task)):
+        # Lesson -> plan-decision provenance edge (migration 0074, written where the change
+        # actually happened): one durable row per (lesson, task) the lesson really shaped —
+        # what lesson_effectiveness() joins guard observations against. Same transaction as
+        # the plan itself; ON CONFLICT DO NOTHING keeps a replayed pass from inflating counts.
+        if applied_lesson_ids:
+            record_lesson_plan_decisions(db, task=task, applied_lesson_ids=applied_lesson_ids)
         detail = {"plan_version": next_version}
         if applied_lesson_ids:
             detail["lessons_applied"] = [str(lesson_id) for lesson_id in applied_lesson_ids]
+        selection = selections_by_task[i] if i < len(selections_by_task) else None
+        if selection is not None and selection.decisions:
+            # The explainable decision record: which rules were considered, their measured
+            # standing, who was selected/flagged/excluded and why — point-in-time, on the
+            # durable event history (the evidence tables stay the live source of truth).
+            detail["lesson_selection"] = selection.summary_for_event()
         db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.created, detail=detail))
 
     goal.current_plan_version = next_version
@@ -371,10 +412,15 @@ PLANNER_SYSTEM_PROMPT = (
     "Du är MainAI:s planerare. Du får ett mål (title + fullständig instruktion). Bryt ner det "
     "i en sekvens av konkreta, avgränsade tasks. Svara ENDAST med ett JSON-objekt på formen "
     '{"tasks": [{"description": "...", "task_type": "read_only_audit|repo_edit|run_tests|'
-    'open_pr", "depends_on": [0, 1], "risk_level": "low|medium|high", "approval_required": '
+    'open_pr", "depends_on": [], "risk_level": "low|medium|high", "approval_required": '
     'true|false, "verification_plan": [{"kind": "targeted_tests", "target": "..."}]}]} -- '
     "inget annat, ingen markdown-kodblocksmarkering, ingen förklarande text före eller efter. "
-    "depends_on är 0-baserade index in i samma tasks-lista. Håll planen minimal: bara de "
+    "depends_on är 0-baserade index in i samma tasks-lista och får bara peka på TIDIGARE tasks "
+    "(index mindre än taskens eget index); en task utan beroenden ska ha depends_on: [] och en task "
+    "får aldrig lista sitt eget index -- första tasken har alltid depends_on: []. Vanligaste felet "
+    "är att sätta depends_on: [0] på task 0. En read_only_audit har alltid verification_plan: [] "
+    "(den ändrar ingenting, det finns inget att köra); targeted_tests används bara med en riktig "
+    "testfilsökväg (t.ex. tests/backend/test_x.py), aldrig med en beskrivning i klartext. Håll planen minimal: bara de "
     "tasks som faktiskt krävs för målet, aldrig spekulativa extra steg. En task som ändrar "
     "kod (repo_edit) eller öppnar en PR (open_pr) ska nästan alltid ha approval_required=false "
     "(godkännande krävs bara för merge/deploy, inte för att föreslå en ändring som PR) -- men "
@@ -393,12 +439,48 @@ async def propose_plan_via_ai(db: Session, *, goal: MainAIGoal) -> tuple[list[Pl
     never falls back to guessing a plan from free text, and never itself writes anything to
     the database (see create_plan() for the separate, deterministic persist step this feeds)."""
     user_prompt = f"## Mål\n{goal.title}\n\n## Fullständig instruktion\n{goal.original_instruction}"
-    messages = [Message(role="system", content=PLANNER_SYSTEM_PROMPT), Message(role="user", content=user_prompt)]
-    result, _attempted = await chat_with_fallback(
-        db, messages, owner_id=goal.owner_id, purpose="mainai_planning", requested_by="mainai_execution.planner.propose_plan_via_ai", goal_id=goal.id
-    )
+    base_messages = [Message(role="system", content=PLANNER_SYSTEM_PROMPT), Message(role="user", content=user_prompt)]
+    # R15 (2026-11-19): a 4B local planner emitted `"depends_on": [0]` on task 0, i.e. a self-edge,
+    # which create_plan() correctly rejects as a cycle -- leaving the founder with a 422 and no plan
+    # and no way to tell the model what was wrong. One corrective retry (the same "show the error,
+    # ask again" discipline app/mainai_execution uses elsewhere) fixes model-format slips WITHOUT
+    # relaxing a single validation rule: the second response must still pass every check below.
+    messages = list(base_messages)
+    last_error: PlanValidationError | None = None
+    for attempt in (1, 2):
+        result, _attempted = await chat_with_fallback(
+            db, messages, owner_id=goal.owner_id, purpose="mainai_planning", requested_by="mainai_execution.planner.propose_plan_via_ai", goal_id=goal.id
+        )
+        try:
+            specs = _parse_plan_specs(result.content)
+        except PlanValidationError as exc:
+            last_error = exc
+            if attempt == 2:
+                break
+            messages = base_messages + [
+                Message(role="assistant", content=result.content),
+                Message(
+                    role="user",
+                    content=(
+                        f"Ditt svar avvisades av validatorn: {exc}\n\n"
+                        "Svara igen med ETT korrigerat JSON-objekt på exakt samma form. Inget annat.\n"
+                        'Exempel på ett giltigt svar med en enda task: {"tasks": [{"description": "Läs filen X", '
+                        '"task_type": "read_only_audit", "depends_on": [], "risk_level": "low", '
+                        '"approval_required": false, "verification_plan": []}]}'
+                    ),
+                ),
+            ]
+            continue
+        return specs, result.provider, result.model
 
-    raw = result.content.strip()
+    assert last_error is not None
+    raise last_error
+
+
+def _parse_plan_specs(content: str) -> list[PlannedTaskSpec]:
+    """Validate one planner reply into task specs. Every rule is a REJECTION rule -- nothing here
+    repairs or guesses a plan; the only recovery is the corrective retry in propose_plan_via_ai()."""
+    raw = content.strip()
     if raw.startswith("```"):
         raw = raw.split("```", 2)[1]
         if raw.startswith("json"):
@@ -426,6 +508,24 @@ async def propose_plan_via_ai(db: Session, *, goal: MainAIGoal) -> tuple[list[Pl
         depends_on = raw_task.get("depends_on", [])
         if not isinstance(depends_on, list) or not all(isinstance(d, int) for d in depends_on):
             raise PlanValidationError(f"tasks[{i}].depends_on must be a list of integers.")
+        # R15 (2026-11-19): the local 4B planner kept emitting `depends_on: [0]` on task 0 even
+        # after a corrective retry. A task depending on ITSELF is not a plan decision at all --
+        # there is no ordering it can express -- so that one specific edge is dropped, LOUDLY,
+        # instead of blocking the founder's whole plan. Any forward reference (a real ordering
+        # claim this validator cannot check for cycles) still rejects the plan outright.
+        self_refs = [d for d in depends_on if d == i]
+        if self_refs:
+            logger.warning(
+                "planner: dropped self-dependency %s from tasks[%d].depends_on (model output, meaningless edge).",
+                self_refs,
+                i,
+            )
+            depends_on = [d for d in depends_on if d != i]
+        if any(d < 0 or d >= i for d in depends_on):
+            raise PlanValidationError(
+                f"tasks[{i}].depends_on must only reference EARLIER tasks (index < {i}); "
+                f"got {depends_on}. A task cannot depend on a later task."
+            )
 
         risk_raw = raw_task.get("risk_level", "low")
         try:
@@ -436,6 +536,31 @@ async def propose_plan_via_ai(db: Session, *, goal: MainAIGoal) -> tuple[list[Pl
         verification_plan = raw_task.get("verification_plan", [])
         if not isinstance(verification_plan, list):
             raise PlanValidationError(f"tasks[{i}].verification_plan must be a list.")
+        # R15 (2026-11-19): the local planner put PROSE in a targeted_tests target
+        # ("Review work chain logic and documented lifecycle stages."). verify.py then ran
+        # `pytest -q <prose>` -> exit 4 "file or directory not found", so a read-only audit could
+        # never complete no matter how good the work was. A pytest target must be a .py path;
+        # anything else is a malformed step and is rejected here (corrective retry re-asks).
+        # R15 (2026-11-19): a read_only_audit changes nothing, so there is nothing to test -- yet
+        # the local planner invented test paths (tests/backend/work_chain_read.py) for it, and
+        # pytest's exit 4 (file not found) failed every audit attempt forever. This app's only
+        # verification kind is a real pytest run, so an audit must declare an empty plan; the
+        # audit's own written evidence is its verification. Rejecting (not silently clearing)
+        # keeps the model's plan honest and triggers the corrective retry.
+        if task_type == "read_only_audit" and verification_plan:
+            raise PlanValidationError(
+                f"tasks[{i}]: a read_only_audit must have verification_plan: [] (it changes nothing, "
+                f"so there is no test to run); got {verification_plan!r}."
+            )
+        for step_index, step in enumerate(verification_plan):
+            if isinstance(step, dict) and step.get("kind") == "targeted_tests":
+                target = step.get("target")
+                if not isinstance(target, str) or not target.endswith(".py"):
+                    raise PlanValidationError(
+                        f"tasks[{i}].verification_plan[{step_index}].target must be a real .py test path "
+                        f"(e.g. tests/backend/test_x.py) for kind 'targeted_tests'; got {target!r}. "
+                        "If there is nothing to run, use verification_plan: []."
+                    )
         if task_type in TASK_TYPES_REQUIRING_NONEMPTY_VERIFICATION_PLAN and not verification_plan:
             raise PlanValidationError(
                 f"tasks[{i}]: the AI-proposed plan gives task_type '{task_type}' an empty verification_plan -- "
@@ -459,4 +584,4 @@ async def propose_plan_via_ai(db: Session, *, goal: MainAIGoal) -> tuple[list[Pl
     if not specs:
         raise PlanValidationError("Planner response's 'tasks' array must not be empty.")
 
-    return specs, result.provider, result.model
+    return specs

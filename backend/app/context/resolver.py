@@ -33,6 +33,12 @@ INTENT_IDEA_WORTH_SAVING = "idea_worth_saving"
 INTENT_EXPLICIT_MEMORY = "explicit_memory"
 INTENT_UNCERTAIN_REFERENCE = "uncertain_reference"
 
+# Intents where the founder's message plausibly states a SUGGESTION/desired outcome rather
+# than just discussing or asking -- the set used (chat.py, Phase A) to gate the "understand
+# the underlying goal, not just the literal suggestion" instruction, so it fires only where a
+# suggestion is actually being made, not on every single turn.
+SUGGESTION_BEARING_INTENTS = frozenset({INTENT_WORK_COMMAND, INTENT_IDEA_WORTH_SAVING})
+
 CONFIDENCE_HIGH = "high"
 CONFIDENCE_MEDIUM = "medium"
 CONFIDENCE_LOW = "low"
@@ -99,6 +105,13 @@ def _contains_any(text: str, markers: list[str]) -> str | None:
 
 def _words(text: str) -> set[str]:
     return {w for w in _WORD_RE.findall(text.lower()) if len(w) > 2}
+
+
+def _last_user_message(history: list[ConversationMessage]) -> ConversationMessage | None:
+    for m in reversed(history):
+        if m.role == "user":
+            return m
+    return None
 
 
 def _is_pronoun_heavy(text: str) -> bool:
@@ -198,9 +211,18 @@ def resolve_context(
 
     if marker := _contains_any(text, _CORRECTION_MARKERS):
         ref_idx = len(history) - 1 if history else None
-        return _result(
-            INTENT_CORRECTION, CONFIDENCE_HIGH, f"Korrigeringsmarkör: {marker!r}, syftar troligen på föregående meddelande.", [marker], ref_idx
-        )
+        signals = [marker]
+        reasoning = f"Korrigeringsmarkör: {marker!r}, syftar troligen på föregående meddelande."
+        # Distinguishes "founder is correcting a STATED FACT" from "founder is reversing an
+        # INSTRUCTION they themselves just gave" — the latter needs the model to explicitly
+        # confirm which instruction now applies, not silently treat both as still active (see
+        # docs/CONTEXT_RESOLVER_V1.md's "not built tonight" list -- this is the smallest real
+        # piece of it: detection only, app/routers/chat.py decides what to do with the signal).
+        prior_user = _last_user_message(history)
+        if prior_user and _contains_any(_normalize(prior_user.content), _WORK_COMMAND_MARKERS):
+            signals.append("instruction_reversal")
+            reasoning += " Föregående meddelande från grundaren var ett arbetskommando — möjlig instruktionsändring, inte bara en faktakorrigering."
+        return _result(INTENT_CORRECTION, CONFIDENCE_HIGH, reasoning, signals, ref_idx)
 
     if marker := _contains_any(text, _NAVIGATION_MARKERS):
         return _result(INTENT_NAVIGATION_QUESTION, CONFIDENCE_HIGH, f"Navigationsfråga: {marker!r}.", [marker])

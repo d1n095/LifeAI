@@ -221,7 +221,7 @@ def test_recovery_api_pushed_no_pr_requires_approve_endpoint_before_takeover_con
         db_session.commit()
         await push_worktree_branch(wt)
 
-    asyncio.get_event_loop().run_until_complete(_do_push())
+    asyncio.run(_do_push())
     _kill_lease(superuser_db, db_session, owner_id, dead_job.id)
 
     first_res = client.post(f"/api/mainai/execution/tasks/{task.id}/recover", headers={"X-CSRF-Token": csrf})

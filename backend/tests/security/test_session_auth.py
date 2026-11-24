@@ -148,3 +148,59 @@ def test_password_reset_revokes_all_sessions(client, db_session, make_verified_u
 
     # The session established BEFORE the reset must now be dead.
     assert client.get("/api/auth/me").status_code == 401
+
+
+def test_expired_access_token_is_rejected_cleanly_not_with_a_500(make_verified_user):
+    """"Session expiry" fail-closed check: get_current_user's PyJWTError catch (app/deps.py)
+    exercised by an ACTUALLY expired token, not just a malformed one (app/security.py's own
+    tampering tests cover that case) -- every `get_current_user`-gated route shares this
+    dependency, so /api/auth/me is representative, not endpoint-specific. Uses its own bare
+    client/cookie jar (no prior login) so there is never more than one access_token cookie
+    in play -- mixing a manually-set cookie into an already-logged-in jar is ambiguous about
+    which value wins and isn't what this check is about."""
+    import uuid
+
+    import jwt
+    from fastapi.testclient import TestClient
+
+    from app.config import get_settings
+    from app.main import app
+
+    user, _password = make_verified_user()
+    settings = get_settings()
+    expired_token = jwt.encode(
+        {
+            "sub": str(user.id),
+            "role": user.role if isinstance(user.role, str) else user.role.value,
+            "iat": 1577836800,  # 2020-01-01T00:00:00Z
+            "exp": 1577836860,  # one minute later -- long since expired
+            "jti": str(uuid.uuid4()),
+        },
+        settings.secret_key,
+        algorithm=settings.jwt_algorithm,
+    )
+
+    with TestClient(app, base_url="https://testserver", raise_server_exceptions=False) as bare_client:
+        bare_client.cookies.set("access_token", expired_token)
+        blocked = bare_client.get("/api/auth/me")
+        assert blocked.status_code == 401
+        assert blocked.status_code != 500
+
+
+def test_refresh_issues_an_access_token_that_actually_works(client, make_verified_user):
+    """Session-expiry recovery, the other half: refresh (app/routers/auth.py) must issue a
+    NEW access token that genuinely authenticates, not just a cookie whose value differs
+    from the old one (test_refresh_rotates_token_and_csrf above already proves the value
+    changes; this proves the new value is actually usable)."""
+    user, password = make_verified_user()
+    login = client.post("/api/auth/login", json={"email": user.email, "password": password})
+    assert login.status_code == 200
+    csrf = login.json()["csrf_token"]
+
+    assert client.get("/api/auth/me").status_code == 200
+
+    refreshed = client.post("/api/auth/refresh", headers={"X-CSRF-Token": csrf})
+    assert refreshed.status_code == 200
+
+    recovered = client.get("/api/auth/me")
+    assert recovered.status_code == 200
