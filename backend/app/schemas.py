@@ -158,8 +158,16 @@ class ChatMessageOut(BaseModel):
     confidence_score: float | None = None
     providers_attempted: list[str] = []  # >1 entry means fallback engaged
     conflicts_detected: bool = False
-    context_intent: str | None = None  # see app/context/resolver.py — observational only tonight
+    context_intent: str | None = None  # see app/context/resolver.py
     context_confidence: str | None = None
+    # True when app/context/resolver.py found the message genuinely ambiguous (two candidate
+    # projects, or an unresolved reference) — the model was instructed to ask rather than
+    # silently guess; a future UI may use this to show the same prompt to the founder directly.
+    needs_clarification: bool = False
+    # True when this conversation has more prior messages than the chat history window
+    # includes — the model was told explicitly, so it never claims to recall something from
+    # earlier in the conversation that it was never actually shown.
+    history_truncated: bool = False
     # Set whenever retrieval found zero hits (success or failure path) — see
     # app/rag/context_status.py. None when hits were actually found; there is nothing to
     # explain in that case.

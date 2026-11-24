@@ -153,6 +153,34 @@ def test_old_context_superseded_by_new_information_is_a_correction():
     assert result.intent == INTENT_CORRECTION
 
 
+# --- Workstream D: instruction reversal (a founder correcting their OWN just-given work
+# command, not merely correcting a stated fact) ---
+
+
+def test_correction_of_a_prior_work_command_is_flagged_instruction_reversal():
+    history = _history("Skapa ett nytt dokument i biblioteket.")
+    result = resolve_context("Nej, det stämmer inte, gör det inte.", history, now=BASE_TIME + timedelta(seconds=30))
+    assert result.intent == INTENT_CORRECTION
+    assert "instruction_reversal" in result.signals
+
+
+def test_correction_of_a_stated_fact_is_not_flagged_instruction_reversal():
+    history = _history("Filen ligger i mappen Projekt/2026.")
+    result = resolve_context("Den finns inte där.", history, now=BASE_TIME + timedelta(seconds=30))
+    assert result.intent == INTENT_CORRECTION
+    assert "instruction_reversal" not in result.signals
+
+
+def test_instruction_reversal_only_checks_the_most_recent_founder_message():
+    # The work command is the founder's FIRST message, not their most recent one -- the most
+    # recent founder message is itself a plain factual statement, so this correction most
+    # plausibly targets that, not the older instruction, and must not be flagged.
+    history = _history("Skapa ett nytt dokument i biblioteket.", "Klart, dokumentet heter Rapport.", "Det heter Analys, inte Rapport.")
+    result = resolve_context("Nej, det stämmer inte.", history, now=BASE_TIME + timedelta(seconds=90))
+    assert result.intent == INTENT_CORRECTION
+    assert "instruction_reversal" not in result.signals
+
+
 def test_explicit_memory_marker():
     result = resolve_context("Kom ihåg att mötet flyttades till fredag.", _history("Ok."), now=BASE_TIME + timedelta(seconds=30))
     assert result.intent == INTENT_EXPLICIT_MEMORY

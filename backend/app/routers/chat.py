@@ -23,9 +23,11 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.context.resolver import (
+    CONFIDENCE_LOW,
     INTENT_CORRECTION,
     INTENT_EXPLICIT_MEMORY,
     INTENT_IDEA_WORTH_SAVING,
+    INTENT_UNCERTAIN_REFERENCE,
     ContextResolution,
     ConversationMessage,
     resolve_context,
@@ -37,6 +39,7 @@ from app.founder_memory_signals import record_candidate_signal
 from app.limiter import limiter
 from app.mainai_runtime_contract import build_answer_response, sanitize_unverified_execution_claims
 from app.models.conversation import Conversation, Message as MessageModel, MessageRole, MessageStatus
+from app.models.project import Project
 from app.billing import record_usage
 from app.billing.enforcement import BillingBudgetExceededError, BillingEnforcementUnavailableError
 from app.billing.limits import effective_limits
@@ -155,6 +158,7 @@ class _ChatContext:
     trust: object
     context_status_out: ContextStatusOut | None
     context_resolution: ContextResolution
+    history_truncated: bool
 
 
 async def _build_chat_context(db: Session, *, conversation: Conversation, user_message: MessageModel, user: User) -> _ChatContext:
@@ -248,7 +252,18 @@ async def _build_chat_context(db: Session, *, conversation: Conversation, user_m
         else None
     )
 
-    history = (
+    _HISTORY_WINDOW = 20
+    # Root cause of a real multi-turn-reliability defect (found while auditing long-conversation
+    # behavior): this used to be `.order_by(created_at.asc(), id.asc()).limit(20)` directly,
+    # which — with ascending order — takes the OLDEST 20 messages, not the most recent 20. Once
+    # a conversation passed 20 prior messages, every later turn was answered (and resolved by
+    # app/context/resolver.py) from that same frozen earliest window forever: the model and the
+    # resolver permanently lost all newer context the moment the 21st message existed, with no
+    # error, no degraded-reason signal, nothing — a silent, worsening loss of exactly the kind
+    # this effort's "cognitive reliability" review exists to catch. Fixed by selecting the most
+    # recent `_HISTORY_WINDOW` by the same total order (DESC), then reversing back to the
+    # ascending order every caller below already expects.
+    recent_desc = (
         db.query(MessageModel)
         .filter(
             MessageModel.conversation_id == conversation.id,
@@ -261,18 +276,32 @@ async def _build_chat_context(db: Session, *, conversation: Conversation, user_m
         # different order between two calls could change the model's answer and the resolver's
         # classification for reasons nothing could reproduce. Same tiebreaker the S1B backfill
         # numbers by; still not `ORDER BY sequence_number` (EXPAND phase — see conversations.py).
-        .order_by(MessageModel.created_at.asc(), MessageModel.id.asc())
-        .limit(20)
+        .order_by(MessageModel.created_at.desc(), MessageModel.id.desc())
+        .limit(_HISTORY_WINDOW + 1)  # one extra row, only to detect truncation below
         .all()
     )
+    history_truncated = len(recent_desc) > _HISTORY_WINDOW
+    history = list(reversed(recent_desc[:_HISTORY_WINDOW]))
+
+    # The resolver's project-disambiguation path (project_ambiguous) existed but was never
+    # wired to any real candidate names — it could never actually fire from the live endpoint.
+    # A plain owner-scoped name lookup is enough: this is a disambiguation heuristic over
+    # literal text, not a security boundary, so it costs nothing to be generous with.
+    candidate_project_names = {
+        name: pid
+        for pid, name in db.query(Project.id, Project.name).filter(Project.created_by == user.id).all()
+    }
 
     # Conversation Context Resolver v1 (see app/context/resolver.py, docs/CONTEXT_RESOLVER_V1.md)
     # — a rule-based classification of what kind of turn this message is (continuation, new
-    # topic, correction, ...). Purely observational: it doesn't yet change retrieval or the
-    # system prompt — surfaced on the response so the founder and a future UI can see it and
-    # build on it without this endpoint's core behavior depending on it.
+    # topic, correction, ...). Purely observational: it doesn't yet change retrieval — it now
+    # does inform the system prompt for the specific, narrow cases below (genuine ambiguity,
+    # a founder instruction being reversed) — and is also surfaced on the response so the
+    # founder and a future UI can see it and build on it further.
     context_resolution = resolve_context(
-        user_message.content, [ConversationMessage(role=m.role.value, content=m.content, created_at=m.created_at) for m in history]
+        user_message.content,
+        [ConversationMessage(role=m.role.value, content=m.content, created_at=m.created_at) for m in history],
+        candidate_project_names=candidate_project_names or None,
     )
     _record_candidate_signal_if_worth_noticing(db, owner_id=user.id, user_message=user_message, context_resolution=context_resolution)
 
@@ -326,6 +355,44 @@ async def _build_chat_context(db: Session, *, conversation: Conversation, user_m
             db, owner_id=user.id, question="\n".join([m.content for m in history if m.role == MessageRole.user][-2:] + [user_message.content]))
     except Exception:
         logger.warning("project status block failed; reply unaffected", exc_info=True)
+
+    # Cognitive-reliability instructions (Workstream D): narrow, deterministic prompt text for
+    # the three conversational-quality gaps the resolver can detect but — until now — never
+    # acted on (see app/context/resolver.py's own "observational only" note and
+    # docs/CONTEXT_RESOLVER_V1.md's "not built tonight" list). Each block fires only on its own
+    # specific, already-computed signal; none of them change retrieval, authorization, or what
+    # provider gets called — text-only guidance to the model, same fail-open posture as every
+    # block above (appending an extra instruction line can never raise and never blocks a reply).
+    cognitive_lines: list[str] = []
+    if context_resolution.project_ambiguous or (
+        context_resolution.intent == INTENT_UNCERTAIN_REFERENCE and context_resolution.confidence == CONFIDENCE_LOW
+    ):
+        cognitive_lines.append(
+            "Grundarens senaste meddelande är tvetydigt (flera möjliga projekt eller oklar "
+            "referens till vad som avses). Gissa INTE tyst vilket som menas — ställ en kort, "
+            "konkret förtydligande fråga som nämner alternativen, eller svara utifrån det mest "
+            "sannolika alternativet men säg uttryckligen vilket antagande du gjort."
+        )
+    if "instruction_reversal" in context_resolution.signals:
+        cognitive_lines.append(
+            "Grundaren verkar ändra eller upphäva en instruktion hen själv just gav. Bekräfta "
+            "tydligt vilken instruktion som gäller nu och att den tidigare inte längre gäller — "
+            "anta aldrig tyst att båda ska följas."
+        )
+    cognitive_lines.append(
+        "Om svaret på frågan redan finns i KONTEXT, EVIDENSSTATUS, PROJEKTSTATUS ovan eller i "
+        "den tidigare konversationen nedan — svara direkt utifrån det. Fråga inte grundaren om "
+        "något hen redan har svarat på eller som redan är känt, om det inte genuint behövs."
+    )
+    if history_truncated:
+        cognitive_lines.append(
+            f"OBS: endast de {_HISTORY_WINDOW} senaste meddelandena i den här konversationen "
+            "visas nedan — äldre delar av konversationen är inte inkluderade i den här "
+            "kontexten. Påstå inte att du minns eller känner till något från tidigare i "
+            "konversationen som inte faktiskt visas här."
+        )
+    system_content += "\n\nKOGNITIV TILLFÖRLITLIGHET:\n" + "\n".join(cognitive_lines)
+
     messages = [Message(role="system", content=system_content)]
     messages += [Message(role=m.role.value, content=m.content) for m in history]
     messages.append(Message(role="user", content=user_message.content))
@@ -333,6 +400,7 @@ async def _build_chat_context(db: Session, *, conversation: Conversation, user_m
     return _ChatContext(
         messages=messages, hits=hits, trust=trust,
         context_status_out=context_status_out, context_resolution=context_resolution,
+        history_truncated=history_truncated,
     )
 
 
@@ -387,6 +455,7 @@ async def _attempt_assistant_reply(db: Session, *, conversation: Conversation, u
         db, conversation=conversation, user_message=user_message, assistant_row=assistant_row,
         result=result, attempted=attempted, hits=hits, trust=trust,
         context_resolution=context_resolution, context_status_out=context_status_out, user=user,
+        history_truncated=ctx.history_truncated,
     )
 
 
@@ -439,6 +508,7 @@ def _finalize_failed_reply(
 def _finalize_successful_reply(
     db: Session, *, conversation: Conversation, user_message: MessageModel, assistant_row: MessageModel | None,
     result, attempted: list[str], hits: list[dict], trust, context_resolution, context_status_out, user: User,
+    history_truncated: bool = False,
 ) -> ChatMessageOut:
     """Shared by the non-streaming and streaming reply paths — the single place a successful
     provider result becomes one committed assistant `MessageModel` row and the one
@@ -521,6 +591,11 @@ def _finalize_successful_reply(
         conflicts_detected=trust.conflicts_detected,
         context_intent=context_resolution.intent,
         context_confidence=context_resolution.confidence,
+        needs_clarification=(
+            context_resolution.project_ambiguous
+            or (context_resolution.intent == INTENT_UNCERTAIN_REFERENCE and context_resolution.confidence == CONFIDENCE_LOW)
+        ),
+        history_truncated=history_truncated,
         context_status=context_status_out,
     )
 
@@ -784,6 +859,7 @@ async def _generate_stream_events(
             db, conversation=conversation, user_message=user_message, assistant_row=assistant_row,
             result=result, attempted=[provider.name], hits=ctx.hits, trust=ctx.trust,
             context_resolution=ctx.context_resolution, context_status_out=ctx.context_status_out, user=user,
+            history_truncated=ctx.history_truncated,
         )
         yield _sse({
             "done": True,
@@ -797,6 +873,12 @@ async def _generate_stream_events(
             "confidence": finalized.confidence,
             "confidence_score": finalized.confidence_score,
             "context_status": finalized.context_status.model_dump(mode="json") if finalized.context_status else None,
+            # Same cognitive-reliability signals the non-streaming contract now carries (see
+            # ChatMessageOut) — Item 3 of this effort already found and fixed one instance of
+            # the streaming "done" event silently omitting fields the non-streaming shape had;
+            # not repeating that gap for these two.
+            "needs_clarification": finalized.needs_clarification,
+            "history_truncated": finalized.history_truncated,
         })
     finally:
         db.close()

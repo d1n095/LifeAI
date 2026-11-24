@@ -189,6 +189,8 @@ export type ChatResponse = {
   conflicts_detected?: boolean;
   context_intent?: string | null;
   context_confidence?: string | null;
+  needs_clarification?: boolean;
+  history_truncated?: boolean;
   context_status?: ContextStatus | null;
   error_category: string | null;
   error_message: string | null;
@@ -211,6 +213,8 @@ export type ChatStreamDone = {
   confidence?: Confidence | null;
   confidence_score?: number | null;
   context_status?: ContextStatus | null;
+  needs_clarification?: boolean;
+  history_truncated?: boolean;
 };
 
 export type ChatStreamError = {

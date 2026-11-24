@@ -105,6 +105,24 @@ def test_stream_happy_path_delivers_incremental_deltas_and_persists_one_row(monk
     assert count == 1
 
 
+def test_stream_done_event_carries_cognitive_reliability_fields_same_as_non_streaming(monkeypatch, client):
+    """Workstream D added `needs_clarification`/`history_truncated` to the non-streaming
+    ChatMessageOut contract. Item 3 already found and fixed one instance of the streaming
+    "done" event silently dropping fields the non-streaming shape had (status/error_category/
+    in_reply_to_id) -- this confirms these two new ones were not left out the same way."""
+    _patch_streaming_chat(monkeypatch, [
+        StreamChunk(delta="Hej"),
+        StreamChunk(delta="", done=True, usage={"prompt_tokens": 1, "completion_tokens": 1}),
+    ])
+    csrf = _login(client)
+    res = client.post("/api/chat/stream", json={"message": "Hej MainAI"}, headers={"X-CSRF-Token": csrf})
+    final = _sse_events(res.text)[-1]
+    assert final["done"] is True
+    assert "needs_clarification" in final
+    assert "history_truncated" in final
+    assert final["history_truncated"] is False  # brand-new conversation, well under the window
+
+
 def test_stream_reassembled_content_matches_exact_delta_concatenation(monkeypatch, client):
     _patch_streaming_chat(monkeypatch, [
         StreamChunk(delta="A"), StreamChunk(delta="B"), StreamChunk(delta="C"),
