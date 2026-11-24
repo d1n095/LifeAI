@@ -325,3 +325,10 @@ bash scripts/ops/export_commit_stack.sh verify \
   körts mot LifeAI:s korpus.
 - Semantisk överlapp med #501 (near-duplicate) och #506 (beslutsstöd i live-prompten) måste
   prövas före merge (se §2).
+
+## 12. System Intelligence 2.0
+
+En separat uppföljningsbranch, `freebuff/system-intelligence-2-20261124`, bygger vidare på
+atlasen med projektisolering (C3), hållbart utvecklingstillstånd/återhämtning (E1/E3) och
+statisk arkitekturkonsistens (B3). Se `docs/SYSTEM_INTELLIGENCE_2.md`; den ändrar inte denna
+branch eller dess 92-testerresultat.

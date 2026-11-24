@@ -22,8 +22,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.context_atlas.capability_map import scan_capabilities  # noqa: E402
+from app.context_atlas.consistency import check_consistency  # noqa: E402
 from app.context_atlas.git_evidence import load_pull_requests, scan_local_git  # noqa: E402
 from app.context_atlas.identity import compare_sources  # noqa: E402
+from app.context_atlas.project_scope import (  # noqa: E402
+    ProjectDefinition,
+    ScopeClaim,
+    resolve_project_scope,
+)
 from app.context_atlas.recommendation import (  # noqa: E402
     CapabilityFact,
     EngineeringRequest,
@@ -122,6 +128,40 @@ def _cmd_compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_scope(args: argparse.Namespace) -> int:
+    projects_payload = json.loads(Path(args.projects).read_text(encoding="utf-8"))
+    claims_payload = json.loads(Path(args.claims).read_text(encoding="utf-8"))
+    projects = tuple(
+        ProjectDefinition(
+            project_id=str(item["project_id"]),
+            name=str(item["name"]),
+            aliases=tuple(item.get("aliases") or ()),
+            archived=bool(item.get("archived", False)),
+        )
+        for item in projects_payload
+    )
+    claims = tuple(
+        ScopeClaim(
+            source_id=str(item["source_id"]),
+            project_ref=item.get("project_ref"),
+            statement=str(item.get("statement", "")),
+            evidence=str(item.get("evidence", "")),
+        )
+        for item in claims_payload
+    )
+    _emit(resolve_project_scope(claims, projects).to_dict(), args.out)
+    return 0
+
+
+def _cmd_consistency(args: argparse.Namespace) -> int:
+    system = scan_system_map(Path(args.repo_root))
+    _emit(
+        check_consistency(system, repo_root=Path(args.repo_root)).to_dict(),
+        args.out,
+    )
+    return 0
+
+
 def _cmd_prs(args: argparse.Namespace) -> int:
     refs = load_pull_requests(Path(args.path))
     _emit(
@@ -184,6 +224,17 @@ def main(argv: list[str] | None = None) -> int:
     compare_parser.add_argument("left")
     compare_parser.add_argument("right")
     compare_parser.set_defaults(func=_cmd_compare)
+
+    scope_parser = sub.add_parser("scope", help="check explicit project boundaries")
+    scope_parser.add_argument("projects", help="reviewed project registry JSON")
+    scope_parser.add_argument("claims", help="claims with explicit project_ref JSON")
+    scope_parser.add_argument("--out")
+    scope_parser.set_defaults(func=_cmd_scope)
+
+    consistency_parser = sub.add_parser("consistency", help="static architecture consistency findings")
+    consistency_parser.add_argument("--repo-root", default=".")
+    consistency_parser.add_argument("--out")
+    consistency_parser.set_defaults(func=_cmd_consistency)
 
     prs_parser = sub.add_parser("prs", help="normalize captured pull-request metadata")
     prs_parser.add_argument("path")
