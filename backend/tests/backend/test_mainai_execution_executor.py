@@ -24,6 +24,7 @@ Covers, in order:
 Real local Postgres (RLS included). Only the LLM provider is faked, never the DB, RLS, or the
 local filesystem/subprocess verification path."""
 
+import subprocess
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -1060,12 +1061,32 @@ async def test_run_task_execution_job_repo_edit_proposes_only_with_real_local_ve
     """github_write_enabled defaults to False (app/config.py) and no GitHub credentials are
     configured in this test environment, so any accidental attempt at a real network call would
     itself fail this test -- the absence of a mock IS the assertion. What must still be real:
-    the AI-proposed file content is actually written locally and a real subprocess pytest run
-    verifies it before the task can complete."""
+    the AI-proposed file content is actually written somewhere real and a real subprocess
+    pytest run verifies it before the task can complete.
+
+    Reconciliation note (PI-1d merge): the proposal now lands in M4's isolated git checkout
+    (app/mainai_execution/proposal_worktree.py), not a plain filesystem copy -- the previous
+    version of this test asserted against a bare, non-git `tmp_path`, which is now
+    incompatible with that mechanism's bootstrap (it would simply fall back to the shared
+    checkout). `tests/backend/test_proposal_worktree_isolation.py`'s
+    `test_an_accepted_proposal_also_leaves_the_shared_checkout_untouched` and
+    `test_an_accepted_proposals_checkout_is_removed_once_the_goal_finalizes` now cover exactly
+    this (isolation-on-success, and cleanup-on-goal-finalization) against a real git
+    `_shared_checkout()` fixture -- kept here only as confirmation that `_repo_root()` itself
+    (a real git checkout, as it always is in production) is never touched."""
     from app.mainai_execution import execution_job
 
-    monkeypatch.setattr(execution_job, "_repo_root", lambda: tmp_path)
-    (tmp_path / "backend" / "tests").mkdir(parents=True)
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    subprocess.run(["git", "init", "-q", "."], cwd=repo_root, check=True)
+    subprocess.run(["git", "config", "user.email", "test@lifeai.invalid"], cwd=repo_root, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_root, check=True)
+    (repo_root / "backend" / "tests").mkdir(parents=True)
+    (repo_root / "backend" / "tests" / ".keep").write_text("")
+    subprocess.run(["git", "add", "-A"], cwd=repo_root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=repo_root, check=True)
+
+    monkeypatch.setattr(execution_job, "_repo_root", lambda: repo_root)
     monkeypatch.setattr(
         OpenAIProvider,
         "chat",
@@ -1087,9 +1108,8 @@ async def test_run_task_execution_job_repo_edit_proposes_only_with_real_local_ve
     _set_rls_user(db_session, owner_id)
     await run_task_execution_job(db_session, job.id, owner_id, worker_id="worker-1", lease_generation=generation, lease_seconds=120)
 
-    written = tmp_path / "backend" / "tests" / "test_scratch_edit.py"
-    assert written.exists()
-    assert "assert 2 + 3 == 5" in written.read_text()
+    never_written = repo_root / "backend" / "tests" / "test_scratch_edit.py"
+    assert not never_written.exists(), "PI-1d: proposal-mode edits must never land in the real repo root, even on success"
 
     job = superuser_db.get(MainAIJob, job.id)
     assert job.status == MainAIJobStatus.completed
@@ -1102,6 +1122,9 @@ async def test_run_task_execution_job_repo_edit_proposes_only_with_real_local_ve
     ).scalar_one()
     assert completed_event["work_result"]["proposed"] is True
     assert "branch" in completed_event["work_result"]
+    # PI-1d: the durable record of WHERE the proposal actually lives, never a path under the
+    # real repo root.
+    assert "proposal_worktree_path" in completed_event["work_result"]
 
 
 # ---------------------------------------------------------------- E'. repo_edit absolute-path attack

@@ -30,6 +30,18 @@ RLS_STATEMENTS = [
     "ALTER TABLE knowledge_claims FORCE ROW LEVEL SECURITY",
     "ALTER TABLE claim_relationships ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE claim_relationships FORCE ROW LEVEL SECURITY",
+    # Claim-level study metadata (migration 0073) — the evidence-quality producer's rows
+    # (app/rag/evidence_metadata.py). Also enabled directly in the migration itself;
+    # listed here so this idempotent reapply path stays the single source of truth for
+    # every owner-scoped table.
+    "ALTER TABLE claim_evidence_metadata ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE claim_evidence_metadata FORCE ROW LEVEL SECURITY",
+    # Migration 0074 (engineering_lesson_plan_decisions) — the lesson->plan-decision
+    # provenance edge (app/mainai_execution/lessons.py). Also enabled directly in the
+    # migration itself; listed here so this idempotent reapply path stays the single
+    # source of truth for every owner-scoped table.
+    "ALTER TABLE engineering_lesson_plan_decisions ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE engineering_lesson_plan_decisions FORCE ROW LEVEL SECURITY",
     # Audio/video import v1 (migration 0009, STEG 12) — see app/models/media_url_import.py.
     "ALTER TABLE media_url_imports ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE media_url_imports FORCE ROW LEVEL SECURITY",
@@ -209,6 +221,16 @@ POLICY_DEFINITIONS = [
     {
         "table": "claim_relationships",
         "name": "claim_relationships_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "claim_evidence_metadata",
+        "name": "claim_evidence_metadata_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "engineering_lesson_plan_decisions",
+        "name": "engineering_lesson_plan_decisions_isolation",
         "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
     {
@@ -605,6 +627,14 @@ _MAINAI_EXECUTION_TABLES = (
     "workforce_lifecycle_events",
     "workforce_cost_budgets",
     "workforce_verification_decisions",
+    # Migration 0073 (claim_evidence_metadata): the evidence-quality producer's rows ride on
+    # knowledge_claims' own ownership -- one row per claim, owner-anchored composite FK, so
+    # it gets the same ownership-only treatment (RLS + policy + UPDATE kept for re-stamping).
+    "claim_evidence_metadata",
+    # Migration 0074 (engineering_lesson_plan_decisions): append-only history of which
+    # lesson changed which task's plan (the 0058-provenance edge) -- same structural role
+    # as the 0058 guard observations, SELECT/INSERT-only narrowing below.
+    "engineering_lesson_plan_decisions",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
@@ -1039,6 +1069,12 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_execution_authorization_children() TO mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON engineering_lesson_guard_observations FROM mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON supervisor_goal_leases FROM mainai_app"))
+        # Migration 0073 (claim_evidence_metadata): mutable on purpose -- re-stamping a
+        # corrected founder declaration must UPDATE the materialized verdict in place --
+        # but rows are never deleted by the app role (they die via ON DELETE CASCADE from
+        # knowledge_claims/users with their owner), so DELETE/TRUNCATE/REFERENCES/TRIGGER go.
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON claim_evidence_metadata FROM mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON engineering_lesson_plan_decisions FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_supervisor_goal_leases() TO mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON provider_spend_authorizations FROM mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON provider_spend_usage_events FROM mainai_app"))
@@ -1124,6 +1160,8 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("execution_scope_proposals", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("execution_authorization_envelopes", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("engineering_lesson_guard_observations", frozenset({"SELECT", "INSERT"})),
+            ("claim_evidence_metadata", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("engineering_lesson_plan_decisions", frozenset({"SELECT", "INSERT"})),
             ("supervisor_goal_leases", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("provider_spend_authorizations", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("provider_spend_usage_events", frozenset({"SELECT", "INSERT"})),

@@ -24,7 +24,6 @@ visible as an operational issue, not silently swallowed. mark_conflict() never p
 BOTH lessons move to `disputed`, preserving their full history (no delete-based forgetting,
 matching this table's other status transitions)."""
 
-import json
 import logging
 import uuid
 
@@ -33,8 +32,6 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from app.models.mainai_execution import EngineeringLesson, EngineeringLessonStatus, MainAITask, MainAITaskEvent, MainAITaskEventType
-from app.providers.base import Message
-from app.providers.registry import chat_with_fallback
 
 logger = logging.getLogger("mainai.execution")
 
@@ -68,29 +65,33 @@ def find_conflict_candidate_pairs(db: Session, *, lessons: list[EngineeringLesso
 
 async def detect_conflict(db: Session, *, lesson_a: EngineeringLesson, lesson_b: EngineeringLesson) -> tuple[bool, str]:
     """Returns (is_conflict, reasoning). The one real AI-judgment call in this module -- see
-    module docstring for the fail-closed default on a malformed/errored response."""
-    prompt = (
-        f"## Lärdom A (id={lesson_a.id})\nKomponent: {lesson_a.affected_component}\n"
-        f"Regel: {lesson_a.general_rule}\nÅtgärd: {lesson_a.fix}\n\n"
-        f"## Lärdom B (id={lesson_b.id})\nKomponent: {lesson_b.affected_component}\n"
-        f"Regel: {lesson_b.general_rule}\nÅtgärd: {lesson_b.fix}"
+    module docstring for the fail-closed default on a malformed/errored response.
+
+    Founder directive ("RESUME LIFEAI FIRST-CYCLE REMEDIATION" -> "FOUNDER DECISION -- EGRESS
+    AUTHORIZATION & FIRST-CYCLE INTEGRATION", Task #60, requirement 5): this call is invoked
+    only from app/worker.py's own autonomous background tick (resolve_conflicts_among()),
+    never from a live, authenticated Founder request -- and `EngineeringLesson` is explicitly
+    documented (see its own model docstring) as founder-wide, NOT RLS-protected, project state
+    with no `owner_id` column at all. There is currently NO durable, founder-wide (non-goal-
+    scoped) authorization record in this codebase that could legitimately back this call --
+    `ExecutionAuthorizationEnvelope` (app/models/execution_envelope.py) requires a non-null
+    `goal_id` FK to a single `MainAIGoal`, which does not fit "founder-wide, across every
+    lesson regardless of which goal it came from." Rather than fabricate an owner_id (the
+    anti-pattern this directive explicitly forbids) or silently reuse a goal-scoped envelope
+    that was never actually granted for this purpose, this call is FAILED CLOSED outright --
+    zero provider calls, no `chat_with_fallback()` invocation at all -- until a real
+    founder-wide authorization/lease primitive exists. Logged, never raised to the caller:
+    the same fail-closed, logged-but-non-fatal contract every other judgment failure in this
+    module already has (see module docstring), so one missing authorization record does not
+    crash the whole worker tick or the lessons it's evaluating."""
+    logger.warning(
+        "Lesson conflict judgment for lessons %s/%s denied: no backing founder-wide egress authorization "
+        "exists yet (EngineeringLesson is ownerless, founder-wide state with no ExecutionAuthorizationEnvelope "
+        "equivalent) -- failing closed per founder directive Task #60 requirement 5, zero provider calls.",
+        lesson_a.id,
+        lesson_b.id,
     )
-    messages = [Message(role="system", content=LESSON_CONFLICT_SYSTEM_PROMPT), Message(role="user", content=prompt)]
-    try:
-        result, _attempted = await chat_with_fallback(db, messages)
-        raw = result.content.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```", 2)[1]
-            if raw.startswith("json"):
-                raw = raw[len("json") :]
-            raw = raw.strip()
-        parsed = json.loads(raw)
-        if not isinstance(parsed, dict) or "conflict" not in parsed:
-            raise ValueError(f"malformed conflict-judgment response: {parsed!r}")
-        return bool(parsed["conflict"]), str(parsed.get("reasoning", ""))
-    except Exception as exc:  # noqa: BLE001 -- fail closed: an unreliable judgment is never treated as a proven conflict
-        logger.warning("Lesson conflict judgment failed for lessons %s/%s: %s", lesson_a.id, lesson_b.id, exc)
-        return False, ""
+    return False, ""
 
 
 def _tasks_that_applied_lesson(db: Session, lesson_id: uuid.UUID) -> list[MainAITask]:
