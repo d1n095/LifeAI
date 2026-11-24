@@ -30,10 +30,17 @@ docker compose up --build
 ```
 
 Detta startar:
-- **PostgreSQL** — `localhost:5432`
-- **Qdrant** (vektordatabas) — `localhost:6333`
+- **PostgreSQL** (med pgvector — även vektordatabasen, se nedan) — `localhost:5432`
+- **Redis** — `localhost:6379`
 - **Backend (FastAPI)** — `localhost:8000` (Swagger-dokumentation: `localhost:8000/docs`)
+- **Worker** — bearbetar dokumentindexering och MainAI-exekveringsjobb (`app/worker.py`s
+  claim-loop; detta är den ENDA vägen dokument faktiskt chunkas/embeddas eller jobb
+  exekveras — utan den tjänsten tar API:et emot uppladdningar men indexerar dem aldrig)
 - **Frontend (Next.js)** — `localhost:3000`
+
+(Qdrant användes i ett tidigt skede men är sedan länge ersatt av pgvector direkt i Postgres —
+se `docs/MAINAI_ARCHITECTURE.md`. Det finns ingen `qdrant`-tjänst i `docker-compose.yml` och
+ingen `QDRANT_URL` att sätta.)
 
 Vill du även köra en lokal modell (Llama/Qwen/Mistral) utan molnkostnad:
 
@@ -123,11 +130,22 @@ cd backend
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# Kräver en körande PostgreSQL och Qdrant, t.ex.:
-# docker compose up postgres qdrant
+# Kräver en körande PostgreSQL (med pgvector) och Redis, t.ex.:
+# docker compose up postgres redis
 
-cp ../.env.example .env   # justera DATABASE_URL/QDRANT_URL till localhost om du kör lokalt
+cp ../.env.example .env   # justera DATABASE_URL/APP_DATABASE_URL/REDIS_URL till localhost om du kör lokalt
+
+# Sätter upp rollen/migrationerna/privilegiepolicyn i rätt ordning (samma sekvens som
+# backend/docker-entrypoint.sh kör i en container) — se scripts/setup/bootstrap_database.py
+# för varför detta INTE är valfritt: ett felande `uvicorn`-startsteg annars är nästan alltid
+# ett utelämnat steg här, inte ett appfel.
+DATABASE_URL=... APP_DATABASE_URL=... python scripts/setup/bootstrap_database.py
+
 uvicorn app.main:app --reload
+
+# I en separat terminal — annars indexeras inga uppladdade dokument och inga MainAI-jobb
+# exekveras (se app/worker.py):
+# python -m app.worker
 ```
 
 ### Frontend
@@ -145,7 +163,7 @@ backend/
   alembic/           # schemamigrationer — enda källan till schemat, se docs/OPERATIONS.md
   app/
     providers/       # OpenAI, Anthropic, Gemini, DeepSeek, OpenRouter, Ollama — gemensamt interface
-    rag/             # chunkning, embedding, Qdrant-lagring, retrieval
+    rag/             # chunkning, embedding, pgvector-lagring, retrieval
     routers/         # auth, account, chat, documents, projects, knowledge, admin, health
     models/          # SQLAlchemy-modeller (Postgres)
     cleanup.py        # schemalagt städjobb för utgångna auth-tokens

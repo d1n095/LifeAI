@@ -124,8 +124,19 @@ curl -s localhost:8000/api/chat -H 'content-type: application/json' \
 # 5. runtime outage: stop the local runtime, check health reports reachable:false,
 #    and that chat fails honestly (assistant_status "failed") instead of retrying silently;
 #    restart it, then confirm health and chat recover with no backend restart.
+
+# 6. real streaming (Founder Alpha Item 1): the SSE endpoint must deliver more than one
+#    token-bearing `data: {...}` event before `done: true`, and ending the connection after
+#    reading only the first event (simulating a closed browser tab) must not crash or wedge
+#    the backend — a health probe taken right after must still return 200.
+curl -sN localhost:8000/api/chat/stream -H 'content-type: application/json' \
+     -H "X-CSRF-Token: …" -d '{"message":"<question>"}'
 ```
 
-Real-Ollama CI (`.github/workflows/real-local-ai-verification.yml`) exercises the same
-properties with a throwaway pgvector service container and small models, and fails if the
-runtime is unreachable — never falling back to a paid API.
+Real-Ollama CI (`.github/workflows/real-local-ai-verification.yml`, `workflow_dispatch`)
+exercises all of the above — including the streaming/disconnect checks in step 6 — against a
+real installed Ollama runtime and a throwaway pgvector service container on a GitHub-hosted
+runner (which has real internet access, unlike most interactive development sandboxes), and
+fails if the runtime is unreachable — never falling back to a paid API. Dispatch it with
+`candidate_ref`/`candidate_sha` set to the exact commit under test; its own defaults point at
+a specific historical candidate and should not be read as "the current one" without checking.
