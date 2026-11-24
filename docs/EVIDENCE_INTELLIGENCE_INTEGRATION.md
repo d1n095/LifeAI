@@ -124,8 +124,8 @@ Evidence: `docs/evidence/evidence-intelligence-integration/`.
 
   ```bash
   cd backend
-  DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/lifeos_test_si3 \
-  APP_DATABASE_URL=postgresql://mainai_app:mainai_app@127.0.0.1:55432/lifeos_test_si3 \
+  DATABASE_URL=postgresql://<db-user>@127.0.0.1:55432/lifeos_test_si3 \
+  APP_DATABASE_URL=postgresql://<app-user>@127.0.0.1:55432/lifeos_test_si3 \
   REDIS_URL=redis://127.0.0.1:56379/3 ENVIRONMENT=test \
   python -m pytest tests/backend/mainai/test_evidence_intelligence_integration.py -q
   ```
