@@ -1,0 +1,76 @@
+{
+  "module": "app.rag.trust",
+  "direct_dependents": [
+    "app.rag.claim_graph",
+    "app.rag.epistemics",
+    "app.routers.blueprint",
+    "app.routers.chat",
+    "app.routers.library",
+    "app.routers.workbench"
+  ],
+  "transitive_dependents": [
+    "app.rag.evidence_metadata",
+    "app.rag.evidence_quality",
+    "app.rag.graph_instructions",
+    "app.rag.intellectual_adversary",
+    "app.rag.scientific_reasoning"
+  ],
+  "endpoints": [
+    "DELETE /api/library/{source_id}",
+    "GET /api/blueprint/drafts",
+    "GET /api/blueprint/drafts/{draft_id}",
+    "GET /api/chat/unresolved",
+    "GET /api/library",
+    "GET /api/library/claims/{claim_id}/evidence-chain",
+    "GET /api/library/graph/cross-domain-overlaps",
+    "GET /api/library/jobs",
+    "GET /api/library/jobs/{job_id}",
+    "GET /api/library/ops/status",
+    "GET /api/library/search/hybrid",
+    "GET /api/library/sources/{source_id}/consequences",
+    "GET /api/library/url-imports",
+    "GET /api/library/{source_id}",
+    "GET /api/library/{source_id}/media",
+    "GET /api/workbench/blueprint-readiness",
+    "POST /api/blueprint/drafts",
+    "POST /api/blueprint/drafts/{draft_id}/approve",
+    "POST /api/blueprint/drafts/{draft_id}/regenerate",
+    "POST /api/chat",
+    "POST /api/chat/messages/{message_id}/retry",
+    "POST /api/chat/stream",
+    "POST /api/chat/unresolved/{attempt_id}/reconcile",
+    "POST /api/library/claims/{claim_id}/relationships",
+    "POST /api/library/import",
+    "POST /api/library/import-url",
+    "POST /api/library/{source_id}/relationships",
+    "POST /api/library/{source_id}/replace",
+    "POST /api/workbench/analyze",
+    "POST /api/workbench/save",
+    "PUT /api/library/claims/{claim_id}/evidence-metadata"
+  ],
+  "tests": [
+    "backend/tests/account/test_founder_only.py",
+    "backend/tests/backend/chat/test_chat_message_persistence.py",
+    "backend/tests/backend/chat/test_chat_source_grounding.py",
+    "backend/tests/backend/jobs/test_mainai_jobs.py",
+    "backend/tests/backend/mainai/test_agent_dispatch_authorization_boundary.py",
+    "backend/tests/backend/mainai/test_candidate_learning_signals.py",
+    "backend/tests/backend/mainai/test_capability_reality_foundation.py",
+    "backend/tests/backend/mainai/test_causal_diagnosis_interface.py"
+  ],
+  "model_dependencies": [
+    "app.models.claim_relationship",
+    "app.models.knowledge_claim",
+    "app.models.source_relationship"
+  ],
+  "migration_note": "module imports ORM models; check whether the change alters a table or index",
+  "security_notes": [
+    "no authorization dependency detected by static import analysis"
+  ],
+  "unknowns": [
+    "runtime callers reached through indirection/dynamic dispatch are not visible",
+    "no coverage measurement is performed; test references are names only",
+    "deployment/activation state is not observable from a checkout"
+  ],
+  "execution_authorized": false
+}

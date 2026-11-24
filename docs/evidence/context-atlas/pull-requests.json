@@ -1,0 +1,55 @@
+{
+  "pull_requests": [
+    {
+      "number": 500,
+      "state": "open",
+      "draft": true,
+      "head_ref": "claude/founder-alpha-ws-a-memory",
+      "head_sha": "14eb5f6df1e93f73068cdfe684c758c700a77a71",
+      "base_ref": "integration/founder-alpha-20261121",
+      "updated_at": "2026-11-24T07:10:00Z",
+      "url": "https://github.com/d1n095/LifeAI/pull/500"
+    },
+    {
+      "number": 501,
+      "state": "open",
+      "draft": true,
+      "head_ref": "claude/founder-alpha-ws-b-knowledge",
+      "head_sha": "1e6487b5c3e874315bb64715f1f1688e1fd2b80e",
+      "base_ref": "integration/founder-alpha-20261121",
+      "updated_at": "2026-11-24T07:25:00Z",
+      "url": "https://github.com/d1n095/LifeAI/pull/501"
+    },
+    {
+      "number": 502,
+      "state": "open",
+      "draft": true,
+      "head_ref": "claude/founder-alpha-ws-c-devintel",
+      "head_sha": "d298936132b739cc016fb5365cec98fb862b2e43",
+      "base_ref": "integration/founder-alpha-20261121",
+      "updated_at": "2026-11-24T07:37:46Z",
+      "url": "https://github.com/d1n095/LifeAI/pull/502"
+    },
+    {
+      "number": 503,
+      "state": "open",
+      "draft": true,
+      "head_ref": "docs/founder-vision-gap-register-20261124",
+      "head_sha": "93640a279c58e26c2659ee7d3039efd12462c772",
+      "base_ref": "claude/founder-alpha-real-ai-acceptance",
+      "updated_at": "2026-11-24T08:17:11Z",
+      "url": "https://github.com/d1n095/LifeAI/pull/503"
+    },
+    {
+      "number": 504,
+      "state": "open",
+      "draft": true,
+      "head_ref": "claude/founder-alpha-ws-d-cognitive",
+      "head_sha": "3985b48ccbe9de2a2ad7402865c1f79c5ff9d60f",
+      "base_ref": "integration/founder-alpha-20261121",
+      "updated_at": "2026-11-24T07:56:36Z",
+      "url": "https://github.com/d1n095/LifeAI/pull/504"
+    }
+  ],
+  "execution_authorized": false
+}

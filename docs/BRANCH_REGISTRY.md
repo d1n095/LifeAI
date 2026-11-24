@@ -6,6 +6,54 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Context Atlas — källidentitet, relationsmappning och kontextbeslut (2026-11-24)
+
+**Branch:** `freebuff/context-atlas-20261124`, bas `8c7b335e` (`freebuff/life-workspaces`).
+Ingen PR/push/merge/deploy; GitHub write-access saknas. `first_cycle_go=false`. Inga
+VPS-tjänster, produktionsresurser eller `security/POLICY_LOCK.json` rörda.
+
+**Scope:** en läs-only analysyta ovanpå befintlig lagring — `identity.py` (byte-identitet vs
+normalisering vs en-teckensändring vs near-duplicate vs likhet, bounded och utan att någonsin
+kasta ett original), `relationships.py` (programmets elva begrepp mappade till den befintliga
+`SourceRelationship`-enumen, med sex synliga luckor), `reconciliation.py`
+(REUSE/LINK/DOCUMENT/COMPARE/PROPOSE/ASK/WAIT/REJECT, alltid utan exekveringsrätt) och
+`capability_map.py` (evidensbaserad inventering från checkouten). Ingen ny minnes-, RAG-,
+köläggnings- eller agentmotor; inga rader skrivs och ingen delad fil ändras.
+
+**Faktiska resultat:** **40 passed** (identitet, beslut, kapabilitetskarta, inklusive
+recovery- och authorization-negative-fall). Kapabilitetskarta på `8c7b335e`: 30 inkopplade
+routers, 56 moduler, 68 modeller, 94 migrationer, head `0095`, 322 testfiler; relationsluckor
+`SIMILAR_TO`, `VERSION_OF`, `DEPENDS_ON`, `IMPLEMENTS_REQUIREMENT`, `VERIFIED_BY`,
+`PROPOSED_FOR`. WS-A: den opushade stacken (6 commits ovanpå PR #499-head `0659f454`) är
+exporterad till en verifierad bundle (`9 385 188` byte, sha256 `d4c44692…c50426`) och
+återverifierad i en isolerad klon (4/4 brancher, SHA + tree-hash + `git fsck`).
+
+**Beroenden:** oberoende av PR #500–#504 i den meningen att inga av deras filer ändras, men
+semantisk överlappning med #501 (Document Intelligence) måste prövas före merge — om #501
+redan täcker near-duplicate-detektion ska atlasens identitetsmodul ersättas, inte dubbleras.
+Migrationer: inga. Mergeordning: när som helst efter `8c7b335e`; ingen konflikt med
+staging-stacken i `/tmp/cand`.
+
+**Fas 1–5 (2026-11-24, samma branch):** kandidatsökning mot riktiga `documents`-rader via
+indexerat `checksum` + bounded storleksfönster (RLS-scope, tvärtenant-nekande och
+omstartsstabilitet testat), djup systemkarta (418 moduler, 403 wired, 402 testrefererade,
+220 endpoints varav 177 founder-only, 21 eventmodeller, 94 migrationer/head `0095`) med
+explicit `unknown` för reviewed/integrated/activated/observed, kravspårning
+VISION→…→RUNTIME EVIDENCE utan `canonical_truth`, samt läs-only rekommendationer
+(REUSE/IMPROVE/INVESTIGATE/WAIT/ASK/REPLACE/REJECT). **78 tester passerar** (174,67 s) över
+åtta filer, inklusive acceptansfall 1–16. Ingen delad fil ändras; ingen migration tillkommer.
+
+**Ancestry (mätt):** atlas-basen `8c7b335e` är lokal-only och innehåller
+integrationshead `0adb108f` som ancestor (115 commits före). PR #499-head `0659f454`
+divergerar: 75 commits på #499-sidan, 63 på atlas-sidan, merge-base `86671468`. PR
+#500–#504 är 1–4 commits före `0659f454`. Ingen textuell konflikt förväntas (endast nya
+filer), men semantisk överlapp med #501 måste granskas före merge.
+
+**Kvarstående blockerare:** GitHub write-access (push/PR/merge; `push --dry-run` exit 128),
+samt att WS-F:s fullständiga gap-register, en indexerad normaliserad hash och fas 6-gränssnittet
+inte är byggda. Detaljer: `docs/CONTEXT_ATLAS.md`; evidens:
+`docs/evidence/context-atlas/`.
+
 ## Founder Alpha local AI — riktig lokal modell verifierad (2026-11-23)
 
 **Branch:** `freebuff/life-workspaces`, bas `04de94db7d7ccf51c23dd68670e789e8e9df6cde`.

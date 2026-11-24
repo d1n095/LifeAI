@@ -1,0 +1,2161 @@
+{
+  "counts": {
+    "migrations": 94,
+    "models": 68,
+    "modules": 56,
+    "routers": 30,
+    "test_files": 327
+  },
+  "migrations_head": "0095",
+  "unmapped_relationships": [
+    "SIMILAR_TO",
+    "VERSION_OF",
+    "DEPENDS_ON",
+    "IMPLEMENTS_REQUIREMENT",
+    "VERIFIED_BY",
+    "PROPOSED_FOR"
+  ],
+  "capabilities": [
+    {
+      "component": "active_context",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/active_context.py"
+      ],
+      "tests": [
+        "backend/tests/backend/context/test_active_context_intelligence.py",
+        "backend/tests/backend/context/test_goals_dreams_dependencies.py",
+        "backend/tests/backend/context/test_memory_threads_foundation.py",
+        "backend/tests/backend/context/test_problem_solution_decision_learning.py",
+        "backend/tests/backend/mainai/test_autonomous_development_driver.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "ads",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/ads.py"
+      ],
+      "tests": [
+        "backend/tests/backend/test_ads_adversarial.py",
+        "backend/tests/backend/test_ads_isolation.py",
+        "backend/tests/backend/test_billing_engine.py",
+        "backend/tests/backend/test_config_contract.py",
+        "backend/tests/backend/test_financial_correctness.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "agent_coordination",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/agent_coordination.py"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_activation_gate.py",
+        "backend/tests/backend/mainai/test_adaptive_cognition_protected_boundary.py",
+        "backend/tests/backend/mainai/test_agent_dispatch_authorization_boundary.py",
+        "backend/tests/backend/mainai/test_agent_dispatch_foundation.py",
+        "backend/tests/backend/mainai/test_agent_execution_control.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "agent_task",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/agent_task.py"
+      ],
+      "tests": [
+        "backend/tests/backend/test_agent_orchestration.py",
+        "backend/tests/backend/test_blueprint_readiness.py",
+        "backend/tests/founder_acceptance/test_founder_acceptance_suite.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "audit",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/audit.py"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/backend/chat/test_chat_context_status.py",
+        "backend/tests/backend/jobs/test_mainai_jobs.py",
+        "backend/tests/backend/mainai/test_first_supervised_development_cycle.py",
+        "backend/tests/backend/mainai/test_first_supervised_development_cycle_real_dispatch.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "billing",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/billing.py"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_concept_reconciliation.py",
+        "backend/tests/backend/providers/test_r15_integration_security.py",
+        "backend/tests/backend/test_ads_adversarial.py",
+        "backend/tests/backend/test_ads_isolation.py",
+        "backend/tests/backend/test_billing_benchmark.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "blueprint_draft",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/blueprint_draft.py"
+      ],
+      "tests": [
+        "backend/tests/backend/test_blueprint_approval_security.py",
+        "backend/tests/backend/test_blueprint_draft.py",
+        "backend/tests/backend/test_founder_alpha_blueprint_e2e.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "calendar",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/calendar.py"
+      ],
+      "tests": [
+        "backend/tests/backend/test_calendar_service.py",
+        "backend/tests/backend/test_migration_0069_composition_integration.py",
+        "backend/tests/backend/test_personal_work_management_api.py",
+        "backend/tests/security/test_rls_isolation_calendar_events.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "candidate_learning_signal",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/candidate_learning_signal.py"
+      ],
+      "tests": [
+        "backend/tests/backend/chat/test_chat_candidate_signal_capture.py",
+        "backend/tests/backend/mainai/test_inspectable_memory_foundation.py",
+        "backend/tests/security/test_rls_isolation_candidate_learning_signals.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "capability_reality",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/capability_reality.py"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_capability_reality_foundation.py",
+        "backend/tests/backend/mainai/test_capability_record_active_context_linking.py",
+        "backend/tests/backend/mainai/test_founder_memory_foundation.py",
+        "backend/tests/backend/mainai/test_mainai_executive_loop.py",
+        "backend/tests/security/test_rls_isolation_cognition_foundation.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "claim_evidence_metadata",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/claim_evidence_metadata.py"
+      ],
+      "tests": [
+        "backend/tests/backend/test_cognitive_acceptance_e2e.py",
+        "backend/tests/backend/test_cognitive_hardening.py",
+        "backend/tests/backend/test_cross_session_continuity.py",
+        "backend/tests/backend/test_evidence_metadata_integration.py",
+        "backend/tests/backend/test_integration_contracts_r11.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "claim_relationship",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/claim_relationship.py"
+      ],
+      "tests": [
+        "backend/tests/backend/chat/test_chat_source_grounding.py",
+        "backend/tests/backend/rag/test_claims.py",
+        "backend/tests/backend/rag/test_epistemics.py",
+        "backend/tests/backend/rag/test_evidence_quality.py",
+        "backend/tests/backend/test_adversarial_reasoning.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "cognitive_gate",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/cognitive_gate.py"
+      ],
+      "tests": [
+        "backend/tests/backend/test_cognitive_gate.py",
+        "backend/tests/backend/test_full_cognitive_acceptance_r10.py",
+        "backend/tests/backend/test_model_gate_r11.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "company",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/company.py"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/security/test_rls_isolation.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "conversation",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/conversation.py"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/backend/chat/test_chat_candidate_signal_capture.py",
+        "backend/tests/backend/chat/test_chat_message_persistence.py",
+        "backend/tests/backend/chat/test_chat_request_idempotency.py",
+        "backend/tests/backend/chat/test_chat_source_grounding.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "corpus_trial_run",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/corpus_trial_run.py"
+      ],
+      "tests": [
+        "backend/tests/security/test_rls_isolation_corpus_trial_runs.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "diagnosis",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/diagnosis.py"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_causal_diagnosis_interface.py",
+        "backend/tests/backend/mainai/test_corpus_trial_harness.py",
+        "backend/tests/backend/test_context_resolver.py",
+        "backend/tests/security/test_rls_isolation_cognition_foundation.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "document",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/document.py"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/backend/chat/test_chat_context_status.py",
+        "backend/tests/backend/chat/test_chat_source_grounding.py",
+        "backend/tests/backend/chat/test_message_sequence.py",
+        "backend/tests/backend/jobs/test_mainai_jobs.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "document_chunk",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/document_chunk.py"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/backend/chat/test_chat_context_status.py",
+        "backend/tests/backend/chat/test_chat_source_grounding.py",
+        "backend/tests/backend/jobs/test_mainai_jobs.py",
+        "backend/tests/backend/rag/test_bootstrap_hardening.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "email_verification_token",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/email_verification_token.py"
+      ],
+      "tests": [
+        "backend/tests/account/test_verification.py",
+        "backend/tests/backend/test_auth_concurrency.py",
+        "backend/tests/backend/test_cleanup_job.py",
+        "backend/tests/backend/test_founder_recovery_edge.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "execution_envelope",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/execution_envelope.py"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_autonomous_gap_live_integration.py",
+        "backend/tests/backend/mainai/test_autonomous_gap_worker_live_loop.py",
+        "backend/tests/backend/mainai/test_execution_envelopes.py",
+        "backend/tests/backend/mainai/test_goal_rollup_next_task_production.py",
+        "backend/tests/backend/mainai/test_recovery_takeover_authority_fencing.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "founder_email_change",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/founder_email_change.py"
+      ],
+      "tests": [
+        "backend/tests/backend/test_auth_concurrency.py",
+        "backend/tests/backend/test_founder_recovery.py",
+        "backend/tests/backend/test_founder_recovery_edge.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "founder_memory",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/founder_memory.py"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_candidate_learning_signals.py",
+        "backend/tests/backend/mainai/test_corpus_trial_harness.py",
+        "backend/tests/backend/mainai/test_founder_behavior_requirements.py",
+        "backend/tests/backend/mainai/test_founder_memory_foundation.py",
+        "backend/tests/backend/test_mainai_lesson_from_founder_correction.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "github_evidence",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/github_evidence.py"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_first_supervised_development_cycle.py",
+        "backend/tests/backend/mainai/test_first_supervised_development_cycle_edge_cases.py",
+        "backend/tests/backend/mainai/test_first_supervised_development_cycle_real_dispatch.py",
+        "backend/tests/backend/mainai/test_github_evidence_candidates.py",
+        "backend/tests/security/test_rls_isolation_github_evidence_candidates.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "github_status",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/github_status.py"
+      ],
+      "tests": [
+        "backend/tests/backend/test_github_status.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "import_job",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/import_job.py"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/backend/chat/test_chat_context_status.py",
+        "backend/tests/backend/jobs/test_worker.py",
+        "backend/tests/backend/providers/test_provider_verification.py",
+        "backend/tests/backend/rag/test_library_import.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "improvement_proposal",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/improvement_proposal.py"
+      ],
+      "tests": [
+        "backend/tests/backend/test_controlled_learning_r11.py",
+        "backend/tests/backend/test_conversation_acceptance_r12.py",
+        "backend/tests/backend/test_lifecycle_and_state_r12.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "intelligence_governance",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/intelligence_governance.py"
+      ],
+      "tests": [
+        "backend/tests/backend/context/test_active_context_intelligence.py",
+        "backend/tests/backend/context/test_problem_solution_decision_learning.py",
+        "backend/tests/backend/mainai/test_adaptive_cognition_protected_boundary.py",
+        "backend/tests/backend/mainai/test_capability_reality_foundation.py",
+        "backend/tests/backend/mainai/test_capability_record_active_context_linking.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "knowledge_claim",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/knowledge_claim.py"
+      ],
+      "tests": [
+        "backend/tests/backend/chat/test_chat_source_grounding.py",
+        "backend/tests/backend/mainai/test_claims_to_goal_composed_chain.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_milestone.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_runtime_probe.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_soak_v2.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "knowledge_version",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/knowledge_version.py"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/backend/providers/test_provider_verification.py",
+        "backend/tests/backend/rag/test_claims.py",
+        "backend/tests/backend/rag/test_library_import.py",
+        "backend/tests/backend/rag/test_memory_source_backfill.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "lesson_guard_observations",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/lesson_guard_observations.py"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_correction_intelligence.py",
+        "backend/tests/backend/test_cognitive_acceptance_e2e.py",
+        "backend/tests/backend/test_cognitive_gate.py",
+        "backend/tests/backend/test_lesson_effectiveness_integration.py",
+        "backend/tests/backend/test_lesson_guard_observations.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "lesson_plan_decisions",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/lesson_plan_decisions.py"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_founder_behavior_requirements.py",
+        "backend/tests/backend/test_cognitive_acceptance_e2e.py",
+        "backend/tests/backend/test_cognitive_cycle_continuous.py",
+        "backend/tests/backend/test_cognitive_gate.py",
+        "backend/tests/backend/test_cognitive_hardening.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "life_intent",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/life_intent.py"
+      ],
+      "tests": [
+        "backend/tests/backend/context/test_goals_dreams_dependencies.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "mainai_execution",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/mainai_execution.py"
+      ],
+      "tests": [
+        "backend/tests/backend/context/test_active_context_intelligence.py",
+        "backend/tests/backend/context/test_goals_dreams_dependencies.py",
+        "backend/tests/backend/context/test_memory_threads_foundation.py",
+        "backend/tests/backend/context/test_problem_solution_decision_learning.py",
+        "backend/tests/backend/mainai/test_adaptive_cognition_protected_boundary.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "mainai_job",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/mainai_job.py"
+      ],
+      "tests": [
+        "backend/tests/backend/chat/test_message_sequence.py",
+        "backend/tests/backend/context/test_active_context_intelligence.py",
+        "backend/tests/backend/jobs/test_mainai_jobs.py",
+        "backend/tests/backend/mainai/test_autonomous_development_driver.py",
+        "backend/tests/backend/mainai/test_autonomous_gap_live_integration.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "mainai_recovery",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/mainai_recovery.py"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_composed_autonomy_milestone.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_soak.py",
+        "backend/tests/backend/mainai/test_development_operator.py",
+        "backend/tests/backend/mainai/test_first_supervised_development_cycle_real_dispatch.py",
+        "backend/tests/backend/mainai/test_operator_lease_effect_time_race.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "mainai_wait",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/mainai_wait.py"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_first_supervised_development_cycle_real_dispatch.py",
+        "backend/tests/backend/test_mainai_execution_cancellation.py",
+        "backend/tests/backend/test_mainai_execution_ci_wait.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "media_url_import",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/media_url_import.py"
+      ],
+      "tests": [
+        "backend/tests/backend/rag/test_library_routes.py",
+        "backend/tests/backend/rag/test_media_import.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "memory_source_backfill_run",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/memory_source_backfill_run.py"
+      ],
+      "tests": [
+        "backend/tests/backend/rag/test_memory_source_backfill_run.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "memory_source_unit",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/memory_source_unit.py"
+      ],
+      "tests": [
+        "backend/tests/backend/rag/test_bootstrap_hardening.py",
+        "backend/tests/backend/rag/test_claims.py",
+        "backend/tests/backend/rag/test_library_import.py",
+        "backend/tests/backend/rag/test_memory_source_backfill.py",
+        "backend/tests/backend/rag/test_memory_source_backfill_run.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "memory_thread",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/memory_thread.py"
+      ],
+      "tests": [
+        "backend/tests/backend/context/test_memory_threads_foundation.py",
+        "backend/tests/backend/test_openai_consult_mainai.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "memory_truth_claim",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/memory_truth_claim.py"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_inspectable_memory_foundation.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "password_reset_token",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/password_reset_token.py"
+      ],
+      "tests": [
+        "backend/tests/account/test_password_reset.py",
+        "backend/tests/backend/test_auth_concurrency.py",
+        "backend/tests/backend/test_cleanup_job.py",
+        "backend/tests/backend/test_founder_recovery.py",
+        "backend/tests/backend/test_founder_recovery_edge.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "problem_learning",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/problem_learning.py"
+      ],
+      "tests": [
+        "backend/tests/backend/context/test_problem_solution_decision_learning.py",
+        "backend/tests/backend/mainai/test_autonomous_gap_child_task.py",
+        "backend/tests/backend/mainai/test_autonomous_gap_live_integration.py",
+        "backend/tests/backend/mainai/test_autonomous_gap_worker_live_loop.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_soak_v4_long_autonomy.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "project",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/project.py"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/backend/context/test_memory_threads_foundation.py",
+        "backend/tests/backend/mainai/test_claims_to_goal_composed_chain.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_runtime_probe.py",
+        "backend/tests/backend/mainai/test_execution_envelopes.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "project_entities",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/project_entities.py"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_claims_to_goal_composed_chain.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_milestone.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_runtime_probe.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_soak_v2.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_soak_v4_long_autonomy.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "project_memory",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/project_memory.py"
+      ],
+      "tests": [
+        "backend/tests/backend/rag/test_library_routes.py",
+        "backend/tests/backend/storage/test_source_purge.py",
+        "backend/tests/backend/test_account_erasure.py",
+        "backend/tests/backend/test_agent_orchestration.py",
+        "backend/tests/backend/test_blueprint_readiness.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "provider_config",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/provider_config.py"
+      ],
+      "tests": [
+        "backend/tests/backend/providers/test_provider_verification.py",
+        "backend/tests/backend/providers/test_r15_integration_security.py",
+        "backend/tests/backend/providers/test_routing_security_hardening.py",
+        "backend/tests/backend/test_continuity_realistic_r12.py",
+        "backend/tests/backend/test_integration_contracts_r11.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "provider_disclosure",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/provider_disclosure.py"
+      ],
+      "tests": [
+        "backend/tests/backend/chat/test_chat_message_persistence.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_soak.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_soak_v2.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_soak_v3_restart_session.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_soak_v4_long_autonomy.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "provider_spend",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/provider_spend.py"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_autonomous_gap_worker_live_loop.py",
+        "backend/tests/backend/mainai/test_autonomous_task_provider_spend_e2e.py",
+        "backend/tests/backend/mainai/test_autonomy_spend_narrow_wire.py",
+        "backend/tests/backend/mainai/test_cancel_after_accept_before_driver.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_milestone.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "provider_verification",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/provider_verification.py"
+      ],
+      "tests": [
+        "backend/tests/backend/providers/test_local_verification_budget.py",
+        "backend/tests/backend/providers/test_model_capability_routing.py",
+        "backend/tests/backend/providers/test_provider_verification.py",
+        "backend/tests/backend/providers/test_routing_security_hardening.py",
+        "backend/tests/backend/test_lifecycle_and_state_r12.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "refresh_token",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/refresh_token.py"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/account/test_password_reset.py",
+        "backend/tests/backend/test_auth_concurrency.py",
+        "backend/tests/backend/test_cleanup_job.py",
+        "backend/tests/backend/test_founder_recovery.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "revoked_access_token",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/revoked_access_token.py"
+      ],
+      "tests": [
+        "backend/tests/backend/test_auth_concurrency.py",
+        "backend/tests/backend/test_cleanup_job.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "runtime_incident",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/runtime_incident.py"
+      ],
+      "tests": [
+        "backend/tests/backend/test_runtime_incidents.py",
+        "backend/tests/backend/test_v5_fault_injection.py",
+        "backend/tests/backend/test_v5_reliability.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "source_import_batch",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/source_import_batch.py"
+      ],
+      "tests": [
+        "backend/tests/backend/rag/test_bootstrap_hardening.py",
+        "backend/tests/backend/rag/test_source_import_batches.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "source_relationship",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/source_relationship.py"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/backend/chat/test_chat_source_grounding.py",
+        "backend/tests/backend/rag/test_epistemics.py",
+        "backend/tests/backend/rag/test_graph_traverse.py",
+        "backend/tests/backend/rag/test_rag_quality_matrix.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "storage_deletion_task",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/storage_deletion_task.py"
+      ],
+      "tests": [
+        "backend/tests/backend/jobs/test_worker.py",
+        "backend/tests/backend/rag/test_library_import.py",
+        "backend/tests/backend/storage/test_source_purge.py",
+        "backend/tests/backend/test_account_erasure.py",
+        "backend/tests/backend/test_documents_upload_durable_delivery.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "strategy_evaluation",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/strategy_evaluation.py"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_adaptive_cognition_protected_boundary.py",
+        "backend/tests/backend/mainai/test_strategy_evaluation_promotion.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "strategy_synthesis",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/strategy_synthesis.py"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_adaptive_cognition_protected_boundary.py",
+        "backend/tests/backend/mainai/test_strategy_synthesis_learning.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "supervisor_lease",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/supervisor_lease.py"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_supervisor_goal_lease.py",
+        "backend/tests/backend/mainai/test_supervisor_production_entry.py",
+        "backend/tests/backend/test_account_erasure.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "usage",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/usage.py"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/backend/jobs/test_mainai_jobs.py",
+        "backend/tests/backend/mainai/test_autonomous_task_provider_spend_e2e.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_milestone.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_soak.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "user",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/user.py"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/account/test_founder_only.py",
+        "backend/tests/account/test_password_reset.py",
+        "backend/tests/account/test_rate_limiting.py",
+        "backend/tests/account/test_registration.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "work_candidate",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/work_candidate.py"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_claims_to_goal_composed_chain.py",
+        "backend/tests/backend/mainai/test_goal_intake_path_a_worker_live.py",
+        "backend/tests/backend/mainai/test_inspectable_memory_foundation.py",
+        "backend/tests/backend/mainai/test_mainai_executive_loop.py",
+        "backend/tests/backend/mainai/test_memory_work_linkage.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "work_intelligence",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/work_intelligence.py"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_adaptive_cognition_protected_boundary.py",
+        "backend/tests/backend/mainai/test_autonomous_development_driver.py",
+        "backend/tests/backend/mainai/test_cancel_after_accept_before_driver.py",
+        "backend/tests/backend/mainai/test_development_operator.py",
+        "backend/tests/backend/mainai/test_first_bounded_self_improvement.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "work_management",
+      "kind": "model",
+      "status": "implemented_unverified",
+      "evidence": [
+        "backend/app/models/work_management.py"
+      ],
+      "tests": [],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "workforce",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/workforce.py"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_agent_dispatch_authorization_boundary.py",
+        "backend/tests/backend/mainai/test_execution_authority_convergence_gap.py",
+        "backend/tests/backend/mainai/test_first_supervised_development_cycle.py",
+        "backend/tests/backend/mainai/test_first_supervised_development_cycle_edge_cases.py",
+        "backend/tests/backend/mainai/test_mainai_executive_chaos_why.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "workforce_ops",
+      "kind": "model",
+      "status": "implemented_unverified",
+      "evidence": [
+        "backend/app/models/workforce_ops.py"
+      ],
+      "tests": [],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "workspace",
+      "kind": "model",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/workspace.py"
+      ],
+      "tests": [
+        "backend/tests/backend/test_personal_work_management_api.py",
+        "backend/tests/backend/test_workspaces_api.py"
+      ],
+      "note": "model module; table existence is confirmed by migrations, not by this scan"
+    },
+    {
+      "component": "active_context",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/active_context/"
+      ],
+      "tests": [
+        "backend/tests/backend/context/test_active_context_intelligence.py",
+        "backend/tests/backend/context/test_goals_dreams_dependencies.py",
+        "backend/tests/backend/context/test_memory_threads_foundation.py",
+        "backend/tests/backend/context/test_problem_solution_decision_learning.py",
+        "backend/tests/backend/mainai/test_autonomous_development_driver.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "agent_coordination",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/agent_coordination/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_activation_gate.py",
+        "backend/tests/backend/mainai/test_adaptive_cognition_protected_boundary.py",
+        "backend/tests/backend/mainai/test_agent_dispatch_authorization_boundary.py",
+        "backend/tests/backend/mainai/test_agent_dispatch_foundation.py",
+        "backend/tests/backend/mainai/test_agent_execution_control.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "autonomous_gap",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/autonomous_gap/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_agent_dispatch_foundation.py",
+        "backend/tests/backend/mainai/test_agent_real_execution_bridge.py",
+        "backend/tests/backend/mainai/test_agent_runtime_control_plane.py",
+        "backend/tests/backend/mainai/test_autonomous_gap_child_task.py",
+        "backend/tests/backend/mainai/test_autonomous_gap_live_integration.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "billing",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/billing/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_concept_reconciliation.py",
+        "backend/tests/backend/providers/test_r15_integration_security.py",
+        "backend/tests/backend/test_ads_adversarial.py",
+        "backend/tests/backend/test_ads_isolation.py",
+        "backend/tests/backend/test_billing_benchmark.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "blueprint_readiness",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/blueprint_readiness/"
+      ],
+      "tests": [
+        "backend/tests/backend/test_blueprint_readiness.py",
+        "backend/tests/founder_acceptance/test_founder_acceptance_suite.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "capability_reality",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/capability_reality/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_capability_reality_foundation.py",
+        "backend/tests/backend/mainai/test_capability_record_active_context_linking.py",
+        "backend/tests/backend/mainai/test_founder_memory_foundation.py",
+        "backend/tests/backend/mainai/test_mainai_executive_loop.py",
+        "backend/tests/security/test_rls_isolation_cognition_foundation.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "cognitive_state",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/cognitive_state/"
+      ],
+      "tests": [
+        "backend/tests/backend/test_lifecycle_and_state_r12.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "concept_reconciliation",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/concept_reconciliation/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_concept_reconciliation.py",
+        "backend/tests/backend/mainai/test_founder_add_auto_link.py",
+        "backend/tests/backend/mainai/test_mainai_executive_chaos_why.py",
+        "backend/tests/backend/mainai/test_mainai_executive_loop.py",
+        "backend/tests/backend/mainai/test_mainai_executive_ops_lanes.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "context",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/context/"
+      ],
+      "tests": [
+        "backend/tests/backend/chat/test_chat_candidate_signal_capture.py",
+        "backend/tests/backend/chat/test_chat_context_status.py",
+        "backend/tests/backend/chat/test_chat_message_persistence.py",
+        "backend/tests/backend/chat/test_chat_source_grounding.py",
+        "backend/tests/backend/context/test_active_context_intelligence.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "context_atlas",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/context_atlas/"
+      ],
+      "tests": [
+        "backend/tests/backend/test_context_atlas_acceptance.py",
+        "backend/tests/backend/test_context_atlas_candidates.py",
+        "backend/tests/backend/test_context_atlas_capability_map.py",
+        "backend/tests/backend/test_context_atlas_identity.py",
+        "backend/tests/backend/test_context_atlas_recommendation.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "corpus_trial",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/corpus_trial/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_capability_reality_foundation.py",
+        "backend/tests/backend/mainai/test_corpus_trial_harness.py",
+        "backend/tests/backend/mainai/test_corpus_trial_run_history.py",
+        "backend/tests/security/test_rls_isolation_corpus_trial_runs.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "development_driver",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/development_driver/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_agent_dispatch_foundation.py",
+        "backend/tests/backend/mainai/test_agent_runtime_control_plane.py",
+        "backend/tests/backend/mainai/test_autonomous_development_driver.py",
+        "backend/tests/backend/mainai/test_autonomy_spend_narrow_wire.py",
+        "backend/tests/backend/mainai/test_cancel_after_accept_before_driver.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "development_operator",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/development_operator/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_agent_dispatch_foundation.py",
+        "backend/tests/backend/mainai/test_agent_runtime_control_plane.py",
+        "backend/tests/backend/mainai/test_autonomous_development_driver.py",
+        "backend/tests/backend/mainai/test_autonomy_spend_narrow_wire.py",
+        "backend/tests/backend/mainai/test_cancel_after_verify_before_finalize.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "development_supervisor",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/development_supervisor/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_agent_dispatch_foundation.py",
+        "backend/tests/backend/mainai/test_agent_real_execution_bridge.py",
+        "backend/tests/backend/mainai/test_agent_runtime_control_plane.py",
+        "backend/tests/backend/mainai/test_autonomous_development_driver.py",
+        "backend/tests/backend/mainai/test_autonomous_gap_child_task.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "diagnosis",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/diagnosis/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_causal_diagnosis_interface.py",
+        "backend/tests/backend/mainai/test_corpus_trial_harness.py",
+        "backend/tests/backend/test_context_resolver.py",
+        "backend/tests/security/test_rls_isolation_cognition_foundation.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "egress_policy",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/egress_policy/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_egress_policy.py",
+        "backend/tests/backend/mainai/test_first_bounded_self_improvement.py",
+        "backend/tests/backend/mainai/test_provider_assisted_planning.py",
+        "backend/tests/backend/providers/test_r15_integration_security.py",
+        "backend/tests/backend/test_ads_isolation.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "founder_memory",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/founder_memory/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_candidate_learning_signals.py",
+        "backend/tests/backend/mainai/test_corpus_trial_harness.py",
+        "backend/tests/backend/mainai/test_founder_behavior_requirements.py",
+        "backend/tests/backend/mainai/test_founder_memory_foundation.py",
+        "backend/tests/backend/test_mainai_lesson_from_founder_correction.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "founder_memory_signals",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/founder_memory_signals/"
+      ],
+      "tests": [
+        "backend/tests/backend/chat/test_chat_candidate_signal_capture.py",
+        "backend/tests/backend/mainai/test_candidate_learning_signals.py",
+        "backend/tests/backend/test_cognitive_cycle_continuous.py",
+        "backend/tests/backend/test_cognitive_gate.py",
+        "backend/tests/backend/test_cross_session_continuity.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "github_evidence",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/github_evidence/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_first_supervised_development_cycle.py",
+        "backend/tests/backend/mainai/test_first_supervised_development_cycle_edge_cases.py",
+        "backend/tests/backend/mainai/test_first_supervised_development_cycle_real_dispatch.py",
+        "backend/tests/backend/mainai/test_github_evidence_candidates.py",
+        "backend/tests/security/test_rls_isolation_github_evidence_candidates.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "integrations",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/integrations/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_first_supervised_development_cycle_real_dispatch.py",
+        "backend/tests/backend/test_agent_orchestration.py",
+        "backend/tests/backend/test_config_contract.py",
+        "backend/tests/backend/test_github_client.py",
+        "backend/tests/backend/test_github_work_queue.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "intelligence_governance",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/intelligence_governance/"
+      ],
+      "tests": [
+        "backend/tests/backend/context/test_active_context_intelligence.py",
+        "backend/tests/backend/context/test_problem_solution_decision_learning.py",
+        "backend/tests/backend/mainai/test_adaptive_cognition_protected_boundary.py",
+        "backend/tests/backend/mainai/test_capability_reality_foundation.py",
+        "backend/tests/backend/mainai/test_capability_record_active_context_linking.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "jobs",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/jobs/"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/backend/chat/test_chat_context_status.py",
+        "backend/tests/backend/chat/test_chat_message_persistence.py",
+        "backend/tests/backend/chat/test_message_sequence.py",
+        "backend/tests/backend/jobs/test_job_lock.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "life_intents",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/life_intents/"
+      ],
+      "tests": [
+        "backend/tests/backend/context/test_goals_dreams_dependencies.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "mainai_evals",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/mainai_evals/"
+      ],
+      "tests": [
+        "backend/tests/backend/test_cognitive_gate.py",
+        "backend/tests/backend/test_full_cognitive_acceptance_r10.py",
+        "backend/tests/backend/test_model_gate_r11.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "mainai_executive",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/mainai_executive/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_mainai_executive_chaos_why.py",
+        "backend/tests/backend/mainai/test_mainai_executive_loop.py",
+        "backend/tests/backend/mainai/test_mainai_executive_ops_lanes.py",
+        "backend/tests/backend/mainai/test_mainai_executive_retrieval_dash.py",
+        "backend/tests/backend/mainai/test_mainai_executive_scenarios.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "mainai_school",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/mainai_school/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_mainai_school.py",
+        "backend/tests/backend/mainai/test_mainai_school_wire.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "mainai_startup_readiness",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/mainai_startup_readiness/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_workforce_activation_prep.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "memory_threads",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/memory_threads/"
+      ],
+      "tests": [
+        "backend/tests/backend/context/test_goals_dreams_dependencies.py",
+        "backend/tests/backend/context/test_memory_threads_foundation.py",
+        "backend/tests/backend/context/test_problem_solution_decision_learning.py",
+        "backend/tests/backend/mainai/test_capability_record_active_context_linking.py",
+        "backend/tests/backend/mainai/test_founder_memory_foundation.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "memory_work_linkage",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/memory_work_linkage/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_memory_work_linkage.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "models",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/models/"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/account/test_founder_only.py",
+        "backend/tests/account/test_password_reset.py",
+        "backend/tests/account/test_registration.py",
+        "backend/tests/account/test_verification.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "openai_consult",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/openai_consult/"
+      ],
+      "tests": [
+        "backend/tests/backend/test_ads_isolation.py",
+        "backend/tests/backend/test_config_contract.py",
+        "backend/tests/backend/test_local_first_routing.py",
+        "backend/tests/backend/test_openai_consult.py",
+        "backend/tests/backend/test_openai_consult_audit.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "problem_learning",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/problem_learning/"
+      ],
+      "tests": [
+        "backend/tests/backend/context/test_problem_solution_decision_learning.py",
+        "backend/tests/backend/mainai/test_autonomous_gap_child_task.py",
+        "backend/tests/backend/mainai/test_autonomous_gap_live_integration.py",
+        "backend/tests/backend/mainai/test_autonomous_gap_worker_live_loop.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_soak_v4_long_autonomy.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "provider_planning",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/provider_planning/"
+      ],
+      "tests": [
+        "backend/tests/backend/chat/test_chat_message_persistence.py",
+        "backend/tests/backend/mainai/test_autonomous_gap_worker_live_loop.py",
+        "backend/tests/backend/mainai/test_autonomous_task_provider_spend_e2e.py",
+        "backend/tests/backend/mainai/test_cancel_after_accept_before_driver.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_milestone.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "providers",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/providers/"
+      ],
+      "tests": [
+        "backend/tests/account/test_founder_only.py",
+        "backend/tests/backend/chat/test_chat_context_status.py",
+        "backend/tests/backend/chat/test_chat_message_persistence.py",
+        "backend/tests/backend/chat/test_chat_request_idempotency.py",
+        "backend/tests/backend/chat/test_chat_source_grounding.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "rag",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/rag/"
+      ],
+      "tests": [
+        "backend/tests/account/test_founder_only.py",
+        "backend/tests/backend/chat/test_chat_context_status.py",
+        "backend/tests/backend/chat/test_chat_source_grounding.py",
+        "backend/tests/backend/chat/test_message_sequence.py",
+        "backend/tests/backend/chat/test_messages_rls.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "routers",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/routers/"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/account/test_founder_only.py",
+        "backend/tests/account/test_rate_limiting.py",
+        "backend/tests/backend/chat/test_chat_candidate_signal_capture.py",
+        "backend/tests/backend/chat/test_chat_message_persistence.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "safe_planner",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/safe_planner/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_agent_dispatch_foundation.py",
+        "backend/tests/backend/mainai/test_agent_runtime_control_plane.py",
+        "backend/tests/backend/mainai/test_autonomous_development_driver.py",
+        "backend/tests/backend/mainai/test_autonomous_gap_live_integration.py",
+        "backend/tests/backend/mainai/test_first_supervised_development_cycle.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "storage",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/storage/"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/backend/chat/test_chat_source_grounding.py",
+        "backend/tests/backend/jobs/test_worker.py",
+        "backend/tests/backend/mainai/test_concept_reconciliation.py",
+        "backend/tests/backend/mainai/test_correction_intelligence.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "strategy_evaluation",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/strategy_evaluation/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_adaptive_cognition_protected_boundary.py",
+        "backend/tests/backend/mainai/test_strategy_evaluation_promotion.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "strategy_synthesis",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/strategy_synthesis/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_adaptive_cognition_protected_boundary.py",
+        "backend/tests/backend/mainai/test_strategy_synthesis_learning.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "work_candidates",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/work_candidates/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_claims_to_goal_composed_chain.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_milestone.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_runtime_probe.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_soak_v2.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_soak_v4_long_autonomy.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "work_intelligence",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/work_intelligence/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_adaptive_cognition_protected_boundary.py",
+        "backend/tests/backend/mainai/test_autonomous_development_driver.py",
+        "backend/tests/backend/mainai/test_cancel_after_accept_before_driver.py",
+        "backend/tests/backend/mainai/test_development_operator.py",
+        "backend/tests/backend/mainai/test_first_bounded_self_improvement.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "work_management",
+      "kind": "module",
+      "status": "implemented_unverified",
+      "evidence": [
+        "backend/app/work_management/"
+      ],
+      "tests": [],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "workforce",
+      "kind": "module",
+      "status": "implemented_with_test_reference",
+      "evidence": [
+        "backend/app/workforce/"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_agent_dispatch_authorization_boundary.py",
+        "backend/tests/backend/mainai/test_execution_authority_convergence_gap.py",
+        "backend/tests/backend/mainai/test_first_supervised_development_cycle.py",
+        "backend/tests/backend/mainai/test_first_supervised_development_cycle_edge_cases.py",
+        "backend/tests/backend/mainai/test_mainai_executive_chaos_why.py"
+      ],
+      "note": "module exists on disk; not necessarily activated by any router"
+    },
+    {
+      "component": "account",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:85"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/account/test_founder_only.py",
+        "backend/tests/account/test_password_reset.py",
+        "backend/tests/account/test_rate_limiting.py",
+        "backend/tests/account/test_registration.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "admin",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:99"
+      ],
+      "tests": [
+        "backend/tests/account/test_founder_only.py",
+        "backend/tests/backend/jobs/test_mainai_jobs.py",
+        "backend/tests/backend/mainai/test_mainai_executive_security.py",
+        "backend/tests/backend/mainai/test_system_activation_authorizations_composition_security.py",
+        "backend/tests/backend/mainai/test_workforce_ops.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "ads",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:112"
+      ],
+      "tests": [
+        "backend/tests/backend/test_ads_adversarial.py",
+        "backend/tests/backend/test_ads_isolation.py",
+        "backend/tests/backend/test_billing_engine.py",
+        "backend/tests/backend/test_config_contract.py",
+        "backend/tests/backend/test_financial_correctness.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "agents",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:101"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_agent_dispatch_foundation.py",
+        "backend/tests/backend/mainai/test_agent_runtime_control_plane.py",
+        "backend/tests/backend/mainai/test_workforce_foundation.py",
+        "backend/tests/backend/test_agent_orchestration.py",
+        "backend/tests/conftest.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "auth",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:83"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/account/test_founder_only.py",
+        "backend/tests/account/test_password_reset.py",
+        "backend/tests/account/test_rate_limiting.py",
+        "backend/tests/account/test_registration.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "blueprint",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:86"
+      ],
+      "tests": [
+        "backend/tests/backend/test_blueprint_approval_security.py",
+        "backend/tests/backend/test_blueprint_draft.py",
+        "backend/tests/backend/test_blueprint_evaluation_harness.py",
+        "backend/tests/backend/test_blueprint_readiness.py",
+        "backend/tests/backend/test_founder_alpha_blueprint_e2e.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "calendar",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:87"
+      ],
+      "tests": [
+        "backend/tests/backend/test_calendar_service.py",
+        "backend/tests/backend/test_migration_0069_composition_integration.py",
+        "backend/tests/backend/test_personal_work_management_api.py",
+        "backend/tests/security/test_rls_isolation_calendar_events.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "chat",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:89"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/account/test_founder_only.py",
+        "backend/tests/backend/chat/test_chat_candidate_signal_capture.py",
+        "backend/tests/backend/chat/test_chat_context_status.py",
+        "backend/tests/backend/chat/test_chat_message_persistence.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "conversations",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:91"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/account/test_founder_only.py",
+        "backend/tests/backend/chat/test_chat_message_persistence.py",
+        "backend/tests/backend/chat/test_message_sequence.py",
+        "backend/tests/backend/chat/test_messages_rls.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "dashboard",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:88"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_mainai_executive_retrieval_dash.py",
+        "backend/tests/backend/test_personal_work_management_api.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "documents",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:92"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/account/test_founder_only.py",
+        "backend/tests/backend/chat/test_chat_context_status.py",
+        "backend/tests/backend/chat/test_chat_source_grounding.py",
+        "backend/tests/backend/jobs/test_mainai_jobs.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "execution_envelopes",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:109"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_autonomous_task_provider_spend_e2e.py",
+        "backend/tests/backend/mainai/test_autonomy_spend_narrow_wire.py",
+        "backend/tests/backend/mainai/test_cancel_after_accept_before_driver.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_milestone.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_runtime_probe.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "founder_recovery",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:84"
+      ],
+      "tests": [
+        "backend/tests/backend/test_auth_concurrency.py",
+        "backend/tests/backend/test_config_contract.py",
+        "backend/tests/backend/test_founder_recovery.py",
+        "backend/tests/backend/test_founder_recovery_edge.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "github_status",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:106"
+      ],
+      "tests": [
+        "backend/tests/backend/test_github_status.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "health",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:82"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_agent_dispatch_authorization_boundary.py",
+        "backend/tests/backend/mainai/test_agent_dispatch_foundation.py",
+        "backend/tests/backend/mainai/test_agent_execution_control.py",
+        "backend/tests/backend/mainai/test_agent_real_execution_bridge.py",
+        "backend/tests/backend/mainai/test_founder_behavior_requirements.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "improvement_proposals",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:103"
+      ],
+      "tests": [
+        "backend/tests/backend/test_controlled_learning_r11.py",
+        "backend/tests/backend/test_conversation_acceptance_r12.py",
+        "backend/tests/backend/test_full_cognitive_acceptance_r10.py",
+        "backend/tests/backend/test_lifecycle_and_state_r12.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "incidents",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:90"
+      ],
+      "tests": [
+        "backend/tests/backend/test_runtime_incidents.py",
+        "backend/tests/backend/test_v5_fault_injection.py",
+        "backend/tests/backend/test_v5_reliability.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "inspectable_memory",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:108"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_founder_add_auto_link.py",
+        "backend/tests/backend/mainai/test_inspectable_memory_foundation.py",
+        "backend/tests/backend/mainai/test_mainai_executive_chaos_why.py",
+        "backend/tests/backend/mainai/test_mainai_executive_loop.py",
+        "backend/tests/backend/mainai/test_mainai_executive_ops_lanes.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "knowledge",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:96"
+      ],
+      "tests": [
+        "backend/tests/account/test_founder_only.py",
+        "backend/tests/backend/mainai/test_claims_to_goal_composed_chain.py",
+        "backend/tests/backend/mainai/test_first_supervised_development_cycle.py",
+        "backend/tests/backend/providers/test_openai_provider_failclosed.py",
+        "backend/tests/backend/providers/test_r15_integration_security.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "library",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:97"
+      ],
+      "tests": [
+        "backend/tests/backend/jobs/test_redis_client_sharing.py",
+        "backend/tests/backend/mainai/test_mainai_school_wire.py",
+        "backend/tests/backend/mainai/test_workforce_activation_prep.py",
+        "backend/tests/backend/rag/test_claims.py",
+        "backend/tests/backend/rag/test_error_disclosure.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "mainai_execution",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:104"
+      ],
+      "tests": [
+        "backend/tests/backend/context/test_active_context_intelligence.py",
+        "backend/tests/backend/context/test_goals_dreams_dependencies.py",
+        "backend/tests/backend/context/test_memory_threads_foundation.py",
+        "backend/tests/backend/context/test_problem_solution_decision_learning.py",
+        "backend/tests/backend/mainai/test_adaptive_cognition_protected_boundary.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "mainai_jobs",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:102"
+      ],
+      "tests": [
+        "backend/tests/backend/jobs/test_mainai_jobs.py",
+        "backend/tests/backend/mainai/test_first_supervised_development_cycle_real_dispatch.py",
+        "backend/tests/backend/mainai/test_recovery_takeover_authority_fencing.py",
+        "backend/tests/backend/mainai/test_supervisor_goal_lease.py",
+        "backend/tests/backend/mainai/test_supervisor_production_entry.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "memory",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:100"
+      ],
+      "tests": [
+        "backend/tests/account/test_rate_limiting.py",
+        "backend/tests/backend/jobs/test_redis_client_sharing.py",
+        "backend/tests/backend/mainai/test_agent_execution_control.py",
+        "backend/tests/backend/mainai/test_concept_reconciliation.py",
+        "backend/tests/backend/mainai/test_first_supervised_development_cycle_edge_cases.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "project_entities",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:105"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_claims_to_goal_composed_chain.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_milestone.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_runtime_probe.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_soak_v2.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_soak_v4_long_autonomy.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "project_status",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:107"
+      ],
+      "tests": [
+        "backend/tests/backend/providers/test_r15_integration_security.py",
+        "backend/tests/backend/test_github_status.py",
+        "backend/tests/backend/test_project_status_work_chain.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "projects",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:93"
+      ],
+      "tests": [
+        "backend/tests/account/test_account_deletion.py",
+        "backend/tests/account/test_founder_only.py",
+        "backend/tests/backend/test_claim_graph_integration.py",
+        "backend/tests/backend/test_graph_prompt_integration.py",
+        "backend/tests/backend/test_personal_work_management_api.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "provider_spend",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:110"
+      ],
+      "tests": [
+        "backend/tests/backend/mainai/test_autonomous_gap_worker_live_loop.py",
+        "backend/tests/backend/mainai/test_autonomous_task_provider_spend_e2e.py",
+        "backend/tests/backend/mainai/test_autonomy_spend_narrow_wire.py",
+        "backend/tests/backend/mainai/test_cancel_after_accept_before_driver.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_milestone.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "search",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:94"
+      ],
+      "tests": [
+        "backend/tests/account/test_founder_only.py",
+        "backend/tests/account/test_password_reset.py",
+        "backend/tests/account/test_registration.py",
+        "backend/tests/account/test_verification.py",
+        "backend/tests/backend/chat/test_chat_context_status.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "workbench",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:98"
+      ],
+      "tests": [
+        "backend/tests/backend/test_claim_graph_integration.py",
+        "backend/tests/backend/test_epistemics_integration.py",
+        "backend/tests/backend/test_evidence_metadata_integration.py",
+        "backend/tests/backend/test_founder_alpha_blueprint_e2e.py",
+        "backend/tests/backend/test_graph_prompt_integration.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    },
+    {
+      "component": "workspaces",
+      "kind": "router",
+      "status": "connected_with_test_reference",
+      "evidence": [
+        "backend/app/main.py:95"
+      ],
+      "tests": [
+        "backend/tests/backend/test_personal_work_management_api.py",
+        "backend/tests/backend/test_workspaces_api.py"
+      ],
+      "note": "router is wired in app/main.py; wiring is not behavioural verification"
+    }
+  ],
+  "execution_authorized": false
+}
