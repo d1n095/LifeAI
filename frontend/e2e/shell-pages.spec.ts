@@ -11,6 +11,12 @@ import { loginViaUi } from "./helpers";
 const FOUNDER_EMAIL = "founder@lifeos.local";
 const FOUNDER_PASSWORD = process.env.E2E_FOUNDER_PASSWORD || "TestFounderPassword123!";
 
+// The library import assertion waits for the real durable worker to claim and finish the
+// job, so it needs more than the suite's default 30s on a cold CI runner. The wait itself
+// remains bounded; this only stops Playwright from killing the test before the app's own
+// worker can complete.
+test.describe.configure({ timeout: 60_000 });
+
 test.describe("shell pages: empty states and mutation error handling", () => {
   test.beforeEach(async ({ page }) => {
     await loginViaUi(page, FRONTEND_URL, FOUNDER_EMAIL, FOUNDER_PASSWORD);
@@ -32,7 +38,9 @@ test.describe("shell pages: empty states and mutation error handling", () => {
       buffer: Buffer.from("Innehall for PRIO 4-felhanteringstestet."),
     });
     const row = page.locator("tr", { hasText: "e2e-error-handling-test.txt" });
-    await expect(row).toBeVisible({ timeout: 15000 });
+    // The upload only produces a visible row after the real worker has claimed and
+    // completed the job; on a cold CI runner that can legitimately take longer than 15s.
+    await expect(row).toBeVisible({ timeout: 60_000 });
 
     // Force the DELETE call to fail server-side (a real HTTP 500 response reaching the
     // browser) and confirm the UI surfaces it via role="alert" rather than staying silent.
@@ -85,7 +93,11 @@ test.describe("shell pages: empty states and mutation error handling", () => {
   test("dashboard ('/'): a cold-start backend failure is announced via role=alert, not shown as silent success", async ({
     page,
   }) => {
-    await page.route("**/api/documents", (route) => {
+    // The dashboard page loads api.dashboard(), which is GET /api/dashboard — not
+    // /api/documents (that was the old dashboard contract). Intercepting the wrong path
+    // made this test pass only by accident when some other request failed, and fail
+    // deterministically once the dashboard stopped calling /api/documents at all.
+    await page.route("**/api/dashboard", (route) => {
       if (route.request().method() === "GET") {
         route.fulfill({ status: 500, contentType: "application/json", body: '{"detail":"Simulerat serverfel"}' });
       } else {
