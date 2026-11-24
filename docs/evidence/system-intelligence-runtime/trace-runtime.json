@@ -1,0 +1,106 @@
+{
+  "requirement_id": "SI2-RUNTIME",
+  "status": "traced",
+  "trace": {
+    "requirement_id": "SI2-RUNTIME",
+    "title": "Runtime interface for System Intelligence",
+    "project_ref": "lifeai",
+    "classification": "implemented_capability",
+    "uncertainty": "medium",
+    "missing_stages": [
+      "vision",
+      "decision",
+      "architecture",
+      "review",
+      "integration",
+      "runtime_evidence"
+    ],
+    "superseded_by": null,
+    "canonical_truth": null,
+    "links": [
+      {
+        "stage": "vision",
+        "status": "missing",
+        "evidence": [],
+        "note": "no evidence supplied for this stage"
+      },
+      {
+        "stage": "requirement",
+        "status": "evidenced",
+        "evidence": [
+          {
+            "kind": "doc",
+            "ref": "docs/SYSTEM_INTELLIGENCE_RUNTIME.md",
+            "verified": true,
+            "detail": ""
+          }
+        ],
+        "note": ""
+      },
+      {
+        "stage": "decision",
+        "status": "missing",
+        "evidence": [],
+        "note": "no evidence supplied for this stage"
+      },
+      {
+        "stage": "architecture",
+        "status": "missing",
+        "evidence": [],
+        "note": "no evidence supplied for this stage"
+      },
+      {
+        "stage": "implementation",
+        "status": "evidenced",
+        "evidence": [
+          {
+            "kind": "code",
+            "ref": "backend/app/context_atlas/runtime.py",
+            "verified": true,
+            "detail": ""
+          }
+        ],
+        "note": ""
+      },
+      {
+        "stage": "test",
+        "status": "evidenced",
+        "evidence": [
+          {
+            "kind": "test",
+            "ref": "backend/tests/backend/test_context_atlas_runtime.py::test_capability_reads_real_code_and_test_evidence",
+            "verified": true,
+            "detail": ""
+          }
+        ],
+        "note": ""
+      },
+      {
+        "stage": "review",
+        "status": "missing",
+        "evidence": [],
+        "note": "no evidence supplied for this stage"
+      },
+      {
+        "stage": "integration",
+        "status": "missing",
+        "evidence": [],
+        "note": "no evidence supplied for this stage"
+      },
+      {
+        "stage": "runtime_evidence",
+        "status": "missing",
+        "evidence": [],
+        "note": "no evidence supplied for this stage"
+      }
+    ],
+    "execution_authorized": false
+  },
+  "unverified_refs": [],
+  "limitations": [
+    "only path refs that exist in this checkout are counted as evidence",
+    "PR/runtime refs are caller-supplied and are not fetched or verified over the network",
+    "approval is not inferred from historical wording; it requires approval_verified=True"
+  ],
+  "execution_authorized": false
+}

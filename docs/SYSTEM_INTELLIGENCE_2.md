@@ -129,7 +129,15 @@ python backend/scripts/context_atlas.py scope projects.json claims.json --out sc
 Alla artefakter är deterministiska funktioner av checkouten/JSON-underlagen och innehåller
 inga hemligheter eller exekveringsrättigheter.
 
-## 7. Kvarstående begränsningar
+## 7. Runtime-integration (nästa branch)
+
+`freebuff/system-intelligence-runtime-20261124` bygger vidare på denna branch med en
+read-only `SystemIntelligence`-service i `backend/app/context_atlas/runtime.py`. Den
+återanvänder modulerna ovan och lägger till strukturerade svar för capability, dependencies,
+traceability, assessment, integration status, recovery, overlap och self-knowledge. Inga nya
+tabeller eller migrationer. Se `docs/SYSTEM_INTELLIGENCE_RUNTIME.md`.
+
+## 8. Kvarstående begränsningar
 
 - Ingen ny persistence: E1 sammanställer befintliga rader. Det gör tillståndet hållbart så
   länge de befintliga tabellerna är det, men det är inte en ny eventlogg.

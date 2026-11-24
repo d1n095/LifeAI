@@ -1,0 +1,22 @@
+{
+  "branch": "freebuff/system-intelligence-runtime-20261124",
+  "head_sha": "d1c631be26985a8b2ed19f833ecbfe6a1c076a6d",
+  "dirty_tracked_tree": true,
+  "local_branch_count": 32,
+  "captured_pull_requests": [],
+  "matching_pull_requests": [],
+  "state": "unknown",
+  "local_only": null,
+  "notes": [
+    "no network call was made; PR state is limited to captured metadata",
+    "a local branch/SHA is not proof of remote publication, review, merge or deployment",
+    "no captured pull-request metadata; remote integration is unknown",
+    "tracked files are modified; HEAD does not represent the full working tree"
+  ],
+  "evidence": [
+    "branch: freebuff/system-intelligence-runtime-20261124",
+    "head: d1c631be26985a8b2ed19f833ecbfe6a1c076a6d",
+    "local branches: 32"
+  ],
+  "execution_authorized": false
+}

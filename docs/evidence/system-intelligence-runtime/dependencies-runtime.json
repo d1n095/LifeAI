@@ -1,0 +1,50 @@
+{
+  "module": "app.context_atlas.runtime",
+  "status": "found",
+  "impact": {
+    "module": "app.context_atlas.runtime",
+    "direct_dependents": [
+      "app.context_atlas"
+    ],
+    "transitive_dependents": [],
+    "endpoints": [],
+    "tests": [
+      "backend/tests/backend/test_context_atlas_runtime.py",
+      "backend/tests/account/test_account_deletion.py",
+      "backend/tests/backend/chat/test_chat_message_persistence.py",
+      "backend/tests/backend/chat/test_message_sequence.py",
+      "backend/tests/backend/chat/test_messages_rls.py",
+      "backend/tests/backend/jobs/test_mainai_jobs.py",
+      "backend/tests/backend/mainai/test_agent_real_execution_bridge.py",
+      "backend/tests/backend/mainai/test_agent_runtime_control_plane.py"
+    ],
+    "model_dependencies": [],
+    "migration_note": "no model import detected; a migration is unlikely but cannot be ruled out",
+    "security_notes": [
+      "no authorization dependency detected by static import analysis"
+    ],
+    "unknowns": [
+      "runtime callers reached through indirection/dynamic dispatch are not visible",
+      "no coverage measurement is performed; test references are names only",
+      "deployment/activation state is not observable from a checkout"
+    ],
+    "execution_authorized": false
+  },
+  "evidence": [
+    "backend/app/context_atlas/runtime.py",
+    "backend/tests/backend/test_context_atlas_runtime.py",
+    "backend/tests/account/test_account_deletion.py",
+    "backend/tests/backend/chat/test_chat_message_persistence.py",
+    "backend/tests/backend/chat/test_message_sequence.py",
+    "backend/tests/backend/chat/test_messages_rls.py",
+    "backend/tests/backend/jobs/test_mainai_jobs.py",
+    "backend/tests/backend/mainai/test_agent_real_execution_bridge.py",
+    "backend/tests/backend/mainai/test_agent_runtime_control_plane.py"
+  ],
+  "limitations": [
+    "runtime callers reached through indirection/dynamic dispatch are not visible",
+    "no coverage measurement is performed; test references are names only",
+    "deployment/activation state is not observable from a checkout"
+  ],
+  "execution_authorized": false
+}

@@ -332,3 +332,9 @@ En separat uppföljningsbranch, `freebuff/system-intelligence-2-20261124`, bygge
 atlasen med projektisolering (C3), hållbart utvecklingstillstånd/återhämtning (E1/E3) och
 statisk arkitekturkonsistens (B3). Se `docs/SYSTEM_INTELLIGENCE_2.md`; den ändrar inte denna
 branch eller dess 92-testerresultat.
+
+En tredje branch, `freebuff/system-intelligence-runtime-20261124`, lägger en gemensam
+read-only `SystemIntelligence`-service ovanpå atlasen. Den ger programmatisk åtkomst till
+capability-evidens, dependency impact, traceability, assessment, integration status,
+recovery/overlap och deterministisk self-knowledge utan ny router i `app/main.py`, utan ny
+tabell och utan nätverksanrop. Se `docs/SYSTEM_INTELLIGENCE_RUNTIME.md`.
