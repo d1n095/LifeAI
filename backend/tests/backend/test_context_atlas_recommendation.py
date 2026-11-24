@@ -83,6 +83,25 @@ def test_active_assignment_prevents_duplicate_work():
     assert "claude/ws-a-memory" in result.evidence[0]
 
 
+def test_ownership_report_refs_block_duplicate_work():
+    result = recommend(
+        EngineeringRequest(
+            "build a memory engine",
+            capability_aliases=("memory",),
+            active_assignments=(
+                "active assignment a1: agent=claude, role=builder, status=running",
+                "active assignment a2: agent=cursor, role=reviewer, status=ready",
+            ),
+        ),
+        _facts(),
+    )
+
+    assert result.outcome is RecommendationOutcome.wait
+    assert any("a1" in ref for ref in result.evidence)
+    assert any("a2" in ref for ref in result.evidence)
+    assert result.execution_authorized is False
+
+
 def test_conflicting_sources_force_an_explicit_question():
     result = recommend(
         EngineeringRequest(

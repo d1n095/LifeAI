@@ -176,6 +176,40 @@ def _uncertainty(
     return "high"
 
 
+_FORGOTTEN_CLASSES = frozenset(
+    {
+        ContextClass.founder_approved_decision,
+        ContextClass.historical_suggestion,
+        ContextClass.open_question,
+        ContextClass.proposed_design,
+    }
+)
+
+
+def forgotten_requirements(
+    traces: Sequence[RequirementTrace],
+) -> tuple[RequirementTrace, ...]:
+    """Requirements that have intent/approval evidence but no implementation evidence.
+
+    "Forgotten" here is a review-queue label, not a claim that nobody remembers the item: an
+    approved decision with no code in this checkout may be implemented on another branch,
+    belong to another project, or have been deliberately dropped without a recorded
+    supersession. The function therefore excludes rejected and superseded traces and keeps
+    the trace's own uncertainty and missing stages intact. It performs no I/O and promotes
+    nothing to canonical truth.
+    """
+    candidates = [
+        trace
+        for trace in traces
+        if trace.classification in _FORGOTTEN_CLASSES
+        and Stage.implementation in trace.missing_stages
+        and trace.superseded_by is None
+    ]
+    return tuple(
+        sorted(candidates, key=lambda trace: (trace.project_ref, trace.requirement_id))
+    )
+
+
 def build_trace(
     requirement_id: str,
     title: str,

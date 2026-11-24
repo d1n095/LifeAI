@@ -62,6 +62,10 @@ class EngineeringRequest:
     capability_aliases: tuple[str, ...] = ()
     project_ref: str = "unknown"
     active_assignment: str | None = None
+    # Evidence refs produced by app.context_atlas.ownership.find_work_owners(); kept as plain
+    # strings so this module stays pure (no SQLAlchemy import) and the caller decides how to
+    # scope the lookup.
+    active_assignments: tuple[str, ...] = ()
     conflicting_sources: bool = False
     unresolved_evidence: tuple[str, ...] = ()
     prior_decision: str | None = None  # approved | rejected | postponed | superseded
@@ -149,11 +153,17 @@ def recommend(
     wired = tuple(f for f in matched if f.wired)
     tested = tuple(f for f in matched if f.test_referenced)
 
-    if request.active_assignment:
+    active_assignments = tuple(
+        ref
+        for ref in (request.active_assignment, *request.active_assignments)
+        if ref
+    )
+    if active_assignments:
         return Recommendation(
             outcome=RecommendationOutcome.wait,
             current_state="an active assignment already covers this work",
-            evidence=(f"active assignment: {request.active_assignment}",) + evidence,
+            evidence=tuple(f"active assignment: {ref}" for ref in active_assignments)
+            + evidence,
             root_problem="duplicate work would consume the same scope",
             alternatives=(
                 Alternative(

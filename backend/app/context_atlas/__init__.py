@@ -27,6 +27,15 @@ from app.context_atlas.identity import (
     compare_sources,
     fingerprint,
 )
+from app.context_atlas.ownership import (
+    CLEAR,
+    OWNED,
+    UNCLEAR,
+    UNKNOWN,
+    OwnershipReport,
+    WorkOwner,
+    find_work_owners,
+)
 from app.context_atlas.recommendation import (
     CAPABILITY_ALIASES,
     Alternative,
@@ -68,13 +77,18 @@ from app.context_atlas.traceability import (
     Stage,
     TraceLink,
     build_trace,
+    forgotten_requirements,
     reconcile_disagreement,
 )
 
 __all__ = [
     "CAPABILITY_ALIASES",
+    "CLEAR",
     "CONCEPT_MAPPINGS",
+    "OWNED",
     "STAGE_ORDER",
+    "UNCLEAR",
+    "UNKNOWN",
     "Alternative",
     "CandidateReport",
     "Capability",
@@ -97,6 +111,7 @@ __all__ = [
     "MediaKind",
     "ModuleNode",
     "Outcome",
+    "OwnershipReport",
     "PullRequestRef",
     "Recommendation",
     "RecommendationOutcome",
@@ -109,10 +124,13 @@ __all__ = [
     "SystemMap",
     "TraceLink",
     "Verdict",
+    "WorkOwner",
     "build_trace",
     "compare_sources",
     "find_candidates",
     "fingerprint",
+    "find_work_owners",
+    "forgotten_requirements",
     "load_pull_requests",
     "match_capabilities",
     "propose_relationship",
