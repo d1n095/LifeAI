@@ -103,6 +103,143 @@ async def test_stale_worker_cannot_land_a_work_result_checkpoint_after_being_rec
     assert task.status == MainAITaskStatus.completed
 
 
+def _git(args, cwd):
+    import subprocess
+
+    return subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True)
+
+
+def _shared_checkout(tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    _git(["init", "-q", "."], shared)
+    _git(["config", "user.email", "test@lifeai.invalid"], shared)
+    _git(["config", "user.name", "Test"], shared)
+    (shared / "README.md").write_text("ORIGINAL CONTENT\n", encoding="utf-8")
+    _git(["add", "-A"], shared)
+    _git(["commit", "-q", "-m", "base"], shared)
+    return shared
+
+
+def _fake_chat_with_concurrent_reclaim(response_text: str, *, job_id, superuser_db):
+    """Models PR #478's named gap concretely: the lease is reclaimed by a second worker WHILE
+    this provider call is in flight -- not before it starts (already covered by the stale-
+    worker test above) and not after the whole task finishes, but between the call starting and
+    its result being used. The reclaim happens as a side effect of the fake call itself, which
+    is as close to genuine concurrency as a single-threaded synchronous test can model: by the
+    time this coroutine returns, a concurrent takeover has already landed in the database."""
+
+    async def _chat(self, messages, model, **kwargs):
+        superuser_db.execute(
+            sa_text("UPDATE mainai_jobs SET locked_by = 'worker-2', lease_generation = lease_generation + 1 WHERE id = :id"),
+            {"id": str(job_id)},
+        )
+        superuser_db.commit()
+        return ChatResult(content=response_text, provider="openai", model=model, raw_usage={})
+
+    return _chat
+
+
+def _dispatch_repo_edit(db_session, owner_id, *, repo_root):
+    from app.mainai_execution import execution_job
+
+    goal = planner.create_goal(
+        db_session, owner_id=owner_id, title="Lease-revocation-in-flight test",
+        original_instruction="Propose an edit.", created_by="test", approval_policy="standard_repo_work",
+    )
+    planner.create_plan(
+        db_session, goal=goal, rationale="single repo_edit",
+        tasks=[planner.PlannedTaskSpec(description="propose an edit", task_type="repo_edit")],
+        created_by="test",
+    )
+    db_session.commit()
+    task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
+    job = executor.dispatch_ready_task(db_session, task=task, goal=goal, dispatched_by="test-worker")
+    db_session.commit()
+    return execution_job, task, job
+
+
+@pytest.mark.asyncio
+async def test_repo_edit_lease_revoked_while_ai_call_in_flight_rolls_back_shared_checkout(
+    db_session, superuser_db, owner_id, monkeypatch, tmp_path
+):
+    """Stream 7, item 1 (PR #478's named gap): with proposal-worktree isolation disabled --
+    the one configuration where the AI's output is written straight into the shared checkout --
+    a lease reclaimed by another worker DURING the chat_with_fallback() call must never leave
+    that write behind. Before this fix, the only `_rollback_proposal_writes()` call site was
+    gated on a failed verification, which this path never reaches: the function returns as soon
+    as the post-call lease re-check fails, before verification ever runs."""
+    import json
+
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "mainai_proposal_worktree_isolation", False)
+    shared = _shared_checkout(tmp_path)
+
+    execution_job, task, job = _dispatch_repo_edit(db_session, owner_id, repo_root=shared)
+    monkeypatch.setattr(execution_job, "_repo_root", lambda: shared)
+
+    job_id, _owner, stale_generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    proposal = json.dumps(
+        {"files": [{"path": "README.md", "content": "PROPOSED BY A STALE WORKER\n"}], "commit_message": "proposal"}
+    )
+    monkeypatch.setattr(
+        OpenAIProvider, "chat",
+        _fake_chat_with_concurrent_reclaim(proposal, job_id=job_id, superuser_db=superuser_db),
+    )
+
+    _set_rls_user(db_session, owner_id)
+    await run_task_execution_job(db_session, job_id, owner_id, worker_id="worker-1", lease_generation=stale_generation, lease_seconds=120)
+
+    # The write happened (the fake call's reclaim side effect runs before chat_with_fallback
+    # returns, so the file write at line ~502 of execution_job.py still executes) -- the whole
+    # point of this test is that it must not survive the lease check that follows it.
+    assert (shared / "README.md").read_text(encoding="utf-8") == "ORIGINAL CONTENT\n"
+    assert latest_checkpoint_for_step(db_session, task_id=task.id, job_id=job_id, step="work_result") is None
+    db_session.refresh(task)
+    from app.models.mainai_execution import MainAITaskStatus
+
+    assert task.status == MainAITaskStatus.running
+
+
+@pytest.mark.asyncio
+async def test_repo_edit_lease_revoked_while_ai_call_in_flight_is_harmless_under_default_isolation(
+    db_session, superuser_db, owner_id, monkeypatch, tmp_path
+):
+    """Same scenario, default configuration (worktree isolation ON): the shared checkout must
+    never be touched at all regardless of the lease outcome, since the proposal write lands in
+    a disposable per-attempt checkout, not the tree this backend process runs from."""
+    import json
+
+    from app.mainai_execution import proposal_worktree
+
+    monkeypatch.setattr(proposal_worktree, "PROPOSAL_ROOT", tmp_path / "proposal-root")
+    shared = _shared_checkout(tmp_path)
+    original = (shared / "README.md").read_bytes()
+
+    execution_job, task, job = _dispatch_repo_edit(db_session, owner_id, repo_root=shared)
+    monkeypatch.setattr(execution_job, "_repo_root", lambda: shared)
+
+    job_id, _owner, stale_generation = claim_next_mainai_job(superuser_db, "worker-1", 120)
+    proposal = json.dumps(
+        {"files": [{"path": "README.md", "content": "PROPOSED BY A STALE WORKER\n"}], "commit_message": "proposal"}
+    )
+    monkeypatch.setattr(
+        OpenAIProvider, "chat",
+        _fake_chat_with_concurrent_reclaim(proposal, job_id=job_id, superuser_db=superuser_db),
+    )
+
+    _set_rls_user(db_session, owner_id)
+    await run_task_execution_job(db_session, job_id, owner_id, worker_id="worker-1", lease_generation=stale_generation, lease_seconds=120)
+
+    assert (shared / "README.md").read_bytes() == original
+    assert latest_checkpoint_for_step(db_session, task_id=task.id, job_id=job_id, step="work_result") is None
+    db_session.refresh(task)
+    from app.models.mainai_execution import MainAITaskStatus
+
+    assert task.status == MainAITaskStatus.running
+
+
 def test_claim_next_mainai_job_never_blind_reclaims_a_dead_task_execution_job(db_session, superuser_db, owner_id):
     """The actual SQL invariant migration 0034 establishes: once a `task_execution` job's
     lease expires, `claim_next_mainai_job()` must never hand it back out on its own --
