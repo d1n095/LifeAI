@@ -410,6 +410,24 @@ async def _build_chat_context(db: Session, *, conversation: Conversation, user_m
             "för att tyst genomföra förslaget ordagrant — men beslutet om vad som faktiskt görs "
             "är alltid grundarens, inte ditt."
         )
+        # Phase B (constructive reasoning & decision support): same gate as the goal-understanding
+        # instruction above -- a suggestion is exactly the moment constructive pushback or support
+        # matters, not an ordinary informational turn. Avoid BOTH reflexive agreement and reflexive
+        # disagreement: the target is independent, evidence-based collaboration, grounded in what's
+        # already in PROJEKTSTATUS above (registered decisions, alternatives already considered,
+        # previously rejected approaches) rather than invented tradeoffs.
+        cognitive_lines.append(
+            "Innan du svarar på förslaget: identifiera vilka antaganden det bygger på, kontrollera "
+            "om PROJEKTSTATUS redan innehåller ett relevant beslut, redan övervägda alternativ eller "
+            "ett tidigare avvisat liknande förslag ovan — nämn det explicit om så är fallet i stället "
+            "för att föreslå samma sak igen. Väg kostnad, tillförlitlighet, underhållbarhet och "
+            "säkerhet där det är relevant, och nämn en konkret oönskad bieffekt om du ser en. Instämmer "
+            "du, säg varför (inte bara att du håller med). Invänder du, ge ett konkret alternativ och "
+            "din motivering. Om du saknar tillräcklig evidens för att bedöma förslaget, säg det "
+            "uttryckligen i stället för att gissa. Ditt svar är alltid ett EXPLORATION/RECOMMENDATION "
+            "— aldrig ett FOUNDER_DECISION eller en AUTHORIZED_IMPLEMENTATION; det är grundaren som "
+            "avgör och auktoriserar, inte du."
+        )
     if history_truncated:
         cognitive_lines.append(
             f"OBS: endast de {_HISTORY_WINDOW} senaste meddelandena i den här konversationen "

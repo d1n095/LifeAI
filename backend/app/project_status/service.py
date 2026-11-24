@@ -32,7 +32,7 @@ from app.mainai_execution.improvement_proposals import list_proposals
 from app.models.blueprint_draft import BlueprintDraft
 from app.models.improvement_proposal import ImprovementStatus
 from app.models.mainai_execution import MainAIGoal, MainAIGoalStatus
-from app.models.problem_learning import LifeProblemDecision
+from app.models.problem_learning import LifeProblemApproach, LifeProblemDecision
 
 SCHEMA_VERSION = "1.1"
 
@@ -261,6 +261,14 @@ def _warnings(status: dict[str, Any]) -> list[str]:
 
 
 def _decisions(db: Session, owner_id: uuid.UUID) -> list[dict[str, Any]]:
+    # Phase B (constructive reasoning & decision support): this used to drop `alternatives`
+    # and `basis` before they ever reached a caller, AND the resulting list was never actually
+    # rendered into the live chat prompt by format_project_status_instructions() below (it was
+    # computed into build_project_status()'s dict and never read again) -- so a founder/AI
+    # decision with real alternatives considered and a real evidentiary basis was, in effect,
+    # invisible to every live conversation. Both are now included and rendered (see
+    # _format_decisions below) so "reconsider a previous recommendation when new evidence
+    # appears" and "generate credible alternatives" have something real to work from.
     rows = (
         db.execute(
             select(LifeProblemDecision)
@@ -276,9 +284,36 @@ def _decisions(db: Session, owner_id: uuid.UUID) -> list[dict[str, Any]]:
             "id": str(d.id),
             "decision": d.decision,
             "authority": d.authority,
+            "basis": d.basis,
+            "alternatives": list(d.alternatives or []),
             "decided_at": _iso(d.decided_at),
         }
         for d in rows
+    ]
+
+
+def _rejected_approaches(db: Session, owner_id: uuid.UUID) -> list[dict[str, Any]]:
+    # Phase B: "inspect existing solutions" / Phase F scenario "recognize a previously
+    # rejected idea" both need LifeAI to know what's already been tried and turned down --
+    # app/problem_learning already records this (status="rejected" + rejection_reason), it
+    # was simply never read by anything that reaches the live chat prompt.
+    rows = (
+        db.execute(
+            select(LifeProblemApproach)
+            .where(LifeProblemApproach.owner_id == owner_id, LifeProblemApproach.status == "rejected")
+            .order_by(LifeProblemApproach.updated_at.desc())
+            .limit(_MAX_EXAMPLES)
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "id": str(a.id),
+            "description": a.description,
+            "rejection_reason": a.rejection_reason,
+        }
+        for a in rows
     ]
 
 
@@ -442,6 +477,7 @@ def build_project_status(db: Session, *, owner_id: uuid.UUID) -> dict[str, Any]:
             for p in proposals[:_MAX_EXAMPLES]
         ],
         "decisions": _decisions(db, owner_id),
+        "rejected_approaches": _rejected_approaches(db, owner_id),
         "work": work,
     }
     status["next_steps"] = _next_steps(
@@ -521,6 +557,41 @@ def format_project_status_instructions(db: Session, *, owner_id: uuid.UUID, ques
         lines += [
             f"  - {p['content']}" + (f" (källa: {p['source']})" if p.get("source") else "")
             for p in status["priorities"][:3]
+        ]
+    # Phase B (constructive reasoning & decision support): these two were computed into
+    # build_project_status()'s dict but never actually reached this prompt — a recorded
+    # decision's alternatives/basis and a rejected approach's reason were durable but
+    # invisible to every live conversation. `authority` is translated into the same
+    # IDEA/EXPLORATION/RECOMMENDATION/FOUNDER_DECISION/AUTHORIZED_IMPLEMENTATION vocabulary
+    # PR #503's founder-vision register uses, so the distinction is explicit in the prompt
+    # itself rather than a raw internal string the model has no reason to interpret correctly.
+    if status["decisions"]:
+        lines.append(
+            "- Registrerade beslut (skilj alltid på FOUNDER_DECISION, som är bindande, och "
+            "RECOMMENDATION, som bara är ett AI-förslag INTE ännu godkänt av grundaren):"
+        )
+        for d in status["decisions"][:3]:
+            label = (
+                "FOUNDER_DECISION (bindande)"
+                if d["authority"] == "founder"
+                else "RECOMMENDATION (inte ännu godkänd av grundaren)"
+                if d["authority"] == "ai_interpretation"
+                else f"auktoritet okänd ({d['authority']}) — behandla som obekräftad"
+            )
+            line = f"  - [{label}] {d['decision']}"
+            if d.get("basis") and d["basis"] != "unknown":
+                line += f" (grund: {d['basis']})"
+            lines.append(line)
+            if d.get("alternatives"):
+                lines.append(f"    Alternativ som redan övervägts: {', '.join(str(a) for a in d['alternatives'][:5])}")
+    if status.get("rejected_approaches"):
+        lines.append(
+            "- Tidigare avvisade lösningsförslag (föreslå inte samma sak igen utan att nämna "
+            "och bemöta varför det avvisades):"
+        )
+        lines += [
+            f"  - {a['description']}" + (f" — avvisat: {a['rejection_reason']}" if a.get("rejection_reason") else "")
+            for a in status["rejected_approaches"][:3]
         ]
     if status["warnings"]:
         lines.append("- OSÄKERHET/DATAKVALITET (säg det hellre än att gissa):")
