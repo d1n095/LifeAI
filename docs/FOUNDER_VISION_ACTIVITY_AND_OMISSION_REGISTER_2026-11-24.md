@@ -168,3 +168,110 @@ Before building Activity Layer or related modules:
 ## 12. Required use of this register
 
 This file is an **ideas, coverage and architecture reference**, not permission to start work or a substitute for current GitHub reality. Any future implementation begins with an exact-SHA capability inventory and confirms which relevant branch is actually active. Do not interrupt a working agent, duplicate an existing workstream, bypass security review, or promote an idea into an approved feature without an explicit founder decision.
+
+
+---
+
+## 13. Federation, private AI roles and modular Life OS — founder discussion, 2026-11-24
+
+**Classification:** Desired product direction + architectural hypotheses. **Not an approved implementation contract, new product launch, or authorization to start coding.** This section extends the older notes without replacing the validated security/architecture foundation.
+
+### 13.1 What the founder is trying to achieve
+
+- The founder's own private MainAI is intended to develop, assess and maintain reusable software and, in time, help users build their own systems.
+- Family members, individual users, employers, organizations and their AI "employees" should be able to have **their own private AI instances**, distinct memory, credentials and owner-controlled rights.
+- A user's or organization's AI could request development assistance from founder MainAI **by explicit opt-in**, or install a prebuilt, reviewed and signed module when a suitable feature already exists.
+- A future Life OS computer environment could host a chosen private AI and isolated web/app/agent execution.
+- The LifeAI ecosystem should be a reusable "city infrastructure" (identity, signed packages, event interfaces, runtime isolation, recovery), with individually controlled "buildings" (applications and tenants). Shared infrastructure is **not** shared private data or a common master key.
+- Founder MainAI is **not** intended to surveil customers or receive everyone's data. The founder's private instance and distributable user-facing technology have different authority and privacy boundaries.
+
+These are *goals and exploration directions*, not proof that the necessary operating-system, federation or distributed-agent capabilities already exist.
+
+### 13.2 The critical architectural counterproposal
+
+Do **not** route all customer data, security decisions or privileged administration through the founder's MainAI merely because private AIs should be "connected" to Life.
+
+That would create a central compromise target, concentration of user data, operational single point of failure, unclear trust boundaries and unnecessary privacy/legal responsibility.
+
+**Preferred hypothesis for evaluation:** user/organization-controlled AI instances remain autonomous; a narrow, authenticated, consent-based **federation/development channel** exchanges task specifications, reviewed artifacts and limited metadata, not unrestricted personal conversations or hidden backdoors. If the founder service is unavailable, the local instance must retain normal operation. Local system owners can revoke the relationship.
+
+**Other options still open:** fully offline modules; user-exported support packages; ephemeral job invitations; on-device collaboration; federated services where needed. Assess these against security, UX, expense, offline operation and operational burden before selecting a protocol.
+
+### 13.3 Keep dimensions separate
+
+| Dimension | Question | Non-assumption |
+| --- | --- | --- |
+| **AI instance** | Which independent installation/runtime is this? | Shared code does not imply shared memory or ownership |
+| **Human/organization owner** | Who can authorize that instance and its resources? | A developer/vendor does not automatically own customer data |
+| **Agent identity** | Which precise worker/agent makes the request? | "AI employee" is not a privilege by itself |
+| **Agent role** | What work is it meant to perform? | Role names do not grant resources |
+| **Capability grant** | Which operations, scope, purpose and duration are authorized? | Instructions and model output never create permission |
+| **Data boundary** | Which files, conversations, projects, tenant records may be accessed? | Shared event interfaces do not create cross-tenant read rights |
+| **Execution environment** | Local process, container, VM, browser sandbox, external service? | A sandbox lowers risk but is not a security guarantee |
+| **Provider/model** | Which replaceable model executes reasoning? | Provider availability does not imply provider trust or authority |
+| **Development/release authority** | Who may build, review, sign, install, update, rollback and revoke? | A successful test is not deployment approval |
+
+One person may have multiple AI agents; an organization may have employees and multiple distinct agents. Agency and ownership should be modeled explicitly rather than hard-coded as four mutually exclusive "AI types."
+
+### 13.4 Reusable foundations vs separate product domains
+
+**Potential shared infrastructure** (investigate existing implementations first): strong identity, cryptographic key ownership, policy/capability evaluation, protocol adapters, secure consent, events, trustworthy package/update distribution, isolated execution, provenance, observability, recovery, local-first memory primitives and optional collaboration.
+
+**Keep isolated:** individuals' and organizations' memory, files, credentials, payroll/HR, finance, media libraries, tenant-specific policies and autonomous AI execution contexts. Shared software libraries are compatible with separate databases, keys and deployments.
+
+**Flexible deployment models** to compare rather than lock now: local desktop, local server, offline-only, customer-managed VPS, hosted with strong isolation, and dedicated high-assurance tenant environments. Different risk levels may require different boundaries.
+
+### 13.5 Example flow (illustrative; not an active integration)
+
+1. Family member asks **their own AI** for a household feature.
+2. Their instance checks its authorized local registry for a compatible module.
+3. If available, present the signed release and permissions for the member's own approval.
+4. If unavailable, their AI may prepare a minimized functional request **only with consent**.
+5. Founder MainAI may accept the request as a *development proposal*, compare with existing shared modules, and build in an isolated environment.
+6. Independent review, provenance, compatibility testing, signing and release precede any installation.
+7. Recipient validates package signature and permissions and chooses whether to install; any runtime access remains locally scoped.
+8. Both sides can revoke optional communication without disabling core local services.
+
+Never automatically transmit household topology, sensitive documents, personnel records, passwords, private prompts or unrestricted telemetry.
+
+### 13.6 Life OS direction — defer fundamental platform commitment
+
+The aspiration is an OS experience for a computer with an attachable private AI and isolated browsing/apps/agents.
+
+**Recommended exploration, not a permanent decision:** first compare a hardened Linux-based distribution or desktop/runtime layer with building a new operating-system kernel. Evaluate update/security maintenance, hardware drivers, VM/browser isolation, kernel attack surface, offline setup, reproducible builds and recovery. Building a new kernel would require independent justification.
+
+The deterministic System Core should continue working when AI models or the founder development service are unavailable. Private AI instances should be replaceable, with migration/export paths that preserve user control.
+
+### 13.7 Protocol design: prefer compatibility to invention
+
+A dedicated "Life Agent Protocol" is one *option*, not a decided standard. First inventory current LifeAI agent tools, any appropriate existing interoperability protocols, attestation/capability standards and signed-package systems. Use adapters wherever they satisfy the tested use case. Invent a protocol only for a demonstrated unmet requirement, with versioning, threat model and interoperable tests.
+
+### 13.8 Protect room for disagreement and evolving decisions
+
+The founder expects an AI thinking partner, **not an agreeable requirements recorder**. New ideas should be analyzed before becoming requirements.
+
+For every nontrivial proposal, the system or design review should be able to record:
+- **Desired outcome** separately from the founder's suggested implementation.
+- Main assumptions and whether each has evidence.
+- At least one material alternative, including doing nothing/reusing existing components.
+- Counterarguments, expected failure modes, second-order consequences and reversible experiments.
+- Current conclusion, uncertainty and what new evidence would change it.
+- A clear choice: `EXPLORE`, `PARK`, `PREFER`, `REJECT`, `FOUNDER_DECIDED`, `IMPLEMENT_AUTHORIZED` (names illustrative; map to the real decision ledger).
+- **Reconsideration:** an approved product direction may change with new information, but changes must be explicitly reviewed and must not silently weaken already-established security guarantees.
+
+**Conversation != decision; idea != requirement; preference != irreversible commitment; analysis != permission to execute.** Challenging an idea should be constructive and proportionate, not reflexive opposition.
+
+### 13.9 Pre-implementation questions to answer with evidence
+
+- Does the current permission/RLS/agent-coordination architecture already cover independent user AI and delegated agents? Which components truly require redesign?
+- Is cross-instance communication needed for the first deliverable, or would one-way signed-module distribution suffice?
+- What can travel across the boundary, under which user consent, retention and encryption policies?
+- How are package provenance, revocation, rollback and compatibility proven?
+- Can an instance keep working without founder service, outside provider, or network access?
+- Where do browser/agent sandbox boundaries need VMs rather than containers?
+- What data must be deleted on disconnect, and what audit evidence can remain?
+- How do family accounts, employees and multiple legal entities differ in delegated administration?
+- How do multi-tenant and dedicated deployments differ in breach impact and operational cost?
+- What measurable user problem justifies introducing a new generic infrastructure primitive?
+
+**No new agent work is dispatched by this section.** Treat it as context for later options analysis and a compatibility check against current Claude/Z.ai/Freebuff work. Prioritize a functioning, verified founder MainAI before broad Life OS product expansion.
