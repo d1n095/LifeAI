@@ -17,6 +17,11 @@ const FOUNDER_EMAIL = "founder@lifeos.local";
 const FOUNDER_PASSWORD = process.env.E2E_FOUNDER_PASSWORD || "TestFounderPassword123!";
 const UNIQUE_TERM = "kvantflodesalgoritmen7712";
 
+// This is a real import -> worker -> indexing flow, not a mocked upload. On a cold CI
+// runner the durable worker may take longer than the default 30s test budget to claim
+// and finish the job, so give the real asynchronous path a bounded but realistic window.
+test.describe.configure({ timeout: 90_000 });
+
 test.describe("Founder Knowledge Studio: full vertical flow", () => {
   test("import -> library -> search -> chat citation -> open source -> continue -> delete", async ({ page }) => {
     await loginViaUi(page, FRONTEND_URL, FOUNDER_EMAIL, FOUNDER_PASSWORD);
@@ -39,7 +44,10 @@ test.describe("Founder Knowledge Studio: full vertical flow", () => {
     // Aktiv" anywhere on the page — the status filter <select> also has an "Aktiv" <option>,
     // present in the DOM (if hidden) regardless of what's selected.
     const sourceRow = page.locator("tr", { hasText: "vertikalt-e2e-test.txt" });
-    await expect(sourceRow).toBeVisible({ timeout: 15000 });
+    // The row only appears after the real worker claims and completes the import; the
+    // app's own queue polls for up to ~4.5 minutes, so 15s was an artificial test-only
+    // deadline that could fail on a cold CI runner even when the import was healthy.
+    await expect(sourceRow).toBeVisible({ timeout: 60_000 });
     await expect(sourceRow.locator("text=Aktiv")).toBeVisible();
 
     // 4. Search: real hybrid search (semantic + exact text via ILIKE) finds it by the exact
