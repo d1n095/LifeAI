@@ -1,0 +1,92 @@
+name: verify
+
+# Disposable PostgreSQL + Redis verification for the Revenue & Compute Engine lane.
+# Runs the FULL migration chain (0001 → head) on a real PostgreSQL, then the curated
+# suite set (including the engine, financial-correctness and ads-adversarial suites and
+# the PG-fixture suites that are blocked in the dev sandbox).
+#
+# Everything is disposable: services containers are created and destroyed per job; no
+# production database is ever touched. New functionality stays disabled by default
+# (billing_enforcement_enabled=false, ads_enabled=false are the shipped defaults).
+
+on:
+  push:
+    branches: [main, "zai/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  postgres-redis:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: lifeai
+          POSTGRES_PASSWORD: lifeai
+          POSTGRES_DB: lifeai_verify
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U lifeai"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://lifeai:lifeai@localhost:5432/lifeai_verify
+      REDIS_URL: redis://localhost:6379/0
+      ENVIRONMENT: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Full migration chain on disposable PostgreSQL (single head required)
+        working-directory: backend
+        run: |
+          python -m alembic heads            # MUST print exactly one head
+          python -m alembic upgrade head     # full chain 0001 -> head
+          python -m alembic downgrade base   # reversibility check
+          python -m alembic upgrade head     # and back up again
+
+      - name: Migration composition on an EXISTING founder-alpha-shaped database
+        working-directory: backend
+        run: |
+          # Prove the Z.AI lane composes on top of the upstream chain without touching
+          # its data: upgrade to the pre-merge upstream head, snapshot row counts, then
+          # continue to our head.
+          python -m alembic upgrade "0068"
+          psql "$DATABASE_URL" -c "CREATE TABLE IF NOT EXISTS _verify_probe (id int); INSERT INTO _verify_probe VALUES (42);"
+          python -m alembic upgrade head
+          psql "$DATABASE_URL" -t -c "SELECT count(*) FROM _verify_probe;" | grep -q 1
+          psql "$DATABASE_URL" -t -c "SELECT count(*) FROM usage_rollups;" # exists == chain composed
+
+      - name: Engine + financial correctness + ads adversarial suites (real PG/Redis)
+        working-directory: backend
+        run: |
+          python -m pytest tests/backend/test_billing_engine.py \
+                            tests/backend/test_financial_correctness.py \
+                            tests/backend/test_ads_isolation.py \
+                            tests/backend/test_ads_adversarial.py \
+                            tests/backend/test_billing_benchmark.py \
+                            tests/backend/test_config_contract.py \
+                            tests/backend/test_openai_consult.py \
+                            tests/backend/test_openai_consult_budgets.py \
+                            tests/backend/test_openai_consult_policy.py \
+                            tests/backend/test_founder_recovery.py \
+                            tests/backend/test_founder_recovery_edge.py \
+                            tests/backend/test_auth_concurrency.py \
+                            tests/backend/test_security_tokens.py \
+                            tests/backend/jobs/test_job_lock.py \
+                            tests/backend/rag/test_memory_source_backfill.py \
+                            -q

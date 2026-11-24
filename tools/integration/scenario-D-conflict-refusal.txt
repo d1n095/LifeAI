@@ -1,0 +1,16 @@
+# Freebuff integration run — /tmp/fb_fixture_d/candidate-fixture-conflict.bundle
+
+- ✅ bundle ingested (base-seeded if needed); refs: refs/heads/candidate-fixture-conflict e392022ddd01fd46bf62b4e37eb693e763322aed
+- ✅ candidate e392022 resolved to e392022ddd01fd46bf62b4e37eb693e763322aed — HARD GATE PASSED
+- ✅ shared ancestry with base at 69dc5ea5a9cf — merge-based integration possible
+- ❌ migration conflict: revision 0069 exists in both lanes with different content (0069_founder_email_recovery.py vs 0069_conflicting_fixture.py)
+- ❌ migration conflict: filename clashes (alembic loads by path; renumber one lineage): ['0069_founder_email_recovery.py']
+- ⚠️ resolution: renumber/re-chain the Z.AI lineage migrations at composition (their lane owns 0069..0079 numbering); run alembic heads check post-merge
+- ✅ models: mine-only (must keep): ['founder_email_change.py']
+- ✅ routers: mine-only (must register): ['founder_recovery.py']
+- ⚠️ settings: 64 shared keys (verify no semantic drift), 0 candidate-only keys to add at composition
+- ✅ frontend /api calls: 33 mine / 33 candidate, 0 candidate-only (verify endpoints exist post-composition)
+- ✅ openai_consult package: zero collision with candidate tree
+- ✅ candidate kill switch matches base signature: assert_not_killed() — no adaptation needed
+
+**RESULT: GATE REFUSED — migration conflicts must be reconciled before candidate production.**

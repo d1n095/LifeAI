@@ -71,7 +71,7 @@ def get_task_route(task_id: uuid.UUID, db: Session = Depends(get_db)):
 @router.post("/tasks/{task_id}/dispatch", response_model=AgentTaskEventOut)
 async def dispatch_task_route(task_id: uuid.UUID, request: Request, db: Session = Depends(get_db), user: User = Depends(require_founder)):
     try:
-        event = await dispatch_task(db, task_id, dispatched_by=user.email)
+        event = await dispatch_task(db, task_id, dispatched_by=user.email, authorized_by_user_id=user.id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ProviderError as exc:
@@ -99,7 +99,7 @@ def record_test_results_route(task_id: uuid.UUID, payload: RecordTestResultsIn, 
 @router.post("/tasks/{task_id}/review", response_model=AgentTaskEventOut)
 async def review_task_route(task_id: uuid.UUID, request: Request, db: Session = Depends(get_db), user: User = Depends(require_founder)):
     try:
-        event = await review_task(db, task_id, reviewed_by=user.email)
+        event = await review_task(db, task_id, reviewed_by=user.email, authorized_by_user_id=user.id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     record_audit(db, user_id=user.id, action="agent_task_reviewed", entity_type="agent_task", entity_id=str(task_id), detail=event.payload.get("verdict"), request=request)
