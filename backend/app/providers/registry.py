@@ -143,6 +143,16 @@ def _model_is_freshly_verified(db: Session, spec: ModelSpec, role: str) -> bool:
 
 
 
+def model_is_freshly_verified(db: Session, spec: ModelSpec, role: str) -> bool:
+    """Public read-only view of the exact-model verification check.
+
+    Exposes the same fact ``select_model()`` already relies on, so eligibility reporting can
+    reuse it instead of reimplementing a second, drifting verification rule. This grants
+    nothing: a caller still has to pass egress, spend and execution boundaries.
+    """
+    return _model_is_freshly_verified(db, spec, role)
+
+
 def _requires_verification(spec: ModelSpec, policy: ModelSelectionPolicy) -> bool:
     return policy.require_verified and (spec.external or policy.require_verified_local)
 
