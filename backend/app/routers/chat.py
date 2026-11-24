@@ -28,6 +28,7 @@ from app.context.resolver import (
     INTENT_EXPLICIT_MEMORY,
     INTENT_IDEA_WORTH_SAVING,
     INTENT_UNCERTAIN_REFERENCE,
+    SUGGESTION_BEARING_INTENTS,
     ContextResolution,
     ConversationMessage,
     resolve_context,
@@ -384,6 +385,31 @@ async def _build_chat_context(db: Session, *, conversation: Conversation, user_m
         "den tidigare konversationen nedan — svara direkt utifrån det. Fråga inte grundaren om "
         "något hen redan har svarat på eller som redan är känt, om det inte genuint behövs."
     )
+    # Phase A (conversational intelligence): if this very conversation already contains an
+    # assistant reply, that reply is binding context, not just background — a later answer
+    # must not silently drift from or contradict it. This is a self-consistency instruction,
+    # distinct from block E above (which is about not re-asking the FOUNDER something already
+    # known) -- unconditional whenever there's any prior history, same posture as block E.
+    if history:
+        cognitive_lines.append(
+            "Om du själv redan svarat på en liknande fråga tidigare i den här konversationen, "
+            "var konsekvent med det svaret. Om nya fakta gör att du behöver ändra dig, säg "
+            "det uttryckligen och varför — motsäg aldrig ett tidigare svar i tysthet."
+        )
+    # Phase A: the founder's own explicit directive -- when the latest message plausibly
+    # states a desired outcome or a specific suggested implementation (a work command or an
+    # idea worth saving), the model must understand the underlying GOAL, not treat the literal
+    # suggestion as something to execute without judgement. Gated on SUGGESTION_BEARING_INTENTS
+    # so it only fires where a suggestion is actually present, not on every ordinary turn.
+    if context_resolution.intent in SUGGESTION_BEARING_INTENTS:
+        cognitive_lines.append(
+            "Grundarens senaste meddelande föreslår en konkret lösning eller åtgärd. Förstå "
+            "det BAKOMLIGGANDE MÅLET bakom förslaget — inte bara den ordagranna instruktionen. "
+            "Om förslaget verkar vara ett rimligt sätt att nå målet, säg det. Om du ser ett "
+            "tydligt bättre eller enklare sätt att nå samma mål, säg det uttryckligen istället "
+            "för att tyst genomföra förslaget ordagrant — men beslutet om vad som faktiskt görs "
+            "är alltid grundarens, inte ditt."
+        )
     if history_truncated:
         cognitive_lines.append(
             f"OBS: endast de {_HISTORY_WINDOW} senaste meddelandena i den här konversationen "

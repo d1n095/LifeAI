@@ -33,6 +33,12 @@ INTENT_IDEA_WORTH_SAVING = "idea_worth_saving"
 INTENT_EXPLICIT_MEMORY = "explicit_memory"
 INTENT_UNCERTAIN_REFERENCE = "uncertain_reference"
 
+# Intents where the founder's message plausibly states a SUGGESTION/desired outcome rather
+# than just discussing or asking -- the set used (chat.py, Phase A) to gate the "understand
+# the underlying goal, not just the literal suggestion" instruction, so it fires only where a
+# suggestion is actually being made, not on every single turn.
+SUGGESTION_BEARING_INTENTS = frozenset({INTENT_WORK_COMMAND, INTENT_IDEA_WORTH_SAVING})
+
 CONFIDENCE_HIGH = "high"
 CONFIDENCE_MEDIUM = "medium"
 CONFIDENCE_LOW = "low"
