@@ -49,9 +49,20 @@ används av CI-jobb utan webbläsare — gör att varje autentiserad journey stu
 `/login` trots 200 på login.
 
 **Endurance:** den äkta fyratimmarssöken (14 400 s, isolerad `lifeos_v5_soak`, Redis DB 15,
-egen backend, restart varje timme, concurrency 4) **kördes igång 2026-11-23 12:46Z** och
-rapporteras först när den själv skrivit sitt utfall. En förkortad körning kallas aldrig
-endurance-PASS.
+egen backend, restart varje timme, concurrency 4) **kördes 2026-11-23 16:00Z–20:01Z och blev PASS**: `status=PASS`, `f23_status=PASS`,
+14 400 s, **0 failures, 0 blockers**, 3 backend-restarts, 6 899 chat-/stream-/health-cykler,
+2 299 MainAI-jobb, 1 379 dokumentimport med 1 379 grundade retrieval-chats och 5 504
+samtidiga health-checks. `runtime_incidents=0`, inga stalled jobb/imports, worker-heartbeat
+`alive` hela vägen; databasen slutade på 15 177 samtal, 30 354 meddelanden och 1 379 chunks.
+Latens (fake-provider, alltså applikationsoverhead — inte modellgenerering): health p50 33 ms
+/ p95 49 ms, chat p50 215 ms / p95 419 ms, stream p50 971 ms, retrieval-chat p50 210 ms.
+
+**Två tidigare försök frös vid minut 15 utan att rapportera fel.** Orsaken var inte en hängd
+backend: access-token lever 15 minuter (`access_token_expire_minutes`) men harnessen loggade in
+en enda gång, så varje autentiserat anrop fick 401 medan loopen snurrade vidare och ingen
+evidens skrevs. Fixen (`backend/scripts/acceptance/v5_soak.py`, commit `81a82a7`) förnyar
+sessionen en gång vid 401; den här körningen registrerade **13 session-refresh** och växte utan
+avbrott över 15-minutersgränsen. En förkortad körning kallas aldrig endurance-PASS.
 
 **Kompatibilitet med Claudes PR #471** (`claude/founder-alpha-phase3-staging`, head
 `9938fd2`, bas `integration/founder-alpha-20261121`, öppen draft, 83 commits, 248 filer):

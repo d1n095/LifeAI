@@ -199,16 +199,16 @@ No second memory store, vector database, provider router or workspace module was
 
 | Package | Status | Evidence / limitation |
 | --- | --- | --- |
-| 1. Real local AI | **PARTIAL — implementation verified, live model BLOCKED** | Discovery, authorization boundary, active identity, streaming, persistence, reload, cancel, downtime handling and restart recovery are covered. No Ollama runtime is installed (`127.0.0.1:11434` refused), so a real local model was not invoked. |
+| 1. Real local AI | **PASS — verified against a real local model** | Discovery, authorization boundary, active identity, streaming, persistence, reload, cancel, downtime handling and restart recovery are covered, and the 2026-11-23 addendum verifies them against a real Ollama model (`qwen2.5:0.5b`, `all-minilm`): 7/7 before restart, 5/5 after, real SSE streaming, honest outage and recovery without a backend restart. |
 | 2. Persistent memory and knowledge | **VERIFIED EXISTING** | 13 source-grounding tests plus duplicate import, owner isolation, deletion, legacy-space isolation and founder citation journey. No new memory database. |
 | 3. Document pipeline | **VERIFIED EXISTING** | Durable upload/import, crash before/after commit, worker resume, duplicate bytes, empty file, blob cleanup, indexing and retrieval. The browser journey exercises TXT end to end; other format validators were not re-audited this round. |
 | 4. Project workspace integration | **VERIFIED EXISTING** | Workspace/project/task/calendar/search/dashboard browser journey and project-detail journey, reload persistence, owner-scoped API and no cross-context selection. |
 | 5. Full-stack user journey | **PASS for the covered journey** | Founder login → project → upload → ingestion → cited chat → persisted conversation → related task → reload/restart. See browser evidence. |
 | 6. Recovery and concurrency | **PASS for the executed matrix** | 11 fault-injection tests and the reliability suite passed, including duplicate delivery, interrupted stream, DB/Redis outage, provider errors and lease fencing. Retries do not blindly repeat an uncertain provider effect. |
-| 7. Performance | **MEASURED, provider-limited** | 45-second isolated soak: chat p50 **57.4 ms**, p95 **121.9 ms**; retrieval chat p50 **64.3 ms**; health p50 **30.1 ms**; RSS **183–186 MB**. Backend used a deterministic fake provider, so this measures application overhead, not real model latency. |
-| 8. Endurance | **BLOCKED** | Only 45 seconds ran. F23 requires 14,400 seconds; the result is explicitly `BLOCKED`, never PASS. |
+| 7. Performance | **MEASURED over four hours, provider-limited** | Four-hour isolated soak (14,400 s): health p50 **33 ms** / p95 **49 ms**, chat p50 **215 ms** / p95 **419 ms**, streaming p50 **971 ms** / p95 **1,185 ms**, grounded retrieval chat p50 **210 ms** / p95 **409 ms**, across 6,899 chat cycles and 1,379 grounded retrieval cycles with **zero** request failures. The backend used a deterministic fake provider, so this measures application overhead, not real model latency (a real grounded turn takes ~31 s on this host). |
+| 8. Endurance | **PASS** | A genuine 14,400-second run completed and wrote its own verdict: `status=PASS`, `f23_status=PASS`, **0 failures, 0 blockers**, 3 hourly backend restarts, 0 open incidents and a live worker heartbeat at the end. Evidence: `docs/evidence/founder-alpha-local-ai/soak-4h.json`. |
 | 9. UX and quality | **VERIFIED / IMPROVED** | URL-backed history, truthful active model label, loading/error states, keyboard chat, dashboard network-error recovery, responsive existing layouts. No cosmetic rewrite. |
-| 10. Certification | **PASS locally, external blockers explicit** | 57 backend tests, 13 browser tests, TypeScript, lint, production build and a verified bundle. GitHub CI/PR, real Ollama and four-hour endurance remain blocked. |
+| 10. Certification | **PASS locally, external blockers explicit** | 57 backend tests, 13 browser tests, TypeScript, lint, production build, a verified bundle, real-Ollama acceptance and a four-hour endurance run. GitHub CI/PR (no write access) remains blocked. |
 
 ## Certification results
 
@@ -223,25 +223,30 @@ No second memory store, vector database, provider router or workspace module was
 | TypeScript | **PASS** |
 | ESLint | **0 errors, 1 pre-existing `api.ts` warning** |
 | Production build | **PASS**, 29 routes |
-| Short soak | **BLOCKED for F23**, 0 request failures |
-| Real local Ollama model | **BLOCKED — no runtime** |
+| Short soak (2026-11-22) | **BLOCKED for F23**, 0 request failures |
+| Four-hour soak (2026-11-23) | **PASS** — 14,400 s, 0 failures, 0 blockers |
+| Real local Ollama model | **PASS** — verified 2026-11-23 (see addendum) |
 
-The soak used isolated PostgreSQL `lifeos_soak_test` and Redis DB 15. It completed
-**24 chats, 24 streams, 4 document imports with grounded retrieval, 8 MainAI jobs, 16
-concurrent health checks and one backend restart**. Startup took **4.84 s**; database and
-Redis stayed readable at every sample; no incidents, stalled jobs or failures were recorded.
-The run deliberately returned exit 3 because its duration was below four hours.
+The short soak used isolated PostgreSQL `lifeos_soak_test` and Redis DB 15 and deliberately
+returned exit 3 because its duration was below four hours.
+
+The four-hour run used its own isolated PostgreSQL `lifeos_v5_soak` and Redis DB 15, and the
+harness wrote its own verdict: **`status=PASS`, `f23_status=PASS`, `duration_seconds=14400`,
+0 failures, 0 blockers**. It executed **6,899 health/chat/streaming cycles, 2,299 MainAI jobs,
+1,379 document imports each followed by a grounded retrieval chat, and 5,504 concurrent health
+checks**, across **3 hourly backend restarts**. The final database held 15,177 conversations,
+30,354 messages and 1,379 indexed chunks with **0 runtime incidents**; Redis stayed at 13 keys
+and 1.38 MB; no stalled jobs or imports and no open incidents at any sample; the worker
+heartbeat was alive at the end. Startup took 4.82 s and every sample stayed readable.
 
 ## Blockers
 
-1. **No Ollama runtime**: `127.0.0.1:11434` refuses connections. Real local-model discovery
-   with an installed model and a real generation cannot be claimed. This is an infrastructure
-   blocker, not a passing local-AI acceptance.
-2. **No four-hour endurance window**: F23 is BLOCKED. The 45-second soak only proves the
-   harness and recovery path work; it is not endurance evidence.
-3. **No GitHub write access**: exact-head CI, a draft PR, merge and deployment cannot be
+1. **No GitHub write access**: exact-head CI, a draft PR, merge and deployment cannot be
    performed. The verified Git bundle is the delivery artifact.
-4. **No production access**: no production VPS, database or credentials were touched.
+2. **No production access**: no production VPS, database or credentials were touched.
+
+Two blockers from the 2026-11-22 baseline are closed: a real Ollama runtime is installed and
+verified, and the four-hour endurance run is **PASS**.
 
 ## Reproduction
 
@@ -390,9 +395,22 @@ real-model equivalents are the acceptance checks above.
 
 ### Four-hour endurance
 
-The 14 400-second soak is running in isolation (`lifeos_v5_soak`, Redis DB 15, its own
-backend on a private port, restart every hour, concurrency 4) and is **not** claimed as a
-result until it completes. A shortened run is never reported as endurance.
+The 14,400-second soak completed in isolation (`lifeos_v5_soak`, Redis DB 15, its own backend
+on a private port, restart every hour, concurrency 4) and the harness wrote its own verdict:
+**`status=PASS`, `f23_status=PASS`, `duration_seconds=14400`, 0 failures, 0 blockers**
+(`docs/evidence/founder-alpha-local-ai/soak-4h.json`, 464 samples).
+
+Two earlier attempts froze at minute 15 without reporting anything. The cause was the
+harness, not the product: the access token lives 15 minutes, the harness logged in once, and
+after minute 15 every authenticated call returned 401 while the loop kept spinning, so no
+conversation, document or job was created and the end-of-run evidence was never written.
+Authenticated calls now re-login once on 401 and retry; this run recorded **13
+`session_refreshes`** and grew without interruption across the boundary.
+
+The soak's provider is the deterministic fake used by the E2E harness, so its latency numbers
+are application overhead, not model generation. Real-model latency is measured separately in
+the addendum (~31 s for a grounded turn on this 2-vCPU host). A shortened run is still never
+reported as endurance.
 
 ### Compatibility with Claude's PR #471
 

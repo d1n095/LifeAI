@@ -102,9 +102,13 @@
     ]
   },
   "soak": {
-    "status": "RUNNING",
+    "status": "PASS",
+    "f23_status": "PASS",
     "required_seconds": 14400,
-    "started_at": "2026-11-23T12:46Z",
+    "duration_seconds": 14400,
+    "started_at": "2026-11-23T16:00:57Z",
+    "finished_at": "2026-11-23T20:01:07Z",
+    "commit": "3b11b1f085ecb155c56f1e0a6159cf0c45e9f63e",
     "database": "lifeos_v5_soak (fresh, migration head 0095)",
     "redis": "redis://127.0.0.1:56379/15",
     "sample_every_seconds": 30,
@@ -112,7 +116,49 @@
     "concurrency": 4,
     "provider": "deterministic fake (isolated E2E harness) — measures application overhead, not model generation",
     "out": "docs/evidence/founder-alpha-local-ai/soak-4h.json",
-    "note": "a shortened run is never reported as endurance; status stays RUNNING until the harness writes its own verdict"
+    "failures": [],
+    "blockers": [],
+    "counts": {
+      "cycles": 6899,
+      "health": 6899,
+      "incident_health": 6899,
+      "chat": 6899,
+      "chat_stream": 6899,
+      "mainai_job": 2299,
+      "document_import": 1379,
+      "retrieval_chat": 1379,
+      "concurrent_health": 5504,
+      "restarts": 3,
+      "jobs_skipped_capability": 0,
+      "session_refreshes": 13
+    },
+    "latencies_ms": {
+      "health": {"p50": 33.46, "p95": 49.44, "max": 165.87},
+      "incident_health": {"p50": 10.01, "p95": 13.04, "max": 169.54},
+      "chat": {"p50": 214.99, "p95": 418.93, "max": 4105.68},
+      "chat_stream": {"p50": 970.9, "p95": 1184.97, "max": 1466.68},
+      "retrieval_chat": {"p50": 209.88, "p95": 408.82, "max": 591.21}
+    },
+    "startup_latency_s": 4.824,
+    "database_final": {
+      "documents": 1379,
+      "document_chunks": 1379,
+      "conversations": 15177,
+      "messages": 30354,
+      "knowledge_import_jobs": 1379,
+      "mainai_jobs": 2299,
+      "runtime_incidents": 0,
+      "size_bytes": 135322647
+    },
+    "incident_health_final": {
+      "state": "healthy",
+      "open_incidents": 0,
+      "stalled_jobs": 0,
+      "stalled_imports": 0,
+      "worker_heartbeat": "alive"
+    },
+    "harness_defect_fixed": "Two earlier attempts froze at minute 15 without failing: the access token lives 15 minutes and the harness logged in once, so every authenticated call returned 401 while the loop kept spinning and no evidence was written. Authenticated calls now re-login once on 401; this run recorded 13 session_refreshes and grew without interruption.",
+    "note": "the harness wrote its own verdict; the run is reported exactly as written and a shortened run would have been BLOCKED for F23"
   },
   "pr471_compatibility": {
     "pr": 471,
