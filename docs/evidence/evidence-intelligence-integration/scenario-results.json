@@ -1,0 +1,51 @@
+{
+  "command": "pytest tests/backend/mainai/test_evidence_intelligence_integration.py tests/backend/mainai/test_mainai_executive_loop.py tests/backend/mainai/test_mainai_executive_scenarios.py -q --tb=no -rA",
+  "environment": {
+    "database": "postgresql://postgres@127.0.0.1:55432/lifeos_test_si3 (disposable)",
+    "environment": "test",
+    "redis": "redis://127.0.0.1:56379/3"
+  },
+  "failed": [],
+  "limitations": [
+    "scenario 7 stubs provider configuration; it does not prove a live provider call",
+    "scenario 10 mocks the overlap payload; it proves the composition reports and does not interrupt",
+    "no HTTP route is wired, so no end-to-end API request is exercised"
+  ],
+  "passed": [
+    "tests/backend/mainai/test_evidence_intelligence_integration.py::test_scenario_1_existing_capability_is_found_before_building",
+    "tests/backend/mainai/test_evidence_intelligence_integration.py::test_scenario_2_objection_with_decisive_evidence_revises_conclusion",
+    "tests/backend/mainai/test_evidence_intelligence_integration.py::test_scenario_2b_objection_alone_stays_unresolved",
+    "tests/backend/mainai/test_evidence_intelligence_integration.py::test_scenario_3_module_location_does_not_claim_operational_capability",
+    "tests/backend/mainai/test_evidence_intelligence_integration.py::test_scenario_4_competing_solutions_are_compared_not_authorized",
+    "tests/backend/mainai/test_evidence_intelligence_integration.py::test_scenario_5_interrupted_cycle_resumes_from_checkpoint",
+    "tests/backend/mainai/test_evidence_intelligence_integration.py::test_scenario_6_memory_pressure_does_not_justify_hardware_upgrade",
+    "tests/backend/mainai/test_evidence_intelligence_integration.py::test_scenario_7_unavailable_provider_does_not_become_eligible",
+    "tests/backend/mainai/test_evidence_intelligence_integration.py::test_scenario_8_newer_decision_supersedes_older",
+    "tests/backend/mainai/test_evidence_intelligence_integration.py::test_scenario_9_untrusted_instruction_is_data_not_authority",
+    "tests/backend/mainai/test_evidence_intelligence_integration.py::test_scenario_10_mocked_overlap_is_reported_without_interruption",
+    "tests/backend/mainai/test_mainai_executive_loop.py::test_executive_cycle_composes_without_authority",
+    "tests/backend/mainai/test_mainai_executive_loop.py::test_interruption_mid_plan_leaves_durable_checkpoint",
+    "tests/backend/mainai/test_mainai_executive_loop.py::test_memory_says_do_it_is_not_authority",
+    "tests/backend/mainai/test_mainai_executive_loop.py::test_capability_reality_downranks_gaps",
+    "tests/backend/mainai/test_mainai_executive_loop.py::test_missing_piece_detector_reuses_workforce",
+    "tests/backend/mainai/test_mainai_executive_loop.py::test_observability_snapshot",
+    "tests/backend/mainai/test_mainai_executive_loop.py::test_executive_candidates_never_auto_authorized",
+    "tests/backend/mainai/test_mainai_executive_scenarios.py::test_scenario_a_shorthand_plan_workforce_restart",
+    "tests/backend/mainai/test_mainai_executive_scenarios.py::test_scenario_b_founder_correction_mid_plan",
+    "tests/backend/mainai/test_mainai_executive_scenarios.py::test_scenario_c_overlap_reuses_existing",
+    "tests/backend/mainai/test_mainai_executive_scenarios.py::test_scenario_d_interrupt_exact_continuation",
+    "tests/backend/mainai/test_mainai_executive_scenarios.py::test_scenario_e_poor_worker_changes_selection",
+    "tests/backend/mainai/test_mainai_executive_scenarios.py::test_scenario_f_cost_budget_prefers_cheaper"
+  ],
+  "summary": "24 passed, 589 warnings in 46.84s",
+  "verification_kind": {
+    "browser_used": false,
+    "live_provider_invoked": false,
+    "mocked": [
+      "scenario 7 provider configuration",
+      "scenario 10 work overlap"
+    ],
+    "real_database": true,
+    "real_redis": true
+  }
+}
