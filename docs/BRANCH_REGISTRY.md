@@ -6,6 +6,46 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## System Intelligence 2.0 — projektgränser, utvecklingstillstånd och konsistens (2026-11-24)
+
+**Branch:** `freebuff/system-intelligence-2-20261124`, bas
+`5b8c4630ddaab96fadc580de7b1396c719a7a982` (Context Atlas). Kodcommit
+`f220501cc13ad404de100b759d96d99ef5a6553c`. Ingen PR/push/merge/deploy; GitHub
+write-access saknas fortfarande. `first_cycle_go=false`. Inga VPS-tjänster,
+produktionsresurser eller `security/POLICY_LOCK.json` rörda.
+
+**Scope:** C3-projektisolering (`project_scope.py`), E1/E3 hållbart utvecklingstillstånd och
+återhämtning (`development_state.py`) samt B3 statisk arkitekturkonsistens (`consistency.py`),
+plus CLI-kommandona `scope` och `consistency`. Allt är read-only ovanpå befintliga tabeller
+(`agent_work_assignments`, events, leases, dispatch executions, `mainai_goals`/`tasks`,
+`project_checkpoints`/`notes`). Inga nya tabeller, migrationer, köer, agentdispatchers eller
+nätverksanrop. Varje beslut har `execution_authorized: false`.
+
+**Faktiska resultat:** **114 passed, 334 warnings in 223.85s** över hela atlas-sviten,
+inklusive 22 nya tester (8 projektgräns, 5 konsistens, 9 riktiga DB/RLS-återhämtningstester).
+Efter sista refaktoreringen kördes E1/E3 om separat: **9 passed**. `ruff check` → All checks
+passed. `consistency.json` på checkouten: **0 findings** (de fem deterministiska kontrollerna
+hittade ingen motsägelse; det är inte ett påstående att arkitekturen är felfri).
+
+**Evidens:** `docs/SYSTEM_INTELLIGENCE_2.md`;
+`docs/evidence/system-intelligence-2/{consistency,project-scope-mixed,project-scope-isolated}.json`
+samt `inputs/`. Scope-evidensen visar LifeAI+LifeMusic med identisk ordalydelse → `mixed`,
+`requires_review=true`, `execution_authorized=false`; LifeAI+LifeAI Platform → `isolated`.
+
+**Beroenden:** bygger direkt på atlasens `5b8c4630`. Inga filer överlappar #499–#506; de
+ändrade atlasfilerna (`context_atlas/__init__.py`, `scripts/context_atlas.py`,
+`docs/CONTEXT_ATLAS.md`) finns inte i någon av PR-headarna. #502:s breda
+`founder_intelligence.py` ersätts inte; 2.0:s återhämtning är en snävare
+assignment/lease/event-vy. Inga migrationer. Mergeordning: efter atlasen, oberoende av
+staging-stacken i `/tmp/cand`.
+
+**Kvarstående blockerare/begränsningar:** GitHub write-access (push/PR/merge); `observed`
+bygger på dispatch-heartbeat, inte en OS-processprobe; återhämtningen gör inget GitHub-anrop
+(`github_observed=false`); B3 täcker fem deterministiska kontroller, inte semantisk
+dokumentation-mot-kod-analys; ingen fas 6-UI och ingen automatisk dispatch/merge/deploy.
+Bundle exporteras efter registret till `/tmp/system-intelligence-2-transfer` med manifest och
+`SHA256SUMS`.
+
 ## Context Atlas — källidentitet, relationsmappning och kontextbeslut (2026-11-24)
 
 **Branch:** `freebuff/context-atlas-20261124`, bas `8c7b335e` (`freebuff/life-workspaces`).
