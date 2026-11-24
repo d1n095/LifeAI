@@ -31,6 +31,7 @@ that it defaults to pushing to a live repo."""
 
 import logging
 import subprocess
+import sys
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -79,7 +80,7 @@ from app.models.mainai_execution import (
 from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory
 from app.models.mainai_recovery import MainAITaskWorktree
 from app.models.mainai_wait import MainAITaskWait, MainAITaskWaitStatus
-from app.providers.base import Message
+from app.providers.base import Message, ProviderError
 from app.providers.registry import chat_with_fallback
 
 logger = logging.getLogger("mainai.execution")
@@ -304,7 +305,18 @@ async def _propose_repo_edit(db: Session, task: MainAITask, *, attempt_id=None) 
     reason and writes to the shared checkout as before — where `_rollback_proposal_writes()` still
     restores it on every non-accepting path. Isolation is never silently claimed when it is not in
     effect: `work_result["isolation"]` records which mode actually ran.
+
+    Reconciliation note (PI-1d merge): a second, independent isolation implementation
+    (`_create_proposal_workspace()`, a plain filesystem copy rather than a git checkout) was
+    built in parallel on PR #469 against the same finding. This git-worktree version is kept as
+    the one true mechanism — it was already part of the reviewed, composed integration
+    candidate, and degrades gracefully to the shared-checkout+rollback path if the git bootstrap
+    can't be built, unlike the copy-based version. PR #469's one genuine improvement over this
+    version — threading the isolated location through to the sibling run_tests task — is ported
+    into `_handle_run_tests()` below using THIS mechanism's own `proposal_worktree_path` field,
+    closing the one real gap this version otherwise had.
     """
+
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=task.description)]
     # Freebuff EGRESS-0/EGRESS-1 -- see _handle_read_only_audit()'s matching comment above for
     # why this owner_id/task_id/goal_id is required, not optional.
@@ -523,7 +535,12 @@ def _run_pytest(target: str, *, cwd: Path, timeout_seconds: int = 300) -> dict:
     as an ordinary failed result here too, for the same reason."""
     validate_targeted_tests_target(target)
     try:
-        result = subprocess.run(["python", "-m", "pytest", "-q", target], cwd=str(cwd), capture_output=True, text=True, timeout=timeout_seconds)
+        # R15 (2026-11-19): sys.executable, not "python" -- macOS has no `python` on PATH, and
+        # the FileNotFoundError that produced is an OSError, which used to escape this handler
+        # (only TimeoutExpired was caught) and strand the task at `running`.
+        result = subprocess.run([sys.executable, "-m", "pytest", "-q", target], cwd=str(cwd), capture_output=True, text=True, timeout=timeout_seconds)
+    except OSError as exc:
+        return {"target": target, "returncode": None, "passed": False, "error": "interpreter_unavailable", "detail": str(exc)[:500]}
     except subprocess.TimeoutExpired as exc:
         return {
             "target": target,
@@ -551,13 +568,22 @@ def _handle_run_tests(db: Session, task: MainAITask, *, goal: MainAIGoal) -> dic
     if it ran for real, its `worktree_path` -- identical fallback logic to the one
     `run_task_execution_job()` already uses for this task's OWN post-dispatch verification
     step (`verify_cwd`), now also applied to this task's internal pytest invocation so both
-    checks agree on where the real code actually lives."""
+    checks agree on where the real code actually lives.
+
+    PI-1d completion (merge reconciliation): the same gap exists for a proposal-mode sibling
+    (`github_write_enabled=False`) once `_propose_repo_edit()` stopped writing into the shared
+    checkout -- its own isolated checkout's path (`proposal_worktree_path`, M4 isolation) must
+    be checked here too, exactly like `run_task_execution_job()`'s `verify_cwd` resolution
+    already does for this same task's post-dispatch verification step. Checked second, after
+    the real-worktree case, since a repo_edit task is only ever one or the other."""
     targets = [step["target"] for step in task.verification_plan if step.get("kind") == "targeted_tests" and step.get("target")]
     if not targets:
         raise TaskExecutionError("run_tests task has no 'targeted_tests' entries in its verification_plan to run.")
     edit_info = _find_repo_edit_branch(db, goal_id=goal.id)
     worktree_path = edit_info.get("worktree_path") if edit_info else None
-    cwd = Path(worktree_path) / "backend" if worktree_path else _backend_root()
+    proposal_path = edit_info.get("proposal_worktree_path") if edit_info else None
+    source_root = worktree_path or proposal_path
+    cwd = Path(source_root) / "backend" if source_root else _backend_root()
     try:
         results = [_run_pytest(target, cwd=cwd) for target in targets]
     except VerificationStepError as exc:
@@ -772,6 +798,23 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             try:
                 renew_mainai_job_lease(db, job_id, worker_id, lease_generation, lease_seconds)
             except JobLeaseLostError:
+                # Stream 7 hardening finding: a repo_edit proposal written to the SHARED
+                # checkout (isolation disabled/unavailable -- the isolated-worktree default
+                # never populates `previous_contents`, so this is a no-op there, exactly like
+                # the verification-failure rollback below) must not survive losing the lease
+                # right here, before verification ever runs. Before this fix, the only
+                # `_rollback_proposal_writes()` call site was gated on a failed verification --
+                # unreachable on this early-return path, so a stale worker's provisional write
+                # could outlive the task it was for with no way back, the exact state PI-1d's
+                # own docstring says proposal mode must never produce.
+                if task.task_type == "repo_edit":
+                    rolled_back = _rollback_proposal_writes(work_result)
+                    if rolled_back:
+                        logger.warning(
+                            "task_execution job %s: lease lost before work_result checkpoint; "
+                            "shared-checkout proposal edits rolled back: %s",
+                            job_id, ", ".join(rolled_back),
+                        )
                 logger.warning("task_execution job %s: lease lost before work_result checkpoint commit.", job_id)
                 db.rollback()
                 return
@@ -816,8 +859,11 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             # worktree's own backend/ subdirectory -- the exact same repo layout as
             # _backend_root(), just at a different, per-attempt path -- never against the
             # shared checkout, which never received these edits at all once worktree.py is
-            # wired into the live path. Proposal mode (no worktree_path in work_result) keeps
-            # verifying against the shared checkout, unchanged from V0.1.
+            # wired into the live path. PI-1d: proposal mode is the SAME shape now -- its edits
+            # live inside _propose_repo_edit()'s own isolated `proposal_worktree_path` checkout,
+            # never the shared checkout either, once that fix lands. Only a repo_edit task with NEITHER
+            # (should not be structurally reachable, but never assumed) falls back to
+            # _backend_root(), unchanged from V0.1.
             worktree_path = work_result.get("worktree_path") if task.task_type == "repo_edit" else None
             # Proposal-mode isolation (M4): the proposed files live in their own local checkout,
             # so their verification must run there. Absent (isolation disabled, or the bootstrap
@@ -927,7 +973,18 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
             return
         return
 
-    except (TaskExecutionError, VerificationStepError, GitHubClientError, WorktreeError) as exc:
+    except (TaskExecutionError, VerificationStepError, GitHubClientError, WorktreeError, ProviderError) as exc:
+        # Stream 7 hardening finding: every configured AI provider being unreachable --
+        # chat_with_fallback()'s real, everyday final-failure shape, not a bug -- used to
+        # escape this function entirely (ProviderError was not in this tuple), reaching only
+        # app/worker.py's outer, deliberately generic `except Exception` ("to catch anything
+        # that escapes unexpectedly, a bug, not a designed failure path" per its own
+        # docstring). That outer handler marks the JOB failed but never finalizes the TASK,
+        # leaving it stuck `running` forever next to an already-terminal job -- confirmed by
+        # reproduction before this fix. A total-provider-failure is exactly the kind of
+        # ordinary, designed failure this function's own finalize-task+mark_failed path below
+        # already handles correctly for every other failure shape; it belongs in this tuple,
+        # not the worker's bug-catching fallback.
         logger.warning("task_execution job %s (task %s): %s", job_id, task.id, exc)
         db.rollback()
         job = db.get(MainAIJob, job_id)
@@ -1042,7 +1099,17 @@ def _finalize_task_outcome(
     After a successful `completed` (or cooperative cancel), the canonical `record_final_report`
     path runs so a fully successful terminal graph closes the MainAIGoal. Permanent `failed`
     outcomes defer goal close to the worker finalize tick so auto-replan can still claim an
-    ACTIVE goal — see `_rollup_goal_after_task_boundary`."""
+    ACTIVE goal — see `_rollup_goal_after_task_boundary`.
+
+    PI-1d: this task's own disposable proposal checkout (if any) is deliberately NOT cleaned
+    up here. A repo_edit task reaching ITS OWN `completed` here does not mean the GOAL is
+    done -- a sibling `run_tests` task (a separate task, dispatched later) still needs this
+    exact checkout to verify against (see _handle_run_tests()'s `proposal_worktree_path`
+    lookup). Cleaning up at this task-level granularity deletes the checkout out from under
+    that still-pending sibling. See final_report.py's record_final_report() instead: it cleans
+    up every repo_edit task's checkout under a goal at the one point that's actually safe --
+    once the WHOLE goal has reached a genuinely terminal state and nothing under it can ever
+    dispatch another task that might still need it."""
     db.add(
         MainAITaskEvent(
             task_id=task.id,
@@ -1120,7 +1187,13 @@ def finalize_cancelled_task(db: Session, task: MainAITask, *, reason: str) -> No
     failure: it must never count against `task.attempts`, schedule a `next_retry_at`, or record
     a `verification_failed` event that didn't actually happen. Records `cancelling` (the
     in-flight acknowledgment) then `cancelled` (the durable terminal event), matching
-    MainAIJobEventType's own cancel_requested -> cancel_acknowledged -> cancelled shape."""
+    MainAIJobEventType's own cancel_requested -> cancel_acknowledged -> cancelled shape.
+
+    PI-1d: same reasoning as _finalize_task_outcome() above -- this task's own disposable
+    proposal workspace (if any) is NOT cleaned up here either, for the identical reason: this
+    could be a DIFFERENT task in the goal being cancelled while a repo_edit sibling's own
+    workspace is still needed by a not-yet-run run_tests task. Cleanup happens once at the
+    goal's own terminal close (final_report.py's record_final_report())."""
     db.add(MainAITaskEvent(task_id=task.id, owner_id=task.owner_id, event_type=MainAITaskEventType.cancelling, detail={"reason": reason}))
     task.status = MainAITaskStatus.cancelled
     task.completed_at = datetime.utcnow()

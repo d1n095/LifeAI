@@ -121,10 +121,29 @@ def get_or_create_message_source_unit(db: Session, locator: MessageSourceLocator
     except IntegrityError as exc:
         constraint_name = getattr(getattr(getattr(exc, "orig", None), "diag", None), "constraint_name", None)
         savepoint.rollback()
-        if constraint_name != "uq_msu_owner_identity":
+        if constraint_name is not None and constraint_name != "uq_msu_owner_identity":
+            raise
+        if constraint_name is None:
+            # Dialects without PG's exc.diag (sqlite test databases): the only constraint
+            # this INSERT can violate is uq_msu_owner_identity (locator-vs-locator conflicts
+            # raise MessageSourceIdentityConflict before any INSERT), so resolve the existing
+            # row; if none is visible, re-raise the ORIGINAL error unchanged.
+            resolved = _existing_active_source(db, locator, content_hash)
+            if resolved is not None:
+                return resolved
             raise
 
-    existing = (
+    existing = _existing_source_pair(db, locator)
+    if existing is None:
+        raise MessageSourceIdentityConflict(
+            f"uq_msu_owner_identity fired for identity_key={locator.identity_key!r} but no matching "
+            f"memory_source_units row is visible — likely a concurrent, not-yet-committed writer; retry"
+        )
+    return _validate_existing(existing, locator, content_hash)
+
+
+def _existing_source_pair(db: Session, locator: "MessageSourceLocator"):
+    return (
         db.query(MemorySourceUnit, MessageSourceUnit)
         .join(MessageSourceUnit, MessageSourceUnit.memory_source_id == MemorySourceUnit.id)
         .filter(
@@ -133,12 +152,20 @@ def get_or_create_message_source_unit(db: Session, locator: MessageSourceLocator
         )
         .one_or_none()
     )
-    if existing is None:
-        raise MessageSourceIdentityConflict(
-            f"uq_msu_owner_identity fired for identity_key={locator.identity_key!r} but no matching "
-            f"memory_source_units row is visible — likely a concurrent, not-yet-committed writer; retry"
-        )
 
+
+def _existing_active_source(db: Session, locator: "MessageSourceLocator", content_hash: str):
+    """Dialect-neutral existing-row resolution (None = nothing usable visible)."""
+    existing = _existing_source_pair(db, locator)
+    if existing is None:
+        return None
+    try:
+        return _validate_existing(existing, locator, content_hash)
+    except MessageSourceIdentityConflict:
+        return None
+
+
+def _validate_existing(existing, locator: "MessageSourceLocator", content_hash: str) -> uuid.UUID:
     existing_msu, existing_msgsu = existing
     if existing_msgsu.message_id != locator.message_id or existing_msgsu.conversation_id != locator.conversation_id:
         raise MessageSourceIdentityConflict(

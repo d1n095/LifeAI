@@ -8,6 +8,7 @@ and its result is what actually gates whether a task may become `completed`
 
 import dataclasses
 import subprocess
+import sys
 from pathlib import PurePosixPath
 
 from app.models.mainai_execution import MainAITask
@@ -82,7 +83,12 @@ def _run_targeted_tests(step: dict, *, cwd: str) -> VerificationStepResult:
     timeout_seconds = step.get("timeout_seconds", 300)
     try:
         result = subprocess.run(
-            ["python", "-m", "pytest", "-q", target],
+            # R15 (2026-11-19): `sys.executable`, not the literal "python" -- on macOS there is
+            # no `python` on PATH (only `python3`), so every targeted_tests step raised
+            # FileNotFoundError, which is an OSError and therefore escaped run_task_execution_job()'s
+            # except tuple and left the task `running` forever. The app's own interpreter is also
+            # the honest choice: it is the venv the tests were installed into.
+            [sys.executable, "-m", "pytest", "-q", target],
             cwd=cwd,
             capture_output=True,
             text=True,
@@ -112,6 +118,15 @@ def _run_targeted_tests(step: dict, *, cwd: str) -> VerificationStepResult:
                 "stdout_tail": decode_subprocess_output(exc.stdout)[-4000:],
                 "stderr_tail": decode_subprocess_output(exc.stderr)[-2000:],
             },
+        )
+    except OSError as exc:
+        # Same routing principle as TimeoutExpired above: an interpreter that cannot be spawned
+        # is a FAILED verification step with real evidence, not an exception that escapes the
+        # attempts-remaining logic and strands the task.
+        return VerificationStepResult(
+            kind="targeted_tests",
+            passed=False,
+            detail={"target": target, "error": "interpreter_unavailable", "detail": str(exc)[:500]},
         )
     passed = result.returncode == 0
     # stdout/stderr truncated -- this is stored as durable evidence (MainAITaskEvent.detail,

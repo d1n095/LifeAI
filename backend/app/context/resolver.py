@@ -101,6 +101,13 @@ def _words(text: str) -> set[str]:
     return {w for w in _WORD_RE.findall(text.lower()) if len(w) > 2}
 
 
+def _last_user_message(history: list[ConversationMessage]) -> ConversationMessage | None:
+    for m in reversed(history):
+        if m.role == "user":
+            return m
+    return None
+
+
 def _is_pronoun_heavy(text: str) -> bool:
     tokens = _WORD_RE.findall(text.lower())
     if not tokens:
@@ -198,9 +205,18 @@ def resolve_context(
 
     if marker := _contains_any(text, _CORRECTION_MARKERS):
         ref_idx = len(history) - 1 if history else None
-        return _result(
-            INTENT_CORRECTION, CONFIDENCE_HIGH, f"Korrigeringsmarkör: {marker!r}, syftar troligen på föregående meddelande.", [marker], ref_idx
-        )
+        signals = [marker]
+        reasoning = f"Korrigeringsmarkör: {marker!r}, syftar troligen på föregående meddelande."
+        # Distinguishes "founder is correcting a STATED FACT" from "founder is reversing an
+        # INSTRUCTION they themselves just gave" — the latter needs the model to explicitly
+        # confirm which instruction now applies, not silently treat both as still active (see
+        # docs/CONTEXT_RESOLVER_V1.md's "not built tonight" list -- this is the smallest real
+        # piece of it: detection only, app/routers/chat.py decides what to do with the signal).
+        prior_user = _last_user_message(history)
+        if prior_user and _contains_any(_normalize(prior_user.content), _WORK_COMMAND_MARKERS):
+            signals.append("instruction_reversal")
+            reasoning += " Föregående meddelande från grundaren var ett arbetskommando — möjlig instruktionsändring, inte bara en faktakorrigering."
+        return _result(INTENT_CORRECTION, CONFIDENCE_HIGH, reasoning, signals, ref_idx)
 
     if marker := _contains_any(text, _NAVIGATION_MARKERS):
         return _result(INTENT_NAVIGATION_QUESTION, CONFIDENCE_HIGH, f"Navigationsfråga: {marker!r}.", [marker])
