@@ -3,9 +3,9 @@
     "endpoints": 220,
     "events": 21,
     "migrations": 94,
-    "modules": 418,
+    "modules": 419,
     "routers": 30,
-    "test_files": 327,
+    "test_files": 329,
     "workers": 1
   },
   "migrations_head": "0095",
@@ -142,7 +142,7 @@
         "backend/tests/backend/rag/test_message_source_units.py",
         "backend/tests/backend/test_account_erasure.py",
         "backend/tests/backend/test_ads_adversarial.py",
-        "backend/tests/backend/test_privilege_boot_race_hotfix.py"
+        "backend/tests/backend/test_context_atlas_acceptance.py"
       ],
       "maturity": {
         "present": true,
@@ -658,6 +658,7 @@
         "app.agent_coordination.execution_control",
         "app.agent_coordination.routing",
         "app.agent_coordination.runtime_view",
+        "app.context_atlas.ownership",
         "app.worker"
       ],
       "endpoints": [],
@@ -1766,6 +1767,7 @@
         "app.context_atlas.capability_map",
         "app.context_atlas.git_evidence",
         "app.context_atlas.identity",
+        "app.context_atlas.ownership",
         "app.context_atlas.recommendation",
         "app.context_atlas.reconciliation",
         "app.context_atlas.relationships",
@@ -1901,6 +1903,37 @@
       }
     },
     {
+      "module": "app.context_atlas.ownership",
+      "path": "backend/app/context_atlas/ownership.py",
+      "imports": [
+        "app.agent_coordination.service",
+        "app.models.agent_coordination"
+      ],
+      "imported_by": [
+        "app.context_atlas"
+      ],
+      "endpoints": [],
+      "tests": [
+        "backend/tests/backend/jobs/test_mainai_jobs.py",
+        "backend/tests/backend/mainai/test_autonomous_gap_live_integration.py",
+        "backend/tests/backend/mainai/test_composed_autonomy_milestone.py",
+        "backend/tests/backend/mainai/test_operator_lease_effect_time_race.py",
+        "backend/tests/backend/mainai/test_recovery_takeover_authority_fencing.py",
+        "backend/tests/backend/mainai/test_supervisor_goal_worktree_ownership.py",
+        "backend/tests/backend/rag/test_bootstrap_hardening.py",
+        "backend/tests/backend/rag/test_claims.py"
+      ],
+      "maturity": {
+        "present": true,
+        "wired": true,
+        "test_referenced": true,
+        "reviewed": null,
+        "integrated": null,
+        "activated": null,
+        "observed": null
+      }
+    },
+    {
       "module": "app.context_atlas.recommendation",
       "path": "backend/app/context_atlas/recommendation.py",
       "imports": [],
@@ -2018,6 +2051,7 @@
         "backend/tests/backend/test_blueprint_evaluation_harness.py",
         "backend/tests/backend/test_claim_graph_integration.py",
         "backend/tests/backend/test_context_atlas_acceptance.py",
+        "backend/tests/backend/test_context_atlas_forgotten.py",
         "backend/tests/backend/test_context_atlas_traceability.py"
       ],
       "maturity": {
@@ -6497,6 +6531,7 @@
         "app.agent_coordination.runtime_view",
         "app.agent_coordination.service",
         "app.agent_coordination.system_activation",
+        "app.context_atlas.ownership",
         "app.models",
         "app.project_status.work_chain"
       ],
@@ -15922,6 +15957,7 @@
         "app.agent_coordination.runtime_view",
         "app.agent_coordination.service",
         "app.agent_coordination.system_activation",
+        "app.context_atlas.ownership",
         "app.models",
         "app.project_status.work_chain"
       ],
@@ -16151,8 +16187,8 @@
   ],
   "git": {
     "current_branch": "freebuff/context-atlas-20261124",
-    "current_sha": "9bf8b1ba15960c01d6b6ccf367f1b1434ff20bab",
-    "dirty_tracked_tree": true,
+    "current_sha": "c19e87fb016d7c74d49af84d65c6d242ed111a40",
+    "dirty_tracked_tree": false,
     "local_branches": [
       {
         "name": "claude/founder-alpha-fullstack-qa",
@@ -16226,7 +16262,7 @@
       },
       {
         "name": "freebuff/context-atlas-20261124",
-        "sha": "9bf8b1ba15960c01d6b6ccf367f1b1434ff20bab",
+        "sha": "c19e87fb016d7c74d49af84d65c6d242ed111a40",
         "is_current": true
       },
       {
@@ -16306,7 +16342,7 @@
       }
     ],
     "pull_requests": [],
-    "captured_at": "2026-11-24T08:42:24+00:00",
+    "captured_at": "2026-11-24T10:31:18+00:00",
     "source": "local_git",
     "execution_authorized": false
   },

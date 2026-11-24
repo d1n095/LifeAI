@@ -4,7 +4,7 @@
     "models": 68,
     "modules": 56,
     "routers": 30,
-    "test_files": 327
+    "test_files": 329
   },
   "migrations_head": "0095",
   "unmapped_relationships": [
@@ -1175,8 +1175,8 @@
         "backend/tests/backend/test_context_atlas_acceptance.py",
         "backend/tests/backend/test_context_atlas_candidates.py",
         "backend/tests/backend/test_context_atlas_capability_map.py",
-        "backend/tests/backend/test_context_atlas_identity.py",
-        "backend/tests/backend/test_context_atlas_recommendation.py"
+        "backend/tests/backend/test_context_atlas_forgotten.py",
+        "backend/tests/backend/test_context_atlas_identity.py"
       ],
       "note": "module exists on disk; not necessarily activated by any router"
     },

@@ -49,6 +49,26 @@
       "base_ref": "integration/founder-alpha-20261121",
       "updated_at": "2026-11-24T07:56:36Z",
       "url": "https://github.com/d1n095/LifeAI/pull/504"
+    },
+    {
+      "number": 505,
+      "state": "open",
+      "draft": true,
+      "head_ref": "claude/founder-alpha-phase-a-conversational",
+      "head_sha": "003c1b6efe1e5e533446edc2dbac493006211f3d",
+      "base_ref": "integration/founder-alpha-20261121",
+      "updated_at": "2026-11-24T08:43:03Z",
+      "url": "https://github.com/d1n095/LifeAI/pull/505"
+    },
+    {
+      "number": 506,
+      "state": "open",
+      "draft": true,
+      "head_ref": "claude/founder-alpha-phase-b-decision-support",
+      "head_sha": "164343a703190958e4be932481d5585f9b1b2afa",
+      "base_ref": "integration/founder-alpha-20261121",
+      "updated_at": "2026-11-24T08:54:35Z",
+      "url": "https://github.com/d1n095/LifeAI/pull/506"
     }
   ],
   "execution_authorized": false
