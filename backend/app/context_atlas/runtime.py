@@ -942,6 +942,16 @@ class SystemIntelligence:
             limitations=tuple(limitations),
         )
 
+    def tool_capabilities(self, db: Session, *, user=None):
+        """Read-only view of the reviewed executable capabilities for one identity.
+
+        Delegates to ``tool_capability_view`` so the manifest, the runtime status check and
+        the founder gate stay the single source of truth; nothing is executed here.
+        """
+        from app.mainai_executive.capability_truth import tool_capability_view
+
+        return tool_capability_view(db, user=user)
+
     def recovery(
         self,
         db: Session,

@@ -389,6 +389,138 @@ def chat_route_truth(
 
 
 @dataclass(frozen=True)
+class ToolCapability:
+    """One reviewed executable capability, with each fact kept in its own column.
+
+    ``verified`` comes only from the existing self-model (``CapabilityRecord``) and is
+    ``None`` when nothing was ever recorded -- never inferred from ``available``.
+    """
+
+    key: str
+    implemented: bool
+    configured: bool
+    available: bool
+    permitted: bool | None
+    verified: bool | None
+    unavailable_reason: str | None
+    modifies_existing_data: bool | None
+    writes_new_records: bool | None
+    note: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "key": self.key,
+            "implemented": self.implemented,
+            "configured": self.configured,
+            "available": self.available,
+            "permitted": self.permitted,
+            "verified": self.verified,
+            "unavailable_reason": self.unavailable_reason,
+            "modifies_existing_data": self.modifies_existing_data,
+            "writes_new_records": self.writes_new_records,
+            "note": self.note,
+        }
+
+
+@dataclass(frozen=True)
+class ToolCapabilityView:
+    """The manifest joined with live status, identity and existing verification evidence."""
+
+    tools: tuple[ToolCapability, ...]
+    limitations: tuple[str, ...]
+    execution_authorized: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "tools": [tool.to_dict() for tool in self.tools],
+            "limitations": list(self.limitations),
+            "execution_authorized": False,
+        }
+
+
+def tool_capability_view(db: Session, *, user=None) -> ToolCapabilityView:
+    """Read-only truth for every capability the runtime may claim to execute.
+
+    Reuses the two existing authorities instead of restating either: ``CAPABILITY_MANIFEST``
+    + ``get_capability_status`` decide implemented/configured/available, and the real
+    ``require_founder`` gate decides ``permitted`` for the identity in hand. ``verified`` is
+    read from the existing ``CapabilityRecord`` self-model; a record that claims
+    ``verified_available`` without a verification timestamp is reported as not verified,
+    because the claim is exactly what this view exists to check.
+    """
+
+    from app.mainai_runtime_contract import CAPABILITY_MANIFEST, get_capability_status
+
+    permitted: bool | None = None
+    notes: list[str] = []
+    if user is not None:
+        from fastapi import HTTPException
+
+        from app.deps import require_founder
+
+        try:
+            require_founder(user=user)
+            permitted = True
+        except HTTPException:
+            permitted = False
+        except Exception as exc:  # noqa: BLE001 - an unreadable identity is denied, not a crash
+            permitted = False
+            notes.append(f"identiteten kunde inte prövas ({type(exc).__name__}); nekad")
+
+    records: dict = {}
+    owner_id = getattr(user, "id", None)
+    if owner_id is not None:
+        from app.models.capability_reality import CapabilityRecord
+
+        try:
+            rows = db.query(CapabilityRecord).filter_by(owner_id=owner_id).all()
+            records = {row.capability_key: row for row in rows}
+        except Exception as exc:  # noqa: BLE001 - missing evidence is unknown, not verified
+            notes.append(f"bevislagret kunde inte läsas ({type(exc).__name__}); verifiering okänd")
+
+    tools: list[ToolCapability] = []
+    for key in sorted(CAPABILITY_MANIFEST):
+        status = get_capability_status(db, key)
+        record = records.get(key)
+        if record is None:
+            verified: bool | None = None
+        elif record.status == "verified_available" and record.last_verified_at is not None:
+            verified = True
+        elif record.status == "unknown":
+            verified = None
+        else:
+            verified = False
+
+        note = None
+        if verified is False and record is not None and record.status == "verified_available":
+            note = "posten påstår verified_available men saknar verifieringstidsstämpel"
+        tools.append(
+            ToolCapability(
+                key=key,
+                implemented=status.implemented,
+                configured=status.configured,
+                available=status.currently_available,
+                permitted=permitted,
+                verified=verified,
+                unavailable_reason=status.unavailable_reason,
+                modifies_existing_data=status.modifies_existing_data,
+                writes_new_records=status.writes_new_records,
+                note=note,
+            )
+        )
+
+    return ToolCapabilityView(
+        tools=tuple(tools),
+        limitations=(
+            "available är konfigurerad och policy-tillåten i den här miljön, inte ett live-anrop",
+            "permitted prövas med require_founder, samma grind som de skyddade rutterna",
+            "verified kräver en CapabilityRecord med status verified_available och tidsstämpel",
+            *notes,
+        ),
+    )
+
+
+@dataclass(frozen=True)
 class CapabilityView:
     """The joined answer, always non-executing."""
 
