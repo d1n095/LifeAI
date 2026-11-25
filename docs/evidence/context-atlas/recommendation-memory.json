@@ -1,0 +1,81 @@
+{
+  "outcome": "investigate",
+  "current_state": "an existing implementation covers this area: app.inspectable_memory, app.inspectable_memory.schemas, app.inspectable_memory.service, app.memory_threads, app.memory_threads.service, app.memory_work_linkage, app.memory_work_linkage.service, app.memory_work_linkage.types, app.project_memory",
+  "evidence": [
+    "app.inspectable_memory: wired, test-referenced",
+    "app.inspectable_memory.schemas: wired, test-referenced",
+    "app.inspectable_memory.service: wired, test-referenced",
+    "app.memory_threads: wired, test-referenced",
+    "app.memory_threads.service: wired, test-referenced",
+    "app.memory_work_linkage: wired, test-referenced",
+    "app.memory_work_linkage.service: wired, test-referenced",
+    "app.memory_work_linkage.types: wired, test-referenced",
+    "app.project_memory: wired, test-referenced"
+  ],
+  "root_problem": "the reported failure is unverified; it may come from retrieval quality, indexing, authorization, context limits or stale data rather than the engine itself",
+  "alternatives": [
+    {
+      "option": "improve",
+      "description": "fix the failing stage (retrieval/indexing/authorization/data freshness) first",
+      "advantages": [
+        "smallest change",
+        "keeps existing provenance and tests"
+      ],
+      "disadvantages": [
+        "requires a real reproduction of the failure"
+      ],
+      "evidence": [
+        "app.inspectable_memory: wired, test-referenced",
+        "app.inspectable_memory.schemas: wired, test-referenced",
+        "app.inspectable_memory.service: wired, test-referenced",
+        "app.memory_threads: wired, test-referenced",
+        "app.memory_threads.service: wired, test-referenced",
+        "app.memory_work_linkage: wired, test-referenced",
+        "app.memory_work_linkage.service: wired, test-referenced",
+        "app.memory_work_linkage.types: wired, test-referenced",
+        "app.project_memory: wired, test-referenced"
+      ]
+    },
+    {
+      "option": "reuse",
+      "description": "keep the existing engine and add the missing capability around it",
+      "advantages": [
+        "no migration",
+        "no parallel memory store"
+      ],
+      "disadvantages": [
+        "may not address a genuine architectural limit"
+      ],
+      "evidence": [
+        "app.inspectable_memory: wired, test-referenced",
+        "app.inspectable_memory.schemas: wired, test-referenced",
+        "app.inspectable_memory.service: wired, test-referenced",
+        "app.memory_threads: wired, test-referenced",
+        "app.memory_threads.service: wired, test-referenced",
+        "app.memory_work_linkage: wired, test-referenced",
+        "app.memory_work_linkage.service: wired, test-referenced",
+        "app.memory_work_linkage.types: wired, test-referenced",
+        "app.project_memory: wired, test-referenced"
+      ]
+    },
+    {
+      "option": "replace",
+      "description": "replace the component only if a measured root cause proves it cannot work",
+      "advantages": [
+        "removes a real limitation"
+      ],
+      "disadvantages": [
+        "high risk",
+        "duplicates provenance/RLS work",
+        "long migration"
+      ],
+      "evidence": []
+    }
+  ],
+  "next_action": "reproduce the failure and identify the failing stage before proposing a new engine",
+  "founder_decisions": [
+    "approve an investigation budget before any replacement is designed"
+  ],
+  "uncertainty": "medium",
+  "execution_authorized": false
+}

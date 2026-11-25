@@ -6,9 +6,10 @@ on:
     # Explicit prefixes (not a catch-all) — GitHub branch filters have no brace-expansion.
     branches: [main, "claude/**", "cursor/**", "codex/**", "security/**"]
   pull_request:
-    # Include agent integration bases so stacked PRs (e.g. cursor/* → claude/*) receive
-    # the same required Actions checks as PRs into main. Does not weaken or skip any job.
-    branches: [main, "claude/**", "cursor/**", "codex/**", "security/**", "transfer/freebuff-r15-20261119"]
+    # Include agent integration bases so stacked PRs (e.g. cursor/* → claude/*,
+    # freebuff/* → freebuff/*) receive the same required Actions checks as PRs into
+    # main. Does not weaken or skip any job, change permissions, or expose secrets.
+    branches: [main, "claude/**", "cursor/**", "codex/**", "security/**", "transfer/freebuff-r15-20261119", "freebuff/**"]
 
 # Cancel superseded runs on the same branch/PR to keep the queue short.
 concurrency:

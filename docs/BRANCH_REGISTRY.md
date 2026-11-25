@@ -6,6 +6,61 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Context Atlas — källidentitet, relationsmappning och kontextbeslut (2026-11-24)
+
+**Branch:** `freebuff/context-atlas-20261124`, bas `8c7b335e` (`freebuff/life-workspaces`).
+Ingen PR/push/merge/deploy; GitHub write-access saknas. `first_cycle_go=false`. Inga
+VPS-tjänster, produktionsresurser eller `security/POLICY_LOCK.json` rörda.
+
+**Scope:** en läs-only analysyta ovanpå befintlig lagring — `identity.py` (byte-identitet vs
+normalisering vs en-teckensändring vs near-duplicate vs likhet, bounded och utan att någonsin
+kasta ett original), `relationships.py` (programmets elva begrepp mappade till den befintliga
+`SourceRelationship`-enumen, med sex synliga luckor), `reconciliation.py`
+(REUSE/LINK/DOCUMENT/COMPARE/PROPOSE/ASK/WAIT/REJECT, alltid utan exekveringsrätt),
+`capability_map.py`/`system_map.py` (evidensbaserad inventering från checkouten),
+`traceability.py` (kravkedja utan `canonical_truth`, plus `forgotten_requirements`) och
+`ownership.py` (path-scoped arbetsägande över befintliga koordineringstabeller). Ingen ny
+minnes-, RAG-, köläggnings- eller agentmotor; inga rader skrivs och ingen delad fil ändras.
+
+**Faktiska resultat:** **92 passed** (194,31 s) över tio filer, inklusive acceptansfall 1–16
+samt de nya fallen för path-ägt arbete och glömda krav. Systemkarta på `c19e87fb`: 419
+moduler, 220 endpoints, 21 eventmodeller, 94 migrationer/head `0095`, 329 testfiler;
+relationsluckor `SIMILAR_TO`, `VERSION_OF`, `DEPENDS_ON`, `IMPLEMENTS_REQUIREMENT`,
+`VERIFIED_BY`, `PROPOSED_FOR`. Arbetsägandet testas mot riktig Postgres/RLS (path-överlapp,
+lease, directory-boundary, terminal, utgången lease, unscoped, tvärtenant). WS-A: den opushade
+stacken (6 commits ovanpå PR #499-head `0659f454`) är exporterad till en verifierad bundle
+(`9 385 188` byte, sha256 `d4c44692…c50426`) och återverifierad i en isolerad klon (4/4
+brancher, SHA + tree-hash + `git fsck`).
+
+**Beroenden:** **ingen filöverlapp** med #499–#506 (mätt per PR-head). Semantisk överlappning
+med #501 (near-duplicate) och #506 (beslutsstöd i live-prompten) måste ändå prövas före merge;
+#502:s `founder_intelligence.py` är en bredare "vad gör agenterna"-vy och ersätts inte av
+atlasens snävare path-ägande. Migrationer: inga. Mergeordning: när som helst efter
+`8c7b335e`; ingen konflikt med staging-stacken i `/tmp/cand`.
+
+**Fas 1–5 + fas 2-utökning (2026-11-24, samma branch):** kandidatsökning mot riktiga
+`documents`-rader via indexerat `checksum` + bounded storleksfönster (RLS-scope,
+tvärtenant-nekande och omstartsstabilitet testat), djup systemkarta (419 moduler, 220
+endpoints varav 177 founder-only, 21 eventmodeller, 94 migrationer/head `0095`, 329
+testfiler) med explicit `unknown` för reviewed/integrated/activated/observed, kravspårning
+VISION→…→RUNTIME EVIDENCE utan `canonical_truth`, glömda krav som granskningskö, läs-only
+rekommendationer (REUSE/IMPROVE/INVESTIGATE/WAIT/ASK/REPLACE/REJECT) och path-scoped
+arbetsägande som matar WAIT. Kodcommit `c19e87fb`; dokumentation/evidens i nästa commit.
+Ingen delad fil ändras; ingen migration tillkommer. Competitor-analys:
+`docs/COMPETITOR_ENGINEERING_RESEARCH.md` (förslag, inte implementerad competitor-kod).
+
+**Ancestry (mätt):** atlas-basen `8c7b335e` är lokal-only och innehåller
+integrationshead `0adb108f` som ancestor (115 commits före). PR #499-head `0659f454`
+divergerar: 75 commits på #499-sidan, 63 på atlas-sidan, merge-base `86671468`. PR
+#500–#504 är 1–4 commits före `0659f454`; #505/#506 är fas A/B 1–2 commits efter #504. Ingen
+filöverlapp med någon av dem; semantisk överlapp med #501/#506 måste granskas före merge.
+
+**Kvarstående blockerare:** GitHub write-access (push/PR/merge; `push --dry-run` exit 128),
+samt att WS-F:s fullständiga gap-register, en indexerad normaliserad hash, eventloggsbaserad
+`observed`-mätning och fas 6-gränssnittet inte är byggda. Arbetsägandet är en tabellögonblicksbild,
+inte en liveness-probe. Detaljer: `docs/CONTEXT_ATLAS.md`; evidens:
+`docs/evidence/context-atlas/`; competitor-analys: `docs/COMPETITOR_ENGINEERING_RESEARCH.md`.
+
 ## Founder Alpha local AI — riktig lokal modell verifierad (2026-11-23)
 
 **Branch:** `freebuff/life-workspaces`, bas `04de94db7d7ccf51c23dd68670e789e8e9df6cde`.
