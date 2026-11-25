@@ -54,6 +54,29 @@ def is_open(provider: str, model: str) -> bool:
         return False
 
 
+def state(provider: str, model: str) -> str:
+    """Tri-state breaker view for reporting: ``open``, ``closed`` or ``unknown``.
+
+    ``is_open()`` above must stay fail-open for the chat hot path, which means its ``False``
+    cannot distinguish "the breaker store answered and the circuit is closed" from "Redis is
+    down or timed out". A read-only truth view must not round that up to healthy, so this
+    variant reports ``unknown`` whenever the store did not actually answer. It changes no
+    call decision and is never used on the request path.
+    """
+
+    try:
+        client = _client()
+    except Exception:  # noqa: BLE001 - a reporting helper must never raise
+        return "unknown"
+    if client is None:
+        return "unknown"
+    _, open_key = _keys(provider, model)
+    try:
+        return "open" if client.exists(open_key) == 1 else "closed"
+    except redis.RedisError:
+        return "unknown"
+
+
 def record_failure(provider: str, model: str) -> bool:
     """Count one failed provider attempt. Returns True when this failure opened the circuit."""
 

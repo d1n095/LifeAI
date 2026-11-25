@@ -18,15 +18,18 @@ declared capabilities instead.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal, Mapping
 
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.providers.catalog import ModelSelectionError, model_specs
 from app.providers.registry import resolve_chat_chain
 
 CapabilityKind = Literal["model_tool", "platform_action", "read_only"]
 SideEffect = Literal["none", "external", "writes"]
+CircuitState = Literal["open", "closed", "unknown"]
 
 
 @dataclass(frozen=True)
@@ -199,13 +202,24 @@ def model_tool_calling() -> dict:
 
 @dataclass(frozen=True)
 class RouteEntry:
+    """One provider/model hop, with every unproven fact left unproven.
+
+    ``circuit_open`` is ``None`` when the breaker store did not answer, and ``usable_now`` is
+    only ``True`` with a positive probe -- a closed circuit and a configured key are
+    prerequisites, not evidence that the provider answers right now.
+    """
+
     provider: str
     model: str
     external: bool
     configured: bool
-    circuit_open: bool
+    circuit_state: CircuitState
+    circuit_open: bool | None
     verification: str | None
+    verification_age_seconds: int | None
+    verification_stale: bool | None
     usable_now: bool | None
+    notes: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         return {
@@ -213,9 +227,13 @@ class RouteEntry:
             "model": self.model,
             "external": self.external,
             "configured": self.configured,
+            "circuit_state": self.circuit_state,
             "circuit_open": self.circuit_open,
             "verification": self.verification,
+            "verification_age_seconds": self.verification_age_seconds,
+            "verification_stale": self.verification_stale,
             "usable_now": self.usable_now,
+            "notes": list(self.notes),
         }
 
 
@@ -259,8 +277,8 @@ def chat_route_truth(
     probes = probes or {}
     limitations = [
         "ingen leverantör kontaktas; konfigurerad betyder att en nyckel/runtime finns, inte att modellen svarar",
-        "en stängd krets kan också betyda att breaker-lagringen är onåbar (fail-open), inte att leverantören är frisk",
-        "verifiering är exakt-modell-bevis men krävs inte på den äldre chattvägen",
+        "en stängd krets är ett frånvarande stopp, inte ett friskhetstecken; en onåbar breaker-lagring rapporteras som okänd",
+        "verifiering är exakt-modell-bevis men krävs inte på den äldre chattvägen, och en gammal rad räknas inte som aktuell",
         "den här vyn utför ingenting och autoriserar ingen utgift eller egress",
     ]
     try:
@@ -273,27 +291,91 @@ def chat_route_truth(
             reason=str(exc),
             limitations=tuple(limitations),
         )
+    except Exception as exc:  # noqa: BLE001 - a truth view must never take its caller down
+        # Never str(exc) here: a driver/connection error can embed the DSN, password included.
+        return ChatRouteTruth(
+            status="unavailable",
+            primary=None,
+            entries=(),
+            reason=f"chattkedjan kunde inte byggas ({type(exc).__name__})",
+            limitations=tuple(limitations),
+        )
 
+    now = datetime.utcnow()
+    stale_after = get_settings().provider_verification_cache_seconds
     entries: list[RouteEntry] = []
     for provider, model in chain:
-        configured = provider.is_configured()
-        circuit_open = circuit_breaker.is_open(provider.name, model)
-        check = latest_check(db, provider.name, "chat", model=model)
-        usable: bool | None = configured and not circuit_open
+        notes: list[str] = []
+        try:
+            configured = provider.is_configured()
+        except Exception:  # noqa: BLE001 - an unreadable config is not a configured provider
+            configured = False
+            notes.append("konfigurationen kunde inte läsas; behandlas som ej konfigurerad")
+
+        circuit_state: CircuitState = circuit_breaker.state(provider.name, model)  # type: ignore[assignment]
+        circuit_open: bool | None = True if circuit_state == "open" else (
+            False if circuit_state == "closed" else None
+        )
+        if circuit_state == "unknown":
+            notes.append(
+                "breaker-lagringen svarade inte (nere eller timeout); stängd krets kan inte bekräftas"
+            )
+
+        verification: str | None = None
+        verification_age: int | None = None
+        verification_stale: bool | None = None
+        try:
+            check = latest_check(db, provider.name, "chat", model=model)
+        except Exception as exc:  # noqa: BLE001 - a broken health read is unknown, not healthy
+            check = None
+            notes.append(
+                f"hälsokontrollen kunde inte läsas ({type(exc).__name__}); status förblir okänd"
+            )
+        if check is not None:
+            raw_result = getattr(check, "result", None)
+            value = getattr(raw_result, "value", None)
+            if isinstance(value, str):
+                verification = value
+            else:
+                notes.append("hälsokontrollen hade en okänd resultattyp; den räknas inte som bevis")
+            checked_at = getattr(check, "checked_at", None)
+            if isinstance(checked_at, datetime):
+                verification_age = max(0, int((now - checked_at).total_seconds()))
+                verification_stale = verification_age > stale_after
+                if verification_stale:
+                    notes.append(
+                        f"hälsokontrollen är {verification_age} s gammal och räknas inte som aktuell"
+                    )
+            else:
+                notes.append("hälsokontrollen saknar tidsstämpel; färskheten är okänd")
+
+        # A known blocker makes it definitely unusable; otherwise only a probe can say yes.
+        usable: bool | None
+        if not configured:
+            usable = False
+        elif circuit_state == "open":
+            usable = False
+        else:
+            usable = None
         probe = probes.get(provider.name)
         if probe is False:
             usable = False
-        elif probe is True and usable:
+        elif probe is True and configured:
             usable = True
+
         entries.append(
             RouteEntry(
                 provider=provider.name,
                 model=model,
                 external=not getattr(provider, "is_local", False),
                 configured=configured,
+                circuit_state=circuit_state,
                 circuit_open=circuit_open,
-                verification=check.result.value if check is not None else None,
+                verification=verification,
+                verification_age_seconds=verification_age,
+                verification_stale=verification_stale,
                 usable_now=usable,
+                notes=tuple(notes),
             )
         )
 

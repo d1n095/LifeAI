@@ -38,6 +38,10 @@ omstart av arbetsstyrka och development state — ingen ny task engine byggdes.
 D1/D2: `mainai_executive/capability_truth.py` + `SystemIntelligence.capabilities(db)`
 redovisar implementerad/konfigurerad/tillgänglig/tillåten och den effektiva chat-kedjan
 utan att kontakta någon leverantör — **6 passed**, 28,62 s.
+G1: kretsbrytaren har en tri-state-vy (`open`/`closed`/`unknown`) så en onåbar Redis
+rapporteras som okänd i stället för "stängd"; `chat_route_truth` tål att hälsoläsningen
+kastar, bedömer färskhet och läcker aldrig en DSN — **253 passed** (17 capability + 236
+providers), ruff rent.
 E1/E2: `chat/test_upload_to_grounded_answer.py` bevisar hela produktvägen — HTTP-upload →
 riktig worker-claim → ingest (chunk + embedding-space-stämpel) → chattfråga som grundas i
 dokumentet med korrekt källa, samt att en annan ägare aldrig kan ranka chunket — **2 passed**,
