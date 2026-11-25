@@ -326,11 +326,18 @@ def scan_system_map(repo_root: Path, *, git: GitEvidence | None = None) -> Syste
     test_texts = [(p, _read(p)) for p in test_files]
 
     def tests_for(*needles: str) -> tuple[str, ...]:
-        hits: set[str] = set()
+        # Prefer a test file that names the full module over one that merely contains the
+        # short file stem ("runtime" appears in many unrelated tests). The score is the
+        # index of the first matching needle, so callers pass the most specific needle first.
+        scored: list[tuple[int, str]] = []
         for path, text in test_texts:
-            if any(n and n in text for n in needles):
-                hits.add(str(path.relative_to(repo_root)))
-        return tuple(sorted(hits)[:8])
+            score: int | None = None
+            for index, needle in enumerate(needles):
+                if needle and needle in text:
+                    score = index if score is None else min(score, index)
+            if score is not None:
+                scored.append((score, str(path.relative_to(repo_root))))
+        return tuple(path for _, path in sorted(scored)[:8])
 
     endpoints: list[Endpoint] = []
     for router_name, line in sorted(routers.items()):

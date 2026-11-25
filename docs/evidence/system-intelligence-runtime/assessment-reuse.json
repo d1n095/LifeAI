@@ -1,0 +1,159 @@
+{
+  "request": {
+    "text": "build retrieval from scratch",
+    "capability_aliases": [
+      "retrieval"
+    ],
+    "project_ref": "unknown"
+  },
+  "recommendation": {
+    "outcome": "reuse",
+    "current_state": "an existing, wired capability covers this area: app.rag, app.rag.backfill, app.rag.backfill.memory_source, app.rag.backfill.memory_source_run, app.rag.backfill.message_sequence, app.rag.backfill.message_source, app.rag.chunking, app.rag.claim_graph, app.rag.claims, app.rag.context_status, app.rag.corpus_batch, app.rag.embedding_space, app.rag.epistemics, app.rag.evidence_metadata, app.rag.evidence_quality, app.rag.extract, app.rag.graph_instructions, app.rag.graph_traverse, app.rag.ingest, app.rag.intellectual_adversary, app.rag.library_import, app.rag.media_import, app.rag.memory_source, app.rag.message_source, app.rag.query_embedding, app.rag.retrieve, app.rag.scientific_reasoning, app.rag.trust, app.rag.untrusted_content, app.rag.vector_store, app.rag.zip_import, app.routers.search",
+    "evidence": [
+      "app.rag: wired, test-referenced",
+      "app.rag.backfill: wired, test-referenced",
+      "app.rag.backfill.memory_source: wired, test-referenced",
+      "app.rag.backfill.memory_source_run: wired, test-referenced",
+      "app.rag.backfill.message_sequence: wired, test-referenced",
+      "app.rag.backfill.message_source: wired, test-referenced",
+      "app.rag.chunking: wired, test-referenced",
+      "app.rag.claim_graph: wired, test-referenced",
+      "app.rag.claims: wired, test-referenced",
+      "app.rag.context_status: wired, test-referenced",
+      "app.rag.corpus_batch: present but not wired, test-referenced",
+      "app.rag.embedding_space: wired, test-referenced",
+      "app.rag.epistemics: wired, test-referenced",
+      "app.rag.evidence_metadata: wired, test-referenced",
+      "app.rag.evidence_quality: wired, test-referenced",
+      "app.rag.extract: wired, test-referenced",
+      "app.rag.graph_instructions: wired, test-referenced",
+      "app.rag.graph_traverse: wired, test-referenced",
+      "app.rag.ingest: wired, test-referenced",
+      "app.rag.intellectual_adversary: wired, test-referenced",
+      "app.rag.library_import: wired, test-referenced",
+      "app.rag.media_import: wired, test-referenced",
+      "app.rag.memory_source: wired, test-referenced",
+      "app.rag.message_source: wired, test-referenced",
+      "app.rag.query_embedding: wired, test-referenced",
+      "app.rag.retrieve: wired, test-referenced",
+      "app.rag.scientific_reasoning: wired, test-referenced",
+      "app.rag.trust: wired, test-referenced",
+      "app.rag.untrusted_content: wired, test-referenced",
+      "app.rag.vector_store: wired, test-referenced",
+      "app.rag.zip_import: wired, test-referenced",
+      "app.routers.search: wired, test-referenced",
+      "endpoint GET /api/search"
+    ],
+    "root_problem": "the request may already be satisfied by existing code",
+    "alternatives": [
+      {
+        "option": "reuse",
+        "description": "use the existing component and cite its evidence",
+        "advantages": [
+          "no new system",
+          "existing tests and provenance stay valid"
+        ],
+        "disadvantages": [
+          "may need a small extension"
+        ],
+        "evidence": [
+          "app.rag: wired, test-referenced",
+          "app.rag.backfill: wired, test-referenced",
+          "app.rag.backfill.memory_source: wired, test-referenced",
+          "app.rag.backfill.memory_source_run: wired, test-referenced",
+          "app.rag.backfill.message_sequence: wired, test-referenced",
+          "app.rag.backfill.message_source: wired, test-referenced",
+          "app.rag.chunking: wired, test-referenced",
+          "app.rag.claim_graph: wired, test-referenced",
+          "app.rag.claims: wired, test-referenced",
+          "app.rag.context_status: wired, test-referenced",
+          "app.rag.corpus_batch: present but not wired, test-referenced",
+          "app.rag.embedding_space: wired, test-referenced",
+          "app.rag.epistemics: wired, test-referenced",
+          "app.rag.evidence_metadata: wired, test-referenced",
+          "app.rag.evidence_quality: wired, test-referenced",
+          "app.rag.extract: wired, test-referenced",
+          "app.rag.graph_instructions: wired, test-referenced",
+          "app.rag.graph_traverse: wired, test-referenced",
+          "app.rag.ingest: wired, test-referenced",
+          "app.rag.intellectual_adversary: wired, test-referenced",
+          "app.rag.library_import: wired, test-referenced",
+          "app.rag.media_import: wired, test-referenced",
+          "app.rag.memory_source: wired, test-referenced",
+          "app.rag.message_source: wired, test-referenced",
+          "app.rag.query_embedding: wired, test-referenced",
+          "app.rag.retrieve: wired, test-referenced",
+          "app.rag.scientific_reasoning: wired, test-referenced",
+          "app.rag.trust: wired, test-referenced",
+          "app.rag.untrusted_content: wired, test-referenced",
+          "app.rag.vector_store: wired, test-referenced",
+          "app.rag.zip_import: wired, test-referenced",
+          "app.routers.search: wired, test-referenced",
+          "endpoint GET /api/search"
+        ]
+      },
+      {
+        "option": "improve",
+        "description": "extend the existing component only where evidence shows a gap",
+        "advantages": [
+          "keeps one implementation"
+        ],
+        "disadvantages": [
+          "requires a concrete gap, not a preference"
+        ],
+        "evidence": []
+      }
+    ],
+    "next_action": "verify the existing capability against the actual requirement before building",
+    "founder_decisions": [
+      "none; existing evidence is sufficient to start with reuse"
+    ],
+    "uncertainty": "low",
+    "execution_authorized": false
+  },
+  "scope": null,
+  "ownership": null,
+  "trace": null,
+  "evidence": [
+    "app.rag: wired, test-referenced",
+    "app.rag.backfill: wired, test-referenced",
+    "app.rag.backfill.memory_source: wired, test-referenced",
+    "app.rag.backfill.memory_source_run: wired, test-referenced",
+    "app.rag.backfill.message_sequence: wired, test-referenced",
+    "app.rag.backfill.message_source: wired, test-referenced",
+    "app.rag.chunking: wired, test-referenced",
+    "app.rag.claim_graph: wired, test-referenced",
+    "app.rag.claims: wired, test-referenced",
+    "app.rag.context_status: wired, test-referenced",
+    "app.rag.corpus_batch: present but not wired, test-referenced",
+    "app.rag.embedding_space: wired, test-referenced",
+    "app.rag.epistemics: wired, test-referenced",
+    "app.rag.evidence_metadata: wired, test-referenced",
+    "app.rag.evidence_quality: wired, test-referenced",
+    "app.rag.extract: wired, test-referenced",
+    "app.rag.graph_instructions: wired, test-referenced",
+    "app.rag.graph_traverse: wired, test-referenced",
+    "app.rag.ingest: wired, test-referenced",
+    "app.rag.intellectual_adversary: wired, test-referenced",
+    "app.rag.library_import: wired, test-referenced",
+    "app.rag.media_import: wired, test-referenced",
+    "app.rag.memory_source: wired, test-referenced",
+    "app.rag.message_source: wired, test-referenced",
+    "app.rag.query_embedding: wired, test-referenced",
+    "app.rag.retrieve: wired, test-referenced",
+    "app.rag.scientific_reasoning: wired, test-referenced",
+    "app.rag.trust: wired, test-referenced",
+    "app.rag.untrusted_content: wired, test-referenced",
+    "app.rag.vector_store: wired, test-referenced",
+    "app.rag.zip_import: wired, test-referenced",
+    "app.routers.search: wired, test-referenced",
+    "endpoint GET /api/search"
+  ],
+  "limitations": [
+    "the recommendation uses static checkout evidence, not runtime observation",
+    "no model, network call, dispatch or execution authorization is made",
+    "project scope was not supplied; project boundary remains unknown",
+    "ownership was not supplied; duplicate-work risk is unknown"
+  ],
+  "execution_authorized": false
+}

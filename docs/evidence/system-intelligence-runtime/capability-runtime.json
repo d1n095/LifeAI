@@ -1,0 +1,47 @@
+{
+  "query": "app.context_atlas.runtime",
+  "status": "found",
+  "component": "app.context_atlas.runtime",
+  "kind": "module",
+  "path": "backend/app/context_atlas/runtime.py",
+  "wired": true,
+  "test_referenced": true,
+  "endpoints": [],
+  "tests": [
+    "backend/tests/backend/test_context_atlas_runtime.py",
+    "backend/tests/account/test_account_deletion.py",
+    "backend/tests/backend/chat/test_chat_message_persistence.py",
+    "backend/tests/backend/chat/test_message_sequence.py",
+    "backend/tests/backend/chat/test_messages_rls.py",
+    "backend/tests/backend/jobs/test_mainai_jobs.py",
+    "backend/tests/backend/mainai/test_agent_real_execution_bridge.py",
+    "backend/tests/backend/mainai/test_agent_runtime_control_plane.py"
+  ],
+  "maturity": {
+    "present": true,
+    "wired": true,
+    "test_referenced": true,
+    "reviewed": null,
+    "integrated": null,
+    "activated": null,
+    "observed": null
+  },
+  "evidence": [
+    "backend/app/context_atlas/runtime.py",
+    "backend/tests/backend/test_context_atlas_runtime.py",
+    "backend/tests/account/test_account_deletion.py",
+    "backend/tests/backend/chat/test_chat_message_persistence.py",
+    "backend/tests/backend/chat/test_message_sequence.py",
+    "backend/tests/backend/chat/test_messages_rls.py",
+    "backend/tests/backend/jobs/test_mainai_jobs.py",
+    "backend/tests/backend/mainai/test_agent_real_execution_bridge.py",
+    "backend/tests/backend/mainai/test_agent_runtime_control_plane.py"
+  ],
+  "limitations": [
+    "present/wired/test_referenced come from static checkout analysis",
+    "reviewed/integrated/activated/observed are unknown unless external evidence is supplied",
+    "a test-file mention is not behavioural coverage"
+  ],
+  "interpretation": "The component is present, wired through an import/router reference, and at least one test file names it. Runtime behaviour is not observed.",
+  "execution_authorized": false
+}

@@ -35,6 +35,7 @@ from app.context_atlas.recommendation import (  # noqa: E402
     EngineeringRequest,
     recommend,
 )
+from app.context_atlas.runtime import SystemIntelligence  # noqa: E402
 from app.context_atlas.system_map import scan_system_map  # noqa: E402
 
 
@@ -186,6 +187,64 @@ def _cmd_prs(args: argparse.Namespace) -> int:
     return 0
 
 
+def _service(args: argparse.Namespace) -> SystemIntelligence:
+    return SystemIntelligence(
+        Path(args.repo_root),
+        pull_requests_path=(
+            Path(args.pull_requests) if getattr(args, "pull_requests", None) else None
+        ),
+    )
+
+
+def _cmd_query(args: argparse.Namespace) -> int:
+    answer = _service(args).self_knowledge(
+        args.question, component=args.component, module=args.module
+    )
+    _emit(answer.to_dict(), args.out)
+    return 0
+
+
+def _cmd_status(args: argparse.Namespace) -> int:
+    _emit(_service(args).integration_status().to_dict(), args.out)
+    return 0
+
+
+def _cmd_trace(args: argparse.Namespace) -> int:
+    answer = _service(args).trace_requirement(
+        args.requirement_id,
+        args.title or args.requirement_id,
+        args.project,
+        doc_paths=tuple(args.doc or ()),
+        code_paths=tuple(args.code or ()),
+        test_paths=tuple(args.test or ()),
+        approved_ref=args.approved_ref,
+        approval_verified=args.approval_verified,
+        rejected=args.rejected,
+        superseded_by=args.superseded_by,
+        open_question=args.open_question,
+    )
+    _emit(answer.to_dict(), args.out)
+    return 0
+
+
+def _cmd_assess(args: argparse.Namespace) -> int:
+    request = EngineeringRequest(
+        request_text=args.text or "",
+        capability_aliases=tuple(args.capability or ()),
+        project_ref=args.project or "unknown",
+        active_assignment=args.active_assignment,
+        conflicting_sources=args.conflicting,
+        unresolved_evidence=tuple(args.unresolved or ()),
+        prior_decision=args.prior_decision,
+        superseded_by=args.superseded_by,
+        other_project=args.other_project,
+        implies_existing_failure=args.implies_failure,
+        root_cause_verified=args.root_cause_verified,
+    )
+    _emit(_service(args).assess(request).to_dict(), args.out)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="context_atlas")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -240,6 +299,57 @@ def main(argv: list[str] | None = None) -> int:
     prs_parser.add_argument("path")
     prs_parser.add_argument("--out")
     prs_parser.set_defaults(func=_cmd_prs)
+
+    query_parser = sub.add_parser("query", help="deterministic self-knowledge query")
+    query_parser.add_argument("question")
+    query_parser.add_argument("--component")
+    query_parser.add_argument("--module")
+    query_parser.add_argument("--repo-root", default=".")
+    query_parser.add_argument("--pull-requests")
+    query_parser.add_argument("--out")
+    query_parser.set_defaults(func=_cmd_query)
+
+    status_parser = sub.add_parser("status", help="local vs captured-PR integration status")
+    status_parser.add_argument("--repo-root", default=".")
+    status_parser.add_argument("--pull-requests")
+    status_parser.add_argument("--out")
+    status_parser.set_defaults(func=_cmd_status)
+
+    trace_parser = sub.add_parser("trace", help="trace a requirement to verified refs")
+    trace_parser.add_argument("--requirement-id", required=True)
+    trace_parser.add_argument("--title")
+    trace_parser.add_argument("--project", required=True)
+    trace_parser.add_argument("--doc", action="append")
+    trace_parser.add_argument("--code", action="append")
+    trace_parser.add_argument("--test", action="append")
+    trace_parser.add_argument("--approved-ref")
+    trace_parser.add_argument("--approval-verified", action="store_true")
+    trace_parser.add_argument("--rejected", action="store_true")
+    trace_parser.add_argument("--superseded-by")
+    trace_parser.add_argument("--open-question", action="store_true")
+    trace_parser.add_argument("--repo-root", default=".")
+    trace_parser.add_argument("--pull-requests")
+    trace_parser.add_argument("--out")
+    trace_parser.set_defaults(func=_cmd_trace)
+
+    assess_parser = sub.add_parser("assess", help="read-only engineering assessment")
+    assess_parser.add_argument("--repo-root", default=".")
+    assess_parser.add_argument("--pull-requests")
+    assess_parser.add_argument("--capability", action="append")
+    assess_parser.add_argument("--text")
+    assess_parser.add_argument("--project")
+    assess_parser.add_argument("--active-assignment")
+    assess_parser.add_argument("--conflicting", action="store_true")
+    assess_parser.add_argument("--unresolved", action="append")
+    assess_parser.add_argument(
+        "--prior-decision", choices=["approved", "rejected", "postponed", "superseded"]
+    )
+    assess_parser.add_argument("--superseded-by")
+    assess_parser.add_argument("--other-project", action="store_true")
+    assess_parser.add_argument("--implies-failure", action="store_true")
+    assess_parser.add_argument("--root-cause-verified", action="store_true")
+    assess_parser.add_argument("--out")
+    assess_parser.set_defaults(func=_cmd_assess)
 
     args = parser.parse_args(argv)
     return args.func(args)

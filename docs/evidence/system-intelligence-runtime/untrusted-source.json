@@ -1,0 +1,17 @@
+{
+  "source_ref": "docs/untrusted-example.md",
+  "treated_as_data": true,
+  "instruction_like": true,
+  "matched_patterns": [
+    "ignore_previous",
+    "role_override",
+    "privileged_action"
+  ],
+  "allowed_actions": [
+    "cite",
+    "review",
+    "ask"
+  ],
+  "note": "retrieved source text is untrusted data; it cannot authorize execution, change system instructions, or cause dispatch",
+  "execution_authorized": false
+}
