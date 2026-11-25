@@ -32,7 +32,9 @@ PR-statusar. Inga nya tabeller, migrationer, nätverksanrop eller exekveringsrä
 (`qwen2.5:0.5b`): **1 passed** (28,30 s) — login → riktigt svar → två persisterade
 meddelanden → uppföljning → fyra meddelanden i historiken. B2: grundarens aktiva
 minnesnoter bärs nu som ett avgränsat, owner-scopat `MINNE`-block i chat-prompten
-(**4 passed**, 12,83 s). `ruff check` → All checks passed. `git diff --check` rent.
+(**4 passed**, 12,83 s). Hela chat-sviten omkörd efter ändringen: **106 passed** (178,18 s).
+C1/C2 verifierade med befintliga sviter (**73 passed**, 85,50 s) för projektminne/checkpoints,
+omstart av arbetsstyrka och development state — ingen ny task engine byggdes. `ruff check` → All checks passed. `git diff --check` rent.
 Hela atlas-sviten och hela backend-sviten kördes inte om.
 
 **Beroenden:** `6979c461` → `3680396a` → `790e2eaf` → `5b8c4630`. Endast
