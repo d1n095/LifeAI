@@ -20,10 +20,12 @@ import re
 import uuid
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.capability_reality.service import list_capability_records
 from app.mainai_execution.lessons import lookup_lessons
+from app.models.problem_learning import LifeProblemDecision
 from app.mainai_executive.engineering_decision import CRITERIA, OPTION_KINDS, default_option_set
 from app.mainai_executive.missing_piece import detect_missing_pieces
 from app.problem_learning.service import (
@@ -71,6 +73,18 @@ def _prior_problems(db: Session, *, owner_id: uuid.UUID, tokens: set[str]) -> li
         if not _overlaps(f"{problem.title} {problem.description}", tokens):
             continue
         decision = active_decision(db, owner_id=owner_id, problem_id=problem.id)
+        # `active_decision()` intentionally returns only `active` rows. A rejected or
+        # postponed decision is still safety-relevant context, so the latest decision of any
+        # status is reported separately and never collapsed into "no decision".
+        latest_decision = db.execute(
+            select(LifeProblemDecision)
+            .where(
+                LifeProblemDecision.owner_id == owner_id,
+                LifeProblemDecision.problem_id == problem.id,
+            )
+            .order_by(LifeProblemDecision.decided_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
         approaches = approaches_for_problem(db, owner_id=owner_id, problem_id=problem.id)
         useful = useful_components_from_failed_approaches(
             db, owner_id=owner_id, problem_id=problem.id
@@ -90,6 +104,21 @@ def _prior_problems(db: Session, *, owner_id: uuid.UUID, tokens: set[str]) -> li
                         "status": decision.status,
                     }
                     if decision is not None
+                    else None
+                ),
+                "latest_decision": (
+                    {
+                        "decision_id": str(latest_decision.id),
+                        "status": latest_decision.status,
+                        "decision": latest_decision.decision,
+                        "authority": latest_decision.authority,
+                        "decided_at": (
+                            latest_decision.decided_at.isoformat()
+                            if latest_decision.decided_at is not None
+                            else None
+                        ),
+                    }
+                    if latest_decision is not None
                     else None
                 ),
                 "approaches": [
@@ -192,6 +221,83 @@ def _recommendation(
     }
 
 
+def _decision_support(
+    *,
+    request: str,
+    missing: dict[str, Any],
+    runtime: Any | None,
+    ownership: Any | None,
+    scope: Any | None,
+    capability_aliases: tuple[str, ...],
+    project_ref: str,
+    prior_decision: str | None,
+    implies_existing_failure: bool,
+    root_cause_verified: bool,
+    untrusted: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Compose the atlas recommendation without discarding safety-relevant context.
+
+    The recommendation module already knows how an active assignment, a prior decision or
+    conflicting evidence must change the outcome (wait / reject / ask). This adapter only
+    supplies those facts; it does not re-implement the decision rules. When no runtime that
+    can compose an assessment is supplied, the step is reported as not performed instead of
+    being guessed from partial evidence.
+    """
+    if runtime is None or not hasattr(runtime, "assess"):
+        return None, ["decision_support_not_composed"]
+
+    try:
+        from app.context_atlas.recommendation import CAPABILITY_ALIASES, EngineeringRequest
+    except ImportError:
+        return None, ["context_atlas_not_available"]
+
+    aliases = capability_aliases or tuple(
+        key for key in missing["matched_capabilities"] if key in CAPABILITY_ALIASES
+    )
+    notes: list[str] = []
+    unresolved: list[str] = []
+    if untrusted is not None and untrusted.get("instruction_like"):
+        unresolved.append(
+            f"untrusted_source_instruction_like:{untrusted.get('source_ref')}"
+        )
+
+    # The decision table's own statuses are active/superseded/reversed/completed/unknown.
+    # None of them means "rejected" or "postponed", so this adapter does not translate a
+    # stored status into recommendation vocabulary. A caller that knows the direction was
+    # rejected passes ``prior_decision`` explicitly; `prior_problems[].latest_decision`
+    # keeps the stored status verbatim either way.
+    effective_prior = prior_decision
+
+    engineering_request = EngineeringRequest(
+        request_text=request,
+        capability_aliases=tuple(aliases),
+        project_ref=project_ref,
+        prior_decision=effective_prior,
+        conflicting_sources=bool(unresolved),
+        unresolved_evidence=tuple(unresolved),
+        implies_existing_failure=implies_existing_failure,
+        root_cause_verified=root_cause_verified,
+    )
+    try:
+        assessment = runtime.assess(
+            engineering_request, scope=scope, ownership=ownership
+        )
+        payload = assessment.to_dict()
+    except Exception as exc:  # noqa: BLE001 - the investigation must stay inspectable
+        return None, [f"decision_support_failed:{type(exc).__name__}"]
+
+    payload["basis"] = {
+        "capability_aliases": list(aliases),
+        "prior_decision": effective_prior,
+        "unresolved_evidence": list(unresolved),
+        "ownership_supplied": ownership is not None,
+        "scope_supplied": scope is not None,
+        "derived_from": notes,
+    }
+    payload["execution_authorized"] = False
+    return payload, []
+
+
 def investigate_engineering_request(
     db: Session,
     *,
@@ -201,6 +307,12 @@ def investigate_engineering_request(
     capability_keys: tuple[str, ...] = (),
     paths: tuple[str, ...] = (),
     runtime: Any | None = None,
+    scope: Any | None = None,
+    capability_aliases: tuple[str, ...] = (),
+    project_ref: str = "unknown",
+    prior_decision: str | None = None,
+    implies_existing_failure: bool = False,
+    root_cause_verified: bool = False,
     untrusted_text: str | None = None,
     untrusted_source_ref: str = "retrieved_source",
 ) -> dict[str, Any]:
@@ -208,8 +320,13 @@ def investigate_engineering_request(
 
     ``runtime`` is an optional ``app.context_atlas.runtime.SystemIntelligence`` instance. When
     supplied, path overlap, module dependencies and untrusted-source classification reuse that
-    service; when absent, those steps are explicitly reported as not performed rather than
-    guessed.
+    service, and ``decision_support`` composes the atlas recommendation (reuse/improve/
+    investigate/wait/ask/replace/reject) from the same evidence. When absent, those steps are
+    explicitly reported as not performed rather than guessed.
+
+    ``scope`` is an optional ``app.context_atlas.project_scope.ProjectScopeReport``. It is
+    forwarded unchanged so a non-isolated project boundary turns into an explicit question
+    instead of a reuse recommendation.
     """
     tokens = _tokens(request)
     steps: list[str] = ["objective_interpreted"]
@@ -230,9 +347,13 @@ def investigate_engineering_request(
     steps.append("capability_records_checked")
 
     overlap: dict[str, Any] | None = None
+    overlap_assessment: Any | None = None
     if runtime is not None and paths:
         try:
-            overlap = runtime.overlap(db, owner_id=owner_id, paths=list(paths)).to_dict()
+            overlap_assessment = runtime.overlap(
+                db, owner_id=owner_id, paths=list(paths)
+            )
+            overlap = overlap_assessment.to_dict()
             steps.append("work_overlap_checked")
         except Exception as exc:  # noqa: BLE001
             unverified.append(f"overlap_check_failed:{type(exc).__name__}")
@@ -258,6 +379,23 @@ def investigate_engineering_request(
     if runtime is not None and untrusted_text is not None:
         untrusted = runtime.inspect_untrusted_source(untrusted_source_ref, untrusted_text).to_dict()
         steps.append("untrusted_source_classified")
+
+    decision_support, decision_unverified = _decision_support(
+        request=request,
+        missing=missing,
+        runtime=runtime,
+        ownership=getattr(overlap_assessment, "ownership", None),
+        scope=scope,
+        capability_aliases=capability_aliases,
+        project_ref=project_ref,
+        prior_decision=prior_decision,
+        implies_existing_failure=implies_existing_failure,
+        root_cause_verified=root_cause_verified,
+        untrusted=untrusted,
+    )
+    if decision_support is not None:
+        steps.append("decision_support_composed")
+    unverified.extend(decision_unverified)
 
     if missing["strongest_state"] != "runtime_verified":
         unverified.append("no_runtime_verified_evidence_for_this_capability")
@@ -296,6 +434,7 @@ def investigate_engineering_request(
         "comparison_criteria": list(CRITERIA),
         "option_kinds": list(OPTION_KINDS),
         "recommendation": recommendation,
+        "decision_support": decision_support,
         "unverified_areas": unverified,
         "read_only": True,
         "provider_invoked": False,

@@ -23,6 +23,7 @@ import re
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,10 @@ from app.context_atlas.traceability import (
     Stage,
     build_trace,
 )
+
+# A captured PR file is one observation at one point in time. Older than this it is reported
+# as stale instead of being presented as current remote state.
+_PR_CAPTURE_MAX_AGE = timedelta(hours=24)
 
 _SUPPORTED_QUESTIONS = (
     "which components are implemented",
@@ -195,6 +200,8 @@ class IntegrationStatus:
     local_only: bool | None
     notes: tuple[str, ...]
     evidence: tuple[str, ...]
+    capture_stale: bool | None = None
+    capture_age_hours: float | None = None
     execution_authorized: bool = False
 
     def to_dict(self) -> dict:
@@ -233,6 +240,8 @@ class IntegrationStatus:
             "local_only": self.local_only,
             "notes": list(self.notes),
             "evidence": list(self.evidence),
+            "capture_stale": self.capture_stale,
+            "capture_age_hours": self.capture_age_hours,
             "execution_authorized": False,
         }
 
@@ -810,6 +819,31 @@ class SystemIntelligence:
                 "tracked files are modified; HEAD does not represent the full working tree"
             )
 
+        capture_stale: bool | None = None
+        capture_age_hours: float | None = None
+        if self.pull_requests_path is not None and self.pull_requests_path.is_file():
+            try:
+                captured_mtime = datetime.fromtimestamp(
+                    self.pull_requests_path.stat().st_mtime, tz=timezone.utc
+                )
+            except OSError:
+                captured_mtime = None
+            if captured_mtime is not None:
+                age = datetime.now(timezone.utc) - captured_mtime
+                capture_age_hours = round(age.total_seconds() / 3600, 1)
+                capture_stale = age > _PR_CAPTURE_MAX_AGE
+                if capture_stale:
+                    notes.append(
+                        "captured pull-request metadata is "
+                        f"{capture_age_hours} h old; remote state may have changed"
+                    )
+        unknown_state_prs = sorted({pr.number for pr in matching if pr.state == "unknown"})
+        if unknown_state_prs:
+            notes.append(
+                "captured state is unknown for PR "
+                + ", ".join(f"#{number}" for number in unknown_state_prs)
+            )
+
         evidence = [
             f"branch: {git.current_branch or 'unknown'}",
             f"head: {git.current_sha or 'unknown'}",
@@ -835,6 +869,8 @@ class SystemIntelligence:
             local_only=local_only,
             notes=tuple(notes),
             evidence=tuple(evidence),
+            capture_stale=capture_stale,
+            capture_age_hours=capture_age_hours,
         )
 
     def recovery(

@@ -54,6 +54,27 @@ The recommendation is one of `reuse_existing`, `extend_or_repair_existing`,
 `inspect_before_deciding`, `investigate_gap`, and always carries
 `requires_human_decision: true` and `execution_authorized: false`.
 
+When the caller supplies a `SystemIntelligence`, the report also contains `decision_support`:
+the atlas `recommend()` outcome (`reuse`/`improve`/`investigate`/`wait`/`ask`/`replace`/
+`reject`) composed through `SystemIntelligence.assess()`. The adapter forwards, rather than
+re-implements, the safety-relevant facts:
+
+- an active assignment found by `ownership.find_work_owners()` reaches `assess()` unchanged and
+  yields `wait` instead of `reuse`;
+- `prior_problems[]` now reports `latest_decision` for every matched problem, including
+  statuses `active_decision()` hides (`superseded`/`reversed`/`completed`/`unknown`); the
+  stored status is shown verbatim and is never translated into `rejected`/`postponed`.
+  `prior_decision` is therefore an explicit caller argument, and passing `rejected` yields
+  `reject`;
+- instruction-like retrieved text becomes `unresolved_evidence` and yields `ask`, while
+  `untrusted_source` stays in the report;
+- `scope` (a `ProjectScopeReport`) is forwarded so a non-isolated project boundary also yields
+  `ask`.
+
+`decision_support` is `None` when no runtime is supplied; the step is then listed in
+`unverified_areas` as `decision_support_not_composed` instead of being guessed from partial
+evidence. A full atlas scan is ~17 s, so it is never started implicitly per investigation.
+
 ### `app/mainai_executive/assumption_review.py`
 
 `review_objection()` evaluates a founder objection against supplied evidence using the
