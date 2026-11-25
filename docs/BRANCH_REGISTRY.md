@@ -34,7 +34,10 @@ meddelanden → uppföljning → fyra meddelanden i historiken. B2: grundarens a
 minnesnoter bärs nu som ett avgränsat, owner-scopat `MINNE`-block i chat-prompten
 (**4 passed**, 12,83 s). Hela chat-sviten omkörd efter ändringen: **106 passed** (178,18 s).
 C1/C2 verifierade med befintliga sviter (**73 passed**, 85,50 s) för projektminne/checkpoints,
-omstart av arbetsstyrka och development state — ingen ny task engine byggdes. `ruff check` → All checks passed. `git diff --check` rent.
+omstart av arbetsstyrka och development state — ingen ny task engine byggdes.
+D1/D2: `mainai_executive/capability_truth.py` + `SystemIntelligence.capabilities(db)`
+redovisar implementerad/konfigurerad/tillgänglig/tillåten och den effektiva chat-kedjan
+utan att kontakta någon leverantör — **6 passed**, 28,62 s. `ruff check` → All checks passed. `git diff --check` rent.
 Hela atlas-sviten och hela backend-sviten kördes inte om.
 
 **Beroenden:** `6979c461` → `3680396a` → `790e2eaf` → `5b8c4630`. Endast

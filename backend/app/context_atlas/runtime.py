@@ -25,7 +25,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.orm import Session
 
@@ -38,6 +38,9 @@ from app.context_atlas.development_state import (
     recover_development_state,
 )
 from app.context_atlas.git_evidence import GitEvidence, PullRequestRef, scan_local_git
+
+if TYPE_CHECKING:
+    from app.mainai_executive.capability_truth import CapabilityView
 from app.context_atlas.ownership import (
     OWNED,
     UNCLEAR,
@@ -901,6 +904,42 @@ class SystemIntelligence:
             evidence=tuple(evidence),
             capture_stale=capture_stale,
             capture_age_hours=capture_age_hours,
+        )
+
+    def capabilities(self, db: Session) -> CapabilityView:
+        """Report what is wired, configured, available and permitted -- read-only.
+
+        Wired comes from this instance's existing static scan; the chat chain comes from
+        the same ``resolve_chat_chain`` the chat router uses. No provider is contacted and
+        nothing is authorized: ``execution_authorized`` is always false.
+        """
+        from app.mainai_executive.capability_truth import (
+            CapabilityView,
+            capability_inventory,
+            chat_route_truth,
+            model_tool_calling,
+        )
+
+        try:
+            system: SystemMap | None = self._system_map()
+        except RuntimeError:
+            system = None
+
+        wired: dict[str, bool | None] = {}
+        for declared in capability_inventory():
+            node = system.module(declared.module) if system is not None else None
+            wired[declared.id] = node.maturity.wired if node is not None else None
+
+        limitations = [
+            "wired is static checkout evidence, not a live health check",
+            "available and permitted stay unknown unless the caller supplies evidence",
+            "no provider is contacted and no capability is executed by this view",
+        ]
+        return CapabilityView(
+            tools=capability_inventory(wired=wired),
+            model_tool_calling=model_tool_calling(),
+            chat_route=chat_route_truth(db),
+            limitations=tuple(limitations),
         )
 
     def recovery(
