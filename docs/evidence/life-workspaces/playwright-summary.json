@@ -1,0 +1,10 @@
+{
+  "expected": 2,
+  "unexpected": 0,
+  "flaky": 0,
+  "skipped": 0,
+  "duration_ms": 16801.420000000002,
+  "suites": [
+    "workspaces.spec.ts"
+  ]
+}

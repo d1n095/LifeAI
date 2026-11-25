@@ -1,4 +1,11 @@
-from app.models.agent_task import AgentRole, AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
+from app.models.active_context import (
+    ActiveContextEvent,
+    ActiveContextMember,
+    ActiveContextSet,
+    ContextAuthority,
+    ContextBasis,
+    ContextMemberState,
+)
 from app.models.agent_coordination import (
     AgentAdapterKind,
     AgentScopeLease,
@@ -11,26 +18,20 @@ from app.models.agent_coordination import (
     CoordinationAgentStatus,
     ParallelExplorationGroup,
     ParallelExplorationGroupStatus,
+    SystemActivationAuthorization,
     WorkAssignmentReadWriteMode,
     WorkAssignmentRole,
     WorkAssignmentStatus,
 )
-from app.models.active_context import (
-    ActiveContextEvent,
-    ActiveContextMember,
-    ActiveContextSet,
-    ContextAuthority,
-    ContextBasis,
-    ContextMemberState,
+from app.models.agent_task import (
+    AgentRole,
+    AgentTask,
+    AgentTaskEvent,
+    AgentTaskEventType,
+    AgentTaskStatus,
 )
 from app.models.audit import AuditLog
-from app.models.capability_reality import (
-    CAPABILITY_AUTHORITIES,
-    CAPABILITY_OBSERVATION_EVENT_TYPES,
-    CAPABILITY_STATUSES,
-    CapabilityObservationEvent,
-    CapabilityRecord,
-)
+from app.models.calendar import CalendarEvent
 from app.models.candidate_learning_signal import (
     CANDIDATE_SIGNAL_CONFIDENCES,
     CANDIDATE_SIGNAL_KINDS,
@@ -38,14 +39,16 @@ from app.models.candidate_learning_signal import (
     CANDIDATE_SIGNAL_STATUSES,
     CandidateLearningSignal,
 )
-from app.models.memory_truth_claim import (
-    MEMORY_TRUTH_STATES,
-    MEMORY_TRUTH_TARGET_KINDS,
-    MemoryTruthClaim,
+from app.models.capability_reality import (
+    CAPABILITY_AUTHORITIES,
+    CAPABILITY_OBSERVATION_EVENT_TYPES,
+    CAPABILITY_STATUSES,
+    CapabilityObservationEvent,
+    CapabilityRecord,
 )
 from app.models.claim_relationship import ClaimRelationship
 from app.models.company import CompanyInfo
-from app.models.conversation import Conversation, Message
+from app.models.conversation import ChatProviderAttempt, ChatRequestClaim, Conversation, Message
 from app.models.corpus_trial_run import CorpusTrialRun
 from app.models.diagnosis import (
     DIAGNOSIS_AUTHORITIES,
@@ -57,7 +60,10 @@ from app.models.diagnosis import (
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.models.email_verification_token import EmailVerificationToken
-from app.models.execution_envelope import ExecutionAuthorizationEnvelope, ExecutionScopeProposal
+from app.models.execution_envelope import (
+    ExecutionAuthorizationEnvelope,
+    ExecutionScopeProposal,
+)
 from app.models.founder_memory import (
     FOUNDER_MEMORY_AUTHORITIES,
     FOUNDER_MEMORY_BASES,
@@ -65,6 +71,7 @@ from app.models.founder_memory import (
     FOUNDER_MEMORY_NOTE_TYPES,
     FounderMemoryNote,
 )
+from app.models.github_evidence import GithubEvidenceCandidate
 from app.models.import_job import ImportJob
 from app.models.intelligence_governance import (
     ClassificationBasis,
@@ -79,20 +86,25 @@ from app.models.intelligence_governance import (
     ParticipationMode,
     ReviewKind,
 )
+from app.models.claim_evidence_metadata import ClaimEvidenceMetadata
 from app.models.knowledge_claim import KnowledgeClaim
+from app.models.blueprint_draft import BlueprintDraft
 from app.models.knowledge_version import KnowledgeVersion
+from app.models.lesson_plan_decisions import (
+    EngineeringLessonPlanDecision,
+    LessonPlanDecisionType,
+)
 from app.models.lesson_guard_observations import (
     EngineeringLessonGuardObservation,
     LessonGuardEvidenceStrength,
     LessonGuardOutcome,
 )
-from app.models.provider_spend import (
-    ProviderSpendAuthorization,
-    ProviderSpendAuthorizationStatus,
-    ProviderSpendUsageEvent,
-    ProviderSpendUsageStatus,
+from app.models.life_intent import (
+    LifeIntent,
+    LifeIntentBlocker,
+    LifeIntentDependency,
+    LifeIntentEvent,
 )
-from app.models.life_intent import LifeIntent, LifeIntentBlocker, LifeIntentDependency, LifeIntentEvent
 from app.models.mainai_execution import (
     ACTIVE_MAINAI_GOAL_STATUSES,
     READY_FOR_DISPATCH_MAINAI_TASK_STATUSES,
@@ -115,18 +127,6 @@ from app.models.mainai_execution import (
     MainAITaskEventType,
     MainAITaskStatus,
 )
-from app.models.mainai_recovery import (
-    AUTO_SALVAGEABLE_CLASSIFICATIONS,
-    PROTECTED_BRANCHES,
-    MainAIRecoveryEvent,
-    MainAIRecoveryEventType,
-    MainAIRecoveryRecord,
-    MainAIRecoveryStatus,
-    MainAITaskWorktree,
-    MainAITaskWorktreeRecoveryState,
-    MainAITaskWorktreeStatus,
-    RecoveryClassification,
-)
 from app.models.mainai_job import (
     CANCELLABLE_MAINAI_JOB_STATUSES,
     CLAIMABLE_MAINAI_JOB_STATUSES,
@@ -139,6 +139,18 @@ from app.models.mainai_job import (
     MainAIJobProposalStatus,
     MainAIJobStatus,
 )
+from app.models.mainai_recovery import (
+    AUTO_SALVAGEABLE_CLASSIFICATIONS,
+    PROTECTED_BRANCHES,
+    MainAIRecoveryEvent,
+    MainAIRecoveryEventType,
+    MainAIRecoveryRecord,
+    MainAIRecoveryStatus,
+    MainAITaskWorktree,
+    MainAITaskWorktreeRecoveryState,
+    MainAITaskWorktreeStatus,
+    RecoveryClassification,
+)
 from app.models.mainai_wait import (
     TERMINAL_MAINAI_TASK_WAIT_STATUSES,
     MainAITaskWait,
@@ -146,7 +158,12 @@ from app.models.mainai_wait import (
     MainAITaskWaitStatus,
 )
 from app.models.media_url_import import MediaUrlImport
-from app.models.memory_source_backfill_run import BackfillRunMode, BackfillRunStatus, MemorySourceBackfillFailure, MemorySourceBackfillRun
+from app.models.memory_source_backfill_run import (
+    BackfillRunMode,
+    BackfillRunStatus,
+    MemorySourceBackfillFailure,
+    MemorySourceBackfillRun,
+)
 from app.models.memory_source_unit import (
     DocumentSourceUnit,
     LifecycleStatus,
@@ -159,24 +176,83 @@ from app.models.memory_source_unit import (
     SourceRole,
 )
 from app.models.memory_thread import (
-    MemoryThread, MemoryThreadEvent, MemoryThreadMember, MemoryThreadRelationship,
-    ThreadClassificationBasis, ThreadState,
+    MemoryThread,
+    MemoryThreadEvent,
+    MemoryThreadMember,
+    MemoryThreadRelationship,
+    ThreadClassificationBasis,
+    ThreadState,
+)
+from app.models.memory_truth_claim import (
+    MEMORY_TRUTH_STATES,
+    MEMORY_TRUTH_TARGET_KINDS,
+    MemoryTruthClaim,
 )
 from app.models.password_reset_token import PasswordResetToken
-from app.models.project import Project, Task
-from app.models.project_entities import InterpretationProposal, ProjectEntity, ProjectEntityAlias, ProjectEntityRelationship
-from app.models.project_memory import ProjectBranchPRStatus, ProjectCheckpoint, ProjectCheckpointNote, ProjectNote, ProjectSource
 from app.models.problem_learning import (
-    LifeApproachOutcome, LifeComponentEvaluation, LifeProblem, LifeProblemApproach,
-    LifeProblemAssumption, LifeProblemDecision, LifeProblemEvent, LifeProblemLessonLink,
-    LifeSolutionComponent, LifeSolutionComponentLink, LifeSolutionSelection,
+    LifeApproachOutcome,
+    LifeComponentEvaluation,
+    LifeProblem,
+    LifeProblemApproach,
+    LifeProblemAssumption,
+    LifeProblemDecision,
+    LifeProblemEvent,
+    LifeProblemLessonLink,
+    LifeSolutionComponent,
+    LifeSolutionComponentLink,
+    LifeSolutionSelection,
 )
+from app.models.project import Project, Task
+from app.models.work_management import (
+    MilestoneStatus,
+    TaskDependency,
+    TaskEvent,
+    TaskEventType,
+    WorkspaceMilestone,
+)
+from app.models.workspace import WorkspaceActivity, WorkspaceDecision, WorkspaceDecisionStatus, WorkspaceMember, WorkspaceMemberRole
+from app.models.project_entities import (
+    InterpretationProposal,
+    ProjectEntity,
+    ProjectEntityAlias,
+    ProjectEntityRelationship,
+)
+from app.models.project_memory import (
+    ProjectBranchPRStatus,
+    ProjectCheckpoint,
+    ProjectCheckpointNote,
+    ProjectNote,
+    ProjectSource,
+)
+from app.models.github_status import GithubStatusSnapshot
 from app.models.provider_config import ProviderConfig
-from app.models.provider_disclosure import ProviderDisclosureDecision, ProviderDisclosureEvent
+from app.models.runtime_incident import RuntimeIncident
+from app.models.provider_disclosure import (
+    ProviderDisclosureDecision,
+    ProviderDisclosureEvent,
+)
+from app.models.provider_spend import (
+    ProviderSpendAuthorization,
+    ProviderSpendAuthorizationStatus,
+    ProviderSpendUsageEvent,
+    ProviderSpendUsageStatus,
+)
+from app.models.improvement_proposal import ImprovementSource, ImprovementStatus, MainAIImprovementProposal
+from app.models.cognitive_gate import CognitiveGateCaseResult, CognitiveGateRun, GateCaseStatus, GateExecutionMode
 from app.models.provider_verification import ProviderVerificationCheck
 from app.models.refresh_token import RefreshToken
 from app.models.revoked_access_token import RevokedAccessToken
-from app.models.source_import_batch import SourceImportBatch, SourceImportBatchFailure, SourceImportBatchStatus
+from app.models.source_import_batch import (
+    SourceImportBatch,
+    SourceImportBatchFailure,
+    SourceImportBatchStatus,
+)
+from app.models.source_relationship import SourceRelationship
+from app.models.storage_deletion_task import (
+    StorageDeletionReason,
+    StorageDeletionStatus,
+    StorageDeletionTask,
+)
 from app.models.strategy_evaluation import (
     StrategyComparabilityAssessment,
     StrategyComparison,
@@ -191,16 +267,33 @@ from app.models.strategy_evaluation import (
     StrategyQualityAssessment,
 )
 from app.models.strategy_synthesis import (
-    StrategySynthesisCase, StrategySynthesisComponent, StrategySynthesisConflict,
-    StrategySynthesisEvaluationLink, StrategySynthesisEvent, StrategySynthesisInput,
-    StrategySynthesisLessonLink, StrategySynthesisMaterialization,
+    StrategySynthesisCase,
+    StrategySynthesisComponent,
+    StrategySynthesisConflict,
+    StrategySynthesisEvaluationLink,
+    StrategySynthesisEvent,
+    StrategySynthesisInput,
+    StrategySynthesisLessonLink,
+    StrategySynthesisMaterialization,
 )
-from app.models.source_relationship import SourceRelationship
-from app.models.storage_deletion_task import StorageDeletionReason, StorageDeletionStatus, StorageDeletionTask
 from app.models.supervisor_lease import SupervisorGoalLease
 from app.models.usage import UsageLog
+from app.models.billing import BillingTenant, UsageRollup, RevenueLedger
+from app.models.ads import AdConsentEvent, AdEvent
 from app.models.user import User
 from app.models.work_candidate import WorkCandidate
+from app.models.work_intelligence import (
+    WorkEfficiencyObservation,
+    WorkSpecialistContribution,
+    WorkStoppingDecision,
+    WorkStrategy,
+    WorkStrategyExecution,
+    WorkStrategyFinding,
+    WorkStrategyLessonLink,
+    WorkTraceEvent,
+    WorkVerificationObligation,
+    WorkVerificationObservation,
+)
 from app.models.workforce import (
     WorkforceAgentProfile,
     WorkforceAssignment,
@@ -215,89 +308,110 @@ from app.models.workforce_ops import (
     WorkforceLifecycleEvent,
     WorkforceVerificationDecision,
 )
-from app.models.work_intelligence import (
-    WorkEfficiencyObservation, WorkSpecialistContribution, WorkStoppingDecision,
-    WorkStrategy, WorkStrategyExecution, WorkStrategyFinding, WorkStrategyLessonLink,
-    WorkTraceEvent, WorkVerificationObligation, WorkVerificationObservation,
-)
 
 __all__ = [
-    "AgentRole",
-    "AgentAdapterKind",
-    "AgentScopeLease",
-    "AgentScopeLeaseStatus",
-    "AgentWorkAssignment",
-    "AgentWorkAssignmentDependency",
-    "AgentWorkAssignmentEvent",
-    "AgentWorkAssignmentEventType",
-    "CoordinationAgent",
-    "CoordinationAgentStatus",
-    "ParallelExplorationGroup",
-    "ParallelExplorationGroupStatus",
-    "WorkAssignmentReadWriteMode",
-    "WorkAssignmentRole",
-    "WorkAssignmentStatus",
-    "AgentTask",
-    "AgentTaskEvent",
-    "AgentTaskEventType",
-    "AgentTaskStatus",
-    "ActiveContextEvent",
-    "ActiveContextMember",
-    "ActiveContextSet",
-    "ContextAuthority",
-    "ContextBasis",
-    "ContextMemberState",
-    "AuditLog",
-    "CAPABILITY_AUTHORITIES",
-    "CAPABILITY_OBSERVATION_EVENT_TYPES",
-    "CAPABILITY_STATUSES",
-    "CapabilityObservationEvent",
-    "CapabilityRecord",
+    "SystemActivationAuthorization",
+    "ACTIVE_MAINAI_GOAL_STATUSES",
+    "AUTO_SALVAGEABLE_CLASSIFICATIONS",
+    "CANCELLABLE_MAINAI_JOB_STATUSES",
+    "CalendarEvent",
     "CANDIDATE_SIGNAL_CONFIDENCES",
     "CANDIDATE_SIGNAL_KINDS",
     "CANDIDATE_SIGNAL_SOURCE_TYPES",
     "CANDIDATE_SIGNAL_STATUSES",
-    "CandidateLearningSignal",
-    "MEMORY_TRUTH_STATES",
-    "MEMORY_TRUTH_TARGET_KINDS",
-    "MemoryTruthClaim",
-    "ClaimRelationship",
-    "CompanyInfo",
-    "Conversation",
-    "Message",
-    "CorpusTrialRun",
+    "CAPABILITY_AUTHORITIES",
+    "CAPABILITY_OBSERVATION_EVENT_TYPES",
+    "CAPABILITY_STATUSES",
+    "CLAIMABLE_MAINAI_JOB_STATUSES",
     "DIAGNOSIS_AUTHORITIES",
     "DIAGNOSIS_BASES",
     "DIAGNOSIS_CATEGORIES",
     "DIAGNOSIS_EPISTEMIC_STAGES",
-    "DiagnosisRecord",
-    "Document",
-    "DocumentChunk",
-    "EmailVerificationToken",
-    "ExecutionScopeProposal",
-    "ExecutionAuthorizationEnvelope",
     "FOUNDER_MEMORY_AUTHORITIES",
     "FOUNDER_MEMORY_BASES",
     "FOUNDER_MEMORY_NOTE_STATUSES",
     "FOUNDER_MEMORY_NOTE_TYPES",
-    "FounderMemoryNote",
-    "ImportJob",
+    "MEMORY_TRUTH_STATES",
+    "MEMORY_TRUTH_TARGET_KINDS",
+    "PROTECTED_BRANCHES",
+    "READY_FOR_DISPATCH_MAINAI_TASK_STATUSES",
+    "RETRYABLE_MAINAI_JOB_STATUSES",
+    "RETRYABLE_MAINAI_TASK_STATUSES",
+    "TERMINAL_MAINAI_GOAL_STATUSES",
+    "TERMINAL_MAINAI_TASK_STATUSES",
+    "TERMINAL_MAINAI_TASK_WAIT_STATUSES",
+    "ActiveContextEvent",
+    "ActiveContextMember",
+    "ActiveContextSet",
+    "AgentAdapterKind",
+    "AgentRole",
+    "AgentScopeLease",
+    "AgentScopeLeaseStatus",
+    "AgentTask",
+    "AgentTaskEvent",
+    "AgentTaskEventType",
+    "AgentTaskStatus",
+    "AgentWorkAssignment",
+    "AgentWorkAssignmentDependency",
+    "AgentWorkAssignmentEvent",
+    "AgentWorkAssignmentEventType",
+    "AuditLog",
+    "BackfillRunMode",
+    "BackfillRunStatus",
+    "CandidateLearningSignal",
+    "CapabilityObservationEvent",
+    "CapabilityRecord",
+    "ClaimRelationship",
     "ClassificationBasis",
+    "CompanyInfo",
+    "ContextAuthority",
+    "ContextBasis",
+    "ContextMemberState",
+    "ChatProviderAttempt",
+    "ChatRequestClaim",
+    "Conversation",
+    "CoordinationAgent",
+    "CoordinationAgentStatus",
+    "CorpusTrialRun",
+    "DiagnosisRecord",
+    "Document",
+    "DocumentChunk",
+    "DocumentSourceUnit",
+    "EmailVerificationToken",
+    "EngineeringLesson",
+    "EngineeringLessonConfidence",
+    "EngineeringLessonGuardObservation",
+    "EngineeringLessonSeverity",
+    "EngineeringLessonStatus",
+    "ExecutionAuthorizationEnvelope",
     "ExecutionRole",
+    "ExecutionScopeProposal",
+    "FounderMemoryNote",
+    "GithubEvidenceCandidate",
     "IdeaDisposition",
+    "ImportJob",
     "IntelligenceEvidence",
     "IntelligenceExecution",
     "IntelligenceIdea",
     "IntelligenceIdeaLesson",
     "IntelligenceIdeaLink",
     "IntelligenceInterpretation",
+    "InterpretationProposal",
+    "KnowledgeClaim",
+    "KnowledgeVersion",
+    "LessonGuardEvidenceStrength",
+    "LessonGuardOutcome",
+    "LifeApproachOutcome",
+    "LifeComponentEvaluation",
     "LifeIntent",
     "LifeIntentBlocker",
     "LifeIntentDependency",
     "LifeIntentEvent",
     "ParticipationMode",
     "ReviewKind",
+    "ClaimEvidenceMetadata",
     "KnowledgeClaim",
+    "BlueprintDraft",
     "KnowledgeVersion",
     "ACTIVE_MAINAI_GOAL_STATUSES",
     "READY_FOR_DISPATCH_MAINAI_TASK_STATUSES",
@@ -306,6 +420,8 @@ __all__ = [
     "TERMINAL_MAINAI_TASK_STATUSES",
     "EngineeringLesson",
     "EngineeringLessonGuardObservation",
+    "EngineeringLessonPlanDecision",
+    "LessonPlanDecisionType",
     "LessonGuardEvidenceStrength",
     "LessonGuardOutcome",
     "ProviderSpendAuthorization",
@@ -404,21 +520,90 @@ __all__ = [
     "LifeSolutionComponent",
     "LifeSolutionComponentLink",
     "LifeSolutionSelection",
+    "LifecycleStatus",
+    "MainAICheckpoint",
+    "MainAIGoal",
+    "MainAIGoalRiskLevel",
+    "MainAIGoalStatus",
+    "MainAIJob",
+    "MainAIJobErrorCategory",
+    "MainAIJobEvent",
+    "MainAIJobEventType",
+    "MainAIJobProposal",
+    "MainAIJobProposalStatus",
+    "MainAIJobStatus",
+    "MainAIPlan",
+    "MainAIPlanStatus",
+    "MainAIRecoveryEvent",
+    "MainAIRecoveryEventType",
+    "MainAIRecoveryRecord",
+    "MainAIRecoveryStatus",
+    "MainAITask",
+    "MainAITaskDependency",
+    "MainAITaskEvent",
+    "MainAITaskEventType",
+    "MainAITaskStatus",
+    "MainAITaskWait",
+    "MainAITaskWaitSourceType",
+    "MainAITaskWaitStatus",
+    "MainAITaskWorktree",
+    "MainAITaskWorktreeRecoveryState",
+    "MainAITaskWorktreeStatus",
+    "MediaUrlImport",
+    "MemorySourceBackfillFailure",
+    "MemorySourceBackfillRun",
+    "MemorySourceLifecycleEvent",
+    "MemorySourceUnit",
+    "MemoryThread",
+    "MemoryThreadEvent",
+    "MemoryThreadMember",
+    "MemoryThreadRelationship",
+    "MemoryTruthClaim",
+    "Message",
+    "MessageSourceUnit",
+    "OccurredAtBasis",
+    "ParallelExplorationGroup",
+    "ParallelExplorationGroupStatus",
+    "ParticipationMode",
+    "PasswordResetToken",
+    "Project",
+    "ProjectBranchPRStatus",
+    "ProjectCheckpoint",
+    "ProjectCheckpointNote",
+    "ProjectEntity",
+    "ProjectEntityAlias",
+    "ProjectEntityRelationship",
+    "ProjectNote",
+    "ProjectSource",
     "ProviderConfig",
     "ProviderDisclosureDecision",
     "ProviderDisclosureEvent",
+    "ProviderSpendAuthorization",
+    "ProviderSpendAuthorizationStatus",
+    "ProviderSpendUsageEvent",
+    "ProviderSpendUsageStatus",
     "ProviderVerificationCheck",
+    "RecoveryClassification",
     "RefreshToken",
+    "ReviewKind",
     "RevokedAccessToken",
+    "SnapshotStatus",
     "SourceImportBatch",
     "SourceImportBatchFailure",
     "SourceImportBatchStatus",
+    "SourceKind",
     "SourceRelationship",
+    "SourceRole",
     "StorageDeletionReason",
     "StorageDeletionStatus",
     "StorageDeletionTask",
     "SupervisorGoalLease",
     "UsageLog",
+    "BillingTenant",
+    "UsageRollup",
+    "RevenueLedger",
+    "AdConsentEvent",
+    "AdEvent",
     "User",
     "WorkEfficiencyObservation",
     "WorkSpecialistContribution",
@@ -430,6 +615,7 @@ __all__ = [
     "WorkTraceEvent",
     "WorkVerificationObligation",
     "WorkVerificationObservation",
+    "GithubStatusSnapshot",
     "StrategyComparabilityAssessment",
     "StrategyComparison",
     "StrategyEfficiencyDelta",
@@ -449,4 +635,34 @@ __all__ = [
     "StrategySynthesisInput",
     "StrategySynthesisLessonLink",
     "StrategySynthesisMaterialization",
+    "SupervisorGoalLease",
+    "Task",
+    "ThreadClassificationBasis",
+    "ThreadState",
+    "UsageLog",
+    "User",
+    "WorkAssignmentReadWriteMode",
+    "WorkAssignmentRole",
+    "WorkAssignmentStatus",
+    "WorkCandidate",
+    "WorkEfficiencyObservation",
+    "WorkSpecialistContribution",
+    "WorkStoppingDecision",
+    "WorkStrategy",
+    "WorkStrategyExecution",
+    "WorkStrategyFinding",
+    "WorkStrategyLessonLink",
+    "WorkTraceEvent",
+    "WorkVerificationObligation",
+    "WorkVerificationObservation",
+    "WorkforceAgentProfile",
+    "WorkforceAssignment",
+    "WorkforceAssignmentCheckpoint",
+    "WorkforceContextPackage",
+    "WorkforceCostBudget",
+    "WorkforceDelegationRequest",
+    "WorkforceLifecycleEvent",
+    "WorkforcePerformanceRollup",
+    "WorkforceTeam",
+    "WorkforceVerificationDecision",
 ]

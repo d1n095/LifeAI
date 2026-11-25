@@ -26,11 +26,13 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.jobs.heartbeat import worker_process_alive
 from app.models.document import Document, IndexStatus, RESUMABLE_INDEX_STATUSES
+from app.models.document_chunk import DocumentChunk
 from app.models.import_job import ImportJob
 
 
@@ -40,6 +42,7 @@ class ContextStatusReason(str, enum.Enum):
     awaiting_provider = "awaiting_provider"
     search_provider_unavailable = "search_provider_unavailable"
     indexing_failed = "indexing_failed"
+    reindex_required = "reindex_required"
     no_relevant_match = "no_relevant_match"
     no_documents = "no_documents"
 
@@ -65,6 +68,7 @@ class ContextStatus:
     indexed_count: int = 0
     total_document_count: int = 0
     worker_reachable: bool | None = None
+    out_of_space_chunk_count: int = 0
 
 
 def _worker_reachable(db: Session, owner_id: uuid.UUID) -> bool:
@@ -94,6 +98,39 @@ def _worker_reachable(db: Session, owner_id: uuid.UUID) -> bool:
 
 def _plural(count: int, singular: str, plural: str) -> str:
     return singular if count == 1 else plural
+
+
+def _chunks_outside_active_space(db: Session, owner_id: uuid.UUID) -> tuple[int, str | None]:
+    """How many of this owner's live chunks cannot be compared with the ACTIVE embedding model,
+    and which model that is.
+
+    A chunk embedded by another model — including a pre-migration row whose identity columns
+    are NULL — is deliberately excluded from the semantic channel (see app/rag/vector_store.py's
+    active-space guard). Counting them here is what lets chat say "re-index these" instead of
+    the misleading "no relevant match". A soft-deleted source is excluded for the same reason
+    search() excludes it: deleting material must make it unspeakable, not keep it in a warning.
+    """
+    from app.providers.registry import resolve_active
+
+    try:
+        _provider, model = resolve_active(db, role="embedding")
+    except Exception:
+        # Not this classifier's problem to report (a missing/broken provider is already covered
+        # by search_provider_unavailable before this point) — report no count rather than guess.
+        return 0, None
+    if not model:
+        return 0, None
+    count = (
+        db.query(func.count(DocumentChunk.id))
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .filter(
+            DocumentChunk.owner_id == owner_id,
+            Document.deleted_at.is_(None),
+            or_(DocumentChunk.embedding_model.is_(None), DocumentChunk.embedding_model != model),
+        )
+        .scalar()
+    )
+    return int(count or 0), model
 
 
 def build_context_status(
@@ -183,6 +220,24 @@ def build_context_status(
         )
 
     if indexed_count > 0:
+        # Before blaming the question, check the far more likely cause after an embedding-model
+        # switch: chunks that exist but are NOT in the active embedding space. Retrieval filters
+        # the semantic channel to the active (model, native_dim) on purpose (a padded 768-d
+        # vector and a genuine 1536-d vector are incomparable — app/rag/embedding_space.py), so
+        # those chunks can never be ranked, and "no relevant match" would send the founder
+        # looking for a better question instead of re-indexing.
+        out_of_space, active_model = _chunks_outside_active_space(db, owner_id)
+        if out_of_space > 0:
+            return ContextStatus(
+                reason=ContextStatusReason.reindex_required,
+                message=(
+                    f"{out_of_space} textavsnitt i ditt bibliotek är indexerade med en annan "
+                    f"embedding-modell än den som används nu ({active_model}), så de kan inte "
+                    "jämföras med den här frågan. Indexera om dokumenten för att göra dem sökbara igen."
+                ),
+                out_of_space_chunk_count=out_of_space,
+                **counts,
+            )
         return ContextStatus(
             reason=ContextStatusReason.no_relevant_match,
             message="Dina filer är indexerade, men jag hittade ingen relevant träff för den här frågan.",

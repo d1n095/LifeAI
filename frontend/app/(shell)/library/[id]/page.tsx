@@ -96,6 +96,9 @@ function LibrarySourceDetailInner() {
   const [relNote, setRelNote] = useState("");
   const [relError, setRelError] = useState<string | null>(null);
   const [addingRelationship, setAddingRelationship] = useState(false);
+  const [replacementFile, setReplacementFile] = useState<File | null>(null);
+  const [replacing, setReplacing] = useState(false);
+  const [replaceError, setReplaceError] = useState<string | null>(null);
 
   async function refresh() {
     try {
@@ -132,6 +135,21 @@ function LibrarySourceDetailInner() {
       setRelError(e.message);
     } finally {
       setAddingRelationship(false);
+    }
+  }
+
+  async function handleReplace(e: React.FormEvent) {
+    e.preventDefault();
+    if (!replacementFile) return;
+    setReplacing(true);
+    setReplaceError(null);
+    try {
+      const result = await api.replaceLibrarySource(params.id, replacementFile);
+      router.push(`/library/${result.source.id}`);
+    } catch (e: any) {
+      setReplaceError(e.message);
+    } finally {
+      setReplacing(false);
     }
   }
 
@@ -410,6 +428,39 @@ function LibrarySourceDetailInner() {
         {relError && (
           <div role="alert" className="mt-2 text-sm text-red-300">
             {relError}
+          </div>
+        )}
+      </section>
+
+      <section aria-labelledby="replace-heading" className="rounded-xl border border-border p-4">
+        <h2 id="replace-heading" className="text-sm font-medium text-white/70 mb-2">
+          Ersätt med ny version
+        </h2>
+        <p className="text-sm text-white/50 mb-3">
+          Den nya filen indexeras som nästa version. Den gamla versionen blir ersatt och
+          osökbar som aktuell sanning, men dess historik och original finns kvar.
+        </p>
+        <form onSubmit={handleReplace} className="space-y-3">
+          <label htmlFor="replacement-file" className="block text-sm text-white/60">
+            Ny fil
+          </label>
+          <input
+            id="replacement-file"
+            type="file"
+            onChange={(e) => setReplacementFile(e.target.files?.[0] ?? null)}
+            className="block w-full text-sm text-white/60 file:mr-3 file:rounded-lg file:border-0 file:bg-accent/20 file:px-3 file:py-2 file:text-sm file:text-accent"
+          />
+          <button
+            type="submit"
+            disabled={!replacementFile || replacing}
+            className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+          >
+            {replacing ? "Ersätter…" : "Ersätt källa"}
+          </button>
+        </form>
+        {replaceError && (
+          <div role="alert" className="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">
+            {replaceError}
           </div>
         )}
       </section>

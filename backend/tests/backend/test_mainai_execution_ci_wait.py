@@ -339,7 +339,12 @@ async def _dispatch_open_pr_and_reach_waiting_ci(db_session, superuser_db, owner
     monkeypatch.setattr(settings, "github_repo", "d1n095/LifeAI")
 
     async def _fake_create_pull_request(self, *, title, body, head, base):
-        return {"number": 7, "html_url": "https://github.com/d1n095/LifeAI/pull/7", "head": f"d1n095:{head}", "base": base, "state": "open"}
+        # "draft": True -- matches the real GitHubClient.create_pull_request()'s own request
+        # (draft-PR security contract) and _handle_open_pr()'s read-side confirmation check.
+        return {
+            "number": 7, "html_url": "https://github.com/d1n095/LifeAI/pull/7",
+            "head": {"label": f"d1n095:{head}", "ref": head, "sha": commit_sha}, "base": base, "state": "open", "draft": True,
+        }
 
     async def _fake_list_pull_requests_for_head(self, *, head, base, state="all"):
         return []

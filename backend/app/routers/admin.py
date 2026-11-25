@@ -1,4 +1,6 @@
+import logging
 import uuid
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func
@@ -12,7 +14,14 @@ from app.deps import require_founder
 from app.models.provider_config import ProviderConfig
 from app.models.usage import UsageLog
 from app.models.user import User
-from app.providers.registry import get_provider, provider_names
+from app.providers.catalog import (
+    ModelSelectionError,
+    ModelSelectionPolicy,
+    model_specs,
+    resolve_model_spec,
+)
+from app.providers.local_discovery import discover_local_models
+from app.providers.registry import get_provider, provider_names, select_model
 from app.providers.verification import latest_check, verify_now
 from app.models.memory_source_backfill_run import BackfillRunMode, MemorySourceBackfillFailure, MemorySourceBackfillRun
 from app.rag.claims import backfill_claim_types
@@ -29,6 +38,11 @@ from app.schemas import (
     BackfillRunCreateIn,
     BackfillRunFailureOut,
     BackfillRunOut,
+    LocalModelOut,
+    LocalModelsOut,
+    ModelCatalogOut,
+    ModelSelectionPreviewIn,
+    ModelSelectionPreviewOut,
     ProviderConfigIn,
     ProviderConfigOut,
     ProviderStatus,
@@ -36,6 +50,8 @@ from app.schemas import (
     ProviderVerifyIn,
     UsageSummaryRow,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_founder)])
 
@@ -45,7 +61,7 @@ def _verification_out(db: Session, provider_name: str, role: str) -> ProviderVer
     if check is None:
         return None
     return ProviderVerificationOut(
-        result=check.result.value, message=check.message, checked_by=check.checked_by, checked_at=check.checked_at
+        result=check.result.value, message=check.message, checked_by=check.checked_by, checked_at=check.checked_at, model=check.model
     )
 
 
@@ -54,18 +70,28 @@ def provider_status(db: Session = Depends(get_db)):
     active_chat = db.query(ProviderConfig).filter_by(role="chat", is_active=True).first()
     active_embedding = db.query(ProviderConfig).filter_by(role="embedding", is_active=True).first()
     settings = get_settings()
+    active_chat_provider = active_chat.provider if active_chat else settings.default_llm_provider
+    active_chat_model = active_chat.model if active_chat else settings.default_llm_model
+    active_embedding_provider = (
+        active_embedding.provider if active_embedding else settings.default_embedding_provider
+    )
+    active_embedding_model = (
+        active_embedding.model if active_embedding else settings.default_embedding_model
+    )
 
     statuses = []
     for name in provider_names():
         provider = get_provider(name)
-        is_chat_active = (active_chat.provider if active_chat else settings.default_llm_provider) == name
-        is_embedding_active = (active_embedding.provider if active_embedding else settings.default_embedding_provider) == name
+        is_chat_active = active_chat_provider == name
+        is_embedding_active = active_embedding_provider == name
         statuses.append(
             ProviderStatus(
                 name=name,
                 configured=provider.is_configured(),
                 active_chat=is_chat_active,
                 active_embedding=is_embedding_active,
+                active_chat_model=active_chat_model if is_chat_active else None,
+                active_embedding_model=active_embedding_model if is_embedding_active else None,
                 # P1: the latest REAL verification result, regardless of whether this
                 # provider is active right now — so a founder can check a provider before
                 # switching to it. `None` means "never verified", shown neutrally, not as
@@ -75,6 +101,158 @@ def provider_status(db: Session = Depends(get_db)):
             )
         )
     return statuses
+
+
+@router.get("/providers/models", response_model=list[ModelCatalogOut])
+def provider_model_catalog(db: Session = Depends(get_db)):
+    """Founder-visible catalog joined with live configuration and exact-model evidence."""
+
+    rows: list[ModelCatalogOut] = []
+    for spec in model_specs():
+        check = latest_check(db, spec.provider, "embedding" if "embedding" in spec.capabilities else "chat", model=spec.model_id)
+        provider = get_provider(spec.provider)
+        rows.append(
+            ModelCatalogOut(
+                provider=spec.provider,
+                model_id=spec.model_id,
+                version=spec.version,
+                capabilities=sorted(spec.capabilities),
+                supported_capabilities=sorted(spec.supported_capabilities),
+                context_window_tokens=spec.context_window_tokens,
+                locality=spec.locality.value,
+                license_name=spec.license_name,
+                license_url=spec.license_url,
+                input_price_per_million_usd=(
+                    float(spec.pricing.input_per_million_usd)
+                    if spec.pricing.input_per_million_usd is not None
+                    else None
+                ),
+                output_price_per_million_usd=(
+                    float(spec.pricing.output_per_million_usd)
+                    if spec.pricing.output_per_million_usd is not None
+                    else None
+                ),
+                pricing_source=spec.pricing.source,
+                pricing_as_of=spec.pricing.as_of,
+                requests_per_minute=spec.quota.requests_per_minute,
+                tokens_per_minute=spec.quota.tokens_per_minute,
+                quota_note=spec.quota.note,
+                availability=spec.availability.value,
+                configured=provider.is_configured(),
+                verification_result=check.result.value if check is not None else None,
+                verification_checked_at=check.checked_at if check is not None else None,
+            )
+        )
+    return rows
+
+
+@router.get("/providers/local-models", response_model=LocalModelsOut)
+async def local_model_catalog(db: Session = Depends(get_db)):
+    """Discover the exact model tags installed in the local runtime.
+
+    This is deliberately separate from the static catalog: a model can be listed in
+    catalog.py but not pulled, and a pulled local tag can be newer than the catalog. A
+    runtime outage is a normal, founder-visible state (reachable=false), not a 500.
+    """
+
+    settings = get_settings()
+    active_chat = db.query(ProviderConfig).filter_by(role="chat", is_active=True).first()
+    active_embedding = db.query(ProviderConfig).filter_by(role="embedding", is_active=True).first()
+    active_chat_provider = active_chat.provider if active_chat else settings.default_llm_provider
+    active_chat_model = active_chat.model if active_chat else settings.default_llm_model
+    active_embedding_provider = (
+        active_embedding.provider if active_embedding else settings.default_embedding_provider
+    )
+    active_embedding_model = (
+        active_embedding.model if active_embedding else settings.default_embedding_model
+    )
+
+    try:
+        installed = await discover_local_models(settings.ollama_base_url)
+        reachable = True
+    except Exception:
+        # No URL, exception text or response body is exposed to the founder.
+        logger.warning("Local model discovery failed", exc_info=True)
+        installed = []
+        reachable = False
+
+    capabilities: dict[str, list[str]] = {}
+    for spec in model_specs():
+        if spec.provider != "ollama":
+            continue
+        capabilities.setdefault(spec.model_id, []).extend(spec.supported_capabilities)
+        # Ollama reports the implicit default tag as `name:latest`. The catalog stores
+        # `name`; both identify the same installed model for discovery purposes.
+        if ":" not in spec.model_id:
+            capabilities.setdefault(f"{spec.model_id}:latest", []).extend(
+                spec.supported_capabilities
+            )
+
+    return LocalModelsOut(
+        runtime="ollama",
+        reachable=reachable,
+        active_chat_provider=active_chat_provider,
+        active_chat_model=active_chat_model,
+        active_embedding_provider=active_embedding_provider,
+        active_embedding_model=active_embedding_model,
+        models=[
+            LocalModelOut(
+                name=model.name,
+                size_bytes=model.size_bytes,
+                modified_at=model.modified_at,
+                digest=model.digest,
+                catalog_known=model.name in capabilities,
+                declared_capabilities=sorted(set(capabilities.get(model.name, []))),
+            )
+            for model in installed
+        ],
+    )
+
+
+@router.post("/providers/select/preview", response_model=ModelSelectionPreviewOut)
+def preview_model_selection(payload: ModelSelectionPreviewIn, db: Session = Depends(get_db)):
+    """Read-only deterministic preview. Selection never creates authority or invokes a model."""
+
+    policy = ModelSelectionPolicy(
+        role=payload.role,
+        required_capabilities=frozenset(payload.required_capabilities),
+        minimum_context_tokens=payload.minimum_context_tokens,
+        estimated_input_tokens=payload.estimated_input_tokens,
+        estimated_output_tokens=payload.estimated_output_tokens,
+        max_pricing_age_days=payload.max_pricing_age_days,
+        allow_external=payload.allow_external,
+        prefer_local=payload.prefer_local,
+        allowed_providers=frozenset(payload.allowed_providers),
+        allowed_models=frozenset(payload.allowed_models),
+        max_input_price_per_million_usd=(
+            Decimal(str(payload.max_input_price_per_million_usd))
+            if payload.max_input_price_per_million_usd is not None
+            else None
+        ),
+        max_output_price_per_million_usd=(
+            Decimal(str(payload.max_output_price_per_million_usd))
+            if payload.max_output_price_per_million_usd is not None
+            else None
+        ),
+        require_verified=payload.require_verified,
+    )
+    try:
+        _, model, spec = select_model(
+            db,
+            policy,
+            requested_provider=payload.requested_provider,
+            requested_model=payload.requested_model,
+        )
+    except ModelSelectionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return ModelSelectionPreviewOut(
+        provider=spec.provider,
+        model=model,
+        version=spec.version,
+        capabilities=sorted(spec.capabilities),
+        locality=spec.locality.value,
+        verified_required=policy.require_verified,
+    )
 
 
 @router.post("/providers/verify", response_model=ProviderVerificationOut)
@@ -92,7 +270,25 @@ async def verify_provider_now(
     leverantör."""
     if payload.provider not in provider_names():
         raise HTTPException(status_code=400, detail="Okänd leverantör.")
-    outcome = await verify_now(db, payload.provider, payload.role, checked_by="founder")
+    if payload.model is not None:
+        try:
+            spec = resolve_model_spec(
+                payload.provider,
+                payload.model,
+                role=payload.role,
+                allow_custom_local=True,
+            )
+        except ModelSelectionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if payload.role not in spec.capabilities:
+            raise HTTPException(status_code=400, detail="Modellen stöder inte den begärda rollen.")
+    outcome = await verify_now(
+        db,
+        payload.provider,
+        payload.role,
+        checked_by="founder",
+        model=payload.model,
+    )
     record_audit(
         db,
         user_id=user.id,
@@ -102,9 +298,9 @@ async def verify_provider_now(
         detail=outcome.result.value,
         request=request,
     )
-    check = latest_check(db, payload.provider, payload.role)
     return ProviderVerificationOut(
-        result=check.result.value, message=check.message, checked_by=check.checked_by, checked_at=check.checked_at
+        result=outcome.result.value, message=outcome.message, checked_by="founder",
+        checked_at=outcome.checked_at, model=outcome.model,
     )
 
 
@@ -125,6 +321,29 @@ def set_provider_config(
     This is the single write path that changes what LLM the whole platform uses —
     no redeploy, no code change.
     """
+    # Serialize role writes including the first INSERT. No last-writer race can create
+    # duplicate active rows; this transaction lock is released by commit/rollback.
+    from sqlalchemy import text
+    db.execute(text("SELECT pg_advisory_xact_lock(:key)"),
+               {"key": 46301 if payload.role == "chat" else 46302})
+    try:
+        # Manual choice is exact, registered and freshly verified. This validates selection
+        # only; it does not authorize provider spend or content egress.
+        select_model(
+            db,
+            ModelSelectionPolicy(
+                role=payload.role,
+                allow_external=True,
+                prefer_local=False,
+                require_verified=True,
+                allow_custom_local=True,
+            ),
+            requested_provider=payload.provider,
+            requested_model=payload.model,
+        )
+    except ModelSelectionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     entry = db.query(ProviderConfig).filter_by(role=payload.role).first()
     if entry is None:
         entry = ProviderConfig(role=payload.role, provider=payload.provider, model=payload.model, is_active=True)
@@ -133,8 +352,6 @@ def set_provider_config(
         entry.model = payload.model
         entry.is_active = True
     db.add(entry)
-    db.commit()
-    db.refresh(entry)
     record_audit(
         db,
         user_id=user.id,
@@ -143,7 +360,10 @@ def set_provider_config(
         entity_id=payload.role,
         detail=f"{payload.provider}/{payload.model}",
         request=request,
+        commit=False,
     )
+    db.commit()
+    db.refresh(entry)
     return entry
 
 

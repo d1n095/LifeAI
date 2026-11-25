@@ -55,9 +55,10 @@ completeness".
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -307,3 +308,197 @@ def record_lesson_guard_observations_from_finalize(
         if row is not None:
             written.append(row)
     return written
+
+
+# --------------------------------------------------------------------------------------
+# Effectiveness rollup (migration 0074's provenance edge, consumed): the measured form of
+# "recurring failures lead to improvements in decision rules" — WITHOUT the two dishonest
+# shortcuts. It does not call held-guards "caused success" (0058's discipline stands: guard
+# evidence is guard evidence), and it does not let an ineffective rule hide: a lesson whose
+# own named guard FAILED on a task the lesson demonstrably shaped surfaces as
+# needs_reassessment for founder review — a signal, never an automatic mutation of the
+# lesson (this module's "SIGNAL PRODUCER != TRUTH WRITER" rule).
+#
+# The edge matters: observations are counted ONLY where an engineering_lesson_plan_decisions
+# row proves the lesson actually shaped that task's plan. A guard that passed on some
+# unrelated task is not evidence about the rule — exactly the attribution failure 0058's
+# docstring warned the observation table alone could not avoid.
+# --------------------------------------------------------------------------------------
+
+
+@dataclass
+class LessonEffectiveness:
+    """One lesson's standing, from applied-count (decisions) to guard outcomes
+    (observations joined through the provenance edge). All counts are OBSERVATIONS, never
+    causal claims."""
+
+    lesson_id: uuid.UUID
+    problem: str
+    general_rule: str
+    regression_test: str | None
+    applied_count: int
+    guard_held: int
+    guard_failed: int
+    guard_unusable: int
+    guard_not_exercised: int
+    keep_ratio: float | None  # held / (held + failed) — None when no verdict was ever reached
+    needs_reassessment: bool
+
+
+def lesson_effectiveness(
+    db: Session,
+    *,
+    owner_id: uuid.UUID,
+    lesson_ids: list[uuid.UUID] | None = None,
+    limit: int = 100,
+) -> list[LessonEffectiveness]:
+    """Roll up decisions (migration 0074) joined to guard observations (migration 0058) per
+    lesson, for THIS owner's plans. Owner-scoped both by the decisions table's RLS and by
+    the explicit filter (defense in depth, the codebase's standing convention).
+
+    `keep_ratio` is deliberately computed over VERDICTS only (held + failed): a guard that
+    was not exercised or was unusable says nothing about whether the rule holds, and folding
+    those into the denominator would flatter a rule that never runs. `needs_reassessment`
+    is triggered ONLY by guard_failed — the one outcome that contradicts the lesson's own
+    claim — never by guard_unusable/not_exercised (those indict the target path or the
+    evidence, not the rule)."""
+    decisions_sql = """
+        WITH decisions AS (
+            SELECT d.lesson_id, d.task_id
+            FROM engineering_lesson_plan_decisions d
+            WHERE d.owner_id = :owner
+              {lesson_filter}
+        )
+        SELECT d.lesson_id::text AS lesson_id,
+               count(DISTINCT d.task_id)                                AS applied_count,
+               count(o.id) FILTER (WHERE o.outcome IN ('guard_held', 'guard_held_task_failed_elsewhere')) AS held,
+               count(o.id) FILTER (WHERE o.outcome = 'guard_failed')    AS failed,
+               count(o.id) FILTER (WHERE o.outcome = 'guard_unusable')  AS unusable,
+               count(o.id) FILTER (WHERE o.outcome = 'guard_not_exercised') AS not_exercised
+        FROM decisions d
+        LEFT JOIN engineering_lesson_guard_observations o
+               ON o.task_id = d.task_id AND o.lesson_id = d.lesson_id AND o.owner_id = :owner
+        GROUP BY d.lesson_id
+        ORDER BY applied_count DESC, d.lesson_id
+        LIMIT :limit
+    """
+    lesson_filter = ""
+    params: dict[str, Any] = {"owner": str(owner_id), "limit": int(limit)}
+    if lesson_ids:
+        lesson_filter = "AND d.lesson_id IN :lesson_ids"
+        params["lesson_ids"] = tuple(str(l) for l in lesson_ids)
+    rows = db.execute(text(decisions_sql.format(lesson_filter=lesson_filter)), params).all()
+    if not rows:
+        return []
+
+    lessons = (
+        db.query(EngineeringLesson)
+        .filter(EngineeringLesson.id.in_([uuid.UUID(r[0]) for r in rows]))
+        .all()
+    )
+    by_id = {l.id: l for l in lessons}
+
+    out: list[LessonEffectiveness] = []
+    for lesson_id_text, applied, held, failed, unusable, not_exercised in rows:
+        lesson = by_id.get(uuid.UUID(lesson_id_text))
+        if lesson is None:
+            continue
+        verdicts = int(held) + int(failed)
+        out.append(
+            LessonEffectiveness(
+                lesson_id=lesson.id,
+                problem=lesson.problem,
+                general_rule=lesson.general_rule,
+                regression_test=lesson.regression_test,
+                applied_count=int(applied),
+                guard_held=int(held),
+                guard_failed=int(failed),
+                guard_unusable=int(unusable),
+                guard_not_exercised=int(not_exercised),
+                keep_ratio=(int(held) / verdicts) if verdicts else None,
+                needs_reassessment=int(failed) > 0,
+            )
+        )
+    return out
+
+
+def format_lesson_standing_for_advisory(standing: list[LessonEffectiveness]) -> str:
+    """The one-line standing summary the overcorrection advisory appends when it fires, so
+    the audit row's readers see not just 'guards dominate this plan' but WHAT those rules'
+    own track record is. Lessons with no verdicts yet are named honestly as such."""
+    if not standing:
+        return ""
+    parts = []
+    for s in standing:
+        if s.needs_reassessment:
+            parts.append(
+                f"{s.lesson_id}: NEEDS REASSESSMENT — its own guard failed {s.guard_failed}x where applied"
+            )
+        elif s.guard_held > 0:
+            parts.append(f"{s.lesson_id}: guard held {s.guard_held}/{s.guard_held + s.guard_failed} verdicts")
+        else:
+            parts.append(f"{s.lesson_id}: no guard verdicts yet")
+    return " Lesson standing: " + "; ".join(parts) + "."
+
+
+def recurring_failure_clusters(db: Session, *, owner_id: uuid.UUID) -> list[dict]:
+    """DETECTION ONLY: shared-root-cause clusters across DIFFERENT tasks — lessons whose
+    guard FAILED on >= 2 DISTINCT tasks and which share an affected_component (the same
+    broken subsystem producing repeated guard failures no matter which rule was applied to
+    guard it). This is the "identify shared root causes" signal the self-correction loop
+    was missing: per-lesson effectiveness already says the rule failed; this says the
+    COMPONENT keeps failing under every rule pointed at it, which is evidence about the
+    component, not any one lesson.
+
+    Conservative by construction: detection surfaces clusters in the audit trail (and in
+    selection summaries for excluded/flagged lessons); it never auto-disputes lessons,
+    never mutates anything, and never auto-resolves — resolution is founder/async-tick
+    territory (the same boundary lesson_conflicts.py draws). Owner-scoped end to end:
+    both observations and the lesson join run under the caller's RLS GUC and explicit
+    owner filters.
+
+    A cluster needs >= 2 DISTINCT failed tasks. A lesson that failed twice on the SAME
+    task's repeated attempts is a retry pattern, not a cross-task recurrence — exactly the
+    single-failure-must-not-suppress discipline, applied at cluster granularity."""
+    # Round 9 M1: each cluster now also carries the lessons' recorded ROOT CAUSES, the
+    # distinct GUARD TARGETS (the measurable corrective instruments — a guard that runs is
+    # a verifiable action, a wish is not), and a deterministic corrective_action text.
+    # The action is a REVIEW instruction, never an automatic mutation: only a founder or
+    # the async tick resolves a cluster, exactly like lesson_conflicts.py's boundary.
+    rows = db.execute(
+        text("""
+            SELECT l.affected_component,
+                   array_agg(DISTINCT l.id::text)                AS lesson_ids,
+                   array_agg(DISTINCT o.task_id::text)           AS distinct_failed_tasks,
+                   count(DISTINCT o.task_id)                     AS task_count,
+                   array_agg(DISTINCT l.general_rule)            AS general_rules,
+                   array_agg(DISTINCT l.root_cause)              AS root_causes,
+                   array_remove(array_agg(DISTINCT l.regression_test), NULL) AS guard_targets
+            FROM engineering_lesson_guard_observations o
+            JOIN engineering_lessons l ON l.id = o.lesson_id
+            WHERE o.owner_id = :owner AND o.outcome = 'guard_failed'
+            GROUP BY l.affected_component
+            HAVING count(DISTINCT o.task_id) >= 2
+            ORDER BY task_count DESC, l.affected_component
+        """),
+        {"owner": str(owner_id)},
+    ).all()
+
+    return [
+        {
+            "affected_component": component,
+            "lesson_ids": [str(lid) for lid in lesson_ids],
+            "distinct_failed_tasks": [str(tid) for tid in failed_tasks],
+            "task_count": int(task_count),
+            "general_rules": list(general_rules),
+            "root_causes": list(root_causes),
+            "guard_targets": list(guard_targets),
+            "corrective_action": (
+                f"review component '{component}' across {len(lesson_ids)} rule(s) and "
+                f"{int(task_count)} failed tasks; keep {len(set(guard_targets))} distinct "
+                "guard(s) running on every new task for this component and escalate to "
+                "founder review if the failures continue"
+            ),
+        }
+        for component, lesson_ids, failed_tasks, task_count, general_rules, root_causes, guard_targets in rows
+    ]

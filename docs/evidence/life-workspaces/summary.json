@@ -1,0 +1,43 @@
+{
+  "branch": "freebuff/life-workspaces",
+  "code_sha": "83c87049646cf2a52bc1baeb0527776b99fe5a85",
+  "base": "04c82c3aa4ea411835c48561f6c03cef4bb87999",
+  "migrations": ["0093_life_workspaces", "0094_workspace_sync_and_supervised_goals"],
+  "backend_tests": {
+    "passed": 15,
+    "failed": 0,
+    "command": "pytest tests/backend/test_workspaces_api.py tests/backend/test_projects_detail.py tests/backend/chat/test_chat_request_idempotency.py"
+  },
+  "mainai_execution_regression": {
+    "passed": 58,
+    "failed": 0,
+    "command": "pytest tests/backend/test_mainai_execution_api.py tests/backend/test_mainai_execution_planner.py"
+  },
+  "frontend_lint": {
+    "verdict": "PASS",
+    "errors": 0,
+    "warnings": 1,
+    "warning_note": "pre-existing next/no-location-assign-relative-destination in lib/api.ts"
+  },
+  "frontend_build": {
+    "verdict": "PASS",
+    "workspace_routes": ["/workspaces", "/workspaces/[id]"]
+  },
+  "browser": {
+    "spec": "frontend/e2e/workspaces.spec.ts",
+    "expected": 2,
+    "unexpected": 0,
+    "flaky": 0,
+    "skipped": 0,
+    "duration_ms": 16801.42,
+    "verdict": "PASS"
+  },
+  "first_cycle_go": false,
+  "production_changes": false,
+  "notes": [
+    "Browser uses the existing deterministic E2E provider, not a real external model.",
+    "Sync is a bounded reconciliation ledger over existing durable state, not a second ingestion engine.",
+    "Workspace context is bounded and owner-scoped; it grants no execution authority.",
+    "Claude owns V7/R15 and migration reconciliation; migrations are additive after 0092."
+  ]
+}

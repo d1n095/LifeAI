@@ -179,14 +179,22 @@ def _build_task_prompt(task: AgentTask) -> str:
     return "\n".join(lines)
 
 
-async def dispatch_task(db: Session, task_id: uuid.UUID, *, dispatched_by: str) -> AgentTaskEvent:
+async def dispatch_task(db: Session, task_id: uuid.UUID, *, owner_id: uuid.UUID, dispatched_by: str) -> AgentTaskEvent:
     """Sends the task to the code agent (a chat_with_fallback() call, same provider chain as
     ordinary chat) and records the raw response as an event. Does not parse/apply the diff —
     that is a deliberately separate, later increment (see module docstring's scope note); this
     slice proves the dispatch -> record -> review -> propose chain end to end."""
     task = get_task(db, task_id)
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=_build_task_prompt(task))]
-    result, attempted = await chat_with_fallback(db, messages)
+    result, attempted = await chat_with_fallback(
+        db,
+        messages,
+        owner_id=owner_id,
+        purpose="agent_dispatch",
+        requested_by="agent_orchestration.dispatch_task",
+        task_id=task.id,
+        effect_guard=True,
+    )
     return _record_event(
         db,
         task,
@@ -232,7 +240,7 @@ def _latest_test_result_passed(db: Session, task_id: uuid.UUID) -> bool | None:
     return None
 
 
-async def review_task(db: Session, task_id: uuid.UUID, *, reviewed_by: str) -> AgentTaskEvent:
+async def review_task(db: Session, task_id: uuid.UUID, *, owner_id: uuid.UUID, reviewed_by: str) -> AgentTaskEvent:
     """The review agent's verdict is BLOCKED (raises) if no test results have been recorded
     yet — MainAI may not fabricate or skip verification (CLAUDE.md section 6's explicit
     prohibition). The verdict itself always comes from the provider's own answer, parsed from
@@ -249,7 +257,15 @@ async def review_task(db: Session, task_id: uuid.UUID, *, reviewed_by: str) -> A
         f"## Testresultat\n{'GRÖNA' if tests_passed else 'RÖDA/EJ GRÖNA'}"
     )
     messages = [Message(role="system", content=REVIEW_AGENT_SYSTEM_PROMPT), Message(role="user", content=review_prompt)]
-    result, attempted = await chat_with_fallback(db, messages)
+    result, attempted = await chat_with_fallback(
+        db,
+        messages,
+        owner_id=owner_id,
+        purpose="agent_review",
+        requested_by="agent_orchestration.review_task",
+        task_id=task.id,
+        effect_guard=True,
+    )
 
     first_line = result.content.strip().splitlines()[0].strip() if result.content.strip() else ""
     verdict = _parse_review_verdict(first_line)

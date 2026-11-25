@@ -40,6 +40,7 @@ def get_conversation(conversation_id: uuid.UUID, db: Session = Depends(get_db)):
     )
     return ConversationDetailOut(
         id=conversation.id,
+        project_id=conversation.project_id,
         title=conversation.title,
         created_at=conversation.created_at,
         updated_at=conversation.updated_at,

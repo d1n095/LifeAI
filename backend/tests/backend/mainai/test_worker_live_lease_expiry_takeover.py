@@ -112,7 +112,17 @@ async def test_worker_live_lease_expiry_takeover_continues_goal(
         default_provider = "fake-local"
         default_model = "planner-v2"
 
-        def __init__(self, db, *, provider_name=None, model=None):
+        def __init__(
+            self,
+            db,
+            *,
+            provider_name=None,
+            model=None,
+            owner_id=None,
+            task_id=None,
+            goal_id=None,
+            job_id=None,
+        ):
             self.db = db
 
         async def propose(self, *args, **kwargs):

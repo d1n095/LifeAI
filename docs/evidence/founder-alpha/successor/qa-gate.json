@@ -1,0 +1,101 @@
+{
+  "generated_at": "2026-11-21T14:52:49.243307+00:00",
+  "commit": "6a3d3d389f8a85b53a80d2c223cd711454da5eb3",
+  "status": "BLOCKED",
+  "checks": [
+    {
+      "check": "exact commit SHA",
+      "status": "PASS",
+      "actual": "6a3d3d389f8a85b53a80d2c223cd711454da5eb3",
+      "expected": "6a3d3d389f8a85b53a80d2c223cd711454da5eb3"
+    },
+    {
+      "check": "tracked tree clean",
+      "status": "PASS",
+      "detail": "clean"
+    },
+    {
+      "check": "PostgreSQL reachable",
+      "status": "PASS"
+    },
+    {
+      "check": "Redis reachable",
+      "status": "PASS"
+    },
+    {
+      "check": "Alembic revision",
+      "status": "PASS",
+      "actual": "0091",
+      "expected": "0091"
+    },
+    {
+      "check": "installation matrix",
+      "status": "PASS",
+      "actual": {
+        "PASS": 12,
+        "FAIL": 0,
+        "BLOCKED": 0
+      },
+      "expected": {
+        "FAIL": 0,
+        "BLOCKED": 0,
+        "PASS": ">=12"
+      }
+    },
+    {
+      "check": "resource/performance probe",
+      "status": "PASS",
+      "detail": {
+        "status": "PASS",
+        "blockers": []
+      }
+    },
+    {
+      "check": "backup/restore recovery",
+      "status": "PASS",
+      "detail": "PASS"
+    },
+    {
+      "check": "backend tests",
+      "status": "PASS",
+      "tests": 527,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 2
+    },
+    {
+      "check": "real browser E2E",
+      "status": "PASS",
+      "stats": {
+        "startTime": "2026-11-21T13:57:16.784Z",
+        "duration": 61255.17700000001,
+        "expected": 12,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      }
+    },
+    {
+      "check": "F01-F24 program matrix",
+      "status": "BLOCKED",
+      "summary": {
+        "PASS": 21,
+        "FAIL": 0,
+        "BLOCKED": 3,
+        "SKIP": 0
+      },
+      "blocked": [
+        "F04",
+        "F23",
+        "F24"
+      ]
+    }
+  ],
+  "known_limitations": [
+    "Z.ai CLI-dependent tests are not run in this environment.",
+    "`zip`-dependent tests are skipped when the binary is unavailable.",
+    "pg_stat_statements is not installed, so slow-query statistics are BLOCKED rather than guessed.",
+    "Resource-exhaustion behavior (CPU/memory/disk limits) is not measured.",
+    "Exact-head GitHub Actions cannot run without an approved push."
+  ]
+}

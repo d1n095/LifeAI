@@ -1,0 +1,394 @@
+{
+  "generated_at": "2026-11-21T22:14:46.399831+00:00",
+  "commit": "6601fac3b83d29e6ac755affc2eac3abe1912d2c",
+  "status": "BLOCKED",
+  "run_id": "a5162d9876",
+  "first_cycle_go": false,
+  "checks": [
+    {
+      "check": "exact commit SHA",
+      "status": "PASS",
+      "detail": "{\"actual\": \"6601fac3b83d29e6ac755affc2eac3abe1912d2c\", \"expected\": \"6601fac3b83d29e6ac755affc2eac3abe1912d2c\"}",
+      "data": {},
+      "at": "2026-11-21T22:11:56.565645+00:00"
+    },
+    {
+      "check": "tracked tree clean",
+      "status": "PASS",
+      "detail": "clean",
+      "data": {},
+      "at": "2026-11-21T22:11:56.571377+00:00"
+    },
+    {
+      "check": "pg_dump/pg_restore available",
+      "status": "PASS",
+      "detail": "/tmp/lifeai-testenv/root/usr/lib/postgresql/16/bin",
+      "data": {},
+      "at": "2026-11-21T22:11:56.571743+00:00"
+    },
+    {
+      "check": "PostgreSQL reachable",
+      "status": "PASS",
+      "detail": "postgresql://postgres@127.0.0.1:55432/postgres",
+      "data": {},
+      "at": "2026-11-21T22:11:56.576543+00:00"
+    },
+    {
+      "check": "Redis reachable",
+      "status": "PASS",
+      "detail": "redis://@127.0.0.1:56379/14",
+      "data": {},
+      "at": "2026-11-21T22:11:56.579758+00:00"
+    },
+    {
+      "check": "Node/npm available",
+      "status": "PASS",
+      "detail": "{\"node\": \"v22.23.5\", \"npm\": \"10.9.9\"}",
+      "data": {},
+      "at": "2026-11-21T22:11:56.742778+00:00"
+    },
+    {
+      "check": "fresh installation order",
+      "status": "PASS",
+      "detail": "ensure_app_role -> alembic upgrade head -> apply_runtime_privileges",
+      "data": {
+        "steps": [
+          {
+            "step": "ensure_app_role",
+            "exit_code": 0,
+            "stdout_tail": "mainai_app-rollen finns redan — lösenordet ändras INTE (sätt MAINAI_APP_ROTATE_PASSWORD=true för att rotera det explicit).\nmainai_app-rollen är klar.\n",
+            "stderr_tail": ""
+          },
+          {
+            "step": "alembic_upgrade_head",
+            "exit_code": 0,
+            "stdout_tail": "",
+            "stderr_tail": ", Founder Alpha R14 (rebuilt marker: 2026-11-19): READ-ONLY GitHub development-status snapshots.\nINFO  [alembic.runtime.migration] Running upgrade 0089 -> 0090, R15 successor: durable client idempotency for POST /api/chat (migration 0090).\nINFO  [alembic.runtime.migration] Running upgrade 0090 -> 0091, R15 successor: durable billable chat-attempt identity (migration 0091).\nINFO  [alembic.runtime.migration] Running upgrade 0091 -> 0092, V4: owner-scoped runtime incident history (migration 0092).\n"
+          },
+          {
+            "step": "apply_runtime_privileges",
+            "exit_code": 0,
+            "stdout_tail": "apply_runtime_privileges: privilege state verified correct.\n",
+            "stderr_tail": ""
+          }
+        ]
+      },
+      "at": "2026-11-21T22:12:00.346295+00:00"
+    },
+    {
+      "check": "database at Alembic head",
+      "status": "PASS",
+      "detail": "current=0092, head=0092",
+      "data": {
+        "head": "0092"
+      },
+      "at": "2026-11-21T22:12:02.225505+00:00"
+    },
+    {
+      "check": "liveness endpoint",
+      "status": "PASS",
+      "detail": "{\"status\":\"ok\"}",
+      "data": {
+        "status_code": 200
+      },
+      "at": "2026-11-21T22:12:06.650800+00:00"
+    },
+    {
+      "check": "readiness endpoint",
+      "status": "PASS",
+      "detail": "{\"status\":\"ok\"}",
+      "data": {
+        "status_code": 200
+      },
+      "at": "2026-11-21T22:12:06.650885+00:00"
+    },
+    {
+      "check": "anonymous protected routes rejected",
+      "status": "PASS",
+      "detail": "{\"library\": 401, \"mainai_goals\": 401, \"agent_tasks\": 401, \"incidents\": 401}",
+      "data": {},
+      "at": "2026-11-21T22:12:06.683469+00:00"
+    },
+    {
+      "check": "wrong password rejected",
+      "status": "PASS",
+      "detail": "{\"status_code\": 401}",
+      "data": {},
+      "at": "2026-11-21T22:12:06.846945+00:00"
+    },
+    {
+      "check": "founder login",
+      "status": "PASS",
+      "detail": "{\"user_id\": \"00000000-0000-0000-0000-000000000001\", \"email\": \"founder@lifeos.local\"}",
+      "data": {},
+      "at": "2026-11-21T22:12:07.019544+00:00"
+    },
+    {
+      "check": "session /me",
+      "status": "PASS",
+      "detail": "{\"status_code\": 200}",
+      "data": {},
+      "at": "2026-11-21T22:12:07.028287+00:00"
+    },
+    {
+      "check": "session refresh",
+      "status": "PASS",
+      "detail": "{\"status_code\": 200}",
+      "data": {},
+      "at": "2026-11-21T22:12:07.041852+00:00"
+    },
+    {
+      "check": "mutating request without CSRF rejected",
+      "status": "PASS",
+      "detail": "{\"status_code\": 403}",
+      "data": {},
+      "at": "2026-11-21T22:12:07.046813+00:00"
+    },
+    {
+      "check": "project create, task and scoped detail",
+      "status": "PASS",
+      "detail": "{\"project\": 200, \"task\": 200, \"detail\": 200, \"project_id\": \"49883c13-eb37-478d-bf10-dcdd5b2a3b89\"}",
+      "data": {},
+      "at": "2026-11-21T22:12:07.088848+00:00"
+    },
+    {
+      "check": "logout",
+      "status": "PASS",
+      "detail": "{\"status_code\": 200}",
+      "data": {},
+      "at": "2026-11-21T22:12:07.102521+00:00"
+    },
+    {
+      "check": "logout invalidates protected access",
+      "status": "PASS",
+      "detail": "{\"status_code\": 401}",
+      "data": {},
+      "at": "2026-11-21T22:12:07.105308+00:00"
+    },
+    {
+      "check": "12-step founder journey",
+      "status": "PASS",
+      "detail": "{\"exit\": 0, \"status\": \"PASS\", \"failures\": [], \"blockers\": [], \"provider_mode\": \"fake\"}",
+      "data": {
+        "evidence": "run-a5162d9876/founder-journey.json"
+      },
+      "at": "2026-11-21T22:12:14.793838+00:00"
+    },
+    {
+      "check": "liveness endpoint",
+      "status": "PASS",
+      "detail": "{\"status\":\"ok\"}",
+      "data": {
+        "status_code": 200
+      },
+      "at": "2026-11-21T22:12:19.077418+00:00"
+    },
+    {
+      "check": "readiness endpoint",
+      "status": "PASS",
+      "detail": "{\"status\":\"ok\"}",
+      "data": {
+        "status_code": 200
+      },
+      "at": "2026-11-21T22:12:19.077464+00:00"
+    },
+    {
+      "check": "restart preserves conversation, source and task evidence",
+      "status": "PASS",
+      "detail": "{\"conversation\": 200, \"source\": 200, \"task\": 200, \"conversation_ok\": true, \"source_ok\": true, \"task_ok\": true}",
+      "data": {},
+      "at": "2026-11-21T22:12:19.310008+00:00"
+    },
+    {
+      "check": "backup/restore corrupt and partial rejection",
+      "status": "PASS",
+      "detail": "{\"exit\": 0, \"status\": \"PASS\", \"checks\": [{\"check\": \"valid dump created\", \"status\": \"PASS\", \"detail\": \"ok\"}, {\"check\": \"valid dump has a readable TOC\", \"status\": \"PASS\", \"detail\": \"ok\"}, {\"check\": \"valid dump restores\", \"status\": \"PASS\", \"detail\": \"ok\"}, {\"check\": \"valid restore row counts match\", \"status\": \"PASS\", \"detail\": {\"source\": {\"users\": 1, \"conversations\": 2, \"messages\": 4, \"documents\": 1, \"document_chunks\": 1, \"knowledge_import_jobs\": 1, \"memory_source_units\": 5}, \"restored\": {\"users\": 1, \"conversations\": 2, \"messages\": 4, \"documents\": 1, \"document_chunks\": 1, \"knowledge_import_jobs\": 1, \"memory_source_units\": 5}}}, {\"check\": \"corrupt dump checksum differs\", \"status\": \"PASS\", \"detail\": \"c1560287727109274ff83e3df0e5045838e696dbc478f66fe56480578d5361fa\"}, {\"check\": \"corrupt dump is rejected\", \"status\": \"PASS\", \"detail\": {\"list_exit\": 1, \"restore_exit\": 1, \"restore_error\": \"pg_restore: error: input file does not appear to be a valid archive\\n\"}}, {\"check\": \"partial dump is rejected\", \"status\": \"PASS\", \"detail\": {\"list_exit\": 1, \"restore_exit\": 1, \"restore_error\": \"pg_restore: error: could not read from input file: end of file\\n\"}}, {\"check\": \"source database unchanged\", \"status\": \"PASS\", \"detail\": {\"before\": {\"users\": 1, \"conversations\": 2, \"messages\": 4, \"documents\": 1, \"document_chunks\": 1, \"knowledge_import_jobs\": 1, \"memory_source_units\": 5}, \"after\": {\"users\": 1, \"conversations\": 2, \"messages\": 4, \"documents\": 1, \"document_chunks\": 1, \"knowledge_import_jobs\": 1, \"memory_source_units\": 5}}}]}",
+      "data": {},
+      "at": "2026-11-21T22:12:24.155209+00:00"
+    },
+    {
+      "check": "backup restore into disposable database and API verification",
+      "status": "PASS",
+      "detail": "{\"exit\": 0, \"status\": \"PASS\", \"summary\": null, \"stderr_tail\": \"\"}",
+      "data": {},
+      "at": "2026-11-21T22:12:34.083981+00:00"
+    },
+    {
+      "check": "migration upgrade / rollback / re-upgrade",
+      "status": "PASS",
+      "detail": "{\"steps\": [{\"step\": \"upgrade_head\", \"exit_code\": 0, \"current\": \"0092\"}, {\"step\": \"downgrade_one\", \"exit_code\": 0, \"current\": \"0091\"}, {\"step\": \"upgrade_head_again\", \"exit_code\": 0, \"current\": \"0092\"}], \"final_head\": \"0092\"}",
+      "data": {},
+      "at": "2026-11-21T22:12:45.334218+00:00"
+    },
+    {
+      "check": "resource and latency probe",
+      "status": "PASS",
+      "detail": "{\"exit\": 0, \"status\": \"PASS\", \"latencies\": {\"/api/documents\": 14.74, \"/api/conversations\": 9.73, \"/api/mainai/project-status\": 85.71}, \"blockers\": []}",
+      "data": {},
+      "at": "2026-11-21T22:12:53.818857+00:00"
+    },
+    {
+      "check": "endurance soak",
+      "status": "BLOCKED",
+      "detail": "{\"exit\": 3, \"status\": \"BLOCKED\", \"duration_seconds\": 20, \"required_seconds\": 86400, \"f23_status\": \"BLOCKED\", \"blockers\": [\"duration_seconds=20 < required 14400; F23 cannot be claimed from this run\"], \"failures\": []}",
+      "data": {},
+      "at": "2026-11-21T22:13:21.335938+00:00"
+    },
+    {
+      "check": "security, health and regression tests",
+      "status": "PASS",
+      "detail": "{\"exit\": 0, \"totals\": {\"tests\": 59, \"failures\": 0, \"errors\": 0, \"skipped\": 0}, \"tail\": \" objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).\\n    deleted_at=datetime.utcnow() if deleted else None,\\n\\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\\n- generated xml file: /home/lifeai-agent/work/LifeAI/docs/evidence/founder-alpha/program/run-a5162d9876/backend-tests.xml -\\n59 passed, 96 warnings in 69.33s (0:01:09)\\n/tmp/r15-venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:208: PytestDeprecationWarning: The configuration option \\\"asyncio_default_fixture_loop_scope\\\" is unset.\\nThe event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: \\\"function\\\", \\\"class\\\", \\\"module\\\", \\\"package\\\", \\\"session\\\"\\n\\n  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))\\n\"}",
+      "data": {},
+      "at": "2026-11-21T22:14:32.582429+00:00"
+    },
+    {
+      "check": "liveness endpoint",
+      "status": "PASS",
+      "detail": "{\"status\":\"ok\"}",
+      "data": {
+        "status_code": 200
+      },
+      "at": "2026-11-21T22:14:36.360109+00:00"
+    },
+    {
+      "check": "readiness endpoint",
+      "status": "PASS",
+      "detail": "{\"status\":\"ok\"}",
+      "data": {
+        "status_code": 200
+      },
+      "at": "2026-11-21T22:14:36.360158+00:00"
+    },
+    {
+      "check": "browser acceptance",
+      "status": "PASS",
+      "detail": "{\"exit\": 0, \"tail\": \"                  \\\"annotations\\\": [],\\n                  \\\"expectedStatus\\\": \\\"passed\\\",\\n                  \\\"projectId\\\": \\\"chromium\\\",\\n                  \\\"projectName\\\": \\\"chromium\\\",\\n                  \\\"results\\\": [\\n                    {\\n                      \\\"workerIndex\\\": 0,\\n                      \\\"parallelIndex\\\": 0,\\n                      \\\"status\\\": \\\"passed\\\",\\n                      \\\"duration\\\": 4792,\\n                      \\\"errors\\\": [],\\n                      \\\"stdout\\\": [],\\n                      \\\"stderr\\\": [],\\n                      \\\"retry\\\": 0,\\n                      \\\"startTime\\\": \\\"2026-11-21T22:14:40.657Z\\\",\\n                      \\\"annotations\\\": [],\\n                      \\\"attachments\\\": []\\n                    }\\n                  ],\\n                  \\\"status\\\": \\\"expected\\\"\\n                }\\n              ],\\n              \\\"id\\\": \\\"df981b0f8f00200fe854-803c967f3cba905e0a36\\\",\\n              \\\"file\\\": \\\"founder-alpha-resilience.spec.ts\\\",\\n              \\\"line\\\": 168,\\n              \\\"column\\\": 7\\n            }\\n          ]\\n        }\\n      ]\\n    }\\n  ],\\n  \\\"errors\\\": [],\\n  \\\"stats\\\": {\\n    \\\"startTime\\\": \\\"2026-11-21T22:14:38.286Z\\\",\\n    \\\"duration\\\": 7806.16,\\n    \\\"expected\\\": 1,\\n    \\\"skipped\\\": 0,\\n    \\\"unexpected\\\": 0,\\n    \\\"flaky\\\": 0\\n  }\\n}\\n\"}",
+      "data": {},
+      "at": "2026-11-21T22:14:46.130931+00:00"
+    }
+  ],
+  "artifacts": {
+    "commit": "6601fac3b83d29e6ac755affc2eac3abe1912d2c",
+    "migration_head": "0092",
+    "startup_seconds": 3.77,
+    "founder_journey": {
+      "conversation_id": "cbeb9da3-4e6c-493c-9229-7d2b02223e5b",
+      "stream_user_message_id": "9208dfe0-659f-41df-913c-74bd4a1d3b41",
+      "stream_assistant_message_id": "f7541103-f4f2-4e0b-8fb1-bd6daa762c0c",
+      "provider": "openai",
+      "model": "gpt-4o-mini",
+      "stream_latency_ms": 896.38,
+      "stream_delta_count": 3,
+      "stream_text": "Hej! Detta ar ett riktigt svar fran den simulerade AI-motorn under E2E-testet. Kostnadsloggning, Trust Engine och konversationshistorik gar via de riktiga API-vagarna.",
+      "import_job_id": "f17f90cb-572d-4ea7-a07f-a0f0038c5be2",
+      "source_id": "01ca9093-5b65-4b5d-ac29-08c4f7cc3573",
+      "source_status": "indexed",
+      "source_chunk_count": 1,
+      "source_marker": "V6LAB-KNOWLEDGE-06756fedab5e",
+      "source_filename": "v6-testlab-f6c2d7f4.txt",
+      "retrieval_sources": 1,
+      "retrieval_cited_source": true,
+      "goal_id": "a87f261a-4695-46f4-af05-2efd41947327",
+      "task_id": "107121c3-840f-4150-bb0f-abdf927a75b6",
+      "task_type": "read_only_audit",
+      "approval_required": true,
+      "envelope_id": "7e6ddb92-6d5b-408f-9404-970371645634",
+      "provider_spend_authorization_id": "2146d481-eeea-46e0-a7b8-f30eb8a36e86",
+      "task_status": "completed",
+      "task_events": [
+        "completed",
+        "verification_passed",
+        "dispatched",
+        "approval_granted",
+        "ready",
+        "created"
+      ],
+      "cancelled_job_id": "976c09f2-be46-493f-af96-6b2b2bb7c1cb",
+      "cancelled_job_status": "cancelled",
+      "cancelled_job_events": [
+        "created",
+        "cancel_requested",
+        "claimed",
+        "phase_changed",
+        "progress_updated",
+        "cancel_acknowledged",
+        "cancelled"
+      ],
+      "audit_rows": 12
+    },
+    "founder_journey_steps": [
+      {
+        "step": "authentication",
+        "status": "PASS",
+        "detail": "founder authenticated with session + CSRF"
+      },
+      {
+        "step": "unauthorized_routes",
+        "status": "PASS",
+        "detail": "all protected routes rejected anonymous callers"
+      },
+      {
+        "step": "streaming_chat",
+        "status": "PASS",
+        "detail": "SSE start/done received; reply length 167; provider=openai"
+      },
+      {
+        "step": "streaming_delivery",
+        "status": "PASS",
+        "detail": "3 SSE delta(s) reached the client before done"
+      },
+      {
+        "step": "conversation_history",
+        "status": "PASS",
+        "detail": "reopened 2 persisted message(s)"
+      },
+      {
+        "step": "document_ingestion",
+        "status": "PASS",
+        "detail": "job=completed, source=indexed, chunks=1"
+      },
+      {
+        "step": "pgvector_retrieval",
+        "status": "PASS",
+        "detail": "assistant=succeeded, sources=1, cited_uploaded_source=True"
+      },
+      {
+        "step": "supervised_task",
+        "status": "PASS",
+        "detail": "goal/plan created task 107121c3-840f-4150-bb0f-abdf927a75b6 (read_only_audit), approval_required=True"
+      },
+      {
+        "step": "approval_authorization",
+        "status": "PASS",
+        "detail": "explicit founder scope + provider-spend authorization and task approval recorded"
+      },
+      {
+        "step": "approved_execution",
+        "status": "PASS",
+        "detail": "approved isolated read-only task completed with 6 event(s)"
+      },
+      {
+        "step": "active_operation_cancel",
+        "status": "PASS",
+        "detail": "durable job cancel status=cancelled, events=['created', 'cancel_requested', 'claimed', 'phase_changed', 'progress_updated', 'cancel_acknowledged', 'cancelled']"
+      },
+      {
+        "step": "evidence_and_audit",
+        "status": "PASS",
+        "detail": "conversation_persisted=True, task_events=6, audit_rows=12"
+      }
+    ]
+  },
+  "environment": {
+    "database": "postgresql://postgres@127.0.0.1:55432/lifeos_program_a5162d9876",
+    "redis": "redis://@127.0.0.1:56379/14",
+    "backend_port": 42807,
+    "pg_bin": "/tmp/lifeai-testenv/root/usr/lib/postgresql/16/bin"
+  },
+  "limitations": [
+    "The founder journey and API checks use the existing deterministic E2E provider; real Ollama is not available.",
+    "A soak shorter than 24 hours is BLOCKED for endurance, never PASS.",
+    "Browser acceptance is BLOCKED when Chromium cannot load its system libraries.",
+    "Docker daemon access is unavailable; no Docker/Compose lab was started."
+  ]
+}

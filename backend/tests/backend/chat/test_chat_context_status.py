@@ -23,11 +23,16 @@ from app.models.document import ActiveTruthStatus, Document, DocumentSource, Ind
 from app.models.document_chunk import DocumentChunk
 from app.models.import_job import ImportJob, ImportJobStatus
 from app.providers.openai_provider import OpenAIProvider
+from app.providers.ollama_provider import OllamaProvider
 
 FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
 DIM = get_settings().embedding_dim
 MATCHING_VECTOR = [0.5] * DIM
+# The active embedding space these chunks are stamped with (see app/rag/embedding_space.py):
+# retrieval only ranks chunks whose (model, native_dim) matches the query vector's, so a row
+# inserted WITHOUT this identity is invisible to search.
+EMBED_MODEL = "nomic-embed-text"
 FAKE_SECRET = "sk-super-secret-value-that-must-never-reach-the-chat-response"
 
 
@@ -42,6 +47,8 @@ def _fake_chat_ok(monkeypatch):
     `search_provider_unavailable` from a real embed() failure. Tests 3 and 7 override embed()
     again afterwards to specifically exercise that failure path."""
     from app.providers.base import ChatResult
+    monkeypatch.setattr(get_settings(), "default_embedding_provider", "ollama")
+    monkeypatch.setattr(get_settings(), "default_embedding_model", EMBED_MODEL)
 
     async def _fake_chat(self, messages, model, **kwargs):
         return ChatResult(content="Testsvar.", provider="openai", model=model, raw_usage={"prompt_tokens": 10, "completion_tokens": 5})
@@ -50,7 +57,7 @@ def _fake_chat_ok(monkeypatch):
         return [MATCHING_VECTOR for _ in texts]
 
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat)
-    monkeypatch.setattr(OpenAIProvider, "embed", _fake_embed)
+    monkeypatch.setattr(OllamaProvider, "embed", _fake_embed)
 
 
 def _login(client) -> str:
@@ -166,13 +173,13 @@ def test_search_provider_unavailable_at_query_time(client, superuser_db, monkeyp
     # Even a fully indexed, healthy document must not prevent this from being reported —
     # retrieval failing THIS turn takes priority over any persisted document state.
     doc = _make_document(superuser_db, founder_id, "Indexerad fil", status=IndexStatus.indexed)
-    superuser_db.add(DocumentChunk(document_id=doc.id, owner_id=founder_id, chunk_index=0, text="Innehall.", embedding=MATCHING_VECTOR))
+    superuser_db.add(DocumentChunk(document_id=doc.id, owner_id=founder_id, chunk_index=0, text="Innehall.", embedding=MATCHING_VECTOR, embedding_model=EMBED_MODEL, embedding_native_dim=DIM))
     superuser_db.commit()
 
     async def _broken_embed(self, texts, model, **kwargs):
         raise ProviderError("OpenAI API-nyckel saknas.")
 
-    monkeypatch.setattr(OpenAIProvider, "embed", _broken_embed)
+    monkeypatch.setattr(OllamaProvider, "embed", _broken_embed)
     csrf = _login(client)
 
     res = _chat(client, csrf)
@@ -223,7 +230,22 @@ def test_no_documents_uploaded(client, _fake_chat_ok):
 def test_successful_retrieval_has_no_context_status(client, superuser_db, _fake_chat_ok):
     founder_id = _founder_id(superuser_db)
     doc = _make_document(superuser_db, founder_id, "Aktuellt dokument", status=IndexStatus.indexed)
-    superuser_db.add(DocumentChunk(document_id=doc.id, owner_id=founder_id, chunk_index=0, text="Relevant innehall.", embedding=MATCHING_VECTOR))
+    # Stamp the active embedding space (PR #333) so this chunk is retrievable exactly as a real
+    # ingested chunk — this is the one scenario in this file that requires a retrieval HIT.
+    from app.providers.registry import resolve_active
+
+    _p, _embed_model = resolve_active(superuser_db, role="embedding")
+    superuser_db.add(
+        DocumentChunk(
+            document_id=doc.id,
+            owner_id=founder_id,
+            chunk_index=0,
+            text="Relevant innehall.",
+            embedding=MATCHING_VECTOR,
+            embedding_model=_embed_model,
+            embedding_native_dim=len(MATCHING_VECTOR),
+        )
+    )
     superuser_db.commit()
     csrf = _login(client)
 
@@ -233,6 +255,65 @@ def test_successful_retrieval_has_no_context_status(client, superuser_db, _fake_
     assert body["context_status"] is None
     assert len(body["sources"]) == 1
     assert body["sources"][0]["document_id"] == str(doc.id)
+
+
+# --- 7. Chunks outside the ACTIVE embedding space (model switch / legacy rows) -----------------
+
+
+def test_chunks_with_legacy_null_identity_are_reported_as_reindex_required(
+    client, superuser_db, _fake_chat_ok
+):
+    """Rows written before the embedding-space identity columns existed carry NULL identity, so
+    app/rag/vector_store.py's active-space guard excludes them. Saying "no relevant match" there
+    would send the founder hunting for a better question while their files are in fact indexed
+    and simply uncomparable — the actionable statement is "re-index"."""
+    founder_id = _founder_id(superuser_db)
+    doc = _make_document(superuser_db, founder_id, "Gammalt dokument", status=IndexStatus.indexed)
+    superuser_db.add(
+        DocumentChunk(
+            document_id=doc.id,
+            owner_id=founder_id,
+            chunk_index=0,
+            text="Gammalt innehall.",
+            embedding=MATCHING_VECTOR,
+            # no embedding_model / embedding_native_dim: legacy identity (NULL)
+        )
+    )
+    superuser_db.commit()
+    csrf = _login(client)
+
+    res = _chat(client, csrf)
+    assert res.status_code == 200, res.text
+    status = res.json()["context_status"]
+    assert status["reason"] == "reindex_required"
+    assert status["out_of_space_chunk_count"] == 1
+    assert "indexera om" in status["message"].lower()
+
+
+def test_chunks_from_a_previous_embedding_model_are_reported_as_reindex_required(
+    client, superuser_db, _fake_chat_ok
+):
+    founder_id = _founder_id(superuser_db)
+    doc = _make_document(superuser_db, founder_id, "Forra modellen", status=IndexStatus.indexed)
+    superuser_db.add(
+        DocumentChunk(
+            document_id=doc.id,
+            owner_id=founder_id,
+            chunk_index=0,
+            text="Innehall fran en tidigare modell.",
+            embedding=MATCHING_VECTOR,
+            embedding_model="text-embedding-ada-002",
+            embedding_native_dim=DIM,
+        )
+    )
+    superuser_db.commit()
+    csrf = _login(client)
+
+    res = _chat(client, csrf)
+    status = res.json()["context_status"]
+    assert status["reason"] == "reindex_required"
+    assert status["out_of_space_chunk_count"] == 1
+    assert "text-embedding-ada-002" not in status["message"]  # names the ACTIVE model only
 
 
 # --- 7. A raw HTTP provider error never produces a 500 and never leaks the secret --------------
@@ -251,7 +332,7 @@ def test_raw_http_provider_error_never_500s_or_leaks_secret(client, monkeypatch,
         response = httpx.Response(401, request=request)
         raise httpx.HTTPStatusError(f"401 for url with key={FAKE_SECRET}", request=request, response=response)
 
-    monkeypatch.setattr(OpenAIProvider, "embed", _broken_embed)
+    monkeypatch.setattr(OllamaProvider, "embed", _broken_embed)
     csrf = _login(client)
 
     res = _chat(client, csrf)

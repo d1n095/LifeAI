@@ -66,15 +66,18 @@ def assess_confidence(hits: list[dict], conflicting_pairs: list[tuple[str, str]]
     )
 
 
-def detect_conflicts(db: Session, owner_id: uuid.UUID, document_ids: list[str]) -> list[tuple[str, str]]:
-    """Structural conflict detection: two sources actually retrieved for this answer that
-    are linked by a `contradicts` SourceRelationship (see app/models/source_relationship.py).
-    Deliberately NOT an attempt to detect disagreement from the chunk text itself — that
-    would require real NLP/LLM judgement this function has no access to and shouldn't
-    fabricate; a `contradicts` edge only exists because the founder (or a future workbench
-    analysis, see DEL 9) explicitly recorded it. No edge recorded means no conflict is
-    reported, even if two retrieved chunks happen to disagree in fact — that's a known,
-    honestly-scoped limitation, not a silent claim of completeness."""
+def _find_relationship_pairs(
+    db: Session, owner_id: uuid.UUID, document_ids: list[str], relationship_type: RelationshipType
+) -> list[tuple[str, str]]:
+    """Shared structural lookup behind detect_conflicts()/detect_duplicate_sources(): two
+    sources actually retrieved together that are linked by a specific, founder-recorded
+    SourceRelationship edge (see app/models/source_relationship.py). Deliberately NOT an
+    attempt to infer the relationship from chunk text itself — that would require real
+    NLP/LLM judgement neither caller has access to and shouldn't fabricate; an edge only
+    exists because the founder (or a future workbench analysis, see DEL 9) explicitly
+    recorded it. No edge recorded means nothing is reported, even if two retrieved chunks
+    happen to actually duplicate/contradict each other — a known, honestly-scoped
+    limitation, not a silent claim of completeness."""
     if len(document_ids) < 2:
         return []
     ids = [uuid.UUID(d) for d in set(document_ids)]
@@ -82,13 +85,29 @@ def detect_conflicts(db: Session, owner_id: uuid.UUID, document_ids: list[str]) 
         db.query(SourceRelationship)
         .filter(
             SourceRelationship.owner_id == owner_id,
-            SourceRelationship.relationship_type == RelationshipType.contradicts,
+            SourceRelationship.relationship_type == relationship_type,
             SourceRelationship.from_source_id.in_(ids),
             SourceRelationship.to_source_id.in_(ids),
         )
         .all()
     )
     return [(str(r.from_source_id), str(r.to_source_id)) for r in rows]
+
+
+def detect_conflicts(db: Session, owner_id: uuid.UUID, document_ids: list[str]) -> list[tuple[str, str]]:
+    """Structural conflict detection: two sources actually retrieved for this answer that
+    are linked by a `contradicts` SourceRelationship. See _find_relationship_pairs()."""
+    return _find_relationship_pairs(db, owner_id, document_ids, RelationshipType.contradicts)
+
+
+def detect_duplicate_sources(db: Session, owner_id: uuid.UUID, document_ids: list[str]) -> list[tuple[str, str]]:
+    """Mission 4 (Life MainAI Intelligence program) — duplicate/near-duplicate detection: two
+    sources actually retrieved together that are linked by a `duplicates` SourceRelationship.
+    See _find_relationship_pairs(). Reused by Blueprint generation so a duplicate pair isn't
+    silently treated as two independent corroborating sources — the same "independent
+    corroboration only counts once" principle assess_claim_confidence() already applies at
+    the claim level, extended here at the source level."""
+    return _find_relationship_pairs(db, owner_id, document_ids, RelationshipType.duplicates)
 
 
 # Appended to the system prompt based on confidence — this is the actual enforcement
@@ -165,7 +184,9 @@ def detect_claim_conflicts(db: Session, owner_id: uuid.UUID, chunk_ids: list[str
     return any(assess_claim_confidence(db, claim) == ClaimConfidence.conflict for claim in claims)
 
 
-def assess_claim_confidence(db: Session, claim: KnowledgeClaim) -> ClaimConfidence:
+def assess_claim_confidence(
+    db: Session, claim: KnowledgeClaim, *, ignore_relationship_id=None
+) -> ClaimConfidence:
     """STEG 10's claim-level analogue of assess_confidence() above: the stored,
     extraction-time confidence (app/rag/claims.py's grounding-score heuristic) is only the
     starting point — this recomputes the CURRENT confidence from the claim's
@@ -189,15 +210,17 @@ def assess_claim_confidence(db: Session, claim: KnowledgeClaim) -> ClaimConfiden
     (e.g. two chunks of the same document both stating the same fact) is not independent
     corroboration and must never count toward "certain".
     """
-    contradicting = (
-        db.query(ClaimRelationship)
-        .filter(
-            ClaimRelationship.owner_id == claim.owner_id,
-            ClaimRelationship.relationship_type == ClaimRelationshipType.contradicts,
-            or_(ClaimRelationship.from_claim_id == claim.id, ClaimRelationship.to_claim_id == claim.id),
-        )
-        .first()
+    contradicting_q = db.query(ClaimRelationship).filter(
+        ClaimRelationship.owner_id == claim.owner_id,
+        ClaimRelationship.relationship_type == ClaimRelationshipType.contradicts,
+        or_(ClaimRelationship.from_claim_id == claim.id, ClaimRelationship.to_claim_id == claim.id),
     )
+    if ignore_relationship_id is not None:
+        # Counterfactual (epistemic-shift detection): the confidence must be computed as if
+        # ONE specific edge did not exist, so a shift's PRIOR status is honest. Live read
+        # paths never pass this — the default keeps every edge in every verdict.
+        contradicting_q = contradicting_q.filter(ClaimRelationship.id != ignore_relationship_id)
+    contradicting = contradicting_q.first()
     if contradicting is not None:
         return ClaimConfidence.conflict
 

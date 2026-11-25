@@ -1,0 +1,495 @@
+{
+  "generated_at": "2026-11-21T01:23:48.779479+00:00",
+  "commit": "5e803c8ff16b7da8d9b1a3c2f120dbfa4786d836",
+  "branch": "claude/founder-alpha-reliability",
+  "environment": {
+    "admin_url": "postgresql://postgres@127.0.0.1:55432/postgres",
+    "redis_url": "redis://@127.0.0.1:56379/15",
+    "work_dir": "/tmp/lifeai-install-matrix-seb8lz72"
+  },
+  "summary": {
+    "PASS": 12,
+    "FAIL": 0,
+    "BLOCKED": 0
+  },
+  "scenarios": [
+    {
+      "scenario": "clean_install_provisioning",
+      "status": "PASS",
+      "checks": [
+        {
+          "check": "provisioning steps",
+          "status": "PASS",
+          "actual": [
+            {
+              "step": "ensure_app_role",
+              "exit_code": 0,
+              "stdout_tail": "mainai_app-rollen finns redan — lösenordet ändras INTE (sätt MAINAI_APP_ROTATE_PASSWORD=true för att rotera det explicit).\nmainai_app-rollen är klar.\n",
+              "stderr_tail": ""
+            },
+            {
+              "step": "alembic_upgrade",
+              "exit_code": 0,
+              "stdout_tail": "",
+              "stderr_tail": "88, Round 11: the Cognitive Gate records MODEL-MODE runs too.\nINFO  [alembic.runtime.migration] Running upgrade 0088 -> 0089, Founder Alpha R14 (rebuilt marker: 2026-11-19): READ-ONLY GitHub development-status snapshots.\nINFO  [alembic.runtime.migration] Running upgrade 0089 -> 0090, R15 successor: durable client idempotency for POST /api/chat (migration 0090).\nINFO  [alembic.runtime.migration] Running upgrade 0090 -> 0091, R15 successor: durable billable chat-attempt identity (migration 0091).\n"
+            },
+            {
+              "step": "apply_runtime_privileges",
+              "exit_code": 0,
+              "stdout_tail": "apply_runtime_privileges: privilege state verified correct.\n",
+              "stderr_tail": ""
+            }
+          ],
+          "expected": null
+        }
+      ],
+      "details": {
+        "database": "lifeos_matrix_clean_4cafccfb"
+      },
+      "duration_s": 3.21
+    },
+    {
+      "scenario": "clean_install",
+      "status": "PASS",
+      "checks": [
+        {
+          "check": "provisioning",
+          "status": "PASS",
+          "actual": [
+            {
+              "step": "ensure_app_role",
+              "exit_code": 0,
+              "stdout_tail": "mainai_app-rollen finns redan — lösenordet ändras INTE (sätt MAINAI_APP_ROTATE_PASSWORD=true för att rotera det explicit).\nmainai_app-rollen är klar.\n",
+              "stderr_tail": ""
+            },
+            {
+              "step": "alembic_upgrade",
+              "exit_code": 0,
+              "stdout_tail": "",
+              "stderr_tail": "88, Round 11: the Cognitive Gate records MODEL-MODE runs too.\nINFO  [alembic.runtime.migration] Running upgrade 0088 -> 0089, Founder Alpha R14 (rebuilt marker: 2026-11-19): READ-ONLY GitHub development-status snapshots.\nINFO  [alembic.runtime.migration] Running upgrade 0089 -> 0090, R15 successor: durable client idempotency for POST /api/chat (migration 0090).\nINFO  [alembic.runtime.migration] Running upgrade 0090 -> 0091, R15 successor: durable billable chat-attempt identity (migration 0091).\n"
+            },
+            {
+              "step": "apply_runtime_privileges",
+              "exit_code": 0,
+              "stdout_tail": "apply_runtime_privileges: privilege state verified correct.\n",
+              "stderr_tail": ""
+            }
+          ],
+          "expected": null
+        },
+        {
+          "check": "health",
+          "status": "PASS",
+          "actual": {
+            "status_code": 200,
+            "body": {
+              "status": "ok",
+              "worker": "unknown"
+            }
+          },
+          "expected": null
+        },
+        {
+          "check": "alembic at head",
+          "status": "PASS",
+          "actual": "0091",
+          "expected": "0091"
+        },
+        {
+          "check": "runtime job grants",
+          "status": "PASS",
+          "actual": {
+            "event_select": true,
+            "event_insert": true,
+            "event_update": false,
+            "proposal_update": true,
+            "documents_select": true
+          },
+          "expected": null
+        },
+        {
+          "check": "app role can read documents",
+          "status": "PASS",
+          "actual": {
+            "event_select": true,
+            "event_insert": true,
+            "event_update": false,
+            "proposal_update": true,
+            "documents_select": true
+          },
+          "expected": null
+        }
+      ],
+      "details": {
+        "database": "lifeos_matrix_clean_4cafccfb"
+      },
+      "duration_s": 7.35
+    },
+    {
+      "scenario": "existing_data",
+      "status": "PASS",
+      "checks": [
+        {
+          "check": "existing data present",
+          "status": "PASS",
+          "actual": {
+            "documents": 1,
+            "conversations": 1,
+            "users": 2
+          },
+          "expected": null
+        },
+        {
+          "check": "health",
+          "status": "PASS",
+          "actual": {
+            "status_code": 200,
+            "body": {
+              "status": "ok",
+              "worker": "unknown"
+            }
+          },
+          "expected": null
+        },
+        {
+          "check": "founder login",
+          "status": "PASS",
+          "actual": 200,
+          "expected": 200
+        },
+        {
+          "check": "/api/documents",
+          "status": "PASS",
+          "actual": 200,
+          "expected": 200
+        },
+        {
+          "check": "/api/conversations",
+          "status": "PASS",
+          "actual": 200,
+          "expected": 200
+        },
+        {
+          "check": "/api/mainai/project-status",
+          "status": "PASS",
+          "actual": 200,
+          "expected": 200
+        }
+      ],
+      "details": {
+        "counts": {
+          "documents": 1,
+          "conversations": 1,
+          "users": 2
+        }
+      },
+      "duration_s": 4.03
+    },
+    {
+      "scenario": "bad_db_credentials",
+      "status": "PASS",
+      "checks": [
+        {
+          "check": "invalid app role fails closed",
+          "status": "PASS",
+          "actual": {
+            "state": "exited",
+            "exit_code": 3,
+            "port": 53995,
+            "health": null,
+            "log_path": "/tmp/lifeai-install-matrix-seb8lz72/api-53995.log"
+          },
+          "expected": null
+        },
+        {
+          "check": "wrong password not echoed",
+          "status": "PASS",
+          "actual": "redacted",
+          "expected": null
+        }
+      ],
+      "details": {},
+      "duration_s": 19.05
+    },
+    {
+      "scenario": "unreachable_postgres",
+      "status": "PASS",
+      "checks": [
+        {
+          "check": "unreachable PostgreSQL fails closed",
+          "status": "PASS",
+          "actual": {
+            "state": "exited",
+            "exit_code": 3,
+            "port": 56517,
+            "health": null,
+            "log_path": "/tmp/lifeai-install-matrix-seb8lz72/api-56517.log"
+          },
+          "expected": null
+        }
+      ],
+      "details": {},
+      "duration_s": 3.33
+    },
+    {
+      "scenario": "unreachable_redis",
+      "status": "PASS",
+      "checks": [
+        {
+          "check": "unreachable Redis fails closed",
+          "status": "PASS",
+          "actual": {
+            "state": "exited",
+            "exit_code": 3,
+            "port": 38529,
+            "health": null,
+            "log_path": "/tmp/lifeai-install-matrix-seb8lz72/api-38529.log"
+          },
+          "expected": null
+        }
+      ],
+      "details": {},
+      "duration_s": 4.17
+    },
+    {
+      "scenario": "missing_ollama",
+      "status": "PASS",
+      "checks": [
+        {
+          "check": "API remains healthy without Ollama",
+          "status": "PASS",
+          "actual": {
+            "status_code": 200,
+            "body": {
+              "status": "ok",
+              "worker": "unknown",
+              "local_model": {
+                "runtime": "ollama",
+                "reachable": false,
+                "configured_models": [
+                  "llama3.1"
+                ]
+              }
+            }
+          },
+          "expected": null
+        },
+        {
+          "check": "local model reported unreachable",
+          "status": "PASS",
+          "actual": {
+            "runtime": "ollama",
+            "reachable": false,
+            "configured_models": [
+              "llama3.1"
+            ]
+          },
+          "expected": null
+        }
+      ],
+      "details": {},
+      "duration_s": 3.63
+    },
+    {
+      "scenario": "bad_model_config",
+      "status": "PASS",
+      "checks": [
+        {
+          "check": "health stays honest",
+          "status": "PASS",
+          "actual": {
+            "status_code": 200,
+            "body": {
+              "status": "ok",
+              "worker": "unknown",
+              "local_model": {
+                "runtime": "ollama",
+                "reachable": true,
+                "configured_models": [
+                  "not-installed-model"
+                ],
+                "missing_models": [
+                  "not-installed-model"
+                ]
+              }
+            }
+          },
+          "expected": null
+        },
+        {
+          "check": "runtime reachable",
+          "status": "PASS",
+          "actual": {
+            "runtime": "ollama",
+            "reachable": true,
+            "configured_models": [
+              "not-installed-model"
+            ],
+            "missing_models": [
+              "not-installed-model"
+            ]
+          },
+          "expected": null
+        },
+        {
+          "check": "configured model reported missing",
+          "status": "PASS",
+          "actual": {
+            "runtime": "ollama",
+            "reachable": true,
+            "configured_models": [
+              "not-installed-model"
+            ],
+            "missing_models": [
+              "not-installed-model"
+            ]
+          },
+          "expected": null
+        }
+      ],
+      "details": {},
+      "duration_s": 3.84
+    },
+    {
+      "scenario": "aborted_or_partial_migration",
+      "status": "PASS",
+      "checks": [
+        {
+          "check": "role provisioning",
+          "status": "PASS",
+          "actual": 0,
+          "expected": 0
+        },
+        {
+          "check": "partial migration applied",
+          "status": "PASS",
+          "actual": 0,
+          "expected": 0
+        },
+        {
+          "check": "API refuses partial schema",
+          "status": "PASS",
+          "actual": {
+            "state": "exited",
+            "exit_code": 3,
+            "port": 56387,
+            "health": null,
+            "log_path": "/tmp/lifeai-install-matrix-seb8lz72/api-56387.log"
+          },
+          "expected": null
+        }
+      ],
+      "details": {
+        "database": "lifeos_matrix_partial_5362f518"
+      },
+      "duration_s": 5.02
+    },
+    {
+      "scenario": "failed_migration",
+      "status": "PASS",
+      "checks": [
+        {
+          "check": "provisioning",
+          "status": "PASS",
+          "actual": [
+            {
+              "step": "ensure_app_role",
+              "exit_code": 0,
+              "stdout_tail": "mainai_app-rollen finns redan — lösenordet ändras INTE (sätt MAINAI_APP_ROTATE_PASSWORD=true för att rotera det explicit).\nmainai_app-rollen är klar.\n",
+              "stderr_tail": ""
+            },
+            {
+              "step": "alembic_upgrade",
+              "exit_code": 0,
+              "stdout_tail": "",
+              "stderr_tail": "88, Round 11: the Cognitive Gate records MODEL-MODE runs too.\nINFO  [alembic.runtime.migration] Running upgrade 0088 -> 0089, Founder Alpha R14 (rebuilt marker: 2026-11-19): READ-ONLY GitHub development-status snapshots.\nINFO  [alembic.runtime.migration] Running upgrade 0089 -> 0090, R15 successor: durable client idempotency for POST /api/chat (migration 0090).\nINFO  [alembic.runtime.migration] Running upgrade 0090 -> 0091, R15 successor: durable billable chat-attempt identity (migration 0091).\n"
+            },
+            {
+              "step": "apply_runtime_privileges",
+              "exit_code": 0,
+              "stdout_tail": "apply_runtime_privileges: privilege state verified correct.\n",
+              "stderr_tail": ""
+            }
+          ],
+          "expected": null
+        },
+        {
+          "check": "API refuses unknown migration revision",
+          "status": "PASS",
+          "actual": {
+            "state": "exited",
+            "exit_code": 3,
+            "port": 44399,
+            "health": null,
+            "log_path": "/tmp/lifeai-install-matrix-seb8lz72/api-44399.log"
+          },
+          "expected": null
+        }
+      ],
+      "details": {
+        "database": "lifeos_matrix_failed_2539b2b7"
+      },
+      "duration_s": 6.52
+    },
+    {
+      "scenario": "restart_after_aborted_install",
+      "status": "PASS",
+      "checks": [
+        {
+          "check": "restart still refuses partial schema",
+          "status": "PASS",
+          "actual": {
+            "state": "exited",
+            "exit_code": 3,
+            "port": 41785,
+            "health": null,
+            "log_path": "/tmp/lifeai-install-matrix-seb8lz72/api-41785.log"
+          },
+          "expected": null
+        }
+      ],
+      "details": {
+        "database": "lifeos_matrix_partial_5362f518"
+      },
+      "duration_s": 3.32
+    },
+    {
+      "scenario": "partial_startup_recovery",
+      "status": "PASS",
+      "checks": [
+        {
+          "check": "first partial startup fails closed",
+          "status": "PASS",
+          "actual": {
+            "state": "exited",
+            "exit_code": 3,
+            "port": 59405,
+            "health": null,
+            "log_path": "/tmp/lifeai-install-matrix-seb8lz72/api-59405.log"
+          },
+          "expected": null
+        },
+        {
+          "check": "restart after dependency recovery is healthy",
+          "status": "PASS",
+          "actual": {
+            "state": "running",
+            "exit_code": null,
+            "port": 58653,
+            "health": {
+              "status_code": 200,
+              "body": {
+                "status": "ok",
+                "worker": "unknown"
+              }
+            },
+            "log_path": "/tmp/lifeai-install-matrix-seb8lz72/api-58653.log"
+          },
+          "expected": null
+        }
+      ],
+      "details": {},
+      "duration_s": 7.6
+    }
+  ]
+}

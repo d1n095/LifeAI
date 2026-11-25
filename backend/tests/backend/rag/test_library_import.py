@@ -10,6 +10,7 @@ that module's docstring). `_make_job` below does the storage write a real
 POST /api/library/import would have already done, so every test still just calls
 `run_import_job(db_session, job.id, user.id)`."""
 
+import hashlib
 import importlib.util
 import io
 import threading
@@ -1285,6 +1286,59 @@ def test_store_bytes_with_reference_lock_repairs_a_corrupt_same_size_existing_bl
     assert blob.storage_key == first.storage_key
     assert disk_path.read_bytes() == content
     assert storage.verify(blob.storage_key, expected_sha256=blob.sha256, expected_size=blob.size_bytes) is True
+
+
+@pytest.mark.asyncio
+async def test_resume_recreates_missing_version_and_storage_after_crash_between_commits(
+    db_session, make_verified_user
+):
+    """A hard kill between the Document commit and the KnowledgeVersion/storage commits used
+    to be resumed as "indexed" with no version and no durable original. Claim extraction was
+    skipped forever because the resume path only ran it when a version already existed.
+
+    Reproduce that exact crash window: the Document row exists with a checksum and a
+    resumable status, but no KnowledgeVersion and no storage_key. The same content is then
+    re-claimed from the job's durable upload. Resume must recreate both durable pieces, index
+    the document, and keep exactly one version."""
+    from sqlalchemy import text as sa_text
+
+    from app.models.document import DocumentSource
+    from app.request_context import current_user_id as current_user_id_var
+
+    user, _ = make_verified_user()
+    content = b"Crash window content: document committed, version and storage were not."
+    checksum = hashlib.sha256(content).hexdigest()
+
+    current_user_id_var.set(str(user.id))
+    db_session.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user.id)})
+    document = Document(
+        title="crash-window.txt",
+        source=DocumentSource.upload,
+        uploaded_by=user.id,
+        checksum=checksum,
+        original_filename="crash-window.txt",
+        status=IndexStatus.received,
+    )
+    db_session.add(document)
+    db_session.commit()
+    document_id = document.id
+
+    job = _make_job(db_session, user.id, content, "crash-window.txt")
+    await run_import_job(db_session, job.id, user.id)
+
+    db_session.expire_all()
+    document = db_session.get(Document, document_id)
+    assert document is not None
+    assert document.status == IndexStatus.indexed
+    assert document.storage_key is not None
+    assert get_storage().verify(document.storage_key, expected_sha256=checksum, expected_size=len(content))
+    assert document.version_number == 1
+    assert document.chunk_count >= 1
+
+    versions = db_session.query(KnowledgeVersion).filter_by(source_id=document_id).all()
+    assert len(versions) == 1
+    assert versions[0].version_number == 1
+    assert versions[0].checksum == checksum
 
 
 @pytest.mark.asyncio

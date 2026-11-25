@@ -408,3 +408,101 @@ def test_task_branch_name_never_collides_with_a_protected_branch():
         name = task_branch_name(uuid.uuid4())
         assert name not in PROTECTED_BRANCHES
         assert name.startswith("claude/mainai-task-")
+
+
+# ---------------------------------------------------------------- H. PROV-1 — no persisted
+# token (founder "RESUME LIFEAI FIRST-CYCLE REMEDIATION" directive, Freebuff finding PROV-1:
+# GitHub write credentials stored in worktree remotes)
+
+
+def test_authed_remote_url_never_embeds_the_real_token():
+    """Direct regression on the vulnerable line itself: `git remote add origin <this URL>`
+    persists its return value VERBATIM into the worktree's own `.git/config` on disk for the
+    worktree's entire lifetime. If a future change reverts to embedding the token in this
+    URL (e.g. `https://x-access-token:{token}@github.com/...`), this test fails immediately."""
+    from app.mainai_execution import worktree as worktree_module
+
+    url = worktree_module._authed_remote_url("some-owner/some-repo", "ghp_RealSecretTokenValue")
+    assert "ghp_RealSecretTokenValue" not in url
+    assert url == "https://github.com/some-owner/some-repo.git"
+
+
+def test_auth_header_args_carries_the_token_only_as_a_transient_cli_flag():
+    """The real token must still reach GitHub somehow -- via a `-c http.extraheader=...` flag
+    applied only to the one network call that needs it, never persisted to any config file."""
+    import base64
+
+    from app.mainai_execution import worktree as worktree_module
+
+    args = worktree_module._auth_header_args("ghp_RealSecretTokenValue")
+    assert args[0] == "-c"
+    key, _, value = args[1].partition("=")
+    assert key == "http.extraheader"
+    scheme, _, encoded = value.partition(" basic ")
+    assert base64.b64decode(encoded).decode("utf-8") == "x-access-token:ghp_RealSecretTokenValue"
+
+
+@pytest.mark.asyncio
+async def test_create_task_worktree_never_passes_the_token_to_remote_add(db_session, owner_id, patched_github, monkeypatch):
+    """End-to-end call-site proof: even with the REAL (unpatched) `_auth_header_args` wired
+    into `create_task_worktree_sync()`, the real `settings.github_token` value never appears
+    in the argv of the `git remote add` call -- only in the `git fetch` call's transient
+    `-c http.extraheader=...` flag, which `remote add` never sees and `.git/config` never
+    retains. Spies on `_run_git` (delegating to the real implementation) rather than faking
+    git entirely, so every other operation (init, fetch, checkout) still really happens
+    against the local bare-repo stand-in."""
+    from app.config import get_settings
+    from app.mainai_execution import worktree as worktree_module
+
+    settings = get_settings()
+    real_token = "ghp_RealSecretTokenValue_should_never_reach_remote_add"
+    monkeypatch.setattr(settings, "github_token", real_token)
+
+    recorded_calls: list[list[str]] = []
+    real_run_git = worktree_module._run_git
+
+    def _spying_run_git(args, **kwargs):
+        recorded_calls.append(list(args))
+        return real_run_git(args, **kwargs)
+
+    monkeypatch.setattr(worktree_module, "_run_git", _spying_run_git)
+
+    task, job = _repo_edit_job(db_session, owner_id)
+    wt = await create_task_worktree(db_session, task=task, job=job, lease_generation=1, executor_id="worker-1")
+    db_session.commit()
+
+    import base64
+
+    remote_add_calls = [c for c in recorded_calls if c[:2] == ["remote", "add"]]
+    fetch_calls = [c for c in recorded_calls if "fetch" in c]
+    assert remote_add_calls, "expected create_task_worktree_sync to have called 'git remote add'"
+    assert fetch_calls, "expected create_task_worktree_sync to have called 'git fetch'"
+    for call in remote_add_calls:
+        assert real_token not in call
+        assert not any(arg.startswith("http.extraheader=") for arg in call)
+
+    def _decoded_basic_auth(extraheader_arg: str) -> str:
+        _, _, encoded = extraheader_arg.partition(" basic ")
+        return base64.b64decode(encoded).decode("utf-8")
+
+    decoded_fetch_headers = [
+        _decoded_basic_auth(arg)
+        for call in fetch_calls
+        for arg in call
+        if arg.startswith("http.extraheader=")
+    ]
+    assert decoded_fetch_headers, "expected the fetch call to carry a -c http.extraheader=... flag"
+    assert any(real_token in header for header in decoded_fetch_headers), (
+        "the real token must still reach the fetch call somehow (base64-encoded in the "
+        "transient http.extraheader flag) -- if this assertion fails, auth was dropped "
+        "entirely, not just made non-persistent"
+    )
+
+    # The one artifact that actually persists across the worktree's lifetime never contains it.
+    git_config_text = (Path(wt.path) / ".git" / "config").read_text(encoding="utf-8")
+    assert real_token not in git_config_text
+
+    import stat
+
+    mode = stat.S_IMODE(Path(wt.path).stat().st_mode)
+    assert mode == 0o700

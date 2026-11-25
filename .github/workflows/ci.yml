@@ -4,11 +4,11 @@ on:
   push:
     # Agent coding branches need the same required checks as mainline pushes.
     # Explicit prefixes (not a catch-all) — GitHub branch filters have no brace-expansion.
-    branches: [main, "claude/**", "cursor/**", "codex/**"]
+    branches: [main, "claude/**", "cursor/**", "codex/**", "security/**"]
   pull_request:
     # Include agent integration bases so stacked PRs (e.g. cursor/* → claude/*) receive
     # the same required Actions checks as PRs into main. Does not weaken or skip any job.
-    branches: [main, "claude/**", "cursor/**", "codex/**"]
+    branches: [main, "claude/**", "cursor/**", "codex/**", "security/**", "transfer/freebuff-r15-20261119"]
 
 # Cancel superseded runs on the same branch/PR to keep the queue short.
 concurrency:
@@ -39,6 +39,13 @@ jobs:
         working-directory: frontend
       - run: npx eslint .
         working-directory: frontend
+      # Dev-mode hydration regression guard: `next dev` viewed through a preview host stays
+      # unhydrated unless the origin is in allowedDevOrigins (see next.config.mjs). Checked
+      # both with and without the variable, since the unset case must stay an empty list.
+      - run: node scripts/check-dev-origins.mjs
+        working-directory: frontend
+      - run: NEXT_ALLOWED_DEV_ORIGINS="pv-example.style.dev,localhost:3000" node scripts/check-dev-origins.mjs
+        working-directory: frontend
 
   npm-audit:
     name: Frontend — npm audit
@@ -55,6 +62,8 @@ jobs:
       # Fails the job on any high/critical vulnerability, except the small, dated,
       # ID-scoped allowlist in scripts/check-npm-audit.js — moderate-and-below are tracked
       # but don't block (see docs/SECURITY_BLOCKERS.md for the current baseline).
+      - run: node --test scripts/check-npm-audit.test.js
+        working-directory: frontend
       - run: node scripts/check-npm-audit.js
         working-directory: frontend
 
@@ -148,6 +157,75 @@ jobs:
       # Alembic migration; nothing extra to provision here beyond the Postgres server itself.
       - run: python -m pytest tests/backend/ -v
         working-directory: backend
+
+  # ---------------------------------------------------------------------------------------
+  # R15 security remediation: DB-free policy suites plus the DB/Redis-backed R15
+  # boundaries. The DB-free half is also runnable with no services at all via
+  # backend/scripts/ci/run_r15_security_suite.sh --db-free-only; this job proves the same
+  # code against real PostgreSQL/pgvector and Redis, which local Docker could not provide.
+  # ---------------------------------------------------------------------------------------
+  r15-security-tests:
+    name: Backend — R15 security (Postgres + Redis)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_test
+      APP_DATABASE_URL: postgresql://mainai_app:mainai_app_test_pw@localhost:5432/lifeos_test
+      REDIS_URL: redis://localhost:6379/1
+      SECRET_KEY: ci-test-secret-key
+      FOUNDER_EMAIL: founder@lifeos.local
+      FOUNDER_PASSWORD: TestFounderPassword123!
+      FRONTEND_ORIGINS: http://127.0.0.1:3020
+      PUBLIC_APP_URL: http://127.0.0.1:3020
+      ENABLE_SCHEDULED_CLEANUP: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+        working-directory: backend
+      # These two suites are intentionally DB-free (their own conftest, --confcutdir), so
+      # they also run on a machine with no PostgreSQL/Redis. The Redis-backed store test
+      # inside the successor suite skips when REDIS_URL is unreachable.
+      - name: DB-free R15 policy suites
+        working-directory: backend
+        run: |
+          python -m pytest tests/security_r15_successor -q --confcutdir=tests/security_r15_successor
+          python -m pytest tests/security_r15_egress -q --confcutdir=tests/security_r15_egress
+      # tests/conftest.py creates and drops its own throwaway database (and the restricted
+      # runtime role) from the service container, then applies every Alembic migration.
+      - name: DB/Redis-backed R15 boundaries
+        working-directory: backend
+        run: |
+          python -m pytest \
+            tests/backend/providers/test_r15_integration_security.py \
+            tests/backend/chat/test_chat_request_idempotency.py \
+            tests/backend/test_financial_correctness.py \
+            tests/backend/test_billing_engine.py \
+            tests/backend/test_agent_orchestration.py \
+            tests/backend/test_mainai_execution_lesson_conflicts.py \
+            tests/backend/mainai/test_egress_policy.py \
+            tests/backend/mainai/test_provider_crash_before_settle.py \
+            -q
 
   rls-security-tests:
     name: Backend — RLS & session-security tests
@@ -262,6 +340,15 @@ jobs:
           cache-dependency-path: backend/requirements.txt
       - run: pip install -r requirements.txt
         working-directory: backend
+      - name: Provision restricted migration-grant target
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mainai_app') THEN
+              CREATE ROLE mainai_app LOGIN PASSWORD 'ci-only-migration-role' NOSUPERUSER NOBYPASSRLS NOINHERIT;
+            END IF;
+          END $$;
+          SQL
       - name: Fresh install to head
         working-directory: backend
         env:
@@ -307,7 +394,11 @@ jobs:
   # ---------------------------------------------------------------------------------------
   e2e-tests:
     name: E2E — Playwright (full stack)
-    runs-on: ubuntu-latest
+    # Pinned deliberately: `ubuntu-latest` now resolves to ubuntu-26.04, and Playwright 1.56.1
+    # publishes no Chromium build for it ("Playwright does not support chromium on
+    # ubuntu26.04-x64"), so `npx playwright install` failed before any test ran. Revert to
+    # `ubuntu-latest` only once a Playwright release covers the newer image.
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -339,6 +430,10 @@ jobs:
       E2E_FOUNDER_PASSWORD: TestFounderPassword123!
       E2E_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_e2e
       E2E_EMAIL_LOG_PATH: ${{ github.workspace }}/backend/e2e_test_emails.jsonl
+      # The app's production default is /var/lib/lifeai; the GitHub runner cannot create
+      # that path. Uploads must use a workspace-local storage root or every import fails
+      # before a job row exists (the UI then waits forever for a source that never appears).
+      STORAGE_ROOT: ${{ github.workspace }}/.e2e-uploads
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -422,7 +517,7 @@ jobs:
             curl -sf -o /dev/null http://127.0.0.1:8010/api/health && break
             sleep 1
           done
-      - run: npx playwright test e2e/auth.spec.ts e2e/security.spec.ts e2e/account.spec.ts --project=chromium
+      - run: npx playwright test e2e/auth.spec.ts e2e/founder-knowledge-studio.spec.ts e2e/shell-pages.spec.ts e2e/security.spec.ts e2e/account.spec.ts e2e/model-routing.spec.ts --project=chromium
         working-directory: frontend
       - name: Stop backend
         if: always()
@@ -473,7 +568,8 @@ jobs:
   # ---------------------------------------------------------------------------------------
   same-origin-proxy-test:
     name: E2E — same-origin proxy
-    runs-on: ubuntu-latest
+    # Pinned for the same Playwright/ubuntu-26.04 reason as e2e-tests above.
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -608,7 +704,8 @@ jobs:
   # ---------------------------------------------------------------------------------------
   combined-container-verify:
     name: Combined container — build, run, verify
-    runs-on: ubuntu-latest
+    # Pinned for the same Playwright/ubuntu-26.04 reason as e2e-tests above.
+    runs-on: ubuntu-24.04
     if: github.ref == 'refs/heads/claude/verify-combined-container' || github.ref == 'refs/heads/claude/integrate-founder-vps' || github.ref == 'refs/heads/claude/det-kommer-mer-879lcm'
     services:
       postgres:
@@ -773,7 +870,7 @@ jobs:
         env:
           E2E_FRONTEND_URL: http://localhost:3020
           E2E_BACKEND_DIRECT_PORT: "8000"
-        run: npx playwright test --config=playwright.combined.config.ts e2e/auth.spec.ts e2e/security.spec.ts e2e/account.spec.ts --project=chromium
+        run: npx playwright test --config=playwright.combined.config.ts e2e/auth.spec.ts e2e/security.spec.ts e2e/account.spec.ts e2e/model-routing.spec.ts --project=chromium
 
       - name: Stop container B (verifies graceful SIGTERM shutdown)
         run: |
@@ -2595,6 +2692,7 @@ jobs:
       - npm-audit
       - frontend-build
       - backend-tests
+      - r15-security-tests
       - rls-security-tests
       - account-rate-limit-tests
       - migration-check

@@ -1,27 +1,42 @@
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from app.bootstrap import bootstrap_founder_user
+from app.bootstrap import bootstrap_founder_priorities, bootstrap_founder_user
 from app.config import get_settings
 from app.db import SessionLocal, call_with_db_retry, migration_engine
 from app.limiter import limiter
+# Direct OpenAI consultation (official Responses API) — standalone, fail-closed-until-configured
+# module; see app/openai_consult/__init__.py for the full gate list before any code path here
+# can reach the network.
+from app.openai_consult.router import router as openai_consult
 from app.providers.base import looks_like_placeholder_secret
 from app.rls import apply_mainai_execution_privileges, apply_mainai_job_runtime_privileges, apply_rls
 from app.routers import (
+    improvement_proposals,
+    github_status,
+    project_status,
     account,
+    ads,
     admin,
     agents,
     auth,
+    blueprint,
+    calendar,
+    dashboard,
     chat,
     conversations,
     documents,
     execution_envelopes,
+    founder_recovery,
     health,
+    incidents,
     inspectable_memory,
     knowledge,
     library,
@@ -30,8 +45,10 @@ from app.routers import (
     memory,
     project_entities,
     projects,
+    search,
     provider_spend,
     workbench,
+    workspaces,
 )
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -64,11 +81,18 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(auth.router)
+app.include_router(founder_recovery.router)
 app.include_router(account.router)
+app.include_router(blueprint.router)
+app.include_router(calendar.router)
+app.include_router(dashboard.router)
 app.include_router(chat.router)
+app.include_router(incidents.router)
 app.include_router(conversations.router)
 app.include_router(documents.router)
 app.include_router(projects.router)
+app.include_router(search.router)
+app.include_router(workspaces.router)
 app.include_router(knowledge.router)
 app.include_router(library.router)
 app.include_router(workbench.router)
@@ -76,11 +100,16 @@ app.include_router(admin.router)
 app.include_router(memory.router)
 app.include_router(agents.router)
 app.include_router(mainai_jobs.router)
+app.include_router(improvement_proposals.router)
 app.include_router(mainai_execution.router)
 app.include_router(project_entities.router)
+app.include_router(github_status.router)
+app.include_router(project_status.router)
 app.include_router(inspectable_memory.router)
 app.include_router(execution_envelopes.router)
 app.include_router(provider_spend.router)
+app.include_router(openai_consult)
+app.include_router(ads.router)
 
 
 @app.on_event("startup")
@@ -98,6 +127,12 @@ def on_startup():
     # the role killed the entire process here ("Application startup failed. Exiting."), even
     # though the exact same credential worked moments later. ensure_app_role.py now also
     # retries its own self-test connection, so this is defense in depth, not the only guard.
+    # Schema ownership belongs to Alembic, and the app does not migrate at request-serving
+    # startup. That makes an explicit head check the only way to distinguish a fully
+    # provisioned database from one left behind by an aborted or failed migration: without
+    # it, a process could start against a partial schema and only fail later on the first
+    # request that touches a missing table. Fail closed before any RLS/bootstrap work.
+    call_with_db_retry(_check_database_at_head)
     call_with_db_retry(lambda: apply_rls(migration_engine))
     # See app/rls.py's own docstring: mainai_app's blanket ALL PRIVILEGES grant is
     # unconditionally re-applied by ensure_app_role.py on every boot, BEFORE this code runs —
@@ -123,6 +158,9 @@ def on_startup():
         db = SessionLocal()
         try:
             bootstrap_founder_user(db)
+            # Founder Alpha R14: the locked priority is registered ONCE, idempotently, as a
+            # founder decision — it must never live only in a conversation.
+            bootstrap_founder_priorities(db)
         finally:
             db.close()
 
@@ -134,6 +172,55 @@ def on_startup():
 @app.on_event("shutdown")
 def on_shutdown():
     stop_scheduler()
+    # Release the shared Redis pools explicitly (app/redis_client.py) — a clean shutdown
+    # closes every pooled socket instead of stranding them for the process-exit GC sweep,
+    # which is what made long-running sessions accumulate sockets and made teardown noisy.
+    from app.redis_client import close_shared_redis_clients
+
+    close_shared_redis_clients()
+
+
+def _alembic_heads() -> set[str]:
+    """Return the migration heads declared by this checkout, without touching the DB."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    backend_root = Path(__file__).resolve().parent.parent
+    config = Config(str(backend_root / "alembic.ini"))
+    config.set_main_option("script_location", str(backend_root / "alembic"))
+    return set(ScriptDirectory.from_config(config).get_heads())
+
+
+def _database_migration_revisions() -> set[str]:
+    """Read the revision(s) recorded in the database, fail-closed on a missing table."""
+    try:
+        with migration_engine.connect() as conn:
+            return set(conn.execute(text("SELECT version_num FROM alembic_version")).scalars().all())
+    except Exception as exc:  # noqa: BLE001 - every failure here is a startup failure
+        raise RuntimeError(
+            "Kunde inte läsa alembic_version. Databasen är inte migrerad, eller så "
+            "misslyckades migrationen. Kör `alembic upgrade head` innan appen startas."
+        ) from exc
+
+
+def _check_database_at_head() -> None:
+    """Refuse to serve against a database that is not at exactly this code's Alembic head.
+
+    A partially applied migration can leave enough tables for a few requests to succeed,
+    which makes the failure look like random 500s later instead of a deployment problem.
+    Comparing the recorded revision to the checkout's heads turns that into one loud startup
+    error. This deliberately does not run migrations: schema ownership stays an explicit
+    deploy step, and a process that cannot write DDL must still be able to prove its schema
+    is current.
+    """
+    expected = _alembic_heads()
+    actual = _database_migration_revisions()
+    if actual != expected:
+        raise RuntimeError(
+            "Databasen är inte på rätt Alembic-revision: "
+            f"förväntade {sorted(expected) or ['<ingen head>']}, fann {sorted(actual) or ['<ingen rad>']}. "
+            "Kör `alembic upgrade head` och starta om."
+        )
 
 
 def _check_smtp_mode() -> None:

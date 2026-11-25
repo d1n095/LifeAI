@@ -11,6 +11,16 @@ import { getCsrfToken, setCsrfToken } from "@/lib/auth";
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "";
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
+// One opaque key per logical send. A caller that retries the same send must pass the same
+// key explicitly; the default keeps ordinary UI sends covered without exposing message text.
+export function newClientMessageId(): string {
+  const cryptoApi = globalThis.crypto as { randomUUID?: () => string } | undefined;
+  if (cryptoApi && typeof cryptoApi.randomUUID === "function") {
+    return cryptoApi.randomUUID();
+  }
+  return `chat-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 export class AuthError extends Error {}
 
 // Thrown when fetch() itself rejects — DNS failure, connection refused, TLS failure, CORS
@@ -190,13 +200,24 @@ export type ChatResponse = {
   context_intent?: string | null;
   context_confidence?: string | null;
   context_status?: ContextStatus | null;
+  // R15-03: explicit grounding outcome. "degraded" means retrieval could not run (the
+  // safe reason is in grounding_reason); never infer grounding from the reply text.
+  grounding_status?: "grounded" | "degraded" | "empty" | "unknown";
+  grounding_reason?: string | null;
   error_category: string | null;
   error_message: string | null;
   retryable: boolean;
 };
 
+export type ChatStreamEvent =
+  | { type: "start"; conversation_id: string; user_message_id: string; assistant_message_id: string | null }
+  | { type: "delta"; text: string }
+  | { type: "done"; response: ChatResponse }
+  | { type: "error"; message: string; retryable: boolean };
+
 export type ConversationItem = {
   id: string;
+  project_id?: string | null;
   title: string;
   created_at: string;
   updated_at: string;
@@ -209,6 +230,11 @@ export type ConversationMessage = {
   provider: string | null;
   model: string | null;
   created_at: string;
+  // A failed assistant attempt is stored with empty content. These fields let a reloaded
+  // conversation show the failure and offer the same retry the live response offered.
+  status?: "succeeded" | "failed";
+  error_category?: string | null;
+  in_reply_to_id?: string | null;
 };
 
 export type ConversationDetail = ConversationItem & {
@@ -227,10 +253,17 @@ export type DocumentItem = {
 
 export type ProjectItem = {
   id: string;
+  version?: number;
   name: string;
   description: string | null;
+  purpose?: string | null;
+  goals?: string[];
+  settings?: Record<string, unknown>;
   status: string;
+  archived_at?: string | null;
+  last_activity_at?: string | null;
   created_at: string;
+  updated_at?: string;
 };
 
 // --- Founder Knowledge Studio v1 (see docs/FOUNDER_KNOWLEDGE_STUDIO_V1.md) ---
@@ -339,6 +372,15 @@ export type ImportJobItem = {
   last_failure_transient: boolean | null;
 };
 
+// Explicit source replacement (F11): the old source remains readable for provenance, but its
+// active_truth_status becomes superseded and the new source continues the version numbering.
+export type SourceReplacement = {
+  source: KnowledgeSourceItem;
+  job: ImportJobItem;
+  superseded_source_id: string;
+  version_number: number;
+};
+
 export type LibrarySearchHit = {
   document_id: string;
   title: string;
@@ -404,15 +446,303 @@ export type TaskItem = {
   description: string | null;
   status: string;
   priority: string;
+  due_at?: string | null;
+  completed_at?: string | null;
+  blocked_reason?: string | null;
+  milestone_id?: string | null;
+  version?: number;
+  updated_at?: string | null;
+  is_blocked?: boolean;
+  dependency_count?: number;
   suggested_by_ai: boolean;
   created_at: string;
 };
 
+export type MilestoneItem = {
+  id: string;
+  project_id: string;
+  title: string;
+  description: string | null;
+  due_at: string | null;
+  status: "open" | "in_progress" | "completed" | "cancelled";
+  completed_at: string | null;
+  version: number;
+  created_at: string;
+  updated_at: string;
+  task_count: number;
+  completed_task_count: number;
+};
+
+export type TaskDependencyItem = {
+  id: string;
+  task_id: string;
+  depends_on_task_id: string;
+  depends_on_title: string;
+  depends_on_status: string;
+};
+
+export type TaskEventItem = {
+  id: string;
+  event_type: string;
+  from_status: string | null;
+  to_status: string | null;
+  detail: Record<string, unknown>;
+  created_at: string;
+};
+
+export type TaskDetailItem = TaskItem & {
+  dependencies: TaskDependencyItem[];
+  dependents: TaskDependencyItem[];
+  events: TaskEventItem[];
+  milestone: MilestoneItem | null;
+  project_name: string | null;
+  kind: "user_task";
+  execution_authority: "none";
+};
+
+export type CalendarEventItem = {
+  id: string;
+  title: string;
+  description: string | null;
+  location: string | null;
+  starts_at: string;
+  ends_at: string | null;
+  category: "personal" | "work" | "school";
+  timezone: string;
+  recurrence_rule: "none" | "daily" | "weekly" | "monthly";
+  recurrence_until: string | null;
+  series_id: string | null;
+  recurrence_index: number;
+  project_id: string | null;
+  task_id: string | null;
+  milestone_id: string | null;
+  status: string;
+  source: string;
+  version: number;
+  cancelled_at: string | null;
+  cancellation_reason: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type DashboardData = {
+  generated_at: string;
+  counts: {
+    active_projects: number;
+    open_tasks: number;
+    blocked_tasks: number;
+    upcoming_events: number;
+    recent_decisions: number;
+    recent_documents: number;
+    active_conversations: number;
+    active_mainai_goals: number;
+    running_mainai_tasks: number;
+    awaiting_approval_tasks: number;
+  };
+  active_projects: ProjectItem[];
+  outstanding_tasks: TaskItem[];
+  blocked_tasks: TaskItem[];
+  upcoming_events: CalendarEventItem[];
+  recent_decisions: WorkspaceDecision[];
+  recent_documents: KnowledgeSourceItem[];
+  active_conversations: ConversationItem[];
+  supervised_goals: MainAIGoal[];
+  supervised_tasks: MainAITask[];
+};
+
+export type SearchResultItem = {
+  type: "project" | "task" | "document" | "conversation" | "calendar_event";
+  id: string;
+  title: string;
+  snippet: string;
+  project_id: string | null;
+  occurred_at: string | null;
+  updated_at: string | null;
+  href: string;
+};
+
+export type SearchResponse = {
+  query: string;
+  results: SearchResultItem[];
+  total: number;
+  limit: number;
+  offset: number;
+  types: string[];
+};
+
+// A project and only its own tasks/sources. The backend filters both collections by project
+// id and owner; this type exists so the UI cannot accidentally render a global library list
+// as if it were project-scoped.
+export type ProjectDetail = ProjectItem & {
+  tasks: TaskItem[];
+  milestones: MilestoneItem[];
+  sources: KnowledgeSourceItem[];
+};
+
+export type WorkspaceActivity = {
+  id: string;
+  kind: string;
+  summary: string;
+  detail: Record<string, unknown>;
+  created_at: string;
+};
+
+export type WorkspaceDecision = {
+  id: string;
+  title: string;
+  decision: string;
+  rationale: string | null;
+  status: string;
+  version: number;
+  supersedes_id: string | null;
+  epistemic_status: "confirmed" | "uncertain" | "proposed";
+  origin: "founder" | "ai";
+  superseded_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkspaceContext = {
+  workspace_id: string;
+  context_version: number;
+  objectives: string[];
+  milestones: MilestoneItem[];
+  source_documents: KnowledgeSourceItem[];
+  decisions: WorkspaceDecision[];
+  outstanding_tasks: TaskItem[];
+  past_conversations: ConversationItem[];
+  recent_changes: WorkspaceActivity[];
+  uncertainties: Record<string, unknown>[];
+  retrieval_sources: {
+    document_id: string;
+    title: string;
+    snippet: string;
+    score: number;
+    active_truth_status: string | null;
+  }[];
+  retrieval_degraded_reason: string | null;
+  bounded: boolean;
+};
+
+export type WorkspaceDetail = ProjectItem & {
+  tasks: TaskItem[];
+  milestones: MilestoneItem[];
+  sources: KnowledgeSourceItem[];
+  conversations: ConversationItem[];
+  activities: WorkspaceActivity[];
+  decisions: WorkspaceDecision[];
+  context: WorkspaceContext;
+};
+
+export type WorkspaceSyncItem = {
+  id: string;
+  entity_type: string;
+  entity_id: string;
+  entity_version: number;
+  content_hash: string;
+  status: "pending" | "applied" | "skipped" | "failed";
+  error: string | null;
+  processed_at: string | null;
+  created_at: string;
+};
+
+export type WorkspaceSyncRun = {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled" | "stale";
+  snapshot_hash: string;
+  snapshot_version: number;
+  progress_current: number;
+  progress_total: number;
+  attempt: number;
+  error_category: string | null;
+  result: Record<string, unknown>;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  heartbeat_at: string | null;
+  items: WorkspaceSyncItem[];
+};
+
+export type WorkspaceSupervisedTask = {
+  goal: MainAIGoal;
+  task: MainAITask;
+  events: MainAITaskEvent[];
+  checkpoints: MainAICheckpoint[];
+  waits: MainAITaskWait[];
+  recovery_records: {
+    id: string;
+    classification: string | null;
+    status: string;
+    blocker: string | null;
+    manual_review_required: boolean;
+    created_at: string;
+  }[];
+  job: MainAIJob | null;
+  approval_granted: boolean;
+  verification_evidence: { event_type: string; detail: Record<string, unknown>; created_at: string }[];
+};
+
+export type WorkspaceSupervised = {
+  goals: MainAIGoal[];
+  tasks: WorkspaceSupervisedTask[];
+};
+
 export type ProviderVerification = {
+  model: string | null;
   result: "ok" | "invalid_key" | "unreachable" | "rate_limited" | "unsupported" | "not_configured";
   message: string;
   checked_by: "system" | "founder";
   checked_at: string;
+};
+
+export type ModelCatalog = {
+  provider: string;
+  model_id: string;
+  supported_capabilities: string[];
+  verification_result: string | null;
+  metadata_note: string;
+};
+
+export type RuntimeHealthComponent = {
+  component: string;
+  state: "healthy" | "recovered" | "degraded" | "blocked";
+  open: number;
+  recovered: number;
+  last_seen_at: string | null;
+};
+
+export type RuntimeHealth = {
+  state: "healthy" | "recovered" | "degraded" | "blocked";
+  open_incidents: number;
+  critical_open: number;
+  high_open: number;
+  medium_open: number;
+  low_open: number;
+  recovered_incidents: number;
+  stalled_jobs: number;
+  stalled_imports: number;
+  worker_heartbeat: "alive" | "unknown";
+  components: RuntimeHealthComponent[];
+  checked_at: string;
+};
+
+export type RuntimeIncident = {
+  id: string;
+  error_code: string;
+  component: string;
+  severity: "low" | "medium" | "high" | "critical";
+  status: "open" | "acknowledged" | "resolved";
+  summary: string;
+  correlation_id: string | null;
+  app_version: string | null;
+  occurrence_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  details: Record<string, unknown>;
+  analysis: { known_cause?: string; confidence?: string; reason?: string; automatic_action?: string };
+  recovery_options: { action: string; safe: boolean; requires_owner: boolean; description: string }[];
+  acknowledged_at: string | null;
+  resolved_at: string | null;
 };
 
 export type ProviderStatus = {
@@ -420,8 +750,31 @@ export type ProviderStatus = {
   configured: boolean;
   active_chat: boolean;
   active_embedding: boolean;
+  active_chat_model: string | null;
+  active_embedding_model: string | null;
   chat_verification: ProviderVerification | null;
   embedding_verification: ProviderVerification | null;
+};
+
+export type LocalModel = {
+  name: string;
+  size_bytes: number | null;
+  modified_at: string | null;
+  digest: string | null;
+  catalog_known: boolean;
+  declared_capabilities: string[];
+};
+
+export type LocalModels = {
+  runtime: string;
+  reachable: boolean;
+  active_chat_provider: string | null;
+  active_chat_model: string | null;
+  active_embedding_provider: string | null;
+  active_embedding_model: string | null;
+  selection_requires_verification: boolean;
+  authority_note: string;
+  models: LocalModel[];
 };
 
 export type UsageSummaryRow = {
@@ -736,7 +1089,243 @@ export type MainAIGoalReport = {
   generated_at: string;
 };
 
+// Founder Alpha item 8/9 — source-grounded, versioned, approval-gated Blueprint drafts
+// (backend/app/routers/blueprint.py). A draft is always created as `status="draft"`; the
+// approve endpoint is the only path to `approved`.
+export type BlueprintSourceRef = {
+  document_id: string;
+  similarity: number | null;
+  excerpt: string | null;
+};
+
+export type BlueprintDraftSummary = {
+  id: string;
+  title: string;
+  version: number;
+  status: string;
+  source_count: number;
+  model_provider: string | null;
+  model_name: string | null;
+  created_at: string | null;
+  approved_at: string | null;
+};
+
+export type BlueprintDraft = {
+  id: string;
+  title: string;
+  version: number;
+  status: string;
+  body: string;
+  generated_from_query: string | null;
+  source_document_ids: string[];
+  source_refs: BlueprintSourceRef[];
+  model_provider: string | null;
+  model_name: string | null;
+  provenance: Record<string, unknown>;
+  created_at: string | null;
+  approved_at: string | null;
+  approved_by: string | null;
+};
+
+// Founder Alpha R15 — the composed project status (backend/app/project_status/). One read that
+// joins blueprint, the four explicit buckets, GitHub provenance, the founder's durable memory
+// and the LIVE work chain (goals/tasks/approvals/jobs/agents). Every count here comes from a
+// register, never from the UI's own arithmetic.
+export type ProjectStatusBucket = {
+  count: number;
+  evidence: string;
+  examples: string[];
+};
+
+export type ProjectStatusWork = {
+  goals: {
+    active_count: number;
+    completed_count: number;
+    active: {
+      goal_id: string;
+      title: string;
+      status: string;
+      approval_policy: string;
+      plan_version: number | null;
+      task_counts: Record<string, number>;
+      source: string;
+    }[];
+  };
+  tasks: {
+    counts: Record<string, number>;
+    awaiting_approval_count: number;
+    awaiting_approval: { task_id: string; goal_title: string; description: string; task_type: string; risk_level: string; source: string }[];
+    blocked: { task_id: string; description: string; status: string; blocker_reason: string | null; source: string }[];
+  };
+  jobs: {
+    counts: Record<string, number>;
+    active: number;
+    stalled_count: number;
+    stalled: { job_id: string; job_type: string; status: string; reason: string; age_minutes: number | null; source: string }[];
+  };
+  agents: {
+    registered: number;
+    open_assignments: number;
+    blocked: { assignment_id: string; agent: string | null; role: string; status: string; source: string }[];
+    stale: { assignment_id: string; agent: string | null; role: string; status: string; idle_minutes: number | null; source: string }[];
+  };
+  authorizations: { pending_scope_proposals_count: number; active_envelopes: number };
+  candidates: { unreviewed_count: number };
+  suspected_duplicates: { goal_id: string; title: string; matches_completed_goal: { id: string; title: string }; similarity: number }[];
+  warnings: string[];
+};
+
+export type ProjectStatus = {
+  schema_version: string;
+  generated_at: string;
+  blueprint: {
+    approved: { id: string; title: string; version: number; source_count: number } | null;
+    latest_draft: { id: string; title: string; version: number; status: string } | null;
+  };
+  status_classes: Record<"implemented" | "verified" | "planned" | "blocked", ProjectStatusBucket>;
+  goals: { counts: Record<string, number>; recent: { id: string; title: string; status: string }[] };
+  github: {
+    configured: boolean;
+    repo: string | null;
+    development: {
+      last_verified_at: string | null;
+      age_minutes: number | null;
+      stale: boolean;
+      head_sha: string | null;
+      head_subject: string | null;
+      open_prs: number | null;
+      open_issues: number | null;
+      checks: { total?: number; [key: string]: unknown } | null;
+      local_unpushed_count: number | null;
+      local_unavailable_reason: string | null;
+      error: string | null;
+    };
+    accepted_evidence: number;
+    unreviewed_count: number;
+  };
+  memory: { type: string; content: string; authority: string; created_at: string | null }[];
+  priorities: { type: string; content: string; authority: string }[];
+  agents: { available: boolean; agents: number; open_assignments: number };
+  ideas: { id: string; title: string; status: string }[];
+  work: ProjectStatusWork;
+  warnings: string[];
+  next_steps: { kind: string; title: string; why: string; source: string; authorized: false }[];
+  authorization: { created_goals: number; created_tasks: number; note: string };
+};
+
+async function streamChatRequest(
+  message: string,
+  conversationId: string | undefined,
+  clientMessageId: string | undefined,
+  options: { signal?: AbortSignal; onEvent?: (event: ChatStreamEvent) => void } = {},
+  isRetry = false,
+  projectId?: string
+): Promise<ChatResponse> {
+  const headers: Record<string, string> = { "Content-Type": "application/json", ...csrfHeader() };
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}/api/chat/stream`, {
+      method: "POST",
+      credentials: "include",
+      cache: "no-store",
+      signal: options.signal,
+      headers,
+      body: JSON.stringify({
+        message,
+        conversation_id: conversationId,
+        project_id: projectId,
+        client_message_id: clientMessageId ?? newClientMessageId(),
+      }),
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
+    throw new NetworkError();
+  }
+
+  if (res.status === 401 && !isRetry) {
+    const refreshed = await attemptRefresh();
+    if (refreshed) {
+      return streamChatRequest(message, conversationId, clientMessageId, options, true, projectId);
+    }
+    throw new AuthError("Sessionen har gått ut. Logga in igen.");
+  }
+  if (!res.ok) {
+    const body = await res.text();
+    let detail: string | undefined;
+    try {
+      const parsed = JSON.parse(body);
+      if (parsed && typeof parsed.detail === "string") detail = parsed.detail;
+    } catch {
+      /* not JSON */
+    }
+    const err = new Error(detail ?? `API-fel (${res.status}): ${body}`);
+    (err as Error & { status?: number }).status = res.status;
+    throw err;
+  }
+
+  const reader = res.body?.getReader();
+  if (!reader) throw new Error("Servern kunde inte öppna svarsströmmen.");
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalResponse: ChatResponse | null = null;
+
+  const consume = (block: string) => {
+    let eventName = "message";
+    const dataLines: string[] = [];
+    for (const line of block.split("\n")) {
+      if (line.startsWith("event:")) eventName = line.slice(6).trim();
+      else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+    }
+    if (dataLines.length === 0) return;
+    let data: any;
+    try {
+      data = JSON.parse(dataLines.join("\n"));
+    } catch {
+      return;
+    }
+    if (eventName === "start") {
+      options.onEvent?.({
+        type: "start",
+        conversation_id: data.conversation_id,
+        user_message_id: data.user_message_id,
+        assistant_message_id: data.assistant_message_id ?? null,
+      });
+    } else if (eventName === "delta" && typeof data.text === "string") {
+      options.onEvent?.({ type: "delta", text: data.text });
+    } else if (eventName === "done") {
+      finalResponse = data as ChatResponse;
+      options.onEvent?.({ type: "done", response: finalResponse });
+    } else if (eventName === "error") {
+      options.onEvent?.({
+        type: "error",
+        message: typeof data.message === "string" ? data.message : "Strömmen avbröts.",
+        retryable: Boolean(data.retryable),
+      });
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    buffer = buffer.replace(/\r\n/g, "\n");
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary >= 0) {
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      consume(block);
+      boundary = buffer.indexOf("\n\n");
+    }
+  }
+  if (buffer.trim()) consume(buffer);
+  if (!finalResponse) {
+    throw new Error("Strömmen avslutades utan ett komplett svar. Försök igen.");
+  }
+  return finalResponse;
+}
+
 export const api = {
+  projectStatus: () => request<ProjectStatus>("/api/mainai/project-status"),
   login: (email: string, password: string) =>
     request<CurrentUser>("/api/auth/login", {
       method: "POST",
@@ -770,11 +1359,23 @@ export const api = {
   deleteAccount: (password: string) =>
     request("/api/account", { method: "DELETE", body: JSON.stringify({ password }) }),
 
-  sendChat: (message: string, conversationId?: string) =>
+  sendChat: (message: string, conversationId?: string, clientMessageId?: string, projectId?: string) =>
     request<ChatResponse>("/api/chat", {
       method: "POST",
-      body: JSON.stringify({ message, conversation_id: conversationId }),
+      body: JSON.stringify({
+        message,
+        conversation_id: conversationId,
+        project_id: projectId,
+        client_message_id: clientMessageId ?? newClientMessageId(),
+      }),
     }),
+  streamChat: (
+    message: string,
+    conversationId?: string,
+    clientMessageId?: string,
+    options?: { signal?: AbortSignal; onEvent?: (event: ChatStreamEvent) => void },
+    projectId?: string
+  ) => streamChatRequest(message, conversationId, clientMessageId, options, false, projectId),
   retryChatMessage: (userMessageId: string) =>
     request<ChatResponse>(`/api/chat/messages/${userMessageId}/retry`, { method: "POST" }),
 
@@ -794,14 +1395,217 @@ export const api = {
   deleteDocument: (id: string) => request(`/api/documents/${id}`, { method: "DELETE" }),
 
   listProjects: () => request<ProjectItem[]>("/api/projects"),
+  getProject: (id: string) => request<ProjectDetail>(`/api/projects/${id}`),
   createProject: (payload: Partial<ProjectItem>) =>
     request<ProjectItem>("/api/projects", { method: "POST", body: JSON.stringify(payload) }),
 
-  listTasks: () => request<TaskItem[]>("/api/projects/tasks"),
-  createTask: (payload: Partial<TaskItem>) =>
+  listWorkspaces: (includeArchived = false) =>
+    request<ProjectItem[]>(`/api/workspaces${includeArchived ? "?include_archived=true" : ""}`),
+  getWorkspace: (id: string) => request<WorkspaceDetail>(`/api/workspaces/${id}`),
+  createWorkspace: (payload: {
+    name: string;
+    description?: string | null;
+    purpose?: string | null;
+    goals?: string[];
+    status?: string;
+    settings?: Record<string, unknown>;
+  }) => request<ProjectItem>("/api/workspaces", { method: "POST", body: JSON.stringify(payload) }),
+  updateWorkspace: (
+    id: string,
+    payload: Partial<ProjectItem> & {
+      goals?: string[];
+      purpose?: string | null;
+      settings?: Record<string, unknown>;
+      expected_version?: number;
+    }
+  ) => request<ProjectItem>(`/api/workspaces/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  archiveWorkspace: (id: string) => request<ProjectItem>(`/api/workspaces/${id}/archive`, { method: "POST" }),
+  restoreWorkspace: (id: string) => request<ProjectItem>(`/api/workspaces/${id}/restore`, { method: "POST" }),
+  deleteWorkspace: (id: string) => request(`/api/workspaces/${id}`, { method: "DELETE" }),
+  workspaceKnowledge: (id: string) => request<KnowledgeSourceItem[]>(`/api/workspaces/${id}/knowledge`),
+  associateWorkspaceDocument: (id: string, documentId: string) =>
+    request<KnowledgeSourceItem>(`/api/workspaces/${id}/documents/${documentId}`, { method: "POST" }),
+  disassociateWorkspaceDocument: (id: string, documentId: string) =>
+    request<KnowledgeSourceItem>(`/api/workspaces/${id}/documents/${documentId}`, { method: "DELETE" }),
+  workspaceTasks: (id: string) => request<TaskItem[]>(`/api/workspaces/${id}/tasks`),
+  createWorkspaceTask: (id: string, payload: Partial<TaskItem>) =>
+    request<TaskItem>(`/api/workspaces/${id}/tasks`, { method: "POST", body: JSON.stringify(payload) }),
+  workspaceConversations: (id: string) => request<ConversationItem[]>(`/api/workspaces/${id}/conversations`),
+  createWorkspaceConversation: (id: string) =>
+    request<ConversationItem>(`/api/workspaces/${id}/conversations`, { method: "POST" }),
+  workspaceActivity: (id: string) => request<WorkspaceActivity[]>(`/api/workspaces/${id}/activity`),
+  workspaceDecisions: (id: string) => request<WorkspaceDecision[]>(`/api/workspaces/${id}/decisions`),
+  createWorkspaceDecision: (
+    id: string,
+    payload: {
+      title: string;
+      decision: string;
+      rationale?: string | null;
+      status?: string;
+      epistemic_status?: "confirmed" | "uncertain" | "proposed";
+      origin?: "founder" | "ai";
+    }
+  ) => request<WorkspaceDecision>(`/api/workspaces/${id}/decisions`, { method: "POST", body: JSON.stringify(payload) }),
+  supersedeWorkspaceDecision: (
+    workspaceId: string,
+    decisionId: string,
+    payload: {
+      title: string;
+      decision: string;
+      rationale?: string | null;
+      status?: string;
+      epistemic_status?: "confirmed" | "uncertain" | "proposed";
+      origin?: "founder" | "ai";
+    }
+  ) =>
+    request<WorkspaceDecision>(`/api/workspaces/${workspaceId}/decisions/${decisionId}/supersede`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  workspaceContext: (id: string, query?: string) =>
+    request<WorkspaceContext>(`/api/workspaces/${id}/context${query ? `?q=${encodeURIComponent(query)}` : ""}`),
+  workspaceSupervised: (id: string) =>
+    request<WorkspaceSupervised>(`/api/workspaces/${id}/supervised-tasks`),
+  workspaceSyncRuns: (id: string, limit = 20) =>
+    request<WorkspaceSyncRun[]>(`/api/workspaces/${id}/sync?limit=${limit}`),
+  startWorkspaceSync: (id: string, idempotencyKey: string) =>
+    request<WorkspaceSyncRun>(`/api/workspaces/${id}/sync`, {
+      method: "POST",
+      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    }),
+  retryWorkspaceSync: (id: string, runId: string) =>
+    request<WorkspaceSyncRun>(`/api/workspaces/${id}/sync/${runId}/retry`, { method: "POST" }),
+
+  listTasks: (filters: {
+    project_id?: string;
+    status?: string;
+    priority?: string;
+    q?: string;
+    blocked_only?: boolean;
+    include_cancelled?: boolean;
+    limit?: number;
+    offset?: number;
+  } = {}) => {
+    const qs = new URLSearchParams(
+      Object.entries(filters)
+        .filter(([, value]) => value !== undefined && value !== "")
+        .map(([key, value]) => [key, String(value)])
+    ).toString();
+    return request<TaskItem[]>(`/api/projects/tasks${qs ? `?${qs}` : ""}`);
+  },
+  getTask: (id: string) => request<TaskDetailItem>(`/api/projects/tasks/${id}`),
+  createTask: (payload: Partial<TaskItem> & { depends_on_task_ids?: string[] }) =>
     request<TaskItem>("/api/projects/tasks", { method: "POST", body: JSON.stringify(payload) }),
-  updateTask: (id: string, payload: Partial<TaskItem>) =>
-    request<TaskItem>(`/api/projects/tasks/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  updateTask: (
+    id: string,
+    payload: Partial<TaskItem> & { expected_version?: number; depends_on_task_ids?: string[] }
+  ) => request<TaskItem>(`/api/projects/tasks/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteTask: (id: string) => request(`/api/projects/tasks/${id}`, { method: "DELETE" }),
+  addTaskDependency: (taskId: string, dependsOnTaskId: string) =>
+    request<TaskDetailItem>(
+      `/api/projects/tasks/${taskId}/dependencies?depends_on_task_id=${encodeURIComponent(dependsOnTaskId)}`,
+      { method: "POST" }
+    ),
+  removeTaskDependency: (taskId: string, dependsOnTaskId: string) =>
+    request<TaskDetailItem>(`/api/projects/tasks/${taskId}/dependencies/${dependsOnTaskId}`, {
+      method: "DELETE",
+    }),
+  listMilestones: (projectId: string) =>
+    request<MilestoneItem[]>(`/api/projects/${projectId}/milestones`),
+  createMilestone: (projectId: string, payload: Partial<MilestoneItem>) =>
+    request<MilestoneItem>(`/api/projects/${projectId}/milestones`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateMilestone: (id: string, payload: Partial<MilestoneItem> & { expected_version?: number }) =>
+    request<MilestoneItem>(`/api/projects/milestones/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  deleteMilestone: (id: string) => request(`/api/projects/milestones/${id}`, { method: "DELETE" }),
+
+  dashboard: () => request<DashboardData>("/api/dashboard"),
+  searchPersonalWork: (params: {
+    q: string;
+    type?: string;
+    project_id?: string;
+    date_from?: string;
+    date_to?: string;
+    limit?: number;
+    offset?: number;
+  }) => {
+    const qs = new URLSearchParams(
+      Object.entries(params)
+        .filter(([, value]) => value !== undefined && value !== "")
+        .map(([key, value]) => [key, String(value)])
+    ).toString();
+    return request<SearchResponse>(`/api/search?${qs}`);
+  },
+
+  listCalendarEvents: (params: {
+    starts_after: string;
+    starts_before: string;
+    category?: string;
+    project_id?: string;
+  }) => {
+    const qs = new URLSearchParams(
+      Object.entries(params)
+        .filter(([, value]) => value !== undefined && value !== "")
+        .map(([key, value]) => [key, String(value)])
+    ).toString();
+    return request<CalendarEventItem[]>(`/api/calendar/events?${qs}`);
+  },
+  upcomingCalendarEvents: (withinHours = 24 * 14) =>
+    request<CalendarEventItem[]>(`/api/calendar/events/upcoming?within_hours=${withinHours}`),
+  createCalendarEvent: (payload: {
+    title: string;
+    starts_at: string;
+    ends_at?: string | null;
+    description?: string | null;
+    location?: string | null;
+    category?: "personal" | "work" | "school";
+    timezone?: string;
+    recurrence_rule?: "none" | "daily" | "weekly" | "monthly";
+    recurrence_until?: string | null;
+    project_id?: string | null;
+    task_id?: string | null;
+    milestone_id?: string | null;
+  }) =>
+    request<CalendarEventItem>("/api/calendar/events", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateCalendarEvent: (
+    id: string,
+    payload: {
+      title?: string;
+      starts_at?: string;
+      ends_at?: string | null;
+      description?: string | null;
+      location?: string | null;
+      category?: "personal" | "work" | "school";
+      timezone?: string;
+      project_id?: string | null;
+      task_id?: string | null;
+      milestone_id?: string | null;
+      expected_version?: number;
+      apply_to_series?: boolean;
+    }
+  ) =>
+    request<CalendarEventItem>(`/api/calendar/events/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  deleteCalendarEvent: (id: string, applyToSeries = false) =>
+    request(`/api/calendar/events/${id}?apply_to_series=${applyToSeries}`, { method: "DELETE" }),
+  calendarConflicts: (params: { starts_at: string; ends_at?: string; exclude_event_id?: string }) => {
+    const qs = new URLSearchParams(
+      Object.entries(params)
+        .filter(([, value]) => value !== undefined && value !== "")
+        .map(([key, value]) => [key, String(value)])
+    ).toString();
+    return request<CalendarEventItem[]>(`/api/calendar/conflicts?${qs}`);
+  },
 
   searchKnowledge: (query: string) =>
     request<{ document_id: string; title: string; text: string; score: number }[]>("/api/knowledge/search", {
@@ -809,17 +1613,26 @@ export const api = {
       body: JSON.stringify({ query }),
     }),
 
+  modelCatalog: () => request<ModelCatalog[]>("/api/admin/providers/models"),
+  localModels: () => request<LocalModels>("/api/admin/providers/local-models"),
   providerStatus: () => request<ProviderStatus[]>("/api/admin/providers/status"),
+  listIncidents: (status?: string) =>
+    request<RuntimeIncident[]>(`/api/incidents${status ? `?status=${encodeURIComponent(status)}` : ""}`),
+  incidentHealth: () => request<RuntimeHealth>("/api/incidents/health"),
+  acknowledgeIncident: (id: string) =>
+    request<RuntimeIncident>(`/api/incidents/${id}/acknowledge`, { method: "POST" }),
+  resolveIncident: (id: string) =>
+    request<RuntimeIncident>(`/api/incidents/${id}/resolve`, { method: "POST" }),
   setProviderConfig: (role: "chat" | "embedding", provider: string, model: string) =>
     request("/api/admin/providers/config", {
       method: "PUT",
       body: JSON.stringify({ role, provider, model }),
     }),
   // P1: "Testa nu" — an explicit, real verification call, bypassing the cache.
-  verifyProvider: (provider: string, role: "chat" | "embedding") =>
+  verifyProvider: (provider: string, role: "chat" | "embedding", model: string) =>
     request<ProviderVerification>("/api/admin/providers/verify", {
       method: "POST",
-      body: JSON.stringify({ provider, role }),
+      body: JSON.stringify({ provider, role, model }),
     }),
   usageSummary: () => request<UsageSummaryRow[]>("/api/admin/usage/summary"),
 
@@ -845,6 +1658,14 @@ export const api = {
   getLibraryMediaUrl: (id: string) => `${API_URL}/api/library/${id}/media`,
   deleteLibrarySource: (id: string) =>
     request(`/api/library/${id}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) }),
+  replaceLibrarySource: (id: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return request<SourceReplacement>(`/api/library/${id}/replace?confirm=true`, {
+      method: "POST",
+      body: form,
+    });
+  },
   createSourceRelationship: (sourceId: string, toSourceId: string, relationshipType: string, note?: string) =>
     request<SourceRelationshipItem>(`/api/library/${sourceId}/relationships`, {
       method: "POST",
@@ -937,4 +1758,16 @@ export const api = {
   mainaiExecutionTaskWaits: (id: string) => request<MainAITaskWait[]>(`/api/mainai/execution/tasks/${id}/waits`),
   mainaiExecutionLessons: (statusFilter?: string) =>
     request<EngineeringLesson[]>(`/api/mainai/execution/lessons${statusFilter ? `?status_filter=${statusFilter}` : ""}`),
+
+  // Blueprint drafts (backend/app/routers/blueprint.py). Sources are derived server-side from
+  // the founder's own indexed documents — the client supplies only a title + optional query.
+  blueprintDrafts: (title?: string) =>
+    request<BlueprintDraftSummary[]>(`/api/blueprint/drafts${title ? `?title=${encodeURIComponent(title)}` : ""}`),
+  blueprintDraft: (id: string) => request<BlueprintDraft>(`/api/blueprint/drafts/${id}`),
+  blueprintGenerate: (payload: { title: string; query?: string; top_k?: number }) =>
+    request<BlueprintDraft>("/api/blueprint/drafts", { method: "POST", body: JSON.stringify(payload) }),
+  blueprintRegenerate: (id: string, payload: { query?: string; top_k?: number }) =>
+    request<BlueprintDraft>(`/api/blueprint/drafts/${id}/regenerate`, { method: "POST", body: JSON.stringify(payload) }),
+  blueprintApprove: (id: string) =>
+    request<BlueprintDraft>(`/api/blueprint/drafts/${id}/approve`, { method: "POST" }),
 };

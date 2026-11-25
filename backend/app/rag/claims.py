@@ -248,7 +248,15 @@ async def extract_claims_for_document(
             Message(role="user", content=chunk.text[:4000]),
         ]
         try:
-            result, _ = await chat_with_fallback(db, messages)
+            # Freebuff EGRESS-0/EGRESS-1 (same V4 gap docs/LIFE_VAULT_EGRESS_CONTROL.md
+            # already tracks): owner_id is already in this function's own scope -- passing it
+            # routes this real chunk-content egress through the Life Vault policy gate instead
+            # of silently skipping it (chat_with_fallback()'s owner_id is optional and skips
+            # the entire gate when omitted).
+            result, _ = await chat_with_fallback(
+                db, messages, owner_id=owner_id, purpose="mainai_claim_extraction",
+                requested_by="rag.claims.extract_claims_for_document", effect_guard=True,
+            )
         except ProviderError:
             continue
 
@@ -401,7 +409,13 @@ async def backfill_claim_types(
             Message(role="user", content=json.dumps([c.claim_text for c in candidates])),
         ]
         try:
-            chat_result, _ = await chat_with_fallback(db, messages)
+            # Freebuff EGRESS-0/EGRESS-1 -- see extract_claims_for_document()'s matching
+            # comment above; owner_id is this function's own single-owner-per-call parameter
+            # (see its docstring: "this only ever runs within one owner's RLS scope").
+            chat_result, _ = await chat_with_fallback(
+                db, messages, owner_id=owner_id, purpose="mainai_claim_type_backfill",
+                requested_by="rag.claims.backfill_claim_types", effect_guard=True,
+            )
         except ProviderError:
             result.failed += len(candidates)
             failed_ids.update(c.id for c in candidates)

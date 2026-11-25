@@ -8,6 +8,7 @@ Expects the schema to already be migrated (`alembic upgrade head` — see
 .github/workflows/ci.yml and docs/OPERATIONS.md). Deliberately does NOT create tables
 itself; that's the whole point of no longer using Base.metadata.create_all in this app.
 """
+import asyncio
 import json
 import os
 import sys
@@ -18,6 +19,8 @@ import sys
 # like before the move, not a functional change, just preserving the same target after the move.
 BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, BACKEND_ROOT)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from fake_embedding import text_embedding  # noqa: E402
 
 EMAIL_LOG_PATH = os.environ.get("E2E_EMAIL_LOG_PATH", os.path.join(BACKEND_ROOT, "e2e_test_emails.jsonl"))
 HOST = os.environ.get("E2E_BACKEND_HOST", "127.0.0.1")
@@ -27,17 +30,87 @@ PORT = int(os.environ.get("E2E_BACKEND_PORT", "8010"))
 open(EMAIL_LOG_PATH, "w").close()
 
 from app.config import get_settings
-from app.providers.base import ChatResult
+from app.providers.base import ChatResult, ChatStreamChunk
 from app.providers.openai_provider import OpenAIProvider
+from app.providers.ollama_provider import OllamaProvider
 from app.rag.claims import CLAIM_EXTRACTION_SYSTEM_PROMPT
 import app.rag.vector_store as vector_store
 import app.rag.retrieve as retrieve_mod
 import app.routers.auth as auth_router
 
 _EMBEDDING_DIM = get_settings().embedding_dim
+# Guarded chat permits local query embedding; its transport alone is faked here.
+get_settings().default_embedding_provider = "ollama"
+get_settings().default_embedding_model = "nomic-embed-text"
 
 
 async def fake_chat(self, messages, model, **kwargs):
+    # V6 test lab: the planner is a real API path (POST /goals/{id}/plan). The deterministic
+    # E2E provider must return a valid plan so the founder-journey acceptance can exercise the
+    # approval -> envelope -> execution chain without depending on a model's JSON formatting.
+    # This branch is test-only and is never imported by production code.
+    if messages and messages[0].role == "system" and messages[0].content.startswith("Du är MainAI:s planerare"):
+        return ChatResult(
+            content=json.dumps(
+                {
+                    "tasks": [
+                        {
+                            "description": "Perform one isolated read-only audit; change no files.",
+                            "task_type": "read_only_audit",
+                            "depends_on": [],
+                            "risk_level": "low",
+                            "approval_required": True,
+                            "verification_plan": [],
+                        }
+                    ]
+                }
+            ),
+            provider="openai",
+            model=model,
+            raw_usage={"prompt_tokens": 60, "completion_tokens": 20},
+        )
+
+    # V6 test lab: the production Supervisor uses provider-assisted planning for an ordinary
+    # candidate=None task. Return a valid Safe Planner envelope for the exact read-only scope
+    # the acceptance authorized, so the real Supervisor -> Safe Planner -> Driver chain runs
+    # instead of parsing a generic conversational reply. Test-only; never imported by app code.
+    if messages and messages[0].role == "system" and messages[0].content.startswith(
+        "You are a planning specialist"
+    ):
+        return ChatResult(
+            content=json.dumps(
+                {
+                    "candidate": {
+                        "interpretation": "Read the authorized README as a bounded read-only audit.",
+                        "requested_outcome": "A read-only inspection with no file changes.",
+                        "rationale": "The active envelope authorizes read_file on README.md.",
+                        "facts": ["Only README.md is inside the authorized path scope."],
+                        "assumptions": [],
+                        "unknowns": [],
+                        "exclusions": ["No writes, commands, network calls, merges or deploys."],
+                        "steps": [
+                            {
+                                "step_id": "inspect-readme",
+                                "purpose": "Read the authorized README as the isolated audit.",
+                                "expected_result": "The README content is read without mutation.",
+                                "capability": "read_file",
+                                "arguments": {"path": "README.md"},
+                                "required_risk": "READ_ONLY",
+                            }
+                        ],
+                    },
+                    "clarification_required": False,
+                    "clarification_question": None,
+                    "capability_gaps": [],
+                    "useful_components": [],
+                    "confidence": 0.9,
+                }
+            ),
+            provider="openai",
+            model=model,
+            raw_usage={"prompt_tokens": 90, "completion_tokens": 45},
+        )
+
     # STEG 14: without this branch, EVERY claim extraction call during E2E (app/rag/claims.py's
     # extract_claims_for_document, which runs automatically after every successful import)
     # silently produced zero claims — the generic conversational reply below has no `[...]`
@@ -62,12 +135,48 @@ async def fake_chat(self, messages, model, **kwargs):
     )
 
 
-async def fake_embed(self, texts, model):
+async def fake_stream_chat(self, messages, model, **kwargs):
+    """Chunked transport for the streaming E2E path.
+
+    The ordinary browser suite only needs a completed reply. These tests need to observe
+    the SSE path itself, so emit the same deterministic answer in three delayed chunks —
+    and a deliberately slow answer when the message asks for the cancellation scenario.
+    """
+    result = await fake_chat(self, messages, model, **kwargs)
+    prompt = messages[-1].content if messages else ""
+    if "E2E-avbryt" in prompt:
+        text = " ".join(["Detta är ett långsamt strömmande svar."] * 24)
+        chunks = [text[i : i + 18] for i in range(0, len(text), 18)]
+        delay = 0.35
+    else:
+        text = result.content
+        third = max(1, len(text) // 3)
+        chunks = [text[:third], text[third : 2 * third], text[2 * third :]]
+        delay = 0.25
+
+    for chunk in chunks:
+        if not chunk:
+            continue
+        await asyncio.sleep(delay)
+        yield ChatStreamChunk(delta=chunk, provider=result.provider, model=result.model)
+    yield ChatStreamChunk(
+        provider=result.provider,
+        model=result.model,
+        raw_usage=result.raw_usage,
+        done=True,
+    )
+
+
+async def fake_embed(self, texts, model, **kwargs):
     # Must match app/config.py's embedding_dim exactly — pgvector's document_chunks.embedding
     # column is a fixed vector(1536) (see the 0004 migration), unlike Qdrant's old
     # dynamically-sized collection. A shorter fake vector here would raise a dimension
     # mismatch the moment anything actually tried to insert it.
-    return [[0.05] * _EMBEDDING_DIM for _ in texts]
+    #
+    # `**kwargs` is required: ensure_verified() calls embed(..., timeout=...) before an import
+    # is allowed to proceed. A narrower fake made that pre-flight fail with TypeError and
+    # paused every E2E import as blocked_provider.
+    return [text_embedding(text, _EMBEDDING_DIM) for text in texts]
 
 
 _real_search = vector_store.search
@@ -107,12 +216,35 @@ def fake_send_email(to: str, subject: str, body_text: str) -> None:
 
 
 OpenAIProvider.chat = fake_chat
-OpenAIProvider.embed = fake_embed
+OpenAIProvider.stream_chat = fake_stream_chat
+OllamaProvider.embed = fake_embed
 vector_store.search = fake_search
 retrieve_mod.search = fake_search
 auth_router.send_email = fake_send_email
 
 import uvicorn
+from app.worker import Worker
+
+
+async def _serve() -> None:
+    """Serve the API and run the durable worker in the same E2E process.
+
+    Uploads intentionally only create a pending `knowledge_import_jobs` row; a separate
+    production worker service does the indexing. The browser E2E harness must therefore
+    start that worker too, otherwise every import test can only ever observe `pending`.
+    This is test-only wiring and does not change the production process split.
+    """
+    worker = Worker()
+    worker_task = asyncio.create_task(worker.run())
+    server = uvicorn.Server(
+        uvicorn.Config("app.main:app", host=HOST, port=PORT, log_level="warning")
+    )
+    try:
+        await server.serve()
+    finally:
+        worker.request_shutdown()
+        await worker_task
+
 
 if __name__ == "__main__":
-    uvicorn.run("app.main:app", host=HOST, port=PORT, log_level="warning")
+    asyncio.run(_serve())

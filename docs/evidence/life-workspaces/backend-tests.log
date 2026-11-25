@@ -1,0 +1,188 @@
+/tmp/r15-venv/lib/python3.12/site-packages/pytest_asyncio/plugin.py:208: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+...............                                                          [100%]
+=============================== warnings summary ===============================
+../../../../../tmp/r15-venv/lib/python3.12/site-packages/starlette/testclient.py:40
+  /tmp/r15-venv/lib/python3.12/site-packages/starlette/testclient.py:40: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = typing.Callable[[], typing.ContextManager[anyio.abc.BlockingPortal]]
+
+tests/backend/test_workspaces_api.py::test_workspace_lifecycle_scoped_collections_and_context
+  /home/lifeai-agent/work/LifeAI/backend/app/main.py:111: DeprecationWarning:
+          on_event is deprecated, use lifespan event handlers instead.
+
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+
+    @app.on_event("startup")
+
+tests/backend/test_workspaces_api.py::test_workspace_lifecycle_scoped_collections_and_context
+tests/backend/test_workspaces_api.py::test_workspace_lifecycle_scoped_collections_and_context
+  /tmp/r15-venv/lib/python3.12/site-packages/fastapi/applications.py:4495: DeprecationWarning:
+          on_event is deprecated, use lifespan event handlers instead.
+
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+
+    return self.router.on_event(event_type)
+
+tests/backend/test_workspaces_api.py::test_workspace_lifecycle_scoped_collections_and_context
+  /home/lifeai-agent/work/LifeAI/backend/app/main.py:168: DeprecationWarning:
+          on_event is deprecated, use lifespan event handlers instead.
+
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+
+    @app.on_event("shutdown")
+
+tests/backend/test_workspaces_api.py: 11 warnings
+tests/backend/test_projects_detail.py: 4 warnings
+tests/backend/chat/test_chat_request_idempotency.py: 3 warnings
+  /home/lifeai-agent/work/LifeAI/backend/app/security.py:34: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow().replace(microsecond=0)
+
+tests/backend/test_workspaces_api.py: 172 warnings
+tests/backend/test_projects_detail.py: 32 warnings
+tests/backend/chat/test_chat_request_idempotency.py: 36 warnings
+  /tmp/r15-venv/lib/python3.12/site-packages/sqlalchemy/sql/schema.py:3596: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore
+
+tests/backend/test_workspaces_api.py: 9 warnings
+tests/backend/test_projects_detail.py: 2 warnings
+tests/backend/chat/test_chat_request_idempotency.py: 3 warnings
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/auth.py:107: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    cutoff = datetime.utcnow() - timedelta(minutes=FAILED_LOGIN_WINDOW_MINUTES)
+
+tests/backend/test_workspaces_api.py: 9 warnings
+tests/backend/test_projects_detail.py: 2 warnings
+tests/backend/chat/test_chat_request_idempotency.py: 3 warnings
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/auth.py:76: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expires_at=datetime.utcnow() + timedelta(days=settings.refresh_token_expire_days),
+
+tests/backend/test_workspaces_api.py: 12 warnings
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/workspaces.py:807: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    last_activity_at=datetime.utcnow(),
+
+tests/backend/test_workspaces_api.py: 23 warnings
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/workspaces.py:114: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    project.last_activity_at = datetime.utcnow()
+
+tests/backend/test_workspaces_api.py: 11 warnings
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/workspaces.py:123: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    project.last_activity_at = datetime.utcnow()
+
+tests/backend/test_workspaces_api.py::test_workspace_lifecycle_scoped_collections_and_context
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/workspaces.py:874: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    project.archived_at = datetime.utcnow()
+
+tests/backend/test_workspaces_api.py::test_workspace_lifecycle_scoped_collections_and_context
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/workspaces.py:909: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    project.deleted_at = datetime.utcnow()
+
+tests/backend/test_workspaces_api.py::test_workspace_lifecycle_scoped_collections_and_context
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/workspaces.py:910: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    project.archived_at = project.archived_at or datetime.utcnow()
+
+tests/backend/test_workspaces_api.py::test_workspace_owner_scope_hides_foreign_project_and_document
+  /home/lifeai-agent/work/LifeAI/backend/tests/backend/test_workspaces_api.py:168: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    last_activity_at=datetime.utcnow(),
+
+tests/backend/test_workspaces_api.py::test_chat_binds_new_conversation_to_workspace_and_scopes_retrieval
+tests/backend/chat/test_chat_request_idempotency.py::test_same_client_message_id_replays_without_second_provider_call
+tests/backend/chat/test_chat_request_idempotency.py::test_same_client_message_id_with_different_content_is_a_conflict
+tests/backend/chat/test_chat_request_idempotency.py::test_claim_without_reply_slot_recovers_after_a_crash
+  /home/lifeai-agent/work/LifeAI/backend/app/context/resolver.py:147: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = now or datetime.utcnow()
+
+tests/backend/test_workspaces_api.py::test_chat_binds_new_conversation_to_workspace_and_scopes_retrieval
+  /home/lifeai-agent/work/LifeAI/backend/app/project_status/work_chain.py:442: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = now or datetime.utcnow()
+
+tests/backend/test_workspaces_api.py::test_chat_binds_new_conversation_to_workspace_and_scopes_retrieval
+tests/backend/chat/test_chat_request_idempotency.py::test_same_client_message_id_replays_without_second_provider_call
+tests/backend/chat/test_chat_request_idempotency.py::test_same_client_message_id_with_different_content_is_a_conflict
+tests/backend/chat/test_chat_request_idempotency.py::test_claim_without_reply_slot_recovers_after_a_crash
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/chat.py:652: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    conversation.updated_at = datetime.utcnow()
+
+tests/backend/test_workspaces_api.py::test_workspace_sync_is_idempotent_and_skips_unchanged_entities
+tests/backend/test_workspaces_api.py::test_workspace_sync_is_idempotent_and_skips_unchanged_entities
+tests/backend/test_workspaces_api.py::test_workspace_sync_is_idempotent_and_skips_unchanged_entities
+tests/backend/test_workspaces_api.py::test_workspace_sync_is_idempotent_and_skips_unchanged_entities
+tests/backend/test_workspaces_api.py::test_workspace_sync_failure_retry_and_stale_rejection
+tests/backend/test_workspaces_api.py::test_workspace_sync_failure_retry_and_stale_rejection
+tests/backend/test_workspaces_api.py::test_workspace_sync_reconciles_interrupted_run
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/workspaces.py:315: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    cutoff = datetime.utcnow() - timedelta(minutes=5)
+
+tests/backend/test_workspaces_api.py::test_workspace_sync_is_idempotent_and_skips_unchanged_entities
+tests/backend/test_workspaces_api.py::test_workspace_sync_is_idempotent_and_skips_unchanged_entities
+tests/backend/test_workspaces_api.py::test_workspace_sync_failure_retry_and_stale_rejection
+tests/backend/test_workspaces_api.py::test_workspace_sync_failure_retry_and_stale_rejection
+tests/backend/test_workspaces_api.py::test_workspace_sync_failure_retry_and_stale_rejection
+tests/backend/test_workspaces_api.py::test_workspace_sync_reconciles_interrupted_run
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/workspaces.py:443: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/backend/test_workspaces_api.py::test_workspace_sync_is_idempotent_and_skips_unchanged_entities
+tests/backend/test_workspaces_api.py::test_workspace_sync_is_idempotent_and_skips_unchanged_entities
+tests/backend/test_workspaces_api.py::test_workspace_sync_is_idempotent_and_skips_unchanged_entities
+tests/backend/test_workspaces_api.py::test_workspace_sync_is_idempotent_and_skips_unchanged_entities
+tests/backend/test_workspaces_api.py::test_workspace_sync_failure_retry_and_stale_rejection
+tests/backend/test_workspaces_api.py::test_workspace_sync_reconciles_interrupted_run
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/workspaces.py:496: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    item.processed_at = datetime.utcnow()
+
+tests/backend/test_workspaces_api.py::test_workspace_sync_is_idempotent_and_skips_unchanged_entities
+tests/backend/test_workspaces_api.py::test_workspace_sync_is_idempotent_and_skips_unchanged_entities
+tests/backend/test_workspaces_api.py::test_workspace_sync_is_idempotent_and_skips_unchanged_entities
+tests/backend/test_workspaces_api.py::test_workspace_sync_is_idempotent_and_skips_unchanged_entities
+tests/backend/test_workspaces_api.py::test_workspace_sync_failure_retry_and_stale_rejection
+tests/backend/test_workspaces_api.py::test_workspace_sync_reconciles_interrupted_run
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/workspaces.py:498: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    run.heartbeat_at = datetime.utcnow()
+
+tests/backend/test_workspaces_api.py::test_workspace_sync_is_idempotent_and_skips_unchanged_entities
+tests/backend/test_workspaces_api.py::test_workspace_sync_is_idempotent_and_skips_unchanged_entities
+tests/backend/test_workspaces_api.py::test_workspace_sync_failure_retry_and_stale_rejection
+tests/backend/test_workspaces_api.py::test_workspace_sync_reconciles_interrupted_run
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/workspaces.py:520: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    run.completed_at = datetime.utcnow()
+
+tests/backend/test_workspaces_api.py::test_workspace_sync_failure_retry_and_stale_rejection
+tests/backend/test_workspaces_api.py::test_workspace_sync_failure_retry_and_stale_rejection
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/workspaces.py:492: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    run.completed_at = datetime.utcnow()
+
+tests/backend/test_workspaces_api.py::test_workspace_sync_reconciles_interrupted_run
+  /home/lifeai-agent/work/LifeAI/backend/tests/backend/test_workspaces_api.py:437: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    started_at=datetime.utcnow() - timedelta(minutes=30),
+
+tests/backend/test_workspaces_api.py::test_workspace_sync_reconciles_interrupted_run
+  /home/lifeai-agent/work/LifeAI/backend/tests/backend/test_workspaces_api.py:438: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    heartbeat_at=datetime.utcnow() - timedelta(minutes=30),
+
+tests/backend/test_workspaces_api.py::test_workspace_sync_reconciles_interrupted_run
+  /home/lifeai-agent/work/LifeAI/backend/app/routers/workspaces.py:332: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    run.completed_at = datetime.utcnow()
+
+tests/backend/test_workspaces_api.py::test_workspace_supervised_tasks_include_real_evidence_and_owner_scope
+tests/backend/test_workspaces_api.py::test_workspace_supervised_tasks_include_real_evidence_and_owner_scope
+tests/backend/test_workspaces_api.py::test_workspace_supervised_tasks_include_real_evidence_and_owner_scope
+tests/backend/test_workspaces_api.py::test_workspace_supervised_tasks_include_real_evidence_and_owner_scope
+tests/backend/test_workspaces_api.py::test_workspace_supervised_tasks_include_real_evidence_and_owner_scope
+  /home/lifeai-agent/work/LifeAI/backend/app/mainai_execution/liveness.py:47: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = now or datetime.utcnow()
+
+tests/backend/test_workspaces_api.py::test_workspace_supervised_tasks_include_real_evidence_and_owner_scope
+  /home/lifeai-agent/work/LifeAI/backend/app/mainai_execution/executor.py:384: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    task.completed_at = datetime.utcnow()
+
+tests/backend/test_projects_detail.py::test_project_detail_returns_only_its_tasks_and_owner_visible_sources
+  /home/lifeai-agent/work/LifeAI/backend/tests/backend/test_projects_detail.py:34: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    deleted_at=datetime.utcnow() if deleted else None,
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+---------------- generated xml file: /tmp/workspaces-junit.xml -----------------
+15 passed, 391 warnings in 33.63s

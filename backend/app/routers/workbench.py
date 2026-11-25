@@ -14,9 +14,20 @@ from app.models.user import User
 from app.providers.base import Message, ProviderError
 from app.providers.registry import chat_with_fallback
 from app.rag.ingest import index_document
-from app.rag.retrieve import retrieve_context
+from app.rag.retrieve import GroundingUnavailableError, retrieve_context
+from app.blueprint_readiness import collect_blueprint_readiness
+import logging
+
+from app.mainai_execution.lesson_selection import format_lesson_feedback_instructions
+from app.rag.graph_instructions import format_graph_context_instructions
+from app.rag.untrusted_content import UNTRUSTED_CONTENT_POLICY, build_untrusted_context_block
+from app.rag.epistemics import epistemic_status_counts_sql, format_epistemic_instructions
+from app.rag.evidence_metadata import summarize_owner_evidence_landscape
+from app.rag.evidence_quality import format_landscape_instructions
 from app.rag.trust import assess_confidence, build_trust_instructions, detect_conflicts
 from app.schemas import KnowledgeSourceOut, SourceRef, WorkbenchAnalyzeIn, WorkbenchAnalyzeOut, WorkbenchSaveIn
+
+logger = logging.getLogger("mainai.workbench")
 
 router = APIRouter(prefix="/api/workbench", tags=["workbench"], dependencies=[Depends(require_founder)])
 
@@ -72,23 +83,72 @@ async def analyze(
         if doc is None:
             raise HTTPException(status_code=404, detail="Källan hittades inte.")
 
-    hits = await retrieve_context(
-        db, user.id, payload.question, top_k=5, project_id=payload.project_id, document_id=payload.document_id
-    )
+    try:
+        hits = await retrieve_context(
+            db,
+            user.id,
+            payload.question,
+            top_k=5,
+            project_id=payload.project_id,
+            document_id=payload.document_id,
+            effect_guard=True,
+        )
+    except GroundingUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     conflicting_pairs = detect_conflicts(db, user.id, [h["document_id"] for h in hits])
     trust = assess_confidence(hits, conflicting_pairs)
 
-    context_block = "\n\n".join(f"[{h['title']}]\n{h['text']}" for h in hits) or "Ingen relevant kunskap hittades."
+    # Round 9 M4: same untrusted-content framing as chat — every retrieved chunk is DATA.
+    context_block = build_untrusted_context_block(
+        [{"title": h.get("title", ""), "text": h["text"]} for h in hits],
+        fallback="Ingen relevant kunskap hittades.",
+    )
     system_content = (
-        f"{SYSTEM_PROMPT}\n\nKONTEXT:\n{context_block}\n\n"
+        f"{SYSTEM_PROMPT}\n\n{UNTRUSTED_CONTENT_POLICY}\n\nKONTEXT:\n{context_block}\n\n"
         f"TILLFÖRLITLIGHETSINSTRUKTION:\n"
         f"{build_trust_instructions(trust.level, trust.top_source_status, trust.conflicts_detected)}"
     )
+    # Evidence-ladder rollup + body-of-evidence landscape (Round 8: these lines were
+    # imported but never appended — the seam existed without a driver). Fail-open: any
+    # failure degrades to the trust text alone, exactly the R7 contract.
+    _evidence_lines: list[str] = []
+    try:
+        _evidence_lines.append(format_epistemic_instructions(epistemic_status_counts_sql(db, user.id)))
+        _evidence_lines.append(format_landscape_instructions(summarize_owner_evidence_landscape(db, user.id)))
+    except Exception:
+        logger.warning("epistemic rollup failed; system prompt degrades to trust text alone", exc_info=True)
+    if _evidence_lines:
+        system_content += "\n\nEVIDENSSTATUS:\n" + "\n".join(_evidence_lines)
+    # Round 9 M1: measured lesson standings + recurring-failure clusters ride the same
+    # instruction block (fail-open like everything above). This is planner FEEDBACK in the
+    # cognitive sense: the deterministic create_plan() ordering is unchanged — the prompt
+    # layer now KNOWS which rules are measured-useful, which are hypotheses, and which
+    # components keep failing under every rule pointed at them.
+    try:
+        lesson_feedback = format_lesson_feedback_instructions(db, owner_id=user.id)
+        if lesson_feedback:
+            system_content += "\n\n" + lesson_feedback
+    except Exception:
+        logger.warning("lesson feedback failed; system prompt degrades without it", exc_info=True)
+    # Round 9 M3: the claim graph IN the answer path — consequences, question-relevant
+    # cross-domain overlaps, and the retrieved claims' topic landscape are computed for the
+    # retrieved sources and appended (fail-open). The graph now influences what the model
+    # sees, not just what an endpoint would return.
+    try:
+        graph_context = format_graph_context_instructions(
+            db, user.id, [h.get("document_id") for h in hits], payload.question,
+            top_hit_text=hits[0].get("text") if hits else None,
+        )
+        if graph_context:
+            system_content += "\n\n" + graph_context
+    except Exception:
+        logger.warning("graph context failed; system prompt degrades without it", exc_info=True)
     messages = [Message(role="system", content=system_content), Message(role="user", content=payload.question)]
 
     try:
         result, _ = await chat_with_fallback(
-            db, messages, owner_id=user.id, purpose="workbench_analyze", requested_by="routers.workbench.analyze"
+            db, messages, owner_id=user.id, purpose="workbench_analyze",
+            requested_by="routers.workbench.analyze", effect_guard=True,
         )
     except (ProviderError, EgressDeniedError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -115,6 +175,16 @@ async def analyze(
         provider=result.provider,
         model=result.model,
     )
+
+
+@router.get("/blueprint-readiness")
+def blueprint_readiness(db: Session = Depends(get_db), _user: User = Depends(require_founder)):
+    """Founder Alpha gap audit (Area 3): the cross-reference view connecting knowledge
+    documents, GitHub code/PR snapshots, engineering lessons (tests + verification
+    status) and open agent tasks — a read-only aggregation over EXISTING tables, not a
+    second blueprint engine. The upstream blueprint_drafts stack (when composed) joins
+    to the document entries via source_document_ids."""
+    return collect_blueprint_readiness(db)
 
 
 @router.post("/save", response_model=KnowledgeSourceOut)

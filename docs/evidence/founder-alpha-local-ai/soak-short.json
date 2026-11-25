@@ -1,0 +1,349 @@
+{
+  "generated_at": "2026-11-22T10:32:31.376684+00:00",
+  "commit": "04de94db7d7ccf51c23dd68670e789e8e9df6cde",
+  "required_seconds": 14400,
+  "duration_seconds": 45,
+  "environment": {
+    "database_url": "postgresql://postgres@127.0.0.1:55432/lifeos_soak_test",
+    "redis_url": "redis://@127.0.0.1:56379/15",
+    "port": 40463,
+    "python": "3.12.3",
+    "provider": "faked by scripts/ci/run_e2e_backend.py"
+  },
+  "status": "BLOCKED",
+  "f23_status": "BLOCKED",
+  "blockers": [
+    "duration_seconds=45 < required 14400; F23 cannot be claimed from this run"
+  ],
+  "failures": [],
+  "counts": {
+    "health": 24,
+    "incident_health": 24,
+    "chat": 24,
+    "chat_stream": 24,
+    "mainai_job": 8,
+    "document_import": 4,
+    "retrieval_chat": 4,
+    "restarts": 1,
+    "concurrent_health": 16,
+    "cycles": 24,
+    "jobs_skipped_capability": 0
+  },
+  "latencies_ms": {
+    "health": {
+      "count": 24,
+      "p50": 30.12,
+      "p95": 51.99,
+      "max": 57.56
+    },
+    "incident_health": {
+      "count": 24,
+      "p50": 9.64,
+      "p95": 23.09,
+      "max": 23.33
+    },
+    "chat": {
+      "count": 24,
+      "p50": 57.42,
+      "p95": 121.87,
+      "max": 130.5
+    },
+    "chat_stream": {
+      "count": 24,
+      "p50": 816.39,
+      "p95": 838.09,
+      "max": 871.31
+    },
+    "retrieval_chat": {
+      "count": 4,
+      "p50": 64.3,
+      "p95": 69.21,
+      "max": 69.21
+    }
+  },
+  "samples": [
+    {
+      "at": "2026-11-22T10:32:40.671992+00:00",
+      "elapsed_s": 1.0,
+      "process": {
+        "pids": [
+          490518
+        ],
+        "rss_mb": 183.2,
+        "cpu_seconds": 4.58
+      },
+      "database": {
+        "status": "PASS",
+        "database": "lifeos_soak_test",
+        "size_bytes": 21208087,
+        "connections": 3,
+        "tables": {
+          "users": 1,
+          "documents": 0,
+          "document_chunks": 0,
+          "conversations": 2,
+          "messages": 4,
+          "runtime_incidents": 0,
+          "knowledge_import_jobs": 0,
+          "mainai_jobs": 0
+        },
+        "jobs": {
+          "knowledge_import_jobs": {},
+          "mainai_jobs": {},
+          "runtime_incidents": {}
+        }
+      },
+      "redis": {
+        "status": "PASS",
+        "dbsize": 4,
+        "used_memory_human": "1.44M",
+        "used_memory_bytes": 1512024,
+        "connected_clients": 5
+      },
+      "incidents": {
+        "state": "healthy",
+        "open_incidents": 0,
+        "critical_open": 0,
+        "high_open": 0,
+        "medium_open": 0,
+        "low_open": 0,
+        "recovered_incidents": 0,
+        "stalled_jobs": 0,
+        "stalled_imports": 0,
+        "worker_heartbeat": "alive",
+        "components": [],
+        "checked_at": "2026-11-22T10:32:40.752646"
+      }
+    },
+    {
+      "at": "2026-11-22T10:32:51.249285+00:00",
+      "elapsed_s": 11.6,
+      "process": {
+        "pids": [
+          490518
+        ],
+        "rss_mb": 186.5,
+        "cpu_seconds": 5.59
+      },
+      "database": {
+        "status": "PASS",
+        "database": "lifeos_soak_test",
+        "size_bytes": 21683223,
+        "connections": 3,
+        "tables": {
+          "users": 1,
+          "documents": 1,
+          "document_chunks": 1,
+          "conversations": 17,
+          "messages": 34,
+          "runtime_incidents": 0,
+          "knowledge_import_jobs": 1,
+          "mainai_jobs": 2
+        },
+        "jobs": {
+          "knowledge_import_jobs": {
+            "completed": 1
+          },
+          "mainai_jobs": {
+            "cancelled": 2
+          },
+          "runtime_incidents": {}
+        }
+      },
+      "redis": {
+        "status": "PASS",
+        "dbsize": 8,
+        "used_memory_human": "1.44M",
+        "used_memory_bytes": 1512888,
+        "connected_clients": 5
+      },
+      "incidents": {
+        "state": "healthy",
+        "open_incidents": 0,
+        "critical_open": 0,
+        "high_open": 0,
+        "medium_open": 0,
+        "low_open": 0,
+        "recovered_incidents": 0,
+        "stalled_jobs": 0,
+        "stalled_imports": 0,
+        "worker_heartbeat": "alive",
+        "components": [],
+        "checked_at": "2026-11-22T10:32:51.330124"
+      }
+    },
+    {
+      "at": "2026-11-22T10:33:09.631903+00:00",
+      "elapsed_s": 30.0,
+      "process": {
+        "pids": [
+          490797
+        ],
+        "rss_mb": 185.1,
+        "cpu_seconds": 4.78
+      },
+      "database": {
+        "status": "PASS",
+        "database": "lifeos_soak_test",
+        "size_bytes": 21797911,
+        "connections": 3,
+        "tables": {
+          "users": 1,
+          "documents": 3,
+          "document_chunks": 3,
+          "conversations": 33,
+          "messages": 66,
+          "runtime_incidents": 0,
+          "knowledge_import_jobs": 3,
+          "mainai_jobs": 5
+        },
+        "jobs": {
+          "knowledge_import_jobs": {
+            "completed": 3
+          },
+          "mainai_jobs": {
+            "cancelled": 4,
+            "queued": 1
+          },
+          "runtime_incidents": {}
+        }
+      },
+      "redis": {
+        "status": "PASS",
+        "dbsize": 11,
+        "used_memory_human": "1.44M",
+        "used_memory_bytes": 1513528,
+        "connected_clients": 5
+      },
+      "incidents": {
+        "state": "healthy",
+        "open_incidents": 0,
+        "critical_open": 0,
+        "high_open": 0,
+        "medium_open": 0,
+        "low_open": 0,
+        "recovered_incidents": 0,
+        "stalled_jobs": 0,
+        "stalled_imports": 0,
+        "worker_heartbeat": "alive",
+        "components": [],
+        "checked_at": "2026-11-22T10:33:09.697548"
+      }
+    },
+    {
+      "at": "2026-11-22T10:33:19.776044+00:00",
+      "elapsed_s": 40.1,
+      "process": {
+        "pids": [
+          490797
+        ],
+        "rss_mb": 192.7,
+        "cpu_seconds": 6.37
+      },
+      "database": {
+        "status": "PASS",
+        "database": "lifeos_soak_test",
+        "size_bytes": 21920791,
+        "connections": 6,
+        "tables": {
+          "users": 1,
+          "documents": 4,
+          "document_chunks": 4,
+          "conversations": 46,
+          "messages": 92,
+          "runtime_incidents": 0,
+          "knowledge_import_jobs": 4,
+          "mainai_jobs": 7
+        },
+        "jobs": {
+          "knowledge_import_jobs": {
+            "completed": 4
+          },
+          "mainai_jobs": {
+            "cancelled": 6,
+            "completed": 1
+          },
+          "runtime_incidents": {}
+        }
+      },
+      "redis": {
+        "status": "PASS",
+        "dbsize": 13,
+        "used_memory_human": "1.49M",
+        "used_memory_bytes": 1559432,
+        "connected_clients": 7
+      },
+      "incidents": {
+        "state": "healthy",
+        "open_incidents": 0,
+        "critical_open": 0,
+        "high_open": 0,
+        "medium_open": 0,
+        "low_open": 0,
+        "recovered_incidents": 0,
+        "stalled_jobs": 0,
+        "stalled_imports": 0,
+        "worker_heartbeat": "alive",
+        "components": [],
+        "checked_at": "2026-11-22T10:33:19.849686"
+      }
+    }
+  ],
+  "log_path": "/tmp/lifeai-v5-soak-7534cgi3/backend.log",
+  "startup_latency_s": 4.842,
+  "login_status": 200,
+  "incident_health_last": {
+    "state": "healthy",
+    "open_incidents": 0,
+    "critical_open": 0,
+    "high_open": 0,
+    "medium_open": 0,
+    "low_open": 0,
+    "recovered_incidents": 0,
+    "stalled_jobs": 0,
+    "stalled_imports": 0,
+    "worker_heartbeat": "alive",
+    "components": [],
+    "checked_at": "2026-11-22T10:33:24.716580"
+  },
+  "database": {
+    "status": "PASS",
+    "database": "lifeos_soak_test",
+    "size_bytes": 21969943,
+    "connections": 1,
+    "tables": {
+      "users": 1,
+      "documents": 4,
+      "document_chunks": 4,
+      "conversations": 52,
+      "messages": 104,
+      "runtime_incidents": 0,
+      "knowledge_import_jobs": 4,
+      "mainai_jobs": 8
+    },
+    "jobs": {
+      "knowledge_import_jobs": {
+        "completed": 4
+      },
+      "mainai_jobs": {
+        "cancelled": 6,
+        "queued": 1,
+        "completed": 1
+      },
+      "runtime_incidents": {}
+    }
+  },
+  "redis": {
+    "status": "PASS",
+    "dbsize": 14,
+    "used_memory_human": "1.40M",
+    "used_memory_bytes": 1468728,
+    "connected_clients": 3
+  },
+  "finished_at": "2026-11-22T10:33:24.906296+00:00",
+  "limitations": [
+    "Provider and email transports are faked by the existing E2E harness; real Ollama/pgvector acceptance is separate.",
+    "This harness is local and isolated; it never targets production.",
+    "A run shorter than four hours is intentionally reported BLOCKED for F23."
+  ]
+}

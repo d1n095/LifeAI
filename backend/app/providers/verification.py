@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 import httpx
+from sqlalchemy import case
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -31,6 +32,8 @@ VERIFICATION_PROBE_TEXT = "ping"
 class Outcome:
     result: VerificationResult
     message: str
+    model: str | None = None
+    checked_at: datetime | None = None
 
 
 def classify_provider_exception(exc: Exception) -> Outcome:
@@ -92,7 +95,9 @@ async def verify_provider(provider: LLMProvider, model: str, role: str, *, timeo
         return Outcome(VerificationResult.not_configured, "Ingen API-nyckel är konfigurerad.")
     try:
         if role == "chat":
-            await provider.chat([Message(role="user", content=VERIFICATION_PROBE_TEXT)], model=model, timeout=timeout, max_tokens=1)
+            result = await provider.chat([Message(role="user", content=VERIFICATION_PROBE_TEXT)], model=model, timeout=timeout, max_tokens=1)
+            if not isinstance(result.content, str) or not result.content.strip():
+                return Outcome(VerificationResult.unreachable, "Leverantören returnerade inget giltigt textsvar.")
         else:
             await provider.embed([VERIFICATION_PROBE_TEXT], model=model, timeout=timeout)
         return Outcome(VerificationResult.ok, "Verifierad.")
@@ -100,10 +105,46 @@ async def verify_provider(provider: LLMProvider, model: str, role: str, *, timeo
         return classify_provider_exception(exc)
 
 
-def _default_verification_model(provider: LLMProvider, role: str) -> str:
+# Providers that run ON THIS MACHINE. Their pre-flight check has a different budget: the
+# first call after an idle period or a runtime restart loads model weights into memory, which
+# routinely exceeds what a hosted API ever needs (see local_verification_timeout_seconds).
+LOCAL_PROVIDER_NAMES = frozenset({"ollama"})
+
+
+def verification_timeout_seconds(provider: LLMProvider) -> float:
+    """The pre-flight budget appropriate to this provider's runtime.
+
+    Cloud providers keep the short, fail-fast timeout (an unreachable API must never hang an
+    import); local runtimes get the longer one, because a spurious `unreachable` verdict on a
+    cold model load is the single most likely false negative in a local-first deployment.
+    """
+    settings = get_settings()
+    if provider.name in LOCAL_PROVIDER_NAMES:
+        return settings.local_verification_timeout_seconds
+    return settings.provider_verification_timeout_seconds
+
+
+def _default_verification_model(provider: LLMProvider, role: str, db: Session | None = None) -> str:
     from app.providers.registry import DEFAULT_CHAT_MODELS
 
     settings = get_settings()
+    if db is not None:
+        # On a local runtime the set of installed models is whatever the founder actually
+        # pulled — there is no canonical "nomic-embed-text" to assume. Reusing the model this
+        # provider last verified OK against is the only evidence-based default available; a
+        # check that failed is not evidence of anything and is deliberately ignored.
+        last_ok = (
+            db.query(ProviderVerificationCheck)
+            .filter(
+                ProviderVerificationCheck.provider_name == provider.name,
+                ProviderVerificationCheck.role == role,
+                ProviderVerificationCheck.result == VerificationResult.ok,
+            )
+            .order_by(ProviderVerificationCheck.checked_at.desc())
+            .first()
+        )
+        if last_ok is not None and last_ok.model:
+            return last_ok.model
     if role == "chat":
         return DEFAULT_CHAT_MODELS.get(provider.name, settings.default_llm_model)
     if provider.name == settings.default_embedding_provider:
@@ -127,21 +168,13 @@ async def ensure_verified(db: Session, role: str, *, checked_by: str = "system")
     settings = get_settings()
     provider, model = resolve_active(db, role=role)
 
-    cutoff = datetime.utcnow() - timedelta(seconds=settings.provider_verification_cache_seconds)
-    cached = (
-        db.query(ProviderVerificationCheck)
-        .filter(
-            ProviderVerificationCheck.provider_name == provider.name,
-            ProviderVerificationCheck.role == role,
-            ProviderVerificationCheck.checked_at >= cutoff,
-        )
-        .order_by(ProviderVerificationCheck.checked_at.desc())
-        .first()
-    )
-    if cached is not None:
+    started_at = datetime.utcnow()
+    cutoff = started_at - timedelta(seconds=settings.provider_verification_cache_seconds)
+    cached = latest_check(db, provider.name, role, model=model)
+    if cached is not None and cutoff <= cached.checked_at <= started_at:
         return Outcome(cached.result, cached.message)
 
-    outcome = await verify_provider(provider, model, role, timeout=settings.provider_verification_timeout_seconds)
+    outcome = await verify_provider(provider, model, role, timeout=verification_timeout_seconds(provider))
     db.add(
         ProviderVerificationCheck(
             id=uuid.uuid4(),
@@ -151,24 +184,31 @@ async def ensure_verified(db: Session, role: str, *, checked_by: str = "system")
             result=outcome.result,
             message=outcome.message,
             checked_by=checked_by,
-            checked_at=datetime.utcnow(),
+            checked_at=started_at,
         )
     )
     db.commit()
     return outcome
 
 
-async def verify_now(db: Session, provider_name: str, role: str, *, checked_by: str) -> Outcome:
+async def verify_now(
+    db: Session,
+    provider_name: str,
+    role: str,
+    *,
+    checked_by: str,
+    model: str | None = None,
+) -> Outcome:
     """Admin -> Providers' "Testa nu" action (POST /api/admin/providers/verify) — an
     explicit, founder-initiated check that ALWAYS makes a real call, bypassing the cache, for
     a specific provider (not necessarily the currently active one, so a founder can verify a
     provider before switching to it)."""
     from app.providers.registry import get_provider
 
-    settings = get_settings()
     provider = get_provider(provider_name)
-    model = _default_verification_model(provider, role)
-    outcome = await verify_provider(provider, model, role, timeout=settings.provider_verification_timeout_seconds)
+    model = model or _default_verification_model(provider, role, db)
+    started_at = datetime.utcnow()
+    outcome = await verify_provider(provider, model, role, timeout=verification_timeout_seconds(provider))
     db.add(
         ProviderVerificationCheck(
             id=uuid.uuid4(),
@@ -178,17 +218,31 @@ async def verify_now(db: Session, provider_name: str, role: str, *, checked_by: 
             result=outcome.result,
             message=outcome.message,
             checked_by=checked_by,
-            checked_at=datetime.utcnow(),
+            checked_at=started_at,
         )
     )
     db.commit()
+    outcome.model = model
+    outcome.checked_at = started_at
     return outcome
 
 
-def latest_check(db: Session, provider_name: str, role: str) -> ProviderVerificationCheck | None:
-    return (
-        db.query(ProviderVerificationCheck)
-        .filter(ProviderVerificationCheck.provider_name == provider_name, ProviderVerificationCheck.role == role)
-        .order_by(ProviderVerificationCheck.checked_at.desc())
-        .first()
+def latest_check(
+    db: Session,
+    provider_name: str,
+    role: str,
+    *,
+    model: str | None = None,
+) -> ProviderVerificationCheck | None:
+    query = db.query(ProviderVerificationCheck).filter(
+        ProviderVerificationCheck.provider_name == provider_name,
+        ProviderVerificationCheck.role == role,
     )
+    if model is not None:
+        query = query.filter(ProviderVerificationCheck.model == model)
+    return query.order_by(
+        ProviderVerificationCheck.checked_at.desc(),
+        # Identical timestamps fail closed if one concurrent probe failed.
+        case((ProviderVerificationCheck.result == VerificationResult.ok, 1), else_=0),
+        ProviderVerificationCheck.id.desc(),
+    ).first()

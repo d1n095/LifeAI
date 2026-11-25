@@ -2,10 +2,24 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { api, ChatResponse, ChatSource, Confidence, ContextStatus, ConversationItem } from "@/lib/api";
+import {
+  api,
+  ChatResponse,
+  ChatSource,
+  Confidence,
+  ContextStatus,
+  ConversationItem,
+  newClientMessageId,
+} from "@/lib/api";
 import { useVoice } from "@/lib/useVoice";
 import Orb, { OrbState } from "@/components/Orb";
 import ConfidenceBadge from "@/components/ConfidenceBadge";
+
+type FailedSend = {
+  message: string;
+  clientMessageId: string;
+  conversationId?: string;
+};
 
 type ChatEntry = {
   role: "user" | "assistant";
@@ -29,6 +43,8 @@ type ChatEntry = {
   // VERIFIED reason (worker down, files still processing, no provider, genuinely no match...)
   // without depending on the model having said it correctly in its own reply text.
   contextStatus?: ContextStatus | null;
+  groundingStatus?: "grounded" | "degraded" | "empty" | "unknown";
+  groundingReason?: string | null;
 };
 
 function buildAssistantEntry(res: ChatResponse): ChatEntry {
@@ -41,6 +57,8 @@ function buildAssistantEntry(res: ChatResponse): ChatEntry {
       retryable: res.retryable,
       userMessageId: res.user_message_id,
       contextStatus: res.context_status,
+      groundingStatus: res.grounding_status,
+      groundingReason: res.grounding_reason,
     };
   }
   return {
@@ -54,6 +72,8 @@ function buildAssistantEntry(res: ChatResponse): ChatEntry {
     providersAttempted: res.providers_attempted,
     conflictsDetected: res.conflicts_detected,
     contextStatus: res.context_status,
+    groundingStatus: res.grounding_status,
+    groundingReason: res.grounding_reason,
   };
 }
 
@@ -79,6 +99,17 @@ export default function ChatPage() {
   const [showErrorPulse, setShowErrorPulse] = useState(false);
   const [readAloud, setReadAloud] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  // A request-level failure (network drop, proxy timeout) is different from an assistant
+  // failure: the server may already have durably saved the message and even generated the
+  // reply. Keep the exact idempotency key so "Försök igen" resumes the same logical send
+  // instead of creating a second message/provider call.
+  const [failedSend, setFailedSend] = useState<FailedSend | null>(null);
+  const [streamingText, setStreamingText] = useState("");
+  // The backend chooses the active, authorized chat model; this is a read-only display of
+  // that real selection, not a second model picker or a client-side guess.
+  const [modelState, setModelState] = useState<"loading" | "ready" | "missing" | "error">("loading");
+  const [modelLabel, setModelLabel] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const voice = useVoice();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -92,29 +123,108 @@ export default function ChatPage() {
   }
 
   useEffect(() => {
-    // See justification in app/(shell)/documents/page.tsx — documented fetch-on-mount
-    // pattern, setState happens after an await inside refreshConversations().
+    // The active thread is addressable as /chat?conversation=<id>, so a browser refresh
+    // (or a shared/back-forward navigation) restores the durable transcript instead of
+    // silently starting a new empty conversation. The list is loaded in parallel so the
+    // history panel still works when the URL names a thread.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     refreshConversations();
+    const requested = new URLSearchParams(window.location.search).get("conversation");
+    if (requested) {
+      openConversation(requested);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .providerStatus()
+      .then((providers) => {
+        if (cancelled) return;
+        const active = providers.find((provider) => provider.active_chat);
+        if (!active) {
+          setModelState("missing");
+          setModelLabel(null);
+          return;
+        }
+        // The live selection is the exact configured model. The latest verification may
+        // belong to a different tag, so it is only a fallback for older backends.
+        const model = active.active_chat_model ?? active.chat_verification?.model;
+        setModelLabel(`${active.name}${model ? ` · ${model}` : ""}`);
+        setModelState("ready");
+      })
+      .catch(() => {
+        if (!cancelled) setModelState("error");
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [entries, loading]);
+  }, [entries, loading, streamingText]);
+
+  useEffect(() => () => abortRef.current?.abort(), []);
+
+  function rememberConversation(id: string | undefined) {
+    const next = id ? `/chat?conversation=${encodeURIComponent(id)}` : "/chat";
+    window.history.replaceState(null, "", next);
+  }
 
   async function openConversation(id: string) {
     setHistoryOpen(false);
     try {
       const detail = await api.getConversation(id);
       setConversationId(detail.id);
-      setEntries(
-        detail.messages
-          // A failed assistant attempt (see backend/app/routers/chat.py) is stored with empty
-          // content — never render that as a blank reply bubble; the founder can still see it
-          // never generated by the absence of one, and retry it from a fresh message instead.
-          .filter((m) => m.role !== "system" && !(m.role === "assistant" && m.content === ""))
-          .map((m) => ({ role: m.role as "user" | "assistant", content: m.content, provider: m.provider ?? undefined }))
+      rememberConversation(detail.id);
+      const restored: ChatEntry[] = [];
+      for (const m of detail.messages) {
+        if (m.role === "system") continue;
+        if (m.role === "assistant" && m.status === "failed") {
+          // The live response already showed this failure; a reload must not silently drop
+          // it just because the stored content is empty. `in_reply_to_id` is the durable
+          // user-message target the existing retry endpoint expects.
+          restored.push({
+            role: "assistant",
+            content: "",
+            failed: true,
+            errorMessage: m.error_category
+              ? `AI-svaret kunde inte genereras (${m.error_category}).`
+              : "AI-svaret kunde inte genereras.",
+            retryable: m.error_category === "unreachable" || m.error_category === "rate_limited",
+            userMessageId: m.in_reply_to_id ?? undefined,
+          });
+          continue;
+        }
+        restored.push({
+          role: m.role as "user" | "assistant",
+          content: m.content,
+          provider: m.provider ?? undefined,
+          userMessageId: m.role === "user" ? m.id : m.in_reply_to_id ?? undefined,
+        });
+      }
+      // A crash can leave the durable user message without any assistant row at all.
+      // The live request never returned, so the normal failed-assistant entry above does
+      // not exist. Surface the recoverable failure on the trailing user message so the
+      // founder can retry the exact saved message instead of retyping it (which would
+      // create a duplicate).
+      const last = detail.messages[detail.messages.length - 1];
+      const hasReply = detail.messages.some(
+        (m) => m.role === "assistant" && m.in_reply_to_id === last?.id
       );
+      if (last?.role === "user" && !hasReply) {
+        restored.push({
+          role: "assistant",
+          content: "",
+          failed: true,
+          errorMessage: "AI-svaret saknas efter ett avbrott. Ditt meddelande finns sparat.",
+          retryable: true,
+          userMessageId: last.id,
+        });
+      }
+      setEntries(restored);
+      setFailedSend(null);
     } catch (e: any) {
       setError(e.message);
     }
@@ -123,7 +233,9 @@ export default function ChatPage() {
   function startNewConversation() {
     setConversationId(undefined);
     setEntries([]);
+    setFailedSend(null);
     setHistoryOpen(false);
+    rememberConversation(undefined);
   }
 
   async function deleteConversation(id: string, e: React.MouseEvent) {
@@ -138,42 +250,132 @@ export default function ChatPage() {
     setTimeout(() => setShowErrorPulse(false), 1600);
   }
 
-  async function send(message: string) {
-    if (!message.trim() || loading) return;
-    setEntries((prev) => [...prev, { role: "user", content: message }]);
-    setInput("");
+  function applyChatResponse(res: ChatResponse, message: string) {
+    setConversationId(res.conversation_id);
+    rememberConversation(res.conversation_id);
+    // The user's message is ALWAYS saved by this point (backend commits it before ever
+    // calling a provider) — attach the real id to the optimistic bubble we already
+    // rendered, then append the assistant's reply (or its failure) as its own entry. A
+    // failed assistant_status never means the message above it was lost.
+    setEntries((prev) => {
+      const next = [...prev];
+      for (let i = next.length - 1; i >= 0; i--) {
+        if (next[i].role === "user" && next[i].content === message && !next[i].userMessageId) {
+          next[i] = { ...next[i], userMessageId: res.user_message_id };
+          break;
+        }
+      }
+      next.push(buildAssistantEntry(res));
+      return next;
+    });
+    if (res.assistant_status === "succeeded" && res.reply && readAloud) voice.speak(res.reply);
+    if (res.assistant_status === "failed") flashError();
+    refreshConversations();
+  }
+
+  async function runStream(
+    message: string,
+    targetConversationId: string | undefined,
+    clientMessageId: string
+  ) {
     setLoading(true);
     setError(null);
+    setStreamingText("");
+    const controller = new AbortController();
+    abortRef.current = controller;
+    let streamedUserMessageId: string | undefined;
+    let streamedErrorMessage: string | undefined;
+    let sawDone = false;
     try {
-      const res = await api.sendChat(message, conversationId);
-      setConversationId(res.conversation_id);
-      // The user's message is ALWAYS saved by this point (backend commits it before ever
-      // calling a provider) — attach the real id to the optimistic bubble we already
-      // rendered, then append the assistant's reply (or its failure) as its own entry. A
-      // failed assistant_status never means the message above it was lost.
-      setEntries((prev) => {
-        const next = [...prev];
-        for (let i = next.length - 1; i >= 0; i--) {
-          if (next[i].role === "user" && next[i].content === message && !next[i].userMessageId) {
-            next[i] = { ...next[i], userMessageId: res.user_message_id };
-            break;
+      const res = await api.streamChat(message, targetConversationId, clientMessageId, {
+        signal: controller.signal,
+        onEvent: (event) => {
+          if (event.type === "start") streamedUserMessageId = event.user_message_id;
+          else if (event.type === "delta") setStreamingText((prev) => prev + event.text);
+          else if (event.type === "done") {
+            sawDone = true;
+            setStreamingText("");
+          } else if (event.type === "error") {
+            streamedErrorMessage = event.message;
           }
-        }
-        next.push(buildAssistantEntry(res));
-        return next;
+        },
       });
-      if (res.assistant_status === "succeeded" && res.reply && readAloud) voice.speak(res.reply);
-      if (res.assistant_status === "failed") flashError();
-      refreshConversations();
+      applyChatResponse(res, message);
     } catch (e: any) {
-      // A real request-level failure (network down, session expired, rate-limited) — distinct
-      // from assistant_status:"failed": here the request itself never completed, so we can't
-      // even promise the message reached the server. Still shown clearly, never silently.
+      setStreamingText("");
+      if (e?.name === "AbortError") {
+        // The user explicitly cancelled. The server sees the disconnect and persists an
+        // honest terminal state; keep the saved user message retryable instead of resending
+        // it as a brand-new message.
+        if (!sawDone && streamedUserMessageId) {
+          setEntries((prev) => {
+            if (prev.some((x) => x.role === "assistant" && x.userMessageId === streamedUserMessageId)) {
+              return prev;
+            }
+            return [
+              ...prev,
+              {
+                role: "assistant",
+                content: "",
+                failed: true,
+                errorMessage: "Genereringen avbröts. Ditt meddelande finns sparat.",
+                retryable: true,
+                userMessageId: streamedUserMessageId,
+              },
+            ];
+          });
+        } else if (!sawDone) {
+          setFailedSend({ message, clientMessageId, conversationId: targetConversationId });
+        }
+        setError("Genereringen avbröts.");
+        return;
+      }
+      if (!sawDone && streamedErrorMessage && streamedUserMessageId) {
+        setEntries((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: "",
+            failed: true,
+            errorMessage: streamedErrorMessage,
+            retryable: false,
+            userMessageId: streamedUserMessageId,
+          },
+        ]);
+        setError(streamedErrorMessage);
+        flashError();
+        return;
+      }
+      // A request-level failure (network down, proxy timeout, session expired) is distinct
+      // from assistant_status:"failed": the server may already have saved the message and
+      // completed the reply. Preserve the key so retry resumes the SAME logical send.
+      setFailedSend({ message, clientMessageId, conversationId: targetConversationId });
       setError(e.message);
       flashError();
     } finally {
+      abortRef.current = null;
       setLoading(false);
     }
+  }
+
+  async function send(message: string) {
+    if (!message.trim() || loading) return;
+    const clientMessageId = newClientMessageId();
+    setFailedSend(null);
+    setEntries((prev) => [...prev, { role: "user", content: message }]);
+    setInput("");
+    await runStream(message, conversationId, clientMessageId);
+  }
+
+  async function retryFailedSend() {
+    if (!failedSend || loading) return;
+    const pending = failedSend;
+    setFailedSend(null);
+    await runStream(pending.message, pending.conversationId, pending.clientMessageId);
+  }
+
+  function cancelStream() {
+    abortRef.current?.abort();
   }
 
   async function retry(userMessageId: string) {
@@ -296,6 +498,27 @@ export default function ChatPage() {
           )}
         </div>
 
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-white/40" role="status" aria-live="polite">
+          {modelState === "loading" && <span>Kontrollerar aktiv modell…</span>}
+          {modelState === "ready" && (
+            <>
+              <span>Aktiv modell:</span>
+              <span className="text-white/65">{modelLabel}</span>
+            </>
+          )}
+          {modelState === "missing" && (
+            <span className="text-amber-300">Ingen aktiv chat-modell är konfigurerad.</span>
+          )}
+          {modelState === "error" && (
+            <span className="text-amber-300">Modellstatus kunde inte läsas.</span>
+          )}
+          {(modelState === "missing" || modelState === "error") && (
+            <Link href="/admin" className="text-accent2 hover:underline">
+              Konfigurera modell
+            </Link>
+          )}
+        </div>
+
         <div className="flex justify-center py-2">
           <Orb state={orbState} size={110} />
         </div>
@@ -313,14 +536,21 @@ export default function ChatPage() {
                 <div role="alert" className="rounded-xl px-4 py-3 text-sm bg-red-500/10 border border-red-500/30">
                   <div className="text-red-300">Ditt meddelande sparades, men AI-svaret kunde inte genereras.</div>
                   <div className="mt-1 text-white/50 text-xs">{entry.errorMessage}</div>
-                  <button
-                    type="button"
-                    onClick={() => entry.userMessageId && retry(entry.userMessageId)}
-                    disabled={loading}
-                    className="mt-2 rounded border border-red-500/30 px-3 py-1 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-30"
-                  >
-                    Försök igen
-                  </button>
+                  {entry.retryable ? (
+                    <button
+                      type="button"
+                      onClick={() => entry.userMessageId && retry(entry.userMessageId)}
+                      disabled={loading}
+                      className="mt-2 rounded border border-red-500/30 px-3 py-1 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-30"
+                    >
+                      Försök igen
+                    </button>
+                  ) : (
+                    <div className="mt-2 text-white/40 text-xs">
+                      Det här felet kan inte lösas genom att försöka igen. Kontrollera leverantören
+                      eller försök med en ny fråga.
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div
@@ -331,13 +561,23 @@ export default function ChatPage() {
                   {entry.content}
                 </div>
               )}
-              {entry.contextStatus && (
+              {entry.contextStatus && entry.groundingStatus !== "degraded" && (
                 <div
                   className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200"
                   title="Verifierad orsak från biblioteket/workern — inte en gissning från AI-svaret."
                 >
                   <span className="font-medium">{CONTEXT_STATUS_LABELS[entry.contextStatus.reason]}:</span>{" "}
                   {entry.contextStatus.message}
+                </div>
+              )}
+              {entry.groundingStatus === "degraded" && (
+                <div
+                  role="status"
+                  className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200"
+                  title="Kunskapssökningen kunde inte köras. Svaret är därför uttryckligen utan kunskapsunderlag."
+                >
+                  <span className="font-medium">Svar utan kunskapsunderlag:</span>{" "}
+                  {entry.groundingReason ?? "embedding-leverantören är inte tillgänglig för guardad chat."}
                 </div>
               )}
               {entry.confidence && (
@@ -403,13 +643,25 @@ export default function ChatPage() {
             </div>
           ))}
           {loading && (
-            <div className="text-white/40 text-sm" role="status">
-              MainAI skriver…
+            <div className="max-w-2xl" role="status" aria-live="polite">
+              <div className="rounded-xl border border-border bg-panel px-4 py-3 text-sm whitespace-pre-wrap">
+                {streamingText || "MainAI skriver…"}
+              </div>
             </div>
           )}
           {error && (
             <div role="alert" className="text-red-300 text-sm">
-              Fel: {error}
+              <div>Fel: {error}</div>
+              {failedSend && (
+                <button
+                  type="button"
+                  onClick={retryFailedSend}
+                  disabled={loading}
+                  className="mt-2 rounded border border-red-500/30 px-3 py-1 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-30"
+                >
+                  Försök igen
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -439,14 +691,23 @@ export default function ChatPage() {
             placeholder="Fråga MainAI vad som helst…"
             className="flex-1 rounded-lg border border-border bg-panel px-4 py-3 text-sm outline-none focus:border-accent"
           />
-          <button
-            type="button"
-            onClick={() => send(input)}
-            disabled={loading}
-            className="rounded-lg bg-accent px-5 py-3 text-sm font-medium disabled:opacity-50"
-          >
-            Skicka
-          </button>
+          {loading ? (
+            <button
+              type="button"
+              onClick={cancelStream}
+              className="rounded-lg border border-red-500/40 px-5 py-3 text-sm font-medium text-red-300 hover:bg-red-500/10"
+            >
+              Avbryt
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => send(input)}
+              className="rounded-lg bg-accent px-5 py-3 text-sm font-medium"
+            >
+              Skicka
+            </button>
+          )}
         </div>
       </div>
     </div>

@@ -6,6 +6,728 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Founder Alpha local AI — riktig lokal modell verifierad (2026-11-23)
+
+**Branch:** `freebuff/life-workspaces`, bas `04de94db7d7ccf51c23dd68670e789e8e9df6cde`.
+Ingen PR/push/merge/deploy; GitHub write-access saknas fortfarande (ingen credential helper,
+ingen token, `git push --dry-run` kan inte autentisera). `first_cycle_go=false`.
+
+**Vad som ändrades:** blockeraren "Ollama saknas" är stängd. Ollama **0.40.15** installerades
+från repots egen pinnade release med verifierat SHA-256
+(`628c018404a4206493efd38e46251c154ede5141b8b8dc85c659b3b027c47379`) till ett
+användarskrivbart prefix, eftersom `sudo` saknas — samma arkiv och samma digest-kontrakt som
+`backend/scripts/ci/install_pinned_ollama.sh`, bara utan `sudo tar -C /usr/local`. Modeller:
+`qwen2.5:0.5b` (chat) och `all-minilm` (embedding, native 384 → nollpaddas till 1536, ingen
+destruktiv migration). Inga produktändringar krävdes för att köra riktig modell.
+
+**Verifierat mot riktig runtime** (acceptansdrivrutinen från
+`.github/workflows/real-local-ai-verification.yml`, oförändrad, mot riktig backend + worker,
+`CHAT_FALLBACK_ORDER=""` så ingen tyst fallback kunde dölja ett lokalt fel):
+`local_model` reachable=true utan saknade modeller; **7/7** före restart (inloggning, upload,
+riktig `all-minilm`-indexering `chunk_count=1`, citerad retrieval, `provider=ollama`,
+persisterat samtal); **5/5** efter riktig restart av backend + worker (samtal, indexerad källa
+och live-retrieval överlevde); **riktig SSE-streaming** med 22 delta-händelser och korrekt
+`done`; **utfall**: Ollama stoppad → health `reachable=false` utan `missing_models`, API
+fortsatt `ok` (ingen 503), chat `failed` utan fallback; **återhämtning utan backend-restart**
+(chat `succeeded`, backend-PID oförändrad). En enda grundad tur med 1219-tokens prompt tog
+**31,1 s** på 2 vCPU (modellen 511 MB RSS) — det är en latensbudget, inte en
+korrekthetssignal.
+
+**Browserjourneys mot riktig modell:** `founder-journey-v6` **2/2 PASS** (streaming, reload
+från durable historik, upload, worker-indexering, citeringslänk, supervised agent-uppgift)
+och `model-routing` **2/2 PASS**; `personal-work` **1/1 PASS**. Två riktiga testfel rättades
+i stället för att försvagas: den lokala modellassertionen scopades till `Lokala modeller`
+(annars tvetydig när en riktig `qwen2.5:0.5b`-rad även finns i användningstabellen), och V6
+väntar nu på att uppladdningen faktiskt är `Klar` innan den begär en citering. Fyra
+resilience-tester fallerar **mot riktig modell av konstruktion** (två assertar fake-providerns
+inbakade strängar, två har 10–30 s fönster för en ström som tar 31 s här) — de certifierar
+fake-harnessen och lämnades orörda.
+
+**Viktig miljöfälla:** webbläsarkörningar kräver `COOKIE_SECURE=true` (standard). Kakorna är
+`SameSite=None` och Chromium kastar dem utan `Secure`, så `COOKIE_SECURE=false` — som bara
+används av CI-jobb utan webbläsare — gör att varje autentiserad journey studsar tillbaka till
+`/login` trots 200 på login.
+
+**Endurance:** den äkta fyratimmarssöken (14 400 s, isolerad `lifeos_v5_soak`, Redis DB 15,
+egen backend, restart varje timme, concurrency 4) **kördes 2026-11-23 16:00Z–20:01Z och blev PASS**: `status=PASS`, `f23_status=PASS`,
+14 400 s, **0 failures, 0 blockers**, 3 backend-restarts, 6 899 chat-/stream-/health-cykler,
+2 299 MainAI-jobb, 1 379 dokumentimport med 1 379 grundade retrieval-chats och 5 504
+samtidiga health-checks. `runtime_incidents=0`, inga stalled jobb/imports, worker-heartbeat
+`alive` hela vägen; databasen slutade på 15 177 samtal, 30 354 meddelanden och 1 379 chunks.
+Latens (fake-provider, alltså applikationsoverhead — inte modellgenerering): health p50 33 ms
+/ p95 49 ms, chat p50 215 ms / p95 419 ms, stream p50 971 ms, retrieval-chat p50 210 ms.
+
+**Två tidigare försök frös vid minut 15 utan att rapportera fel.** Orsaken var inte en hängd
+backend: access-token lever 15 minuter (`access_token_expire_minutes`) men harnessen loggade in
+en enda gång, så varje autentiserat anrop fick 401 medan loopen snurrade vidare och ingen
+evidens skrevs. Fixen (`backend/scripts/acceptance/v5_soak.py`, commit `81a82a7`) förnyar
+sessionen en gång vid 401; den här körningen registrerade **13 session-refresh** och växte utan
+avbrott över 15-minutersgränsen. En förkortad körning kallas aldrig endurance-PASS.
+
+**Kompatibilitet med Claudes PR #471** (`claude/founder-alpha-phase3-staging`, head
+`9938fd2`, bas `integration/founder-alpha-20261121`, öppen draft, 83 commits, 248 filer):
+PR #471 innehåller **ingen** `local-models`-endpoint, **ingen** `Lokala modeller`-sektion och
+**ingen** `providers/local_discovery.py` — den här rundans upptäcktsfunktion dubbleras alltså
+inte. Sex filer delas till namnet, men konfliktytan är liten och semantiskt åtskild:
+`admin.py` (endast importblocket), `lib/api.ts` (kring rad 750) och admin-sidan (kring rad
+22). Rebase sker först **efter** att #471 mergats, enligt merge-regeln i `CLAUDE.md`.
+
+**Kvarstående blockerare:** GitHub write-access (exakt-head CI, draft PR, merge, deploy) samt
+avsaknad av produktionsåtkomst. Ingen produktionsändring är gjord.
+
+## Founder Alpha local AI — discovery, reload and certification (2026-11-22)
+
+**Branch:** `freebuff/life-workspaces`, bas `04de94db7d7ccf51c23dd68670e789e8e9df6cde`
+(Founder Alpha / Personal Work). Kod-SHA `4f99518010cdf46df764cf6a9e5a5b6539095a06`,
+tree `46ea9421d87706269fe605eaec6aefa036e7768f`; dokumentationscommit ligger ovanpå. Ingen
+PR/push/merge/deploy är gjord; GitHub write-access saknas. `first_cycle_go=false`.
+
+**Scope:** kopplar ihop befintlig providerregistrering, Ollama, streaming, chattpersistens,
+dokumentpipeline, RAG, workspaces och recovery. Lägger till bounded live-discovery av
+installerade lokala modeller, founder-only `GET /api/admin/providers/local-models`, aktiv
+chat-/embeddingmodell i `ProviderStatus`, en lokal modelltabell i admin-UI samt
+URL-adresserbara `/chat?conversation=<id>`-samtal så reload återställer durable historik.
+Ingen ny providerrouter, minnesdatabas, vektordatabas eller workspace-modul infördes.
+
+**Verifiering:** fokuserad backend-svit **57 passed, 0 failed, 0 skipped** mot riktig
+PostgreSQL/runtime-roll; browserjourneys **13 passed, 0 failed** (V6 2, personal work 1,
+model routing/local discovery 2, resilience 8, inklusive explicit cancel, reload,
+idempotent dropped-response-retry, nätverksfel och tangentbord); TypeScript **PASS**; lint
+**0 errors** (en befintlig `api.ts`-varning); produktionsbuild **PASS** med 29 routes. En
+45-sekunders isolerad soak mot `lifeos_soak_test` hade **0 requestfel**, 24 chats, 24
+streams, 4 dokumentimport med grounded retrieval, 8 MainAI-jobb, 16 samtidiga health checks
+och en backend-restart: chat p50 **57,4 ms** / p95 **121,9 ms**, retrieval p50 **64,3 ms**,
+RSS **183–186 MB**. Soakens provider är deterministisk fake; latensen mäter applikations-
+overhead, inte riktig modellgenerering.
+
+**Riktiga fixar:** döda E2E-antaganden rättades i stället för att försvagas — V6-markören
+matchar nu den faktiskt renderade texten, resilience-nätverksfelet träffar `/api/dashboard`
+och projektassertionen träffar projektlänken. Den lokala modellupptäckten är explicit inte
+auktorisation; val kräver fortfarande befintlig verify/activate-väg.
+
+**Kvarstående blockerare:** Ollama saknas (`127.0.0.1:11434` refused), så riktig lokal
+modell kunde inte anropas; F23 är **BLOCKED** eftersom 45 s < 14 400 s och får inte kallas
+endurance-PASS; exakt-head CI/PR/merge/deploy är blockerat av GitHub write-access.
+
+**Merge:** efter Personal Work-checkpointen och efter att Claude hanterat R15/V7-
+integrationen. Oberoende av Z.ai:s Security Kernel-arbete. Inga ändringar i R15,
+Security Kernel eller produktions-VPS. Detaljer och reproducerbara kommandon finns i
+`docs/FOUNDER_ALPHA_LOCAL_AI.md`; evidens i `docs/evidence/founder-alpha-local-ai/`.
+
+## LifeAI Personal Work — tasks, calendar, search and dashboard (2026-11-22)
+
+**Branch:** `freebuff/life-workspaces`, bas `04c82c3aa4ea411835c48561f6c03cef4bb87999`,
+vidarebyggd ovanpå Life Workspaces-checkpointen `5f733c2`. Kod-SHA
+`0d917c32f267ab98996f8d517a257d2fa369f065`; dokumentationscommit ligger ovanpå. Ingen
+PR/push/merge/deploy är gjord; GitHub write-access saknas. `first_cycle_go=false`.
+
+**Scope:** package A–H i den godkända tvådagarsbackloggen. Persistiska projektmål,
+milstolpar, beslut med version/ersättning/epistemisk status, uppgifter med beroenden,
+blocked-state, historik och optimistisk version, kalender med redigering/upprepning/
+tidszon/konflikter/kategorier/länkar, en bounded founder-dashboard samt owner-scopad
+sökning över projekt/uppgifter/dokument/konversationer/kalender. Bygger på befintliga
+modeller och API:er; ingen parallell minnes-, exekverings- eller kalendermotor.
+
+**Migration:** `0095_personal_work_management`, additiv efter `0094`. Nya tabeller
+`workspace_milestones`, `task_dependencies`, `task_events`; additiva fält på `tasks`,
+`workspace_decisions` och `calendar_events`. RLS/owner-scope finns på alla nya tabeller.
+
+**API:** `/api/projects/tasks` (CRUD, filter, dependencies, historik, milstolpar),
+`/api/projects/{id}/milestones`, `/api/workspaces/{id}/decisions/{decision_id}/supersede`,
+`/api/calendar/events` (CRUD, serie, conflicts), `/api/dashboard` och `/api/search`.
+Alla är founder-gated; främmande resurser ger 404, en icke-founder får 403.
+
+**Frontend:** `/tasks`, `/calendar`, `/search`, uppdaterad `/`, projektvy med milstolpar,
+workspace-vy med beslutversion/ersättning och milstolpar, samt sidebar-poster. Loading-,
+fel-, tom- och behörighetslägen finns; inga påhittade exempelvärden.
+
+**Verifiering:** ny PostgreSQL-acceptans **3 passed**; workspace/projekt/chat-regression
+**15 passed**; Playwright **1 passed, 0 failed, 0 flaky**; frontend lint **0 errors** (en
+befintlig varning), TypeScript **PASS**, produktionsbuild **PASS** med 29 routes.
+Dashboard **24 SQL-statements** (budget 40), **58,0 ms**; sökning **39,6 ms**. Browserresan
+hittade och stängde en verklig tidszon-naiv/aware-defekt i kalenderkonflikter som gav 500.
+Evidens: `docs/evidence/life-personal-work/`; detaljer: `docs/LIFE_PERSONAL_WORK.md`.
+
+**Merge:** efter Life Workspaces och efter att Claude hanterat R15/V7-integrationen.
+Migrationen måste placeras efter `0094` i den samlade sekvensen. Inga ändringar i R15,
+Security Kernel eller produktions-VPS. Ingen extern kalender eller autonom aktivering.
+
+## Life Workspaces — persistent project-centered founder experience (2026-11-21)
+
+**Branch:** `freebuff/life-workspaces`, bas `04c82c3aa4ea411835c48561f6c03cef4bb87999`
+(Founder Alpha-programmet). Kodcheckpoint `83c87049646cf2a52bc1baeb0527776b99fe5a85`.
+Ingen PR/push/merge/deploy är gjord. `first_cycle_go=false`.
+
+**Scope:** bygger vidare på befintliga `projects`, `documents`, `tasks`, `conversations`,
+`mainai_goals`/`mainai_tasks`, retrieval och MainAI-chatt. Lägger till workspace-metadata
+(syfte/mål/settings), arkiv och soft-delete-retention, owner-scopad aktivitet/beslut/membership,
+`conversations.project_id`, optimistisk `projects.version`, en idempotent sync-ledger med
+stale/interruption-recovery samt en valfri `mainai_goals.project_id`-länk. Ingen ny
+projektmodell, chattmotor, kunskapsdatabas, execution-motor eller auktorisering.
+
+**Migrationer:** `0093_life_workspaces` och `0094_workspace_sync_and_supervised_goals`
+(down_revision `0092` respektive `0093`). Additiva; rör inte Security Kernel/R15-lanen. Claude
+äger integrationsreconciliation.
+
+**API:** `/api/workspaces` med create/list/detail/update/archive/restore/soft-delete,
+dokumentassociation, tasks, conversations, activity, decisions, bounded context,
+supervised MainAI-tasks och sync runs. Alla träffar är founder-only och filtrerade på
+`created_by`; främmande workspace eller dokument ger 404. `PATCH` med stale
+`expected_version` ger 409. Chatt med `project_id` binder konversationen och skickar
+`project_id` till retrieval; återanvändning i ett annat workspace ger 409. Sync med samma
+idempotency key replayar samma run, unchanged entities blir `skipped`, failed runs kan retryas,
+och stale/interrupted runs fail-closed.
+
+**Frontend:** `/workspaces` och `/workspaces/[id]` med skapa, mål, versionerad
+settings-redigering, källor, uppgifter, beslut, aktivitet, sync-historik/retry, superviserade
+MainAI-tasks med evidens samt workspace-scopat strömmande MainAI-samtal med stop-knapp.
+Sidebar har en `Workspaces`-post. Inga exempeldata i produktionsvyer.
+
+**Verifiering:** `tests/backend/test_workspaces_api.py` plus befintliga
+`test_projects_detail.py` och `test_chat_request_idempotency.py` gav **15 passed** mot riktig
+PostgreSQL/runtime-roll. MainAI execution API/planner-regression gav **58 passed**. Frontend
+lint **0 errors** (en befintlig varning) och build **PASS** med båda workspace-rutterna.
+Browser `frontend/e2e/workspaces.spec.ts` gav **2 expected, 0 unexpected, 0 flaky**: persistent
+workspace med streamad chatt, reload, versionerad settings, sync och arkiv/återställning, samt
+en transient create-failure som visas och återhämtas på retry.
+
+**Merge:** efter V9/Founder Alpha och efter att Claude hanterat V7/R15. Migrationerna är
+oberoende men måste placeras efter `0092` i den samlade sekvensen. Detaljer finns i
+`docs/LIFE_WORKSPACES.md`.
+
+## Founder Alpha Engineering Program — verifierad, endurance BLOCKED (2026-11-21)
+
+**Branch:** `freebuff/founder-alpha-engineering-program`, bas V9
+`6b3848d96e99926d2d2175f03582f86c0947e906`. Kandidatens kod-SHA är
+`6601fac3b83d29e6ac755affc2eac3abe1912d2c`; dokumentationscommiten ovanpå den är
+transfer-HEAD. Ingen PR/push/merge/deploy är gjord; GitHub write-access saknas fortfarande.
+`first_cycle_go=false`.
+
+**Scope:** en körbar programrunner ovanpå befintliga V5–V9-verktyg, distinkta
+liveness/readiness-endpoints, riktig founderresa, restart-/recovery-/backup-/upgrade-kedja,
+resursprov, kort soak, security-regressioner och en riktig browseracceptans. Inga nya
+migrationer, ingen parallell motor och inga ändringar i R15/Security Kernel/RAG-isolation.
+
+**Faktiska resultat:** programrunnern **31 PASS, 0 FAIL, 1 BLOCKED**; founderresan **12/12**;
+backendtester **59 passed**; installationsmatris **12/12**; Playwright projektdetalj **1
+expected, 0 unexpected**; backup/restore och recovery **PASS**; migration
+`0092 -> 0091 -> 0092` **PASS**; resursprobe **PASS**; frontend lint/build **PASS**. I
+programrunnern är endast 24-timmars endurance BLOCKED; den 20-sekunders soak som kördes har
+noll requestfel men får aldrig kallas F23 PASS. Därutöver är den bredare Workstream
+3-matrisen **PARTIAL/BLOCKED**: backend-restart och backup/recovery kördes, men worker-only
+kill, Redis/PostgreSQL-restart, host-restart och avbruten ingestion/streaming kördes inte och
+påstås därför inte vara PASS.
+
+**Riktiga fixar:** `/api/health/live` skiljer processliveness från `/api/health/ready`s
+fail-closed dependency-check; resurs-/soak-harnessen använder en icke-placeholder-nyckel så
+den deterministiska providern faktiskt väljs; browserbenet kör en separat backend med
+`COOKIE_SECURE=true` så Chromium accepterar sessionen på localhost; programrunnern stoppar
+huvudbackenden innan egna worker-prober för att undvika jobbkonkurrens.
+
+**Merge:** efter V9 och efter att Claude hanterat V7/R15-integrationen. Oberoende av
+Z.ai:s Security Kernel-arbete. Detaljer, evidens och reproducerbara kommandon finns i
+`docs/FOUNDER_ALPHA_ENGINEERING_PROGRAM.md`.
+
+## LifeAI V9 — Founder Alpha funktionell completion (2026-11-21)
+
+**Branch:** `freebuff/v9-founder-alpha-functional-8dafd2f`, bas V8
+`8dafd2f5cb12e19a2fa8416cf93ae6b204a0a97d`. Kodcheckpoint
+`97b16b7bf28d76b992230c64ef24ff7fd97a3aaf`. Ingen PR/push/merge/deploy är gjord;
+GitHub write-access saknas fortfarande. `first_cycle_go=false`.
+
+**Scope:** founder-facing funktionell completion ovanpå befintlig arkitektur. V9 lägger till
+en riktig projektdetaljyta och ett owner-/projekt-scopat API, kopplar projekt till uppgifter,
+gör knowledge-sökningen källattribuerad, förhindrar korsprojektval i Workbench, skiljer ett
+tillfälligt auth-prob från en utgången session och visar aktiv chat-modell samt taskarnas
+verifieringsplan/beroenden i den befintliga MainAI Execution-vyn. Inga nya ramverk,
+migrationer eller parallella motorer infördes.
+
+**Faktiska resultat:** projektdetaljtester **3 passed**; fokuserad backend-svit (workbench,
+streaming, library routes, project-status work chain, founder-only auth) **78 passed**; ruff
+och py_compile **PASS**; frontend lint **PASS** (0 errors, en befintlig varning) och
+produktionsbuild **PASS** med `/projects/[id]` som dynamisk route. Backend-E2E-harnessen var
+healthy på `8010` med isolerad PostgreSQL `0092` och Redis. Playwright-resan är skriven och
+körd men **BLOCKED** eftersom Chromium saknar `libatk-1.0.so.0`; inget browser-PASS påstås.
+
+**Merge:** efter V8 och efter att Claude hanterat V7/R15-integrationen. V9 rör inte
+R15-branchen, security-kernel eller RAG-isolationsarkitekturen. Playwright, Docker och Ollama
+är fortsatt miljöblockerade. Detaljer och reproducerbara kommandon finns i
+`docs/V9_FOUNDER_ALPHA_FUNCTIONAL.md`.
+
+## LifeAI V8 — säker delivery- och staging-integrationspipeline (2026-11-21)
+
+**Branch:** `freebuff/v8-integration-pipeline-8917f0c`, bas V7
+`8917f0ca4f5a64e57a8eda623d57763145bd9cde`. Ingen PR/push/merge är gjord; GitHub write-access
+saknas. Exakt V8-commit, bundle och manifest finns i `delivery/v8-integration/`.
+
+**Scope:** oberoende infrastruktur för att importera agentbundles säkert, verifiera
+SHA-256/ancestry/provenance, analysera konflikter och migrationer, bygga ett immutable
+staging-manifest samt köra exact-SHA staging och rollback. Den resolverar inga konflikter och
+rör inte R15/integrationens säkerhetsinterface; Claude äger den faktiska R15-försoningen.
+
+**Faktiska resultat:** V8-regressioner **11 passed**; R15 egress **13 passed**; V4/V6/V7
+importeras **PASS**; V6+V7 avvisas som överlappande leverans; V7 vs integration har **9
+textuella konflikter** och migrationshuvuden `0079`/`0092`; V7 staging hittade en riktig
+egress-testdefekt som rättats i V8; rollback **PASS** med oförändrad DB-revision och rena
+refs/worktrees. Frontend, Docker, Playwright och Ollama är fortsatt BLOCKED i miljön.
+
+**Merge:** efter V7 och efter att R15/integrationen är stabil. Branchen är oberoende som
+verktygsleverans, men får inte användas för att automatiskt lösa de nio konflikterna. Kör
+`scripts/integration/staging_build.py` på en miljö med frontend-deps och verifiera om V8 efter
+att V7:ans konflikter har hanterats av rätt ägare.
+
+## LifeAI V7 — portabelt testlab och recovery-hardening (2026-11-21)
+
+**Branch:** `freebuff/v7-testlab-5619020`, bas
+`56190209cdfb462f2127f4bc04f91fc2b9b5efe3` (V6). Ingen PR/push är gjord; GitHub write-access
+saknas fortfarande. Exakt V7-commit och bundle finns i `delivery/v7-testlab/`.
+
+**Scope:** portabel preflight, reproducerbar dependency-installation, manuell CI-workflow,
+modell-readiness, komplett evidensinsamling, `--no-docker`-soak, deterministisk teardown samt
+recovery-fixar i reliability-runnern. V6-labben återanvänds oförändrad i grunden; inga
+produktionsresurser refereras. Claude äger R15/integration och PR #468/#469; denna branch rör
+deras säkerhetsinterface inte.
+
+**Resultat:** kontraktstester **3 passed**; Docker-preflight **BLOCKED** av permission-denied
+på Docker-socket; Playwright **BLOCKED** av saknade `atk-1.0`, `atk-bridge-2.0`, `gbm` och
+`asound`; host-preflight har backend/frontend PASS men Ollama onåbar. En 12-sekunders
+host-reliability-körning gav PASS för duplicate delivery, browser disconnect och authorization
+invalidation, men **F23 BLOCKED** (12 s < 14 400 s). F23/F24 är inte PASS.
+
+**Riktiga fixar:** testdeps är opt-in i backend-imagen; `/data/storage` ägs av appuser;
+acceptance samlar journey/Playwright/egress/JUnit även vid delmisslyckande; F23 kräver faktisk
+elapsed tid; Redis-paus räknas inte som appfel; Ollama-recovery verifieras med riktig chat.
+
+**Merge:** efter V6. Oberoende av R15/integration, men kan kollidera i `testlab.py`,
+`v6_reliability.py` och `backend/Dockerfile`. Verifiera med `scripts/testlab/preflight.py` och
+kör `scripts/testlab/ci.sh` på en Docker-värd med Ollama och Playwright-deps.
+
+## LifeAI V6 — isolerat Founder Alpha-integrationstestlab (2026-11-21)
+
+**Branch:** `freebuff/v6-testlab-10bbfea`, bas
+`10bbfea3c43a0d81fa1fe5324a72e8ca945c4798` (V5 reliability). Ingen PR, push, merge eller
+deployment har gjorts eftersom GitHub-credentials saknas i miljön; en verifierad bundle/patch
+är transferartefakten. `first_cycle_go=false`.
+
+**Scope:** ett separat Compose-lab (`lifeai-v6-testlab`) med backend, worker, frontend,
+PostgreSQL+pgvector, Redis och Ollama på loopback-portar och egna volymer; en 12-stegs
+founder-journey; Playwright-frontendresa; fault-injection/soak-runner; provider-egress-probe;
+samt en fail-closed release gate. Inga produktionsvolymer, hemligheter eller deployment
+refereras. Labbet återanvänder befintliga testmekanismer och PR #443:s flöden i stället för att
+återimplementera dem.
+
+**Faktiska resultat:** founder-journey **12/12 PASS** vid bas-SHA `10bbfea` med deterministisk
+fake-provider (integrationsbevis, inte riktig lokal-AI-evidens). Provider-planning-fixen har
+regressionstest **1 passed**. En 8-sekunders reliability-körning gav PASS för duplicate job
+delivery, browser/SSE-disconnection och authorization invalidation, men är **F23 BLOCKED**
+eftersom fyra timmar krävs. Playwright är **BLOCKED** av saknad `libatk-1.0.so.0` och Docker-
+daemonen av permission-denied; Ollama saknas lokalt. Därför rejectar gaten kandidaten och
+F23/F24 är inte PASS.
+
+**Riktig fix:** `RegistryPlanningAdapter` defaultar nu till aktiv chat-provider/model när båda
+utelämnas, vilket stoppar den heta `PROVIDER_SPEND_NOT_AUTHORIZED`-loopen. Regressionstest:
+`backend/tests/backend/mainai/test_provider_assisted_planning.py::test_registry_adapter_defaults_to_active_chat_provider`.
+
+**Evidens:** `docs/V6_TEST_LAB.md`, `docker-compose.testlab.yml`, `scripts/testlab/testlab.py`,
+`backend/scripts/acceptance/v6_*.py`, `frontend/e2e/founder-journey-v6.spec.ts` och
+`delivery/v6-testlab/` (bundle, patch, SHA256SUMS och exakt-SHA-evidens).
+
+**Merge:** efter R15/integration; oberoende av V5 men kan kollidera i
+`backend/scripts/ci/run_e2e_backend.py` och provider-planning. Claude äger R15/integration och
+PR #468/#469; denna branch rör dem inte.
+
+## LifeAI V5 — production reliability/self-healing, F23 kvarstår (2026-11-21)
+
+**Branch:** `freebuff/v5-reliability-2265a0e`, bas `2265a0e5d62d678bb762f520dbf5848a66020387`
+(V4 Founder Alpha). Ingen PR, push, merge eller deployment har gjorts eftersom GitHub-credentials
+saknas i miljön; en verifierad bundle/patch är transferartefakten. `first_cycle_go=false`.
+
+**Scope:** aktiv runtime-health-sweep för utgångna jobbleasar (säker återköning endast av
+idempotenta interna jobbtyper, aldrig `task_execution`), retry-räkning och lease-fencing,
+Redis-baserad provider-circuit-breaker med fail-open, ägarscopad
+`GET /api/incidents/health`, health-banner i incidents-UI, samt en riktig fix för
+streamingförsöket som tidigare använde request-sessionen efter att FastAPI stängt den.
+Ingen migration och ingen parallell observability-/jobbmotor infördes.
+
+**Faktiska resultat:** V5 reliability/fault-injection **23 passed**; fokuserad
+streaming/incident/jobs-regression **32 passed**; security/R15 + MainAI recovery **158 passed**;
+frontend production build **PASS**; riktig PostgreSQL-faultmatris **6/6 PASS**; soak-harnessens
+8-sekundersvalidering hade **noll requestfel** men är **F23 BLOCKED** eftersom den är kortare än
+fyra timmar. F23 är alltså inte körd; F24 ärver blockeringen. Exakt-head CI och GitHub PR är
+blockerade av samma credential-brist. Riktig Ollama/pgvector-acceptans kördes inte om i denna
+sandbox och behandlas inte som ett fel.
+
+**Evidens:** `docs/V5_RELIABILITY.md`, `backend/tests/backend/test_v5_reliability.py`,
+`backend/tests/backend/test_v5_fault_injection.py`, `backend/scripts/acceptance/v5_soak.py` och
+`delivery/founder-alpha-v5-reliability/` (bundle, patch, SHA256SUMS, test-/soak-/DB-fault-evidence).
+
+**Merge:** efter R15/integration. Ingen semantisk konfliktlösning mot PR #467; Claude äger den
+integrationen. Inga ändringar i Claude-, Codex- eller Z-brancher.
+
+## Founder Alpha functional completion v3 — verifierad, F04/F23/F24 kvarstår (2026-11-21)
+
+**Branch:** `claude/founder-alpha-fullstack-qa`, kodcommit `59184c937947dece75a46e11ab600d2690c5a3c6`,
+bas `6ececab306d0c1551d6cefad3bb1c4b62fd8a8c9`. Ingen PR, push, merge eller deployment har
+gjorts. `first_cycle_go=false`. Produktionscontainrar, `/opt/lifeai` och produktionsdatabasen
+är orörda.
+
+**Vad som ändrades:** två bekräftade chattfel stängdes utan ny arkitektur eller migration.
+(1) En durable `ChatRequestClaim` som överlevde en krasch men saknade assistentrad gav
+permanent 409 på varje retry med samma `client_message_id`; replay går nu tillbaka in i den
+befintliga row-lockade försöksvägen, vilket är säkert eftersom originalprocessen aldrig nådde
+provider-claimet. (2) Webbläsaren skapade en ny idempotensnyckel per anrop, så ett tappat svar
+kunde ge ett andra meddelande och ett andra provider-anrop; chattsidan behåller nu samma nyckel
+och erbjuder “Försök igen” för exakt samma logiska sändning. Vid omladdning visas ett avslutande
+användarmeddelande utan svarsrad som återhämtningsbart i stället för att tyst försvinna.
+Tangentbordsnavigation och Enter-sändning verifieras också.
+
+**Faktiska resultat:** samlad backend-JUnit **608 tester, 0 failures, 0 errors, 2 skips
+(606 passed)**. Playwright Founder Alpha **13 expected, 0 unexpected, 0 flaky, 0 skipped**
+(import/indexering/sökning/källciterat svar/öppna källa/fortsätta/radera, media och
+`?t=`-länk, mobil `/library`/`/workbench`/media, reload, nätverksavbrott, projekt/uppgift,
+avbrutet chattsvar med samma `user_message_id`/`assistant_message_id`, tangentbord). PR #464
+kördes om orörd i separat worktree mot head `8667146`: **66 passed, 0 failed, 0 skipped**.
+Frontend production build **PASS** vid `59184c9`.
+
+**Kvarstående blockerare:** F04 (Ollama saknas), F23 (fyra timmars soak) och F24 (ärver
+dessa). Chatten är fortsatt request/response, inte token-streaming; UI:n påstår inte att den
+streamar. `pg_stat_statements`, `zip`, Z.ai-CLI, live OpenAI, exakt-head GitHub Actions och
+resursutmattning är fortsatt kända begränsningar.
+
+**Evidens:** `docs/evidence/founder-alpha/functional-v3/` (`README.md`, `backend-tests.xml`,
+`playwright-founder.json`, `frontend-build.txt`, `summary.json`). PR #464-analysen finns i
+`docs/evidence/founder-alpha/pr464-review.md`.
+
+**Merge:** efter R15 och reliability-leveransen. Ingen känd överlappning med Codex- eller
+Z-brancher. Endast F04 kräver Ollama och F23 en riktig fyratimmarskörning i en resursmässigt
+tillräcklig isolerad miljö.
+
+## Founder Alpha full-stack QA successor — BLOCKED (2026-11-21)
+
+**Branch:** `claude/founder-alpha-fullstack-qa`, bas `6ececab`. Ingen PR, push, merge eller
+deployment har gjorts. `first_cycle_go=false`. Den tidigare leveransen
+`delivery/founder-alpha-reliability/` och dess `SHA256SUMS` är orörda.
+
+**Commits:** `87bede8` crash-säker version/lagring vid resume, `d620642` recovery-matris,
+F01–F24-matris, JUnit-sammanslagning och BLOCKED-propagering i QA-grinden, `b898a02`
+testkontrakt för planner/egress, `2771905` F05-matchning av JUnit-classnames, `c527543`
+riktig PostgreSQL-felinjektion för F13, `35d65a9` explicit ersättning/versionsbyte med
+F11-tester och Knowledge Studio-UI, `0db06d5` F09 RAG-kvalitetsmatris och 12/12 riktig
+Playwright-founderresa, `4814a1d` tre riktiga beteendetester för beständiga beslut,
+bounded agentstyrning och korrigerat beteende. Dokumentationscommiten med denna post,
+PR #464-granskningen och den nya 527-testevidensen ligger ovanpå `4814a1d`.
+
+**Scope:** En verklig crash-window-bugg i `app/rag/library_import.py` är reparerad: en
+`Document`-rad som committats före `KnowledgeVersion`/`storage_key` kunde återupptas som
+"indexed" utan version och utan sparat original, vilket också stoppade claim-extraktion
+permanent. Resume återskapar nu båda delarna, verifierar checksumman och behåller exakt en
+version. Därutöver: körbar recovery-matris för giltig/korrupt/partiell restore, F01–F24-matris
+som härleder PASS/FAIL/BLOCKED/SKIP från terminal evidens, JUnit-merge för avgränsade
+ testsviter, F13-felinjektion mot riktig PostgreSQL, samt rättade testkontrakt för den nya
+`owner_id`-signaturen. Explicit dokumentersättning är nu implementerad: nästa version,
+durabelt ImportJob, `supersedes`-relation och sökexkludering av ersatta mål, med bevarad
+historik/original. F09 är nu mätt mot en riktig PostgreSQL/RLS-databas med relevanta,
+irrelevanta, motstridiga, historiska och explicit ersatta källor. Den fulla founderresan
+körs i Playwright mot riktig Next.js-proxy, backend och durable worker. Ingen ny
+produktarkitektur eller parallell minnesväg har införts.
+
+**Faktiska resultat:** samlad backend-JUnit **527 tester, 0 failures, 0 errors, 2 skips**
+(525 passed; `zip` och live OpenAI). F09 **PASS**: 6 riktiga RAG-kvalitetstester.
+Beteendekraven **3/3 PASS**: beständigt superseded beslut över ny DB-session, körande
+agent med slutfört arbete som inte avbryts/återsänds, samt founder-korrigerad regel som
+ändrar den faktiska verifieringsplanen. PR #464 **66 fokustester PASS** i separat
+worktree, utan ändringar i PR:en. F11 **PASS**: 5
+ersättningstester och 2 crash-resume-tester. F12/F19/F21 **PASS**: 12/12 Playwright-tester
+mot riktig backend/worker, inklusive import → indexering → sökning → källciterat svar →
+öppna källa → fortsätta → radering, mobil layout och felåterhämtning. F13 **6/6 PASS**:
+rollback, en exakt deadlock `40P01`, låstimeout `55P03`, statement/commit-timeout `57014`,
+dödad backend med återanslutning och samtidiga commits. F18 recovery-matris **PASS**.
+F01–F24: **21 PASS, 0 FAIL, 3 BLOCKED**. QA-grinden körde mot exakt `6a3d3d389f8a85b53a80d2c223cd711454da5eb3` med ren
+tracked tree, Alembic `0091`, PostgreSQL/Redis nåbara, installmatris 12/0/0, resursprobe
+PASS, 527 backendtester och 12/12 browser-E2E; resultatet är **BLOCKED** (exit 3), inte PASS.
+
+**Kvarstående blockerare:** F04 (Ollama saknas), F23 (fyra timmars soak) och F24 (grinden
+ärver dessa). `pg_stat_statements`, `zip`, Z.ai-CLI, exakt-head GitHub Actions och
+resursutmattning är fortsatt kända begränsningar.
+
+**Evidens:** `docs/evidence/founder-alpha/successor/` (`program-tests.xml`,
+`recovery-matrix.json`, `postgres-faults.json`, `version-resume.xml`,
+`version-replace.xml`, `rag-quality.json`, `rag-quality.xml`, `playwright-founder.json`,
+`behavior-requirements.xml`, `program-matrix.json`, `qa-gate.json`, `qa-gate.md`,
+`README.md` med reproducerbara kommandon, `pr464-review.md` och `soak-runbook.md`).
+
+**Merge:** efter R15 och den tidigare reliability-leveransen. Inga ändringar i Codex- eller
+Z-brancher; ingen känd överlappning. F09, F12, F19 och F21 är nu stängda med riktig
+databas-/browser-evidens. Endast F04 kräver Ollama och F23 kräver en riktig fyratimmarskörning
+i en resursmässigt tillräcklig isolerad miljö; F24 ärver dessa två.
+
+## Founder Alpha system reliability QA — PASS vid `216f290` (2026-11-21)
+
+**Branch:** `claude/founder-alpha-reliability`. QA-grinden passerade vid `216f290`; en
+uppföljande dokumentationscommit lägger endast till evidens och ändrar ingen kod. Ingen PR,
+push, merge eller deployment har gjorts. `first_cycle_go=false`.
+
+**Commits:** `47d6bef` installmatris/failure-injection/resursprobe/QA-grind/E2E-resiliens,
+`216f290` rättad JUnit-aggregering i grinden.
+
+**Nytt i denna omgång:** startup vägrar nu köra mot en databas som inte står på exakt
+Alembic-head. Det stänger en verklig lucka där en avbruten eller misslyckad migration kunde
+lämna en levande API mot partiellt schema. Installationsmatrisen kör mot riktig PostgreSQL och
+Redis och kontrollerar health, revision, grants och API — inte bara exit code.
+
+**Faktiskt körda resultat:**
+
+| Svit | Resultat |
+| --- | --- |
+| Installationsmatris, riktiga tjänster | **12 PASS, 0 FAIL, 0 BLOCKED** |
+| Startup/head-kontroll + RLS + durable delivery | **31 passed, 0 failed, 0 skipped** |
+| Ny Playwright-resiliens (reload, nätverksfel, projekt/uppgift) | **3 passed** |
+| Full E2E-svit från tidigare | **33 passed, 1 skipped** |
+| Isolerad backup/restore | **PASS** |
+| Resurs-/prestandaproben | **PASS** |
+
+Matrisen verifierade: ren installation, befintlig data, felaktig app-roll, otillgänglig
+PostgreSQL, otillgänglig Redis, saknad Ollama, felaktig modellkonfiguration, partiell/avbruten
+migration, misslyckad migration, omstart efter avbruten installation och recovery efter
+partiell uppstart. Alla fail-closed-scenarier stannade utan att servera trafik mot fel tillstånd.
+
+**Resursmätning:** startup **3,8 s**, health p50 **29,3 ms** / p95 **37,8 ms**, login **152,6 ms**,
+chat **97,6 ms**, 40 samtidiga health-anrop med 10 workers p50 **229,4 ms** / p95 **506,9 ms**,
+RSS **186,3 → 186,6 MB** över 100 upprepade läsningar, CPU **100,8 %** av en kärna under
+mätfönstret, DB **20,9 MB**, 6 anslutningar. `pg_stat_statements` saknas, så långsamma queries
+är **BLOCKED**, inte gissade.
+
+**Backup/restore:** källa 3 konversationer, 1 dokument, 1 chunk, 6 meddelanden, 7 minnesenheter;
+SHA-256 verifierad; restore till ny DB gav identiska radantal; RLS med två principaler; API på
+återställd data svarade 200 för login, dokument, konversationer, projektstatus och chat.
+
+**Kvarstående begränsningar:** exakt-head GitHub Actions kräver godkänd push; 10 tester kräver
+Z.ai-CLI och 1 `zip`; `pg_stat_statements` saknas; resursutmattning (CPU/minne/disk) är inte
+mätt; hela felmatrisen för Ollama/DB/migration är delvis täckt av matrisen, inte uttömmande.
+
+**Evidens:** `docs/evidence/founder-alpha/` (installmatris, resursprobe, recovery, Playwright,
+JUnit och QA-grind). **Merge:** efter R15; ingen överlappning med Codex/Z-brancher.
+
+## Founder Alpha reliability successor — integration, recovery och restore verifierad (2026-11-20)
+
+**Branch:** `claude/founder-alpha-reliability`, bas `6410abe` (R15-leveransen). R15-branchen
+och dess leverans i `delivery/r15/` är orörda. Ingen PR, ingen push, ingen merge och ingen
+deployment har gjorts. `first_cycle_go=false`.
+
+**Commits:** `9b731f4` providerklassificering/felbevarande/LIKE-escape, `0fd8f8d`
+registerpost, `ec33042` frontendstatus, `8c4c3f6` fail-closed vid okänd providerlokalitet,
+`283bf4d` lesson-conflict-testkontrakt, `c2422a8` E2E-worker + full biblioteksresa i CI,
+`3dfe4fc`/`27018b0` verifierad lokal integration, `c022788` självläkande jobbgrants,
+`5734d6b` aktuell shell-spec + CI, `93568d0` isolerad backup/restore-acceptans.
+
+**Scope:** provideradaptrarna klassificerar ogiltig JSON, 429, auth-fel, 5xx och felaktiga
+svarsformat som `ProviderError`; en provider som saknar `is_local` behandlas som extern och
+fail-closed; ett omladdat samtal bevarar misslyckade assistentrader; `hybrid_search`
+escap:ar LIKE-jokertecken; E2E-harnesset kör den riktiga durable workern; startup-policyn
+reparerar nu saknade `mainai_job_*`-grants på en ren installation; shell-specen testar nu
+aktuell `/library`-yta; och en isolerad backup/restore-resa verifierar checksumma, ACL, RLS
+och API på återställda data. Inga nya tabeller, migrationer eller parallell minnesarkitektur.
+
+**Isolerad testmiljö:** PostgreSQL 16.15 + pgvector 0.6.0 på `127.0.0.1:55432`, Redis 7.0.15
+på `127.0.0.1:56379`, Playwright Chromium 1194 och riktig E2E-backend på `127.0.0.1:8010`.
+Allt kördes projektlokalt under `/tmp`; ingen STRATO-produktionsdatabas eller
+produktionscontainer användes.
+
+**Faktiskt körda resultat:**
+
+| Svit | Resultat |
+| --- | --- |
+| `test_chat_message_persistence.py` | 18 passed |
+| Founder Alpha/Blueprint + cognitive acceptance | 39 passed |
+| Library/RAG/embedding/prestanda | 56 passed |
+| R15 DB/Redis | 136 passed |
+| Recovery/conversation/full cognitive | 24 passed, 10 skipped (Z.ai-CLI saknas) |
+| RAG/chat/library/claims | 97 passed, 1 skipped (`zip` saknas) |
+| `test_r15_integration_security.py` | 50 passed |
+| `test_mainai_execution_lesson_conflicts.py` | 11 passed |
+| `test_rls_policy_registry.py` | 5 passed |
+| Dokument/worker/recovery/DB-retry/provider-failclosed/startup | 87 passed, 1 skipped (`zip` saknas) |
+| Founder acceptance-suite | 9 passed, 1 skipped (modellbenet) |
+| Migrationskedja + health | 14 passed |
+| Playwright auth | 3 passed |
+| Playwright Founder Knowledge Studio | 1 passed |
+| Playwright security/model-routing | 6 passed, 1 skipped |
+| Playwright account lifecycle | 5 passed |
+| Playwright media/upload-kö/mobil/pagination | 11 passed |
+| Playwright rate-limit | 2 passed |
+| Playwright same-origin-proxy | 2 passed |
+| Playwright shell/library | 3 passed |
+
+**Full vertikal resa (Playwright, riktig backend + worker):** import av
+`vertikalt-e2e-test.txt` → validering/lagring → extrahering → pgvector-indexering → synlig i
+biblioteket → hybridsökning → MainAI-chatt med källcitat → öppna exakt källa → fortsätta
+samtalet → radera med bekräftelse. Passerade. Den kombinerade E2E-körningen (auth, Founder
+Knowledge Studio, security, model-routing) slutade med **10 passed, 1 skipped**; account-körningen
+separat med **5 passed**; media/upload-kö/mobil/pagination med **11 passed**; rate-limit med
+**2 passed**; same-origin-proxy med **2 passed**; shell/library med **3 passed**. Sammanlagt
+**33 Playwright passed, 1 skipped**.
+
+**Ren installation:** verifierad i ordningen `ensure_app_role` → `alembic upgrade head` →
+`apply_runtime_privileges` → start. Backend blev healthy, shell/library-specen passerade 3/3,
+och den tidigare kraschande startup-policyn reparerar nu själv saknade jobbgrants.
+
+**Backup/restore:** `pg_dump` med bevarade ACL:er, SHA-256-verifiering, restore till ny
+databas, identiska radantal, RLS-kontroll med två riktiga principaler, och API-start på
+återställda data. Login, dokument, konversationer, projektstatus och ett riktigt chatt­svar
+svarade 200. **PASS.**
+
+**Prestanda (lokal mätning):** 10 filer/200 stycken importerade på `0.330 s` (`0.033 s/fil`),
+10 chunkar, hybrid search `top_k=10` på `29.1 ms`, chatt-retrieval `top_k=5` på `11.8 ms`
+med 5 chunkar/10 145 tecken kontext.
+
+**Reparerade defekter:** (1) okänd `is_local` kraschade/klassades fel — nu fail-closed;
+(2) E2E-harnesset saknade worker, så uppladdningar blev liggande `pending`; (3) E2E-faken för
+embedding saknade `timeout`, så `ensure_verified()` pausade varje import som
+`blocked_provider`; (4) två testkontrakt var inaktuella och rättades; (5) startup-policyn
+återkallade men beviljade inte jobbgrants, vilket stoppade en ren installation — nu självläkande;
+(6) `shell-pages.spec.ts` testade den borttagna `/documents`-ytan — nu `/library` och grön.
+
+**Kvarstående begränsningar:** exakt-head GitHub Actions är inte körd eftersom inget har
+pushats; 10 tester hoppas över eftersom Z.ai-CLI saknas och 1 eftersom `zip` saknas. En
+säkerhetsspec hoppas över när backendens externa origin inte är konfigurerad. Resursgränser
+(CPU/minne/disk) är inte mätta, och hela installationsmatrisen (Ollama saknas, ogiltiga
+DB-uppgifter, avbruten/misslyckad migration) är inte separat körd; startup- och
+migrationstesterna täcker delar av den. `ruff` på det avsiktliga E2E-skriptet rapporterar
+fortsatt `E402` för imports efter env-setup; `py_compile` och YAML-validering är gröna.
+
+**Beroende och merge-ordning:** bygger på R15 och ska mergas efter R15. Inga ändringar i
+Codex- eller Z-brancher; ingen känd överlappning med deras implementationer. Nästa steg är
+godkänd push för exakt-head CI, resterande installationsmatris och resursgränsmätning.
+Leveransartefakterna är regenererade mot denna HEAD.
+
+## Blueprint-intelligensbacklogen KLAR: inkrementell dokumentförståelse (2026-11-14)
+
+**Ny branch: `claude/blueprint-incremental-document-understanding`** (PR #401, bas: #399
+`claude/blueprint-context-continuity` — åttonde lagret). Mergeordning: #387 → #388 → #389 →
+#390 → #393 → #398 → #399 → #401.
+
+Komplementet till kontextkontinuitet: `app.rag.vector_store._hit_dict()` fick ett nytt,
+rent additivt fält `document_updated_at` (gäller ALLA retrieval-anrop, inte bara Blueprint,
+eftersom `search()`/`hybrid_search()` båda redan går via samma funktion). Blueprint märker nu
+en källa som tillkommit/ändrats EFTER föregående version som `[NY/UPPDATERAD SEDAN
+FÖREGÅENDE VERSION]` och instruerar modellen att en sådan källa väger tyngre än
+kontinuitetstexten, aldrig tvärtom. Se PR #401 för detaljer.
+
+**Detta slutför direktivets Blueprint-intelligensbacklog (Sektion A):** Mission 1–5
+(#387–#390, #398), utvärderingssviten (#393), kontextkontinuitet (#399), och denna.
+
+## Blueprint: långsiktig kontextkontinuitet över regenereringar (2026-11-14)
+
+**Ny branch: `claude/blueprint-context-continuity`** (PR #399, bas: #398
+`claude/blueprint-founder-decision-recognition` — sjunde lagret i kedjan). Mergeordning:
+#387 → #388 → #389 → #390 → #393 → #398 → #399.
+
+Fann att `regenerate_draft()` tidigare anropade `_generate()` identiskt med en helt ny
+`create_draft()`-förfrågan — noll medvetenhet om vad den föregående RESOLVED-versionen
+faktiskt sade. Ny `app.blueprint.service.latest_resolved_draft()` (hoppar över
+`generating`/`failed`-rader) + ett nytt, tydligt märkt "PREVIOUS VERSION"-block i
+synteskommandot + en `_CONTINUITY_INSTRUCTION` som kräver att varje sakuppgift från
+föregående version fortfarande kontrolleras mot de aktuella numrerade källorna — aldrig
+upprepas bara för att den stod där förut. Se PR #399 för detaljer.
+
+## Blueprint Mission 5: Founder-decision/correction recognition (2026-11-14)
+
+**Ny branch: `claude/blueprint-founder-decision-recognition`** (PR #398, bas: #393
+`claude/blueprint-evaluation-harness` — sjätte lagret i samma `_generate()`-kedja som
+#387→#388→#389→#390→#393). Rekommenderad mergeordning oförändrad, nu förlängd: #387 → #388 →
+#389 → #390 → #393 → #398.
+
+Stängde direktivets sista öppna Blueprint-intelligensuppgift utan ny datamodell: `app.models.
+document.KnowledgeClassification.decisions` + `app.routers.workbench`s befintliga "decision"-
+sparningsväg + att varje retrieval-hit redan bar `classification` (app/rag/vector_store.py)
+fanns redan — Blueprint läste bara aldrig det fältet. En "korrigering" är bara en nyare
+`decisions`-källa, där den gamla redan märks `[KÄLLSTATUS: superseded]` via den BEFINTLIGA
+Mission 2-mekanismen (#388) — inget nytt begrepp behövdes. Se PR #398 för detaljer.
+## Section B, nästa steg: stateless GitHub-bevisrapport (2026-11-14)
+
+**Ny branch: `claude/github-work-queue-evidence-report`** (PR #396, bas: `claude/github-
+client-repo-evidence`/#395 — äkta beroende, inte bara bekvämlighet, eftersom modulen
+anropar #395:s nya `list_pull_requests()`/`list_issues()`/`list_check_runs()` direkt).
+
+**Öppen arkitekturfråga till grundaren (INTE avgjord här):** Jag utredde att återanvända
+`app.work_candidates` (det befintliga "signal producer ≠ truth writer"-mönstret — se
+migration 0054–0056) för att göra GitHub-bevis till en grundarbar granskningsbar kandidat,
+men förkastade det: `WorkCandidate.source_entity_id` är en composite-FK in i
+`project_entities`, som enbart nås via `InterpretationProposal` ← `KnowledgeClaim` —
+hela den kedjan är avsiktligt begränsad till GRUNDARENS EGEN KUNSKAP, inte levande extern
+systemstatus som en GitHub-PR. Att tvinga in GitHub-bevis i den kedjan (t.ex. en påhittad
+`KnowledgeClaim` enbart för att tillfredsställa FK:n) hade återanvänt tabellens FORM medan
+den invariant den byggdes för att upprätthålla bryts — exakt den typen av genväg CLAUDE.md:s
+isolerings-/återanvändningsprincip varnar för.
+
+**Beslut som krävs av grundaren (eller Codex för den säkerhetsrelevanta delen):** Ska
+GitHub-bevis-härledda förslag få sin EGEN grundarbara mellanlagringstabell (en syster till
+`work_candidates`, samma godkännande-grind-mönster, annan källmodell)? Det ändrar hur arbete
+kommer in i goal-skapande-pipelinen — exakt den typ av "unresolved authority decision" som
+direktivet säger ska pausas på, inte avgöras enväldigt. Tills det beslutet finns gör #396
+BARA läsning: `build_github_work_queue_report()` returnerar fakta (draft/stale/ci_red/
+ci_green/merge_conflict) om öppna PR:er/issues, skriver ingenting, skapar inget mål.
+
+## Känd, repo-bred CI-blockad: npm audit-drift, EJ fixad här (2026-11-14)
+
+Upptäckt som bieffekt av att jaga CI på PR #389/#390/#393/#394: jobbet "Frontend — npm audit"
+(`frontend/scripts/check-npm-audit.js`) misslyckas just nu på VARJE PR, oavsett diff —
+bekräftat på #390/#393/#394, inklusive #394 som enbart rör `.github/workflows/ci.yml` och den
+här filen. Skriptets allowlist täcker idag bara 3 advisory-source-ID:n för EN historisk fynd
+(brace-expansion, GHSA-mh99-v99m-4gvg, dokumenterad i `docs/SECURITY_BLOCKERS.md`) — verklig
+`npm audit` rapporterar nu 24 icke-allowlistade high/critical advisory-källor över många olika
+GHSA-ID:n, ren drift sedan allowlisten senast rördes.
+
+**Medvetet INTE fixad i någon av mina aktiva brancher.** Att göra det rätt kräver paket-för-
+paket-triage (version-bump vs. motiverad allowlist-post i `docs/SECURITY_BLOCKERS.md` per
+fynd) — verkligt säkerhetsomdöme, inte en enrads-infrastrukturpinning som Playwright/ubuntu-
+26.04-fixen (#394) ovan. Det ligger närmare Founder Alpha-säkerhetsspåret (Codex's ägarskap
+per `CLAUDE.md`s/direktivets rollfördelning) än Blueprint-intelligens-/MainAI-koordinator-
+spåret jag driver. Flaggat en gång per öppen PR (#389/#390/#393/#394) + här, i stället för att
+upprepa samma kommentar om och om igen eller gissa mig till en snabb fix. Kvarstår som ett
+OLÖST, synligt gap tills grundaren eller Codex bedömer det — ingen egen branch/PR öppnad för
+det ännu.
+
+## Grundardirektiv 2026-11-14: "Turn Life into a working engineering coordinator"
+
+Nytt, explicit direktiv efter #401: bygg en sammanhängande koordineringsväg ovanpå BEFINTLIG
+infrastruktur (Safe Planner, Work Driver, Supervisor Goal Lease, durable MainAI job/
+checkpoint, GitHub-bevis). Löste explicit den öppna arkitekturfrågan från #396/#397: en
+dedikerad, smal evidensmellanlagringsprojektion är auktoriserad eftersom work_candidates-
+kedjan inte kan representera GitHub-bevis utan att bryta grundarkunskaps-invarianten.
+
+**`claude/coordinator-evidence-staging`** (PR #403, bas: #396) — ny tabell
+`github_evidence_candidates`, samma "signal producer ≠ truth writer"-mönster som
+`work_candidates`, men identifierad via source_repo/source_kind/source_number istället för en
+grundarkunskaps-FK. Fullständig RLS/erasure-integration (app/rls.py, app/account/erasure.py).
+
+**Kvarstående delar av direktivet (ej byggda än):** next-task-selection (B), minimal-context-
+promptbyggare (C), checkpoint-reconciliation mot verifierad CI/PR-status (D, nästa steg),
+recovery/idempotent omfördelning (E). Ingen deploy/merge, `first_cycle_go=false` oförändrat.
+
+## Section B startpunkt: github_client.py repo-brett läs-API (2026-11-14)
+
+**Ny, isolerad branch: `claude/github-client-repo-evidence`** (PR #395, bas:
+`claude/det-kommer-mer-879lcm` direkt). Continuous Build Directive, Sektion B ("MainAI
+engineering coordinator") kräver att BEFINTLIG infrastruktur utökas innan något nytt byggs.
+En oberoende kartläggning (se separat registerpost om PR #394 ovan/nedan för samma datum,
+om den hunnit landas i den här grenen vid läsning) av Safe Planner (`app/safe_planner/
+service.py`), Work Driver (`app/development_driver/service.py`), Supervisor Goal Lease
+(`app/development_supervisor/lease.py`), godkännande-grinden (`app/mainai_execution/
+approval.py`), Dead Agent Recovery och den generella `mainai_jobs`-tabellen fann att nästan
+allt Sektion B/C behöver redan finns — UTOM en konkret lucka: `app/integrations/
+github_client.py` kan bara slå upp EN specifik ref/PR i taget, inte hela repot.
+
+**Tillägg (enbart läsning, inget skriv-/mergekapacitet tillagt):** `list_pull_requests()`,
+`list_issues()` (filtrerar bort PR:er som GitHubs `/issues`-endpoint annars blandar in),
+`list_commits()`. Avsiktligt litet — detta är enbart bevisinsamling, inte själva
+koordinator-/arbetskö-logiken (den hör till `app/safe_planner/service.py`s
+`plan_founder_request()`, en separat, senare ändring när den här bevisytan finns att mata
+in i). Isolerad från både Blueprint-kedjan (#387–#390/#393) och Playwright/ubuntu-26.04-
+CI-fixen (#394).
+
+---
+
 ## Stage T — MainAI Internal Workforce Foundation (2026-08-30)
 
 **Primary frontier** parallellt med correction-fix CI / Claude-verifiering. Inte en
@@ -9258,6 +9980,7 @@ väntar på CI+granskning; Codex/Copilots SEPARATA #412/#413-kollision kvarstår
 work-candidate-fragmenteringskontrollen och #323/#394-fyndet är fortfarande redan klara och
 ska återanvändas, inte göras om). Grundarens fyra prioriteter från "RESUME ACTIVE DEVELOPMENT
 WHEN CAPACITY IS AVAILABLE" är nu alla levererade: #440 (P2), #441 (P1), #442 (P3), #443 (P4).
+ska återanvändas, inte göras om).
 
 ## Grundardirektiv "CONTINUE ACTIVE ENGINEERING" (2026-11-15) — fyra nya uppföljningar levererade
 
@@ -9602,3 +10325,133 @@ test` kommer troligen också behöva samma `DEFAULT_LLM_MODEL`/`DEFAULT_EMBEDDIN
 **Ingen merge/deploy/aktivering/säkerhetsgrind ändrad. `first_cycle_go=false` genomgående.**
 Grundaren avgör om denna evidens räcker för att gå vidare, och i vilken ordning relativt
 punkterna ovan.
+
+## New branch: `claude/founder-requirements-consolidation` (2026-11-16) — docs-only, PR TBD
+
+**Scope:** `docs/LIFE_FOUNDER_REQUIREMENTS_INDEX.md` (new file) — a founder-requirements/audit-
+findings consolidation sidequest ("FOUNDER SIDEQUEST — CONSOLIDATE LIFEAI REQUIREMENTS, NOTES &
+AUDIT FINDINGS"). Maps every universal founder requirement and independent-audit finding to its
+authoritative existing document, with current-code-revalidated status for each finding (not a new
+source of truth — an index into #440/#443/#445/#446/#447/#450 and the existing `docs/*.md` set).
+Two new P0 engineering defects confirmed present at the current `dev` tip while preparing this index
+(not fixed here, docs-only): `PROV-1` (GitHub write token persisted in cleartext into a worktree's
+`.git/config` via `worktree.py`'s `_authed_remote_url()`) and `VS-1` (an empty `verification_plan`
+on a `repo_edit`/`open_pr` task is never rejected at plan-validation time, only trivially "passes"
+at verification time — `verify.py`/`planner.py`). Neither overlaps any currently open branch's own
+diff.
+
+**Depends on:** nothing merges-wise — branched fresh from `dev` tip (`69dc5ea5`), same Merge-regel
+discipline as #450. Reads (never merges) `claude/ecosystem-vision-reconciliation` (#445) and
+`claude/first-cycle-readiness-matrix` (#446) by ref, to cross-reference without duplicating their
+content while they're still open.
+
+**Blocks nothing; blocked by nothing.** Pure documentation; safe to merge independently of #440/
+#443/#445/#446/#447/#450's own merge order. `first_cycle_go=false`, no merge/deploy/activation.
+
+## PR #463 — model routing security hardening (2026-11-19)
+
+Existing branch `codex/model-capability-routing-foundation`, base `69dc5ea5a9cfc750303ea1a9b335c78612bc8f39`.
+Active hardening of exact-model verification, catalog/adapter compatibility and Founder configuration.
+Reuses #458's runner pin and dependency updates; no competing CI implementation and no new advisory exceptions.
+#457 overlaps `providers/verification.py`; preserve its local timeout contract during integration.
+R12 has a different eval-only `providers/zai_provider.py` and global `zai` registration lifecycle; do not substitute it for this HTTP adapter.
+Freebuff R15 was subsequently supplied at `transfer/freebuff-r15-20261119` / `16a6bd301a8a389e7648b8a3c1cdd80a3d115662`: read-only compatibility review is recorded in `docs/MODEL_ROUTING_HARDENING.md`; its branch is untouched.
+No merge/rebase/deploy/provider activation. `first_cycle_go=false`.
+
+#463 integration checkpoint: targeted sharp/PostCSS patches now overlap #458's lockfile.
+A synthetic merge reports package-lock.json conflict; retain patches and regenerate the composed lock.
+#457 still conflicts in verification.py; R12 still conflicts in registry.py and the Z.ai adapter.
+
+R15 checkpoint review: adds `gemma3:4b` to #463's local model catalog without runtime guarantees.
+Combined activation remains blocked on Z.ai eval/HTTP identity separation, verifier contract composition and R15 billing's per-attempt/ambiguous-failure accounting. No merge or Freebuff branch changes performed.
+
+## Codex R15 integration hardening — isolated candidate
+
+Branch `codex/r15-routing-integration-hardening`, parent R15 checkpoint `16a6bd301a8a389e7648b8a3c1cdd80a3d115662`.
+Imports #463's exact hardening delta from `dbd7680d267ae56b57e4a823c7cb1657f2308287` by source patch, preserving both source branches unchanged; no branch merge/rebase.
+Scope: eval/HTTP identity isolation, composed verification contracts and retry/accounting boundaries.
+Remote R15 checkpoint still equals the supplied SHA; no newer R15 head was advertised at baseline.
+Independent security acceptance remains external; `first_cycle_go=false`. No deployment or provider activation.
+
+Draft [PR #464](https://github.com/d1n095/LifeAI/pull/464) carries the isolated R15/#463 candidate against the exact transfer checkpoint. #463 stays frozen at `dbd7680d`; Freebuff R15 and Z.ai source heads were rechecked unchanged. Final targeted reply/nonce/intent/accounting regressions pass (48); full exact-head CI and independent acceptance remain separate gates. No merge/deploy/provider activation.
+
+## Successor branch: `security/r15-464-successor` (2026-11-20) — PR TBD
+
+Branched from exact PR #464 head `86671468a6dd271b61a3f985434130c4bf470ea8`; PR #464 itself is untouched and remains draft. Minimal security remediation of verified R15 findings:
+
+- **R15-01:** external models with a declared catalog price are admissible for a reservation under enforcement; unknown/missing prices still fail closed. Snapshot age remains a selection-policy concern, not an invented "unknown price".
+- **R15-04:** durable client idempotency for `POST /api/chat` via owner-scoped `chat_request_claims` (migration `0090`, FORCE RLS, `SELECT`/`INSERT`-only app role). Same key replays the existing outcome; unresolved/conflicting reuse is 409; no second user message or provider call.
+- **R15-05:** `effect_guard=True` on the remaining legacy `chat_with_fallback` callers (planner, execution_job, agent_orchestration, lesson_conflicts, workbench, rag/claims, provider_planning, corpus_review).
+- **R15-02:** durable billable chat-attempt identity via owner-scoped `chat_provider_attempts` (migration `0091`, FORCE RLS, `SELECT`/`INSERT`/`UPDATE`). The exact budget-reservation identity is committed before the provider call; a durable invocation marker separates provably pre-egress attempts from ambiguous ones. `GET /api/chat/unresolved` lists them; `POST /api/chat/unresolved/{id}/reconcile` releases only a stale, never-invoked attempt with a reviewable evidence ref, or settles conservatively / from recorded usage. It never calls a provider and never refunds an ambiguous effect.
+- **R15-03:** guarded chat no longer fails silently when the active embedding provider is external. The existing retrieval path raises an explicit `GroundingUnavailableError`, and `ChatMessageOut.grounding_status`/`grounding_reason` plus the chat UI show the degraded mode. Local Ollama embedding remains the supported guarded path (covered by a regression test); no parallel RAG engine or extra external call was added.
+
+**Tests:** 40 DB-free negative regressions pass (R15-01–R15-07), including release/held policy, conservative settlement, local-Ollama retrieval, guarded workbench/blueprint/knowledge retrieval, live-chat model policy and custom local model specs. The DB-backed idempotency/recovery/routing tests remain **BLOCKED** locally: no disposable PostgreSQL/Redis and neither `pg_isready` nor `redis-cli` is installed. Exact-head CI and independent acceptance remain separate gates.
+
+**R15-05:** all remaining retrieval callers (`blueprint`, `workbench`, `knowledge`) now pass `effect_guard=True`. Workbench and Blueprint return an explicit 503 when guarded grounding is unavailable; knowledge search returns 503 for unavailable grounding and 422 for an egress denial. No silent empty-context success.
+
+**R15-06:** live chat enforces the exact-model policy whenever an active admin `ProviderConfig` exists: external models need fresh exact-model verification, and an unverified selection fails cleanly as `provider_unverified` without a provider call. Deployments that have not written an admin config keep the existing settings-default behavior during rollout.
+
+**R15-07:** legitimate custom local Ollama tags are supported end to end: the catalog synthesizes a local-only spec with zero provider cost, exact verification is recorded per tag, admin config accepts it, and the admin UI exposes a free-text local-tag field. Unregistered external custom models remain fail-closed because their price/capabilities are not independently verified.
+
+**Still blocking at that point:** R15-08–R15-11 (closed on `security/r15-egress-owner-authorization`, see below), DB-backed route tests, and exact-head CI/independent acceptance. No push, merge, deploy, or provider activation. `first_cycle_go=false`.
+
+## Egress owner/lease authorization — `security/r15-egress-owner-authorization` (2026-11-20)
+
+Branched from `d06c9eaf5574ce99bdbee2b462d1ba462323e378`; no PR opened yet. Closes the verified ownerless external-egress paths in `agent_orchestration.dispatch_task/review_task`, `lesson_conflicts.detect_conflict/resolve_conflicts_among`, and `provider_planning.RegistryPlanningAdapter`:
+
+- `chat_with_fallback` now denies an external chain before any provider call unless it receives an active, verified `owner_id` or a freshly re-verified `mainai_jobs` worker lease. A local-only Ollama chain remains ownerless-safe because nothing leaves the host.
+- Owner identity is threaded through all three call paths; `FOUNDER_USER_ID` is never used as a fallback.
+- `provider_planning` validates the owner and runs Life Vault egress before its explicit `provider.chat` path, while avoiding double enforcement for the built-in registry adapter.
+- New DB-free egress regressions: **13 passed**. R15 successor DB-free suite: **40 passed**. DB-backed orchestration/lesson tests remain **BLOCKED** locally because PostgreSQL on `localhost:5433` is not running.
+
+No push, merge, deploy, or provider activation. `first_cycle_go=false`.
+
+### R15-08–R15-11 remediation (same branch, 2026-11-20)
+
+Continues the same isolated branch (no new branch, no PR). Scope is limited to the four
+remaining R15 findings:
+
+- **R15-08:** `estimate_usage_cost()` prices prompt and completion at their own catalog
+  rates; `ChatAttemptBudget` carries `estimated_prompt_tokens`/`estimated_completion_tokens`
+  and prices both the hold and the settlement separately. `estimate_prompt_tokens()` replaces
+  the UTF-8 byte count plus a flat 1024 with a character-based estimate that charges
+  non-ASCII characters individually. Total-only legacy callers remain conservative (priced
+  as output tokens).
+- **R15-09:** `evaluation_provider_scope()` refuses nesting and wildcard/blank model
+  identities, in addition to the existing authorization and environment checks. Regressions
+  prove an active evaluation resolves only the eval provider, never consults `ProviderConfig`,
+  and cannot outlive its scope even through a copied context.
+- **R15-10:** `frontend/scripts/check-npm-audit.js` is GHSA-scoped with written reasons and
+  expiry dates; an expired or malformed entry, or a high/critical finding that cannot be
+  attributed to an advisory, fails closed. All four documented exceptions (brace-expansion,
+  two sharp advisories, picomatch) are now actually in the script. CI push/PR filters include
+  `security/**`, so this branch's own checks run.
+- **R15-11:** DB-free negative regressions cover ambiguous vs proven-pre-egress timeouts,
+  eight concurrent identical reservations charging once, tenant counter isolation, split
+  pricing/settlement, and eval-scope escape. Retrieval transport failures and empty
+  embedding batches/vectors now raise an explicit `RetrievalUnavailableError` (a
+  `GroundingUnavailableError` subclass) instead of escaping as an unhandled 500 or an
+  `IndexError`; chat reports `grounding_status="degraded"` and knowledge/workbench/blueprint
+  return 503 through their existing grounding boundary.
+
+**Tests (local, no PostgreSQL/Redis):** `tests/security_r15_successor` 61 passed plus five
+Redis-backed store tests skipped for lack of a reachable `REDIS_URL`;
+`tests/security_r15_egress` 13 passed; `ruff`, `compileall`, `git diff --check` and
+`node --test scripts/check-npm-audit.test.js` (6/6) pass.
+
+**Reproducible DB/Redis verification (added, not yet run):** the new `r15-security-tests`
+GitHub Actions job runs both DB-free suites and the DB/Redis-backed R15 boundaries against
+`pgvector/pgvector:pg16` + `redis:7-alpine`
+(`tests/backend/providers/test_r15_integration_security.py`,
+`chat/test_chat_request_idempotency.py`, `test_financial_correctness.py`,
+`test_billing_engine.py`, `test_agent_orchestration.py`,
+`test_mainai_execution_lesson_conflicts.py`, `mainai/test_egress_policy.py`,
+`mainai/test_provider_crash_before_settle.py`). The same sequence is available to Codex in
+any isolated environment via `backend/scripts/ci/run_r15_security_suite.sh` (add
+`--db-free-only` when no services exist), including the new
+`test_r15_rag_failure_boundaries.py`. The job is committed but has not run here.
+
+**Still blocking locally:** this environment has no `postgres`/`redis-server`, and Docker
+returns permission denied on `/var/run/docker.sock`, so the DB/Redis-backed half is **unrun
+locally, not passing**. Exact-head GitHub Actions status and independent acceptance remain
+external gates. No push, merge, deploy, or provider activation; `first_cycle_go=false`.

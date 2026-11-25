@@ -21,6 +21,8 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -37,6 +39,22 @@ _NEVER_EGRESS_MARKERS = (
 )
 
 
+@dataclass(frozen=True)
+class WorkerLease:
+    """A worker's claimed-job lease, presented as egress authority.
+
+    This is deliberately not a new lease store: the fields are the existing
+    ``mainai_jobs`` claim/fencing fields. ``resolve_egress_owner()`` re-reads the row and
+    verifies every field immediately before the provider call, so a revoked, expired or
+    taken-over lease cannot authorize a later external request.
+    """
+
+    owner_id: uuid.UUID
+    job_id: uuid.UUID
+    worker_id: str
+    lease_generation: int
+
+
 class EgressDeniedError(RuntimeError):
     """Raised when the egress gate denies a call outright -- severe content, or a malformed/
     incomplete request. The caller must treat this exactly like any other hard authority
@@ -45,9 +63,61 @@ class EgressDeniedError(RuntimeError):
     already durably committed to the session (flushed, not yet committed by this function --
     see enforce_egress_policy()'s own docstring) before this is ever raised."""
 
+    # A stable semantic marker lets central transport code preserve this hard denial even
+    # if development/test reloads create a second class identity. Treating a forged marker
+    # as a denial is fail-closed: it can only stop egress, never authorize or disclose it.
+    is_egress_denial = True
+
     def __init__(self, reason: str):
         self.reason = reason
         super().__init__(f"egress denied: {reason}")
+
+
+def resolve_egress_owner(
+    db: Session,
+    *,
+    owner_id: uuid.UUID | None,
+    worker_lease: WorkerLease | None,
+) -> uuid.UUID:
+    """Resolve the one owner identity an external call may be attributed to.
+
+    An authenticated caller supplies ``owner_id``. A worker supplies its existing
+    ``mainai_jobs`` lease; this function re-reads the current row and verifies owner, worker,
+    fencing generation, running state and expiry. A revoked/expired/taken-over lease fails
+    closed. Never substitutes ``FOUNDER_USER_ID`` or any process-wide identity.
+    """
+    if worker_lease is not None:
+        from app.models.mainai_job import MainAIJob, MainAIJobStatus
+
+        job = db.get(MainAIJob, worker_lease.job_id)
+        if (
+            job is None
+            or job.owner_id != worker_lease.owner_id
+            or job.locked_by != worker_lease.worker_id
+            or job.lease_generation != worker_lease.lease_generation
+            or job.status != MainAIJobStatus.running
+            or job.lease_expires_at is None
+            or job.lease_expires_at <= datetime.utcnow()
+        ):
+            raise EgressDeniedError("worker lease is invalid, expired or revoked")
+        if owner_id is not None and owner_id != job.owner_id:
+            raise EgressDeniedError("owner identity does not match worker lease")
+        return job.owner_id
+    if owner_id is None:
+        raise EgressDeniedError(
+            "external egress requires authenticated owner identity or verified worker lease"
+        )
+
+    # A caller-supplied UUID is not by itself an authenticated owner. Verify the durable
+    # identity exists and is still allowed to act before any disclosure ledger row or
+    # provider request is attempted. Users has no RLS policy, so this lookup is valid even
+    # when the caller has not yet bound app.current_user_id.
+    from app.models.user import User
+
+    user = db.get(User, owner_id)
+    if user is None or not user.is_active or not user.email_verified:
+        raise EgressDeniedError("owner identity is missing, inactive or unverified")
+    return owner_id
 
 
 def _hash_payload(payload: Any) -> str:

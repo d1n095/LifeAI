@@ -17,8 +17,11 @@ from __future__ import annotations
 import asyncio
 import shutil
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 
 
 @dataclass(frozen=True)
@@ -155,6 +158,16 @@ class AdapterTimeoutError(RuntimeError):
     background."""
 
 
+class AdapterScopeNotEnforceableError(RuntimeError):
+    """Founder directive (independent review, Freebuff finding AT-1b/AT-1c): raised by
+    `LocalCLIAdapter.start_assignment()` when the assignment requests an `allowed_paths` scope
+    narrower than this adapter's own `cwd` -- the ONLY boundary it can genuinely enforce today
+    (a plain subprocess `cwd`, no chroot/namespace/landlock sandbox beneath it; the external CLI
+    tool it execs can read/write anywhere its own OS permissions allow once running). An
+    unenforceable restriction must fail closed here, never be silently accepted as if it were
+    actually being honored."""
+
+
 class LocalCLIAdapter:
     """Provider-neutral real adapter over a LOCAL CLI executable -- the SAME bounded
     subprocess mechanism serves Claude Code, Cursor Agent, or Codex, parametrized entirely by
@@ -176,7 +189,23 @@ class LocalCLIAdapter:
 
     `send_instruction()`/`resume()` are deliberately `NotImplementedError` -- this is a bounded,
     single-shot, non-interactive invocation (start, wait up to the bound, capture the result),
-    not an interactive session this coordination layer would have to trust mid-flight."""
+    not an interactive session this coordination layer would have to trust mid-flight.
+
+    `db` is REQUIRED, not optional -- `start_assignment()` re-checks
+    `app.agent_coordination.activation_gate.require_system_activation_authority()` against it
+    immediately before spawning a process, regardless of how this instance was constructed or
+    which caller holds it. This is the actual, unbypassable enforcement point (see
+    `activation_gate.py`'s own module docstring for why it lives here and not only in
+    `get_real_adapter()`): there is no lower level to invoke around this class's own real
+    subprocess spawn.
+
+    `allowed_paths`, if ever supplied non-empty, is a FAIL-CLOSED guard, not an enforcement
+    mechanism (hardening finding AT-1b/AT-1c): `AgentWorkAssignment.allowed_paths` can express
+    a path-prefix scope narrower than the whole worktree (e.g. a single file within a larger
+    checkout), but this adapter has no subprocess-level sandbox capable of actually confining
+    the external CLI tool to anything narrower than its own `cwd`. Rather than silently running
+    with an unenforced restriction the caller believes is being honored, `start_assignment()`
+    refuses outright whenever a narrower-than-cwd scope is requested."""
 
     def __init__(
         self,
@@ -186,14 +215,18 @@ class LocalCLIAdapter:
         args_template: tuple[str, ...],
         cwd: str,
         timeout_seconds: int,
+        db: Session,
         env: dict[str, str] | None = None,
+        allowed_paths: tuple[str, ...] = (),
     ):
         self._provider_key = provider_key
         self._executable = executable
         self._args_template = args_template
         self._cwd = cwd
         self._timeout_seconds = timeout_seconds
+        self._db = db
         self._env = dict(env or {})
+        self._allowed_paths = tuple(allowed_paths)
         self._processes: dict[UUID, asyncio.subprocess.Process] = {}
 
     async def health(self) -> AgentHealth:
@@ -212,6 +245,21 @@ class LocalCLIAdapter:
         return AdapterCapabilities(supports_cancel=True)
 
     async def start_assignment(self, assignment_id: UUID) -> None:
+        from app.agent_coordination.activation_gate import (
+            require_system_activation_authority,
+        )
+
+        require_system_activation_authority(self._db, action=f"LocalCLIAdapter.start_assignment:{self._provider_key}")
+        # Hardening AT-1b/AT-1c: both guards run, in this order -- authority first (who may
+        # start a process at all), then scope (whether this adapter can honour the requested
+        # restriction). Neither replaces the other.
+        if self._allowed_paths:
+            raise AdapterScopeNotEnforceableError(
+                f"assignment {assignment_id} requests allowed_paths={self._allowed_paths!r}, narrower than "
+                f"this adapter's own cwd ({self._cwd!r}) -- LocalCLIAdapter has no sandbox capable of "
+                "enforcing anything narrower than its full working directory, so it refuses to start "
+                "rather than silently run the external CLI tool with an unenforced path restriction."
+            )
         argv = [self._executable, *self._args_template]
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -258,28 +306,55 @@ class LocalCLIAdapter:
         )
 
 
-def get_real_adapter(provider_key: str, *, cwd: str, env: dict[str, str] | None = None) -> "AgentAdapter":
+def get_real_adapter(
+    provider_key: str,
+    *,
+    cwd: str,
+    db: Session,
+    env: dict[str, str] | None = None,
+    allowed_paths: tuple[str, ...] = (),
+) -> AgentAdapter:
     """The founder-controlled factory: returns a real `LocalCLIAdapter` ONLY when
     `app.agent_coordination.adapter_config.real_adapter_config()` confirms every precondition
-    (enabled, executable found, an explicit args_template configured); returns
-    `NotConfiguredAdapter` -- the same honest, fail-closed default -- in every other case.
-    NEVER silently substitutes a fake/mock adapter; callers that want deterministic test
-    behavior construct their own fake explicitly (see
-    tests/backend/mainai/test_agent_dispatch_foundation.py's own `_FakeAgentAdapter`).
+    (enabled, executable found, an explicit args_template configured) AND the founder's own
+    external `first_cycle_go` release decision (`app.agent_coordination.activation_gate.
+    first_cycle_go()`) is satisfied; returns `NotConfiguredAdapter` -- the same honest,
+    fail-closed default -- in every other case, including this new one. NEVER silently
+    substitutes a fake/mock adapter; callers that want deterministic test behavior construct
+    their own fake explicitly (see tests/backend/mainai/test_agent_dispatch_foundation.py's own
+    `_FakeAgentAdapter`). This function's own contract (never raises, always returns an
+    adapter) is unchanged by the `first_cycle_go` check -- it is treated as just one more
+    precondition, not a new failure mode.
+
+    `db` is REQUIRED and passed straight through to the constructed `LocalCLIAdapter`, which
+    re-checks full `require_system_activation_authority()` (env var AND durable DB evidence)
+    fresh immediately before every real subprocess spawn -- this factory's own `first_cycle_go`
+    check here is only a cheap, non-authoritative early exit, not the enforcement point.
 
     When `env` is not explicitly supplied, defaults to
     `app.agent_coordination.adapter_config.resolve_adapter_env(provider_key)` -- the founder's
     own explicit per-provider allowlist of ambient variable NAMES, never a blind inheritance of
     this process's full environment. Passing `env={}` explicitly still means "no environment at
-    all," exactly as before -- only an OMITTED `env` triggers the allowlist default."""
+    all," exactly as before -- only an OMITTED `env` triggers the allowlist default.
 
-    from app.agent_coordination.adapter_config import real_adapter_config, resolve_adapter_env
+    `allowed_paths`, when the caller has an `AgentWorkAssignment.allowed_paths` narrower than
+    the whole worktree, is passed straight through to `LocalCLIAdapter` -- which will then
+    refuse to start rather than run with an unenforceable restriction (see its own docstring,
+    hardening finding AT-1b/AT-1c). Omitted (the default `()`) preserves prior behavior exactly:
+    the adapter's only real boundary remains `cwd` itself."""
+
+    from app.agent_coordination.activation_gate import first_cycle_go
+    from app.agent_coordination.adapter_config import (
+        real_adapter_config,
+        resolve_adapter_env,
+    )
 
     config = real_adapter_config(provider_key)
-    if config is None:
+    if config is None or not first_cycle_go():
         return NotConfiguredAdapter(provider_key=provider_key)
     executable, args_template, timeout_seconds = config
     resolved_env = resolve_adapter_env(provider_key) if env is None else env
     return LocalCLIAdapter(
-        provider_key=provider_key, executable=executable, args_template=args_template, cwd=cwd, timeout_seconds=timeout_seconds, env=resolved_env
+        provider_key=provider_key, executable=executable, args_template=args_template, cwd=cwd,
+        timeout_seconds=timeout_seconds, db=db, env=resolved_env, allowed_paths=allowed_paths,
     )

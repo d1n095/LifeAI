@@ -2,17 +2,20 @@ import { expect, test } from "@playwright/test";
 import { FRONTEND_URL } from "../playwright.config";
 import { loginViaUi } from "./helpers";
 
-// Founder-only shell routes (/documents, /projects, /) beyond the baseline auth.spec.ts flow
-// — written for PRIO 4 of the 2026-07-19/20 night shift work order, which asks for a
-// route-by-route pass including empty states and "clear network errors" specifically. Found
-// three real, previously-uncaught mutation failures while reading the source (documents'
-// handleDelete, projects' addProject/addTask/toggleTask all called the API with no try/catch
-// — a failed request left the UI showing nothing at all, indistinguishable from the click not
-// registering). Fixed in the same commit as this file; these tests simulate the failure via
-// page.route() (a real network response the browser actually receives, not a mocked React
-// state) so they fail against the pre-fix code and pass against the fix.
+// Founder-only shell routes (/library, /projects, /) beyond the baseline auth.spec.ts flow.
+// /documents is intentionally only a redirect to /library now (Life Library upload
+// consolidation), so this spec exercises the current library surface rather than the removed
+// documents upload UI. These tests simulate failures via page.route() (a real network response
+// the browser actually receives, not a mocked React state) so they fail against the pre-fix
+// code and pass against the fix.
 const FOUNDER_EMAIL = "founder@lifeos.local";
 const FOUNDER_PASSWORD = process.env.E2E_FOUNDER_PASSWORD || "TestFounderPassword123!";
+
+// The library import assertion waits for the real durable worker to claim and finish the
+// job, so it needs more than the suite's default 30s on a cold CI runner. The wait itself
+// remains bounded; this only stops Playwright from killing the test before the app's own
+// worker can complete.
+test.describe.configure({ timeout: 60_000 });
 
 test.describe("shell pages: empty states and mutation error handling", () => {
   test.beforeEach(async ({ page }) => {
@@ -20,35 +23,44 @@ test.describe("shell pages: empty states and mutation error handling", () => {
     await page.waitForURL(FRONTEND_URL + "/", { timeout: 5000 });
   });
 
-  test("documents: empty state renders, and a failed delete shows a visible error instead of silently doing nothing", async ({
+  test("library: empty state renders, and a failed delete shows a visible error instead of silently doing nothing", async ({
     page,
   }) => {
-    await page.goto(`${FRONTEND_URL}/documents`, { waitUntil: "networkidle" });
+    await page.goto(`${FRONTEND_URL}/library`, { waitUntil: "networkidle" });
 
     // Empty state (a fresh founder account before any upload) — real backend, no mock.
-    await expect(page.locator("text=Inga dokument uppladdade ännu.")).toBeVisible();
+    await expect(page.locator("text=Inget material importerat ännu.")).toBeVisible();
 
     // Upload one real document so there's a row with a delete button to fail on.
-    await page.setInputFiles('input[type="file"]', {
+    await page.setInputFiles('input[aria-label="Importera till kunskapsbiblioteket"]', {
       name: "e2e-error-handling-test.txt",
       mimeType: "text/plain",
       buffer: Buffer.from("Innehall for PRIO 4-felhanteringstestet."),
     });
-    await expect(page.locator("text=e2e-error-handling-test.txt")).toBeVisible({ timeout: 8000 });
+    const row = page.locator("tr", { hasText: "e2e-error-handling-test.txt" });
+    // The upload only produces a visible row after the real worker has claimed and
+    // completed the job; on a cold CI runner that can legitimately take longer than 15s.
+    await expect(row).toBeVisible({ timeout: 60_000 });
 
     // Force the DELETE call to fail server-side (a real HTTP 500 response reaching the
     // browser) and confirm the UI surfaces it via role="alert" rather than staying silent.
-    await page.route("**/api/documents/**", (route) => {
+    await page.route("**/api/library/*", (route) => {
       if (route.request().method() === "DELETE") {
         route.fulfill({ status: 500, contentType: "application/json", body: '{"detail":"Simulerat serverfel"}' });
       } else {
         route.continue();
       }
     });
-    await page.getByRole("button", { name: /Ta bort dokumentet/ }).first().click();
-    await expect(page.getByRole("alert").filter({ hasText: "Simulerat serverfel" })).toBeVisible({ timeout: 5000 });
+    await row.getByRole("button", { name: "Ta bort e2e-error-handling-test.txt" }).click();
+    await row.getByRole("button", { name: "Bekräfta" }).click();
+    await expect(row.getByRole("alert").filter({ hasText: "Simulerat serverfel" })).toBeVisible({ timeout: 5000 });
     // The row must still be there — a failed delete must not have been assumed to succeed.
-    await expect(page.locator("text=e2e-error-handling-test.txt")).toBeVisible();
+    await expect(row).toBeVisible();
+
+    // Clean up through the real API so this spec leaves the shared founder library empty.
+    await page.unroute("**/api/library/*");
+    await row.getByRole("button", { name: "Bekräfta" }).click();
+    await expect(row).toHaveCount(0, { timeout: 5000 });
   });
 
   test("projects: empty states render, and a failed create shows a visible error instead of silently doing nothing", async ({
@@ -81,7 +93,11 @@ test.describe("shell pages: empty states and mutation error handling", () => {
   test("dashboard ('/'): a cold-start backend failure is announced via role=alert, not shown as silent success", async ({
     page,
   }) => {
-    await page.route("**/api/documents", (route) => {
+    // The dashboard page loads api.dashboard(), which is GET /api/dashboard — not
+    // /api/documents (that was the old dashboard contract). Intercepting the wrong path
+    // made this test pass only by accident when some other request failed, and fail
+    // deterministically once the dashboard stopped calling /api/documents at all.
+    await page.route("**/api/dashboard", (route) => {
       if (route.request().method() === "GET") {
         route.fulfill({ status: 500, contentType: "application/json", body: '{"detail":"Simulerat serverfel"}' });
       } else {

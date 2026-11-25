@@ -151,7 +151,7 @@ async def test_detect_conflict_fails_closed_on_malformed_ai_response(db_session,
 
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat)
 
-    is_conflict, reasoning = await detect_conflict(db_session, lesson_a=a, lesson_b=b)
+    is_conflict, reasoning = await detect_conflict(db_session, lesson_a=a, lesson_b=b, owner_id=owner_id)
     assert is_conflict is False
     assert reasoning == ""
 
@@ -167,7 +167,7 @@ async def test_detect_conflict_fails_closed_when_the_ai_call_raises(db_session, 
 
     monkeypatch.setattr(OpenAIProvider, "chat", _raising_chat)
 
-    is_conflict, reasoning = await detect_conflict(db_session, lesson_a=a, lesson_b=b)
+    is_conflict, reasoning = await detect_conflict(db_session, lesson_a=a, lesson_b=b, owner_id=owner_id)
     assert is_conflict is False
 
 
@@ -232,7 +232,7 @@ async def test_resolve_conflicts_among_disputes_a_real_positive_conflict_and_exc
 
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat)
 
-    still_active = await resolve_conflicts_among(db_session, lessons=[a, b, unrelated])
+    still_active = await resolve_conflicts_among(db_session, lessons=[a, b, unrelated], owner_id=owner_id)
     db_session.commit()
 
     assert {lesson.id for lesson in still_active} == {unrelated.id}
@@ -255,7 +255,7 @@ async def test_resolve_conflicts_among_leaves_non_conflicting_lessons_active(db_
 
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat)
 
-    still_active = await resolve_conflicts_among(db_session, lessons=[a, b])
+    still_active = await resolve_conflicts_among(db_session, lessons=[a, b], owner_id=owner_id)
     db_session.commit()
 
     assert {lesson.id for lesson in still_active} == {a.id, b.id}
@@ -272,6 +272,24 @@ async def test_demo_worker_tick_disputes_conflicting_lessons_and_planner_no_long
     create_plan() calls synchronously) no longer applies either of them. lessons.py/planner.py
     themselves are untouched by V0.3; this demo proves that's safe."""
     a = _lesson(db_session, component="app.mainai_execution.verify", tags=["run_tests"], rule="always retry on flake", regression_test="tests/a.py::test_a")
+    db_session.commit()
+
+    # Conflict judgment is external egress and therefore needs a real owner context. Create the
+    # task while only `a` exists: the planner deliberately refuses to apply BOTH sides of an
+    # unresolved candidate conflict, so a task created after `b` would have no applied lesson.
+    goal = _goal(db_session, owner_id)
+    planner.create_plan(
+        db_session,
+        goal=goal,
+        rationale="uses the first lesson",
+        tasks=[PlannedTaskSpec(description="run tests", task_type="run_tests")],
+        created_by="test",
+    )
+    db_session.commit()
+    task = db_session.query(MainAITask).filter(MainAITask.goal_id == goal.id).one()
+    created_detail = next(e["detail"] for e in _events(db_session, task.id) if e["event_type"] == "created")
+    assert str(a.id) in created_detail["lessons_applied"]
+
     b = _lesson(db_session, component="app.mainai_execution.verify", tags=["run_tests"], rule="never retry on flake", regression_test="tests/b.py::test_b")
     db_session.commit()
 

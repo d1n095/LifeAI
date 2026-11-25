@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
 # Real incident, 2026-07-26: a founder-facing config walkthrough left a literal placeholder
@@ -67,6 +68,23 @@ class ChatResult:
     raw_usage: dict = field(default_factory=dict)
 
 
+@dataclass
+class ChatStreamChunk:
+    """One provider stream event.
+
+    `delta` is the only text a UI may display; `raw_usage` is populated on the final chunk
+    when the provider reports it. A provider that does not implement native streaming still
+    returns one delta plus a final chunk through the base-class fallback, so callers never
+    need a second code path for unsupported adapters.
+    """
+
+    delta: str = ""
+    provider: str | None = None
+    model: str | None = None
+    raw_usage: dict = field(default_factory=dict)
+    done: bool = False
+
+
 class LLMProvider(ABC):
     """Common interface every AI provider must implement.
 
@@ -76,9 +94,33 @@ class LLMProvider(ABC):
     """
 
     name: str
+    # A local provider does not leave the process/host. External providers must always
+    # pass through Life Vault egress with an authenticated owner or verified worker lease.
+    is_local: bool = False
 
     @abstractmethod
     async def chat(self, messages: list[Message], model: str, *, timeout: float | None = None, **kwargs) -> ChatResult: ...
+
+    async def stream_chat(
+        self, messages: list[Message], model: str, *, timeout: float | None = None, **kwargs
+    ) -> AsyncIterator[ChatStreamChunk]:
+        """Fallback for providers without a native streaming transport.
+
+        It still produces the same event contract as a real stream, but only after the
+        provider has completed the non-streaming call. Providers that support token
+        streaming override this method; the chat route therefore never has to special-case
+        a provider or pretend a completed answer was streamed token by token.
+        """
+
+        result = await self.chat(messages, model, timeout=timeout, **kwargs)
+        if result.content:
+            yield ChatStreamChunk(delta=result.content, provider=result.provider, model=result.model)
+        yield ChatStreamChunk(
+            provider=result.provider,
+            model=result.model,
+            raw_usage=result.raw_usage,
+            done=True,
+        )
 
     @abstractmethod
     async def embed(self, texts: list[str], model: str, *, timeout: float | None = None) -> list[list[float]]: ...
@@ -107,3 +149,12 @@ class ProviderError(RuntimeError):
         # After adapter.propose() is entered: None/True → treat as ambiguous (do not
         # release spend). False → proven pre-external-effect; release is allowed.
         self.provider_request_may_have_left = provider_request_may_have_left
+
+
+def chat_token_limit(kwargs, default=None):
+    """Explicit output bounds are never silently ignored by a transport."""
+    value = kwargs.get("max_tokens", default)
+    if value is not None and (type(value) is not int or value <= 0):
+        raise ProviderError("Invalid output token bound.", category="unsupported",
+                            provider_request_may_have_left=False)
+    return value

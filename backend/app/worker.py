@@ -41,11 +41,13 @@ from app.development_supervisor.production_entry import eligible_authorized_goal
 from app.jobs.handlers.corpus_review import run_corpus_review_job
 from app.jobs.handlers.message_sequence_backfill import MESSAGE_SEQUENCE_BACKFILL_JOB_TYPE, run_message_sequence_backfill_job
 from app.jobs.handlers.message_source_backfill import MESSAGE_SOURCE_BACKFILL_JOB_TYPE, run_message_source_backfill_job
+from app.incidents.health import sweep_runtime_health
 from app.jobs.heartbeat import record_worker_heartbeat
 from app.jobs.lease import claim_next_job
 from app.jobs.mainai_job_lease import JobLeaseLostError, claim_next_mainai_job
 from app.jobs.retry import compute_backoff_seconds, is_transient_error
 from app.jobs.service import mark_failed, record_claimed
+from app.incidents.service import record_incident
 from app.mainai_execution.approval import ApprovalRequiredError
 from app.mainai_execution.execution_job import _finalize_task_outcome, resume_waiting_ci_task, run_task_execution_job
 from app.mainai_execution.executor import dispatch_ready_task, retry_task, task_for_job
@@ -228,6 +230,22 @@ async def process_claimed_mainai_job(
         if job is not None:
             try:
                 mark_failed(db, job, worker_id=worker_id, lease_generation=lease_generation, error_category=MainAIJobErrorCategory.unexpected)
+                try:
+                    record_incident(
+                        db,
+                        owner_id=owner_id,
+                        error_code="worker_unexpected",
+                        component="worker.mainai_job",
+                        severity="high",
+                        summary="Worker misslyckades med ett MainAI-jobb",
+                        correlation_id=str(job_id),
+                        app_version="0.1.0",
+                        details={"job_id": str(job_id), "failure_class": "unexpected"},
+                    )
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    logger.exception("Worker %s: could not record incident for job %s.", worker_id, job_id)
             except JobLeaseLostError:
                 logger.warning("Worker %s: lease already lost for mainai_job %s -- could not record the failure.", worker_id, job_id)
 
@@ -763,6 +781,30 @@ class Worker:
             db.rollback()
             logger.exception("Worker %s: failed to expire stale agent scope leases.", self.worker_id)
 
+    def _sweep_runtime_health(self, db: Session) -> None:
+        """Detect expired leases/queues and safely recover bounded internal jobs.
+
+        This is the active detection half that was missing from V4: the lease claim path
+        already reclaimed expired work passively, but no durable incident was created when
+        a job actually stalled. The sweep is bounded and never requeues task_execution.
+        """
+        try:
+            result = sweep_runtime_health(db, worker_id=self.worker_id)
+            db.commit()
+            if result.requeued or result.failed_exhausted or result.incidents or result.errors:
+                logger.warning(
+                    "Worker %s: runtime health sweep scanned=%d requeued=%d failed=%d incidents=%d errors=%s",
+                    self.worker_id,
+                    result.scanned,
+                    result.requeued,
+                    result.failed_exhausted,
+                    result.incidents,
+                    result.errors,
+                )
+        except Exception:
+            db.rollback()
+            logger.exception("Worker %s: runtime health sweep failed.", self.worker_id)
+
     # Bounded per-tick fan-out: how many eligible authorized goals this worker attempts a
     # Supervisor call for per poll cycle -- matches the same small, deliberately conservative
     # batch-size precedent as _MAX_CI_WAITS_PER_TICK above, not an unbounded scan.
@@ -818,6 +860,7 @@ class Worker:
             self._finalize_mainai_execution_goals(claim_db)
             await self._resolve_engineering_lesson_conflicts(claim_db)
             self._expire_stale_agent_scope_leases(claim_db)
+            self._sweep_runtime_health(claim_db)
             await self._advance_authorized_supervisor_goals(claim_db)
             # Reconcile again after Supervisor/Driver may have completed the last task in
             # this same tick. Primary rollup is now inside `_finalize_task_outcome`; this

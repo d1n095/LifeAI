@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import uuid
@@ -9,6 +10,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
+from app.audit import record_audit
 from app.config import get_settings
 from app.db import get_db
 from app.deps import require_founder
@@ -20,12 +22,32 @@ from app.models.import_job import ImportJob, ImportJobStatus
 from app.models.knowledge_claim import KnowledgeClaim
 from app.models.knowledge_version import KnowledgeVersion
 from app.models.media_url_import import MediaUrlImport
-from app.models.source_relationship import SourceRelationship
+from app.models.source_relationship import RelationshipType, SourceRelationship
 from app.models.user import User
 from app.egress_policy import EgressDeniedError
 from app.providers.registry import embed_with_policy, resolve_active
 from app.providers.verification import classify_provider_exception
-from app.rag.library_import import maybe_purge_blob
+from app.rag.embedding_space import native_dim_of
+from app.rag.query_embedding import prepare_embedding_query
+from app.models.audit import AuditLog
+from app.models.claim_relationship import ClaimRelationship
+from app.rag.claim_graph import (
+    EpistemicShift,
+    record_claim_relationship,
+    shifts_to_audit_detail,
+    trace_evidence_chain,
+)
+from app.rag.intellectual_adversary import review_conclusion
+from app.rag.epistemics import cross_domain_claim_overlaps, second_order_consequences
+from app.rag.library_import import EXTRACTION_VERSION, maybe_purge_blob
+from app.rag.epistemics import classify_claim
+from app.rag.evidence_metadata import (
+    ClaimNotFoundError,
+    NothingDeclaredError,
+    cap_from_row,
+    quality_metadata_for_claims,
+    record_claim_evidence_metadata,
+)
 from app.rag.trust import assess_claim_confidence
 from app.rag.vector_store import hybrid_search
 from app.storage import get_storage
@@ -36,8 +58,14 @@ from app.storage.references import (
     acquire_storage_key_lock,
     delete_if_unreferenced,
     get_storage_cleanup_ops_status,
+    retain_pending_rejected_upload_cleanup_tasks,
 )
 from app.schemas import (
+    ClaimEvidenceMetadataIn,
+    ClaimEvidenceMetadataOut,
+    ClaimEvidenceChainOut,
+    ClaimGraphEdgeIn,
+    ClaimGraphEdgeOut,
     DeleteConfirmIn,
     ImportJobOut,
     KnowledgeClaimOut,
@@ -50,7 +78,10 @@ from app.schemas import (
     OpsStatusOut,
     SourceRelationshipIn,
     SourceRelationshipOut,
+    SourceReplacementOut,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/library", tags=["library"], dependencies=[Depends(require_founder)])
 settings = get_settings()
@@ -366,6 +397,11 @@ def get_source(source_id: uuid.UUID, db: Session = Depends(get_db), user: User =
     # confidence is recomputed live (assess_claim_confidence), not read from the stored
     # extraction-time value — see app/rag/trust.py's docstring for why (a relationship added
     # after extraction must be reflected immediately).
+    # Evidence-quality caps (app/rag/evidence_metadata.py): ONE batch read for the page,
+    # then each claim's ladder verdict runs under its stamped cap — the same
+    # classify_claim(quality_cap=...) contract the SQL rollup mirrors, so the detail view
+    # and the chat/workbench instruction rollup can never disagree about a capped claim.
+    quality_rows = quality_metadata_for_claims(db, user.id, [c.id for c in claims])
     detail.claims = [
         KnowledgeClaimOut(
             id=c.id,
@@ -376,6 +412,16 @@ def get_source(source_id: uuid.UUID, db: Session = Depends(get_db), user: User =
             grounding_score=c.grounding_score,
             chunk_id=c.chunk_id,
             created_at=c.created_at,
+            # Evidence-aware epistemics (app/rag/epistemics.py): the five-state ladder
+            # verdict rides ADDITIVELY on the existing per-claim row — same cost shape as
+            # the live-confidence recomputation beside it, and the founder sees WHY each
+            # claim sits where it sits in the Library detail view.
+            epistemic_status=classify_claim(
+                db, user.id, c, quality_cap=cap_from_row(quality_rows.get(c.id))
+            ).status.value,
+            quality_grade=quality_rows[c.id].quality_grade if c.id in quality_rows else None,
+            quality_cap=quality_rows[c.id].quality_cap if c.id in quality_rows else None,
+            quality_caveats=list(quality_rows[c.id].quality_caveats) if c.id in quality_rows else [],
         )
         for c in claims
     ]
@@ -390,6 +436,231 @@ def get_source(source_id: uuid.UUID, db: Session = Depends(get_db), user: User =
             for c in all_chunks
         ]
     return detail
+
+
+@router.post("/{source_id}/replace", response_model=SourceReplacementOut)
+@limiter.limit(f"{settings.rate_limit_library_import_per_minute}/minute")
+async def replace_source(
+    source_id: uuid.UUID,
+    request: Request,
+    file: UploadFile,
+    confirm: bool = False,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Replace a Library source with new bytes as a new, explicit version.
+
+    `Document.storage_key` is immutable once set (migration 0037's Source Vault invariant),
+    so replacement cannot overwrite the old row's original. Instead this creates a new
+    Document with the next `version_number`, a new durable ImportJob, and a `supersedes`
+    edge back to the old source. The old row, its KnowledgeVersion history, claims and
+    original blob stay intact for provenance, but its `active_truth_status` becomes
+    `superseded` and app/rag/vector_store.py excludes every `supersedes` target from both
+    retrieval channels — the obsolete content is not searchable as current truth.
+
+    The new Document is pre-created in `original_stored` exactly like
+    /api/documents/upload, so the existing worker claim/resume path indexes it without a
+    second queue. A KnowledgeVersion is created immediately with the next version number;
+    _resume_incomplete_document therefore reuses that version instead of resetting it to 1.
+    """
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Ersättning kräver explicit bekräftelse (confirm=true).",
+        )
+
+    # Same lock ordering as import: the owner-erasure lock precedes every durable write so a
+    # concurrent account erasure can never inventory past a blob this request is about to
+    # create. Re-check the owner after acquiring it, before writing any bytes.
+    acquire_owner_erasure_lock(db, user.id)
+    if db.query(User).filter_by(id=user.id).first() is None:
+        raise HTTPException(status_code=401, detail="Kontot finns inte längre.")
+
+    old_document = (
+        _visible_document_query(db, user.id)
+        .filter(Document.id == source_id)
+        .with_for_update()
+        .first()
+    )
+    if old_document is None:
+        raise HTTPException(status_code=404, detail="Källan hittades inte.")
+
+    already_replaced = (
+        db.query(SourceRelationship.id)
+        .filter(
+            SourceRelationship.owner_id == user.id,
+            SourceRelationship.to_source_id == source_id,
+            SourceRelationship.relationship_type == RelationshipType.supersedes,
+        )
+        .first()
+    )
+    if already_replaced is not None:
+        raise HTTPException(status_code=409, detail="Källan är redan ersatt av en nyare version.")
+
+    storage = get_storage()
+    peek = file.file.read(1)
+    if not peek:
+        raise HTTPException(status_code=400, detail="Filen är tom.")
+    try:
+        file.file.seek(0)
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"Kunde inte läsa filen: {exc}") from exc
+
+    def _read_chunk() -> bytes:
+        return file.file.read(1 << 20)
+
+    try:
+        blob = await run_in_threadpool(storage.write_stream, _read_chunk, max_bytes=MAX_UPLOAD_BYTES)
+    except StorageSizeLimitExceeded:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Filen är för stor (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB).",
+        )
+    except StorageError as exc:
+        raise HTTPException(status_code=500, detail=f"Kunde inte lagra filen: {exc}") from exc
+
+    if blob.size_bytes == 0:
+        delete_if_unreferenced(db, storage, blob.storage_key)
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Filen är tom.")
+
+    checksum = blob.sha256
+    if old_document.checksum == checksum:
+        # No-op replacement: the same bytes cannot become a new version. The blob is shared
+        # with the still-live old source, so delete_if_unreferenced leaves it in place.
+        delete_if_unreferenced(db, storage, blob.storage_key)
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Den nya filen är identisk med nuvarande version; ingen ersättning skapades.",
+        )
+
+    duplicate = (
+        db.query(Document.id)
+        .filter(
+            Document.uploaded_by == user.id,
+            Document.checksum == checksum,
+            Document.deleted_at.is_(None),
+            Document.id != old_document.id,
+        )
+        .first()
+    )
+    if duplicate is not None:
+        # The worker's file-level idempotency check would treat this as a duplicate and never
+        # index the pre-created replacement row, leaving it stuck at original_stored. Refuse
+        # explicitly instead of manufacturing a source that can never become searchable.
+        delete_if_unreferenced(db, storage, blob.storage_key)
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Innehållet finns redan som en annan källa i biblioteket; ersättningen skapades inte.",
+        )
+
+    acquire_storage_key_lock(db, blob.storage_key)
+    if not storage.exists(blob.storage_key):
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Uppladdningen kolliderade med en samtidig radering av en identisk fil. Försök igen.",
+        )
+
+    client_ip = request.client.host if request and request.client else None
+    try:
+        job = ImportJob(
+            owner_id=user.id,
+            project_id=old_document.project_id,
+            status=ImportJobStatus.pending,
+            source_filename=file.filename or old_document.original_filename,
+            source_checksum=checksum,
+            source_storage_key=blob.storage_key,
+            source_size_bytes=blob.size_bytes,
+            source_media_type=file.content_type or old_document.media_type,
+        )
+        db.add(job)
+        db.flush()
+
+        new_document = Document(
+            title=old_document.title,
+            category=old_document.category,
+            uploaded_by=user.id,
+            original_filename=file.filename or old_document.original_filename,
+            checksum=checksum,
+            media_type=file.content_type or old_document.media_type,
+            storage_key=blob.storage_key,
+            size_bytes=blob.size_bytes,
+            import_job_id=job.id,
+            status=IndexStatus.original_stored,
+            stored_at=datetime.utcnow(),
+            project_id=old_document.project_id,
+            classification=old_document.classification,
+            active_truth_status=ActiveTruthStatus.active,
+            version_number=(old_document.version_number or 1) + 1,
+            imported_at=datetime.utcnow(),
+        )
+        db.add(new_document)
+        db.flush()
+
+        version = KnowledgeVersion(
+            source_id=new_document.id,
+            owner_id=user.id,
+            version_number=new_document.version_number,
+            checksum=checksum,
+            extraction_version=EXTRACTION_VERSION,
+            raw_metadata={
+                "original_filename": new_document.original_filename,
+                "size_bytes": blob.size_bytes,
+                "media_type": new_document.media_type,
+                "replaced_source_id": str(old_document.id),
+            },
+        )
+        db.add(version)
+
+        old_document.active_truth_status = ActiveTruthStatus.superseded
+        db.add(old_document)
+
+        db.add(
+            SourceRelationship(
+                owner_id=user.id,
+                from_source_id=new_document.id,
+                to_source_id=old_document.id,
+                relationship_type=RelationshipType.supersedes,
+                note=f"Ersätter version {old_document.version_number}.",
+            )
+        )
+
+        # Same atomicity as purge_source: the audit row joins this transaction, so the
+        # replacement and its audit trail either both commit or neither does.
+        record_audit(
+            db,
+            user_id=user.id,
+            action="source_replaced",
+            entity_type="document",
+            entity_id=str(new_document.id),
+            detail=(
+                f"superseded_source_id={old_document.id} "
+                f"old_version={old_document.version_number} "
+                f"new_version={new_document.version_number}"
+            ),
+            ip_address=client_ip,
+            commit=False,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        delete_if_unreferenced(db, storage, blob.storage_key)
+        raise
+
+    # The reference is durable now; release any stale rejected-upload cleanup task for this
+    # content-addressed key exactly like the upload path does.
+    retain_pending_rejected_upload_cleanup_tasks(blob.storage_key)
+    db.refresh(new_document)
+    db.refresh(job)
+    return SourceReplacementOut(
+        source=KnowledgeSourceOut.model_validate(new_document),
+        job=ImportJobOut.model_validate(job),
+        superseded_source_id=old_document.id,
+        version_number=new_document.version_number,
+    )
 
 
 def _document_is_media_source(document: Document) -> bool:
@@ -587,6 +858,232 @@ def create_relationship(
     return relationship
 
 
+@router.put("/claims/{claim_id}/evidence-metadata", response_model=ClaimEvidenceMetadataOut)
+def stamp_claim_evidence_metadata(
+    claim_id: uuid.UUID,
+    payload: ClaimEvidenceMetadataIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Founder-declared study metadata for ONE claim — the producer side of the
+    evidence-quality layer (app/rag/evidence_metadata.py). Fail-closed: keys outside the
+    declared vocabulary are rejected with a named reason (and reported back in
+    `rejected_keys`, alongside the materialized verdict that only the ACCEPTED keys
+    produced); a declaration with zero valid keys is refused outright, so an honest
+    absence can never become a stored grade. Re-stamping updates the row in place — a
+    corrected declaration moves the materialized verdict with it."""
+    claim = db.query(KnowledgeClaim).filter(KnowledgeClaim.id == claim_id, KnowledgeClaim.owner_id == user.id).first()
+    if claim is None:
+        raise HTTPException(status_code=404, detail="Påståendet hittades inte.")
+    try:
+        stamped = record_claim_evidence_metadata(
+            db, user.id, claim_id, payload.metadata, declared_via=payload.declared_via
+        )
+    except NothingDeclaredError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ClaimNotFoundError as exc:  # unreachable behind the visibility check; kept for contract symmetry
+        raise HTTPException(status_code=404, detail="Påståendet hittades inte.") from exc
+    db.commit()
+    return ClaimEvidenceMetadataOut(
+        claim_id=stamped.claim_id,
+        declared=stamped.declared,
+        rejected=stamped.rejected,
+        quality_grade=stamped.grade.value,
+        quality_cap=stamped.cap.value,
+        quality_caveats=list(stamped.assessment.caveats),
+        axis_findings=[
+            {"axis": f.axis, "direction": f.direction, "finding": str(f.finding), "reason": f.reason}
+            for f in stamped.assessment.axes
+        ],
+        declared_via=stamped.declared_via,
+        recorded_at=stamped.recorded_at,
+    )
+
+
+@router.post("/claims/{claim_id}/relationships", response_model=ClaimGraphEdgeOut)
+def create_claim_relationship(
+    claim_id: uuid.UUID,
+    payload: ClaimGraphEdgeIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Founder-declared claim-graph edge (Round 8 M3) — the production input path the claim
+    graph never had. Both endpoints must belong to this owner; an exact duplicate edge is
+    idempotent (the ladder counts edge EXISTENCE, not edge copies). On a contradicts edge,
+    the epistemic shift of BOTH endpoints (prior verdict with the edge excluded vs live
+    verdict) is computed in-transaction and written to the audit trail: the old conclusion
+    is never overwritten, it is superseded WITH its provenance. No winner is chosen — the
+    conflict lives in the ladder's conflicting_evidence verdict."""
+    try:
+        edge, shifts = record_claim_relationship(
+            db,
+            user.id,
+            from_claim_id=claim_id,
+            to_claim_id=payload.to_claim_id,
+            relationship_type=payload.relationship_type,
+            note=payload.note,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if shifts:
+        db.add(
+            AuditLog(
+                user_id=user.id,
+                action="epistemic_shift",
+                entity_type="claim_relationship",
+                entity_id=str(edge.id),
+                detail=shifts_to_audit_detail(shifts),
+            )
+        )
+        # Round 9 M6 ("remember important findings"): a conclusion that actually CHANGED is
+        # worth remembering — recorded as a CANDIDATE learning signal (SIGNAL != TRUTH
+        # WRITER: a candidate the founder later promotes or dismisses, never an auto-written
+        # memory note). Idempotent on the edge id, so replays never duplicate the memory.
+        if any(sh.changed for sh in shifts):
+            from app.founder_memory_signals.service import record_candidate_signal
+
+            # Migration 0053's closed vocabulary is REUSED, not extended: a conclusion
+            # correction IS a correction_candidate (source_type stays 'message' — the
+            # provenance dict carries the claim-graph specifics). Extending the enum for a
+            # new producer kind is a schema-policy decision, not this endpoint's to make.
+            record_candidate_signal(
+                db,
+                owner_id=user.id,
+                signal_kind="correction_candidate",
+                idempotency_key=f"epistemic-shift:{edge.id}",
+                source_type="message",
+                classifier_strategy="epistemic_shift_detection",
+                classifier_confidence="high",
+                classifier_reasoning=(
+                    "a founder-declared contradicts edge changed a claim's ladder verdict; "
+                    "prior and current statuses are on the audit trail"
+                ),
+                provenance={
+                    "relationship_id": str(edge.id),
+                    "shifts": [
+                        {
+                            "claim_id": str(sh.claim_id),
+                            "prior": sh.prior_status,
+                            "current": sh.current_status,
+                        }
+                        for sh in shifts
+                        if sh.changed
+                    ],
+                },
+            )
+    db.commit()
+    return ClaimGraphEdgeOut(
+        id=edge.id,
+        from_claim_id=edge.from_claim_id,
+        to_claim_id=edge.to_claim_id,
+        relationship_type=edge.relationship_type.value,
+        note=edge.note,
+        epistemic_shifts=[
+            {
+                "claim_id": str(sh.claim_id),
+                "prior_status": sh.prior_status,
+                "current_status": sh.current_status,
+                "changed": sh.changed,
+                "prior_reasons": sh.prior_reasons,
+                "current_reasons": sh.current_reasons,
+            }
+            for sh in shifts
+        ],
+    )
+
+
+@router.get("/claims/{claim_id}/evidence-chain", response_model=ClaimEvidenceChainOut)
+def get_claim_evidence_chain(
+    claim_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Why does MainAI believe/dispute THIS claim? The bounded, structured answer: verdict
+    + reasons + source trust state + chunk grounding + stamped metadata verdict + BOTH
+    sides of every contradicting edge (presented, never adjudicated) + the second-order
+    consequences of the claim's source. Owner-scoped end to end."""
+    try:
+        chain = trace_evidence_chain(db, user.id, claim_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Påståendet hittades inte.")
+    # Round 10 M4: the bounded intellectual adversary rides the SAME production response
+    # (fail-open: a review failure degrades the field to {reviewed: False}, never the call).
+    try:
+        review = review_conclusion(db, user.id, claim_id)
+        review_dict = review.to_dict()
+    except Exception:
+        logger.warning("adversarial review failed; field degrades honestly", exc_info=True)
+        review_dict = {"claim_id": str(claim_id), "reviewed": False, "verdict_status": None, "objections": [], "error": "review_unavailable"}
+    return ClaimEvidenceChainOut(
+        claim_id=chain.claim_id,
+        claim_text=chain.claim_text,
+        claim_type=chain.claim_type,
+        claim_status=chain.claim_status,
+        confidence=chain.confidence,
+        epistemic_status=chain.verdict.status.value,
+        verdict_reasons=chain.verdict.reasons,
+        source=chain.source,
+        chunk_grounded=chain.chunk_grounded,
+        quality_metadata=chain.quality_metadata,
+        supporting_edges=chain.supporting_edges,
+        contradicting_edges=chain.contradicting_edges,
+        other_edges=chain.other_edges,
+        second_order_consequences=chain.second_order_consequences,
+        adversarial_review=review_dict,
+    )
+
+
+@router.get("/graph/cross-domain-overlaps")
+def get_cross_domain_overlaps(
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """The same statement surfacing in 2+ projects — the cross-domain discovery signal
+    (app/rag/epistemics.py). Deterministic SQL, owner-scoped, LIMIT-bounded."""
+    overlaps = cross_domain_claim_overlaps(db, user.id, limit=min(max(1, int(limit)), 200))
+    return [
+        {
+            "claim_text": o.claim_text,
+            "claim_ids": [str(c) for c in o.claim_ids],
+            "source_ids": [str(s) for s in o.source_ids],
+            "project_ids": [str(p) if p else None for p in o.project_ids],
+        }
+        for o in overlaps
+    ]
+
+
+@router.get("/sources/{source_id}/consequences")
+def get_source_consequences(
+    source_id: uuid.UUID,
+    max_depth: int = 3,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """Second-order consequences of THIS source's supersedes/contradicts edges through the
+    derived_from/supports dependency closure — owner-scoped, cycle-safe, depth-capped
+    (app/rag/epistemics.second_order_consequences). A source with no incident trigger
+    edges returns [] — never an error."""
+    if _visible_document_query(db, user.id).filter(Document.id == source_id).first() is None:
+        raise HTTPException(status_code=404, detail="Källan hittades inte.")
+    consequences = second_order_consequences(db, user.id, [source_id], max_depth=max_depth)
+    return [
+        {
+            "kind": c.kind,
+            "root_source_id": str(c.root_source_id),
+            "trigger_edge": [str(x) for x in c.trigger_edge],
+            "dependent_source_id": str(c.dependent_source_id),
+            "dependent_project_id": str(c.dependent_project_id) if c.dependent_project_id else None,
+            "depth": c.depth,
+            "path": [str(p) for p in c.path],
+        }
+        for c in consequences
+    ]
+
+
 @router.get("/search/hybrid", response_model=LibrarySearchResponseOut)
 @limiter.limit(f"{settings.rate_limit_default_per_minute}/minute")
 async def search_library(
@@ -610,19 +1107,28 @@ async def search_library(
     # tells the client exactly what happened via semantic_search_available/degraded_reason
     # rather than pretending semantic search ran and just found nothing.
     vector: list[float] | None = None
+    active_model: str | None = None
+    active_native_dim: int | None = None
     degraded_reason: str | None = None
     try:
         provider, model = resolve_active(db, role="embedding")
         vectors = await embed_with_policy(
             db,
             provider,
-            [query.query],
+            # Query channel only: the prefix makes instruction-aware local embedding models
+            # rank correctly (app/rag/query_embedding.py). hybrid_search() below still gets the
+            # RAW query for its independent text-match channel.
+            [prepare_embedding_query(query.query)],
             model=model,
             owner_id=user.id,
             purpose="rag_query",
             requested_by="routers.library.search_library",
         )
         vector = vectors[0]
+        # Carry the active embedding space so the semantic channel only ranks chunks embedded
+        # with this same model/dim (app/rag/embedding_space.py); the text channel is unaffected.
+        active_model = model
+        active_native_dim = native_dim_of(vectors)
     except EgressDeniedError as exc:
         # Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V2 query-
         # embedding half): a policy refusal, not a provider outage -- str(exc) is safe to show
@@ -642,6 +1148,8 @@ async def search_library(
         project_id=query.project_id,
         classification=query.classification,
         active_truth_status=query.active_truth_status,
+        embedding_model=active_model,
+        embedding_native_dim=active_native_dim,
     )
     return LibrarySearchResponseOut(
         results=results,

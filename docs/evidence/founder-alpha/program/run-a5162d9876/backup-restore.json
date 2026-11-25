@@ -1,0 +1,35 @@
+{
+  "status": "PASS",
+  "source_database": "lifeos_program_a5162d9876",
+  "restore_database": "lifeos_program_restore_a5162d9876",
+  "source_counts": {
+    "users": 2,
+    "conversations": 2,
+    "messages": 4,
+    "documents": 1,
+    "document_chunks": 1,
+    "knowledge_import_jobs": 1,
+    "memory_source_units": 5
+  },
+  "restored_counts": {
+    "users": 2,
+    "conversations": 2,
+    "messages": 4,
+    "documents": 1,
+    "document_chunks": 1,
+    "knowledge_import_jobs": 1,
+    "memory_source_units": 5
+  },
+  "checksum_sha256": "7d3cb83f44269ef131c5843b8e06e65f7cafa836edcd2e7f2119464be010d3aa",
+  "rls_verified": true,
+  "api": {
+    "login": 200,
+    "documents": 200,
+    "conversations": 200,
+    "project_status": 200,
+    "chat": 200,
+    "reply_chars": 167,
+    "source_documents": 1,
+    "source_conversations": 2
+  }
+}

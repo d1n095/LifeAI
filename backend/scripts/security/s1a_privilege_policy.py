@@ -107,6 +107,22 @@ _PROTECTED_TABLES = [
     ("document_source_units", ["SELECT", "INSERT"]),
     ("memory_source_lifecycle_events", ["SELECT"]),
     ("storage_deletion_tasks", []),
+    # SFA-1 (2026-11-18, Founder Acceptance Suite scenario 8 + REAL-PG battery evidence):
+    # alembic_version is migration bookkeeping, written exclusively by Alembic under the
+    # migration URL (backend/app/config.py: database_url is the superuser/admin role used
+    # ONLY for schema migrations). No application code path reads or writes it, but the
+    # schema-wide floor above only revokes TRUNCATE/REFERENCES/TRIGGER, so the broad
+    # `GRANT ALL PRIVILEGES ON ALL TABLES` in ensure_app_role.py left the restricted
+    # runtime role holding INSERT/UPDATE/DELETE on this table as collateral. A compromised
+    # request path could there silently desynchronize schema bookkeeping (delete/rewrite
+    # the version row → a later `alembic upgrade head` re-runs or skips real migrations),
+    # attacking the recovery/observability substrate (FR-04/FR-17) rather than any one
+    # owner's data. SELECT-only keeps diagnostic read access; every mutation stays with
+    # the migration role. Narrowing here is self-enforcing: both callers re-verify with
+    # real has_table_privilege() checks on every boot, so a boot that finds broader
+    # privileges present fails closed instead of silently running. Placement: ordering in
+    # this list is not semantically significant.
+    ("alembic_version", ["SELECT"]),
     # Life Source Foundation Bootstrap (migration 0037, docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md
     # §D/§L) — message_source_units is S1C, the exact same exclusive-arc pattern as
     # document_source_units above (every field guarded immutable by trg_msgsu_guard_update,
@@ -120,6 +136,31 @@ _PROTECTED_TABLES = [
     ("message_source_units", ["SELECT", "INSERT"]),
     ("source_import_batches", ["SELECT", "INSERT", "UPDATE"]),
     ("source_import_batch_failures", ["SELECT", "INSERT"]),
+    # Founder Alpha Blueprint (migration 0070/0071). mainai_app may CREATE (INSERT) and read
+    # (SELECT) drafts, but holds NO direct UPDATE or DELETE: approval is the only legitimate
+    # write and it runs exclusively through the owner-scoped, transaction-safe SECURITY DEFINER
+    # function blueprint_approve_draft (migration 0071, in _FUNCTIONS below). Removing UPDATE is
+    # what makes it impossible for a compromised request path / SQL bug to forge an approval or
+    # tamper approved content; removing DELETE makes an approved draft an undeletable protected
+    # record. A BEFORE UPDATE/DELETE guard trigger enforces the same invariants for any writer
+    # as defense-in-depth (and is what the test suite's app-role sessions — which still hold the
+    # uniform DML floor — actually trip on).
+    ("blueprint_drafts", ["SELECT", "INSERT"]),
+    # S1D (migration 0072 on the 0069-composition integration branch; 0069 on its own PR
+    # branch) — repository_file_source_units is the exact same exclusive-arc
+    # pattern as document_source_units/message_source_units above (every field guarded
+    # immutable by trg_rfsu_guard_update, so UPDATE would always fail via the trigger anyway;
+    # narrowed at the grant level too for the same defense-in-depth reasoning).
+    ("repository_file_source_units", ["SELECT", "INSERT"]),
+    # R15 successor (migration 0090): the durable chat idempotency claim is append/read-only
+    # for the runtime role. There is no application UPDATE or DELETE path; cascades from the
+    # owning user/conversation/message are performed by Postgres, not by mainai_app.
+    ("chat_request_claims", ["SELECT", "INSERT"]),
+    # R15 successor (migration 0091): durable billable chat-attempt identity. UPDATE is
+    # required for the durable state machine (reserved -> invoking -> held/settled/released);
+    # DELETE is never granted, so an attempt's audit history cannot be erased by the runtime
+    # role. No prompt/reply text is stored here.
+    ("chat_provider_attempts", ["SELECT", "INSERT", "UPDATE"]),
 ]
 
 _ALL_TABLE_PRIVS = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]
@@ -232,6 +273,11 @@ _FUNCTIONS = [
     ("erase_owner_memory_admin", False, True, "void", ("uuid",)),
     ("storage_key_still_referenced_global", True, True, "boolean", ("text",)),
     ("enqueue_account_erasure_storage_task", True, False, "void", ("uuid", "text")),
+    # blueprint_approve_draft (migration 0071): owner-scoped (derives the owner from
+    # app.current_user_id and re-asserts it, same as RLS — so no BYPASSRLS needed), the single
+    # controlled path that may set a Blueprint draft to 'approved'. mainai_app needs EXECUTE
+    # because approval runs from an ordinary owner-scoped request; it returns only the draft id.
+    ("blueprint_approve_draft", True, False, "uuid", ("uuid", "text")),
 ]
 
 

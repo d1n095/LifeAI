@@ -13,18 +13,24 @@ import logging
 
 import httpx
 import pytest
+from sqlalchemy import text
 
 from app.config import get_settings
 from app.providers.base import Message, ProviderError
 from app.providers.gemini_provider import GeminiProvider
 from app.providers.openai_provider import OpenAIProvider
 from app.providers.registry import chat_with_fallback
+from app.request_context import current_user_id
 
 FAKE_SECRET = "sk-super-secret-value-that-must-never-reach-a-log-line"
 
 
 @pytest.mark.asyncio
-async def test_provider_failure_log_line_never_contains_a_leaked_secret(db_session, monkeypatch, caplog):
+async def test_provider_failure_log_line_never_contains_a_leaked_secret(db_session, make_verified_user, monkeypatch, caplog):
+    user, _ = make_verified_user()
+    current_user_id.set(str(user.id))
+    db_session.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user.id)})
+
     # Only Gemini configured — the fallback chain has exactly one entry, so the failure path
     # (not the success path) is what's exercised.
     monkeypatch.setattr(get_settings(), "default_llm_provider", "gemini")
@@ -45,7 +51,7 @@ async def test_provider_failure_log_line_never_contains_a_leaked_secret(db_sessi
 
     with caplog.at_level(logging.WARNING):
         with pytest.raises(ProviderError) as exc_info:
-            await chat_with_fallback(db_session, [Message(role="user", content="hej")])
+            await chat_with_fallback(db_session, [Message(role="user", content="hej")], owner_id=user.id)
 
     assert FAKE_SECRET not in str(exc_info.value)
     for record in caplog.records:
@@ -53,10 +59,14 @@ async def test_provider_failure_log_line_never_contains_a_leaked_secret(db_sessi
 
 
 @pytest.mark.asyncio
-async def test_fallback_to_a_working_provider_still_succeeds_and_stays_clean(db_session, monkeypatch, caplog):
+async def test_fallback_to_a_working_provider_still_succeeds_and_stays_clean(db_session, make_verified_user, monkeypatch, caplog):
     """The logging fix must not change chat_with_fallback's actual behavior — a failing
     primary still falls through to a working secondary, and that secondary's success is
     still reported."""
+    user, _ = make_verified_user()
+    current_user_id.set(str(user.id))
+    db_session.execute(text("SET LOCAL app.current_user_id = :uid"), {"uid": str(user.id)})
+
     monkeypatch.setattr(get_settings(), "default_llm_provider", "gemini")
     monkeypatch.setattr(get_settings(), "google_api_key", "irrelevant-for-this-test")
     monkeypatch.setattr(get_settings(), "openai_api_key", "also-irrelevant")
@@ -76,7 +86,7 @@ async def test_fallback_to_a_working_provider_still_succeeds_and_stays_clean(db_
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_openai_chat)
 
     with caplog.at_level(logging.WARNING):
-        result, attempted = await chat_with_fallback(db_session, [Message(role="user", content="hej")])
+        result, attempted = await chat_with_fallback(db_session, [Message(role="user", content="hej")], owner_id=user.id)
 
     assert result.content == "Fallback svar."
     assert attempted == ["gemini", "openai"]

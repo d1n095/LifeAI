@@ -1,0 +1,49 @@
+{
+  "status": "PASS",
+  "dataset": "F09 real PostgreSQL RLS dataset",
+  "classes": [
+    "relevant",
+    "irrelevant",
+    "contradictory",
+    "historical/outdated",
+    "superseded",
+    "no-match/uncertainty"
+  ],
+  "tests": [
+    {
+      "classname": "tests.backend.rag.test_rag_quality_matrix",
+      "name": "test_relevant_source_is_retrieved_with_citation_fields",
+      "status": "PASS"
+    },
+    {
+      "classname": "tests.backend.rag.test_rag_quality_matrix",
+      "name": "test_irrelevant_source_is_not_retrieved_for_unrelated_query",
+      "status": "PASS"
+    },
+    {
+      "classname": "tests.backend.rag.test_rag_quality_matrix",
+      "name": "test_contradictory_sources_are_retrieved_together_and_flagged",
+      "status": "PASS"
+    },
+    {
+      "classname": "tests.backend.rag.test_rag_quality_matrix",
+      "name": "test_historical_source_is_retrieved_with_capped_confidence_and_warning",
+      "status": "PASS"
+    },
+    {
+      "classname": "tests.backend.rag.test_rag_quality_matrix",
+      "name": "test_explicitly_superseded_source_is_not_retrieved",
+      "status": "PASS"
+    },
+    {
+      "classname": "tests.backend.rag.test_rag_quality_matrix",
+      "name": "test_no_match_returns_no_citations_and_uncertainty_instruction",
+      "status": "PASS"
+    }
+  ],
+  "summary": {
+    "tests": 6,
+    "passed": 6,
+    "failed": 0
+  }
+}

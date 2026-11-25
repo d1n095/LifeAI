@@ -146,6 +146,17 @@ def resolve_delegation(
                 "EXTERNAL_MODEL_OUTPUT_NE_TRUSTED_FACT",
             ],
             "authority_granted_extra": False,
+            # The request's own task_id link, surfaced onto the assignment so
+            # app.workforce.provider_worker's own dispatch-time approval check (see its module
+            # docstring) has a stable, documented place to read it from -- previously dropped
+            # here entirely (request.task_id existed; nothing on the assignment ever reflected
+            # it). Deliberately stored in this existing JSON field rather than as a new
+            # migration-backed column: the current migration head on dev is 0068 and three
+            # separate open PRs (#408/#411/#412) already independently claim revision 0069
+            # (see docs/BRANCH_REGISTRY.md's "KÄND, FÖRVÄNTAD migration-revision-kollision"
+            # section) -- adding a fourth claimant here is exactly the collision risk that
+            # section's discipline exists to avoid, and no migration is needed for this fix.
+            "mainai_task_id": str(request.task_id) if request.task_id is not None else None,
         },
     )
     db.add(assignment)

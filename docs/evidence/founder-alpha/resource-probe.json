@@ -1,0 +1,86 @@
+{
+  "generated_at": "2026-11-21T01:32:09.886389+00:00",
+  "commit": "5e803c8ff16b7da8d9b1a3c2f120dbfa4786d836",
+  "environment": {
+    "database_url": "postgresql://postgres@127.0.0.1:55432/lifeos_e2e",
+    "redis_url": "redis://@127.0.0.1:56379/15",
+    "port": 46883,
+    "python": "3.12.3"
+  },
+  "status": "PASS",
+  "blockers": [],
+  "startup_latency_s": 3.801,
+  "health_latency_ms": {
+    "p50": 29.33,
+    "p95": 37.82,
+    "max": 46.68
+  },
+  "login_latency_ms": 152.57,
+  "login_status": 200,
+  "api_latency_ms": {
+    "/api/documents": 11.1,
+    "/api/conversations": 8.68,
+    "/api/mainai/project-status": 59.75
+  },
+  "api_status": {
+    "/api/documents": 200,
+    "/api/conversations": 200,
+    "/api/mainai/project-status": 200
+  },
+  "chat_latency_ms": 97.55,
+  "chat_status": 200,
+  "chat_reply_chars": 167,
+  "concurrency": {
+    "requests": 40,
+    "workers": 10,
+    "statuses": [
+      200
+    ],
+    "p50_ms": 229.44,
+    "p95_ms": 506.9
+  },
+  "memory": {
+    "rss_before_mb": 186.3,
+    "rss_after_mb": 186.6,
+    "delta_mb": 0.3,
+    "repeated_reads": 100,
+    "note": "RSS delta is an observation, not proof of a leak; GC/allocator behavior varies.",
+    "process_tree_rss_mb": 186.6
+  },
+  "cpu": {
+    "window_s": 3.68,
+    "process_tree_cpu_seconds": 3.71,
+    "process_tree_cpu_percent": 100.8
+  },
+  "database": {
+    "status": "PASS",
+    "database": "lifeos_e2e",
+    "size_bytes": 20872215,
+    "connections": 6,
+    "tables": {
+      "users": 2,
+      "documents": 1,
+      "document_chunks": 1,
+      "conversations": 3,
+      "messages": 6,
+      "memory_source_units": 7
+    },
+    "queues": {
+      "knowledge_import_jobs": {
+        "completed": 1
+      },
+      "mainai_jobs": {}
+    },
+    "slow_query_stats": {
+      "status": "BLOCKED",
+      "reason": "pg_stat_statements not installed"
+    }
+  },
+  "disk": {
+    "free_bytes": 79150456832,
+    "total_bytes": 92487929856,
+    "storage_root": "/tmp/lifeai-resource-probe-j_zq3a6o/storage",
+    "storage_root_bytes": 0
+  },
+  "log_path": "/tmp/lifeai-resource-probe-j_zq3a6o/backend.log"
+}

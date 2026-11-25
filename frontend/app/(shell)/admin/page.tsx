@@ -1,19 +1,28 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, ProviderStatus, ProviderVerification, UsageSummaryRow } from "@/lib/api";
+import { api, LocalModels, ModelCatalog, ProviderStatus, ProviderVerification, UsageSummaryRow } from "@/lib/api";
 
-const MODEL_SUGGESTIONS: Record<string, string> = {
-  openai: "gpt-4o-mini",
-  anthropic: "claude-sonnet-5",
-  gemini: "gemini-2.5-flash",
-  deepseek: "deepseek-chat",
-  openrouter: "openrouter/auto",
-  ollama: "llama3.1",
-};
 
 export default function AdminPage() {
+  const [models, setModels] = useState<ModelCatalog[]>([]);
+  const [choices, setChoices] = useState<Record<string, string>>({});
+  const candidates = (provider: string, role: string) => models.filter(
+    (m) => m.provider === provider && m.supported_capabilities.includes(role)
+  );
+  const selectedModel = (provider: string, role: string) => {
+    const options = candidates(provider, role);
+    return choices[`${provider}:${role}`] ??
+      options.find((m) => m.verification_result === "ok")?.model_id ?? options[0]?.model_id ?? "";
+  };
+  const customOption = (provider: string, role: string) => {
+    const selected = selectedModel(provider, role);
+    return selected && !candidates(provider, role).some((m) => m.model_id === selected)
+      ? <option value={selected}>{selected}</option>
+      : null;
+  };
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
+  const [localModels, setLocalModels] = useState<LocalModels | null>(null);
   const [usage, setUsage] = useState<UsageSummaryRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
@@ -23,9 +32,16 @@ export default function AdminPage() {
 
   async function refresh() {
     try {
-      const [p, u] = await Promise.all([api.providerStatus(), api.usageSummary()]);
+      const [p, u, m, l] = await Promise.all([
+        api.providerStatus(),
+        api.usageSummary(),
+        api.modelCatalog(),
+        api.localModels(),
+      ]);
+      setModels(m);
       setProviders(p);
       setUsage(u);
+      setLocalModels(l);
     } catch (e: any) {
       setError(e.message);
     }
@@ -41,7 +57,7 @@ export default function AdminPage() {
   async function activate(role: "chat" | "embedding", provider: string) {
     setSaving(provider);
     try {
-      await api.setProviderConfig(role, provider, MODEL_SUGGESTIONS[provider] || "");
+      await api.setProviderConfig(role, provider, selectedModel(provider, role));
       await refresh();
     } catch (e: any) {
       setError(e.message);
@@ -56,13 +72,17 @@ export default function AdminPage() {
     const key = `${provider}:${role}`;
     setVerifying(key);
     try {
-      await api.verifyProvider(provider, role);
+      await api.verifyProvider(provider, role, selectedModel(provider, role));
       await refresh();
     } catch (e: any) {
       setError(e.message);
     } finally {
       setVerifying(null);
     }
+  }
+
+  function chooseLocalModel(name: string, role: "chat" | "embedding") {
+    setChoices((prev) => ({ ...prev, [`ollama:${role}`]: name }));
   }
 
   const totalKnownCost = usage.reduce((sum, row) => sum + (row.cost_usd ?? 0), 0);
@@ -132,29 +152,75 @@ export default function AdminPage() {
                     />
                   </td>
                   <td className="px-4 py-3">
+                    <select
+                      aria-label={`Modell för ${p.name} chat`}
+                      className="block max-w-48 bg-panel text-sm mb-2"
+                      value={selectedModel(p.name, "chat")}
+                      disabled={verifying !== null || saving !== null}
+                      onChange={(e) => setChoices({...choices, [`${p.name}:chat`]: e.target.value})}
+                    >
+                      {customOption(p.name, "chat")}
+                      {candidates(p.name, "chat").map((m) => (
+                        <option key={m.model_id} value={m.model_id}>{m.model_id}</option>
+                      ))}
+                    </select>
+                    {p.name === "ollama" && (
+                      <input
+                        aria-label={`Egen modell för ${p.name} chat`}
+                        className="block max-w-48 bg-panel text-sm mb-2"
+                        placeholder="Egen lokal tagg"
+                        value={choices[`${p.name}:chat`] ?? ""}
+                        disabled={verifying !== null || saving !== null}
+                        onChange={(e) => setChoices({...choices, [`${p.name}:chat`]: e.target.value})}
+                      />
+                    )}
                     <VerificationBadge
-                      verification={p.chat_verification}
+                      verification={p.chat_verification?.model === selectedModel(p.name, "chat") ? p.chat_verification : null}
                       onVerify={() => verifyNow("chat", p.name)}
                       busy={verifying === `${p.name}:chat`}
+                      disabled={!selectedModel(p.name, "chat")}
                     />
                   </td>
                   <td className="px-4 py-3">
+                    <select
+                      aria-label={`Modell för ${p.name} embedding`}
+                      className="block max-w-48 bg-panel text-sm mb-2"
+                      value={selectedModel(p.name, "embedding")}
+                      disabled={verifying !== null || saving !== null}
+                      onChange={(e) => setChoices({...choices, [`${p.name}:embedding`]: e.target.value})}
+                    >
+                      {customOption(p.name, "embedding")}
+                      {candidates(p.name, "embedding").map((m) => (
+                        <option key={m.model_id} value={m.model_id}>{m.model_id}</option>
+                      ))}
+                    </select>
+                    {p.name === "ollama" && (
+                      <input
+                        aria-label={`Egen modell för ${p.name} embedding`}
+                        className="block max-w-48 bg-panel text-sm mb-2"
+                        placeholder="Egen lokal tagg"
+                        value={choices[`${p.name}:embedding`] ?? ""}
+                        disabled={verifying !== null || saving !== null}
+                        onChange={(e) => setChoices({...choices, [`${p.name}:embedding`]: e.target.value})}
+                      />
+                    )}
                     <VerificationBadge
-                      verification={p.embedding_verification}
+                      verification={p.embedding_verification?.model === selectedModel(p.name, "embedding") ? p.embedding_verification : null}
                       onVerify={() => verifyNow("embedding", p.name)}
                       busy={verifying === `${p.name}:embedding`}
+                      disabled={!selectedModel(p.name, "embedding")}
                     />
                   </td>
                   <td className="px-4 py-3 text-right space-x-2 whitespace-nowrap">
                     <button
-                      disabled={!p.configured || saving === p.name}
+                      disabled={!p.configured || !selectedModel(p.name, "chat") || saving === p.name}
                       onClick={() => activate("chat", p.name)}
                       className="text-xs rounded border border-border px-2 py-1 disabled:opacity-30"
                     >
                       Använd för chat
                     </button>
                     <button
-                      disabled={!p.configured || saving === p.name}
+                      disabled={!p.configured || !selectedModel(p.name, "embedding") || saving === p.name}
                       onClick={() => activate("embedding", p.name)}
                       className="text-xs rounded border border-border px-2 py-1 disabled:opacity-30"
                     >
@@ -166,6 +232,79 @@ export default function AdminPage() {
             </tbody>
           </table>
         </div>
+      </section>
+
+      <section aria-labelledby="local-models-heading" className="space-y-3">
+        <h2 id="local-models-heading" className="text-sm font-medium text-white/70">
+          Lokala modeller
+        </h2>
+        <p className="text-white/50 text-sm">
+          Modeller som faktiskt finns i den lokala Ollama-runtimen. Att välja en modell här
+          fyller bara i valet ovan — den måste fortfarande verifieras innan den kan aktiveras.
+        </p>
+        {localModels === null && <p className="text-white/40 text-sm">Kontrollerar lokal runtime…</p>}
+        {localModels && !localModels.reachable && (
+          <p role="status" className="text-amber-300 text-sm">
+            Den lokala modellruntimen svarar inte. Kontrollera att Ollama körs och att
+            modeller har hämtats. Aktiva modellval finns kvar:{" "}
+            {localModels.active_chat_provider}/{localModels.active_chat_model}.
+          </p>
+        )}
+        {localModels?.reachable && localModels.models.length === 0 && (
+          <p className="text-white/40 text-sm">Inga lokala modeller är installerade ännu.</p>
+        )}
+        {localModels?.reachable && localModels.models.length > 0 && (
+          <div className="rounded-xl border border-border overflow-x-auto">
+            <table className="w-full text-sm">
+              <caption className="sr-only">Installerade lokala modeller</caption>
+              <thead className="bg-panel text-white/50 text-xs uppercase">
+                <tr>
+                  <th scope="col" className="text-left px-4 py-3">Modell</th>
+                  <th scope="col" className="text-left px-4 py-3">Storlek</th>
+                  <th scope="col" className="text-left px-4 py-3">Katalogstatus</th>
+                  <th scope="col" className="px-4 py-3"><span className="sr-only">Välj roll</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                {localModels.models.map((model) => (
+                  <tr key={model.name} className="border-t border-border/60">
+                    <td className="px-4 py-3 font-mono text-xs">{model.name}</td>
+                    <td className="px-4 py-3 text-white/60">
+                      {model.size_bytes === null
+                        ? "okänd"
+                        : `${Math.round(model.size_bytes / 1_000_000)} MB`}
+                    </td>
+                    <td className="px-4 py-3 text-white/60">
+                      {model.catalog_known
+                        ? model.declared_capabilities.join(", ") || "känd"
+                        : "okänd lokal tagg — kräver verifiering"}
+                    </td>
+                    <td className="px-4 py-3 text-right space-x-2 whitespace-nowrap">
+                      <button
+                        type="button"
+                        className="text-xs rounded border border-border px-2 py-1 disabled:opacity-30"
+                        disabled={verifying !== null || saving !== null}
+                        onClick={() => chooseLocalModel(model.name, "chat")}
+                        aria-label={`Använd ${model.name} som chat-modell`}
+                      >
+                        Chat
+                      </button>
+                      <button
+                        type="button"
+                        className="text-xs rounded border border-border px-2 py-1 disabled:opacity-30"
+                        disabled={verifying !== null || saving !== null}
+                        onClick={() => chooseLocalModel(model.name, "embedding")}
+                        aria-label={`Använd ${model.name} som embedding-modell`}
+                      >
+                        Embedding
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       <section aria-labelledby="usage-heading" className="space-y-3">
@@ -271,10 +410,12 @@ function VerificationBadge({
   verification,
   onVerify,
   busy,
+  disabled = false,
 }: {
   verification: ProviderVerification | null;
   onVerify: () => void;
   busy: boolean;
+  disabled?: boolean;
 }) {
   return (
     <div className="flex items-center gap-2">
@@ -290,7 +431,7 @@ function VerificationBadge({
       )}
       <button
         onClick={onVerify}
-        disabled={busy}
+        disabled={busy || disabled}
         className="text-xs rounded border border-border px-2 py-1 disabled:opacity-30 whitespace-nowrap"
       >
         {busy ? "Testar…" : "Testa nu"}

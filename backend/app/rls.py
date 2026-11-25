@@ -17,6 +17,8 @@ RLS_STATEMENTS = [
     # real product requirement (see app/models/document.py's docstring update).
     "ALTER TABLE documents ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE documents FORCE ROW LEVEL SECURITY",
+    "ALTER TABLE blueprint_drafts ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE blueprint_drafts FORCE ROW LEVEL SECURITY",
     "ALTER TABLE knowledge_versions ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE knowledge_versions FORCE ROW LEVEL SECURITY",
     "ALTER TABLE knowledge_import_jobs ENABLE ROW LEVEL SECURITY",
@@ -28,6 +30,18 @@ RLS_STATEMENTS = [
     "ALTER TABLE knowledge_claims FORCE ROW LEVEL SECURITY",
     "ALTER TABLE claim_relationships ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE claim_relationships FORCE ROW LEVEL SECURITY",
+    # Claim-level study metadata (migration 0073) — the evidence-quality producer's rows
+    # (app/rag/evidence_metadata.py). Also enabled directly in the migration itself;
+    # listed here so this idempotent reapply path stays the single source of truth for
+    # every owner-scoped table.
+    "ALTER TABLE claim_evidence_metadata ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE claim_evidence_metadata FORCE ROW LEVEL SECURITY",
+    # Migration 0074 (engineering_lesson_plan_decisions) — the lesson->plan-decision
+    # provenance edge (app/mainai_execution/lessons.py). Also enabled directly in the
+    # migration itself; listed here so this idempotent reapply path stays the single
+    # source of truth for every owner-scoped table.
+    "ALTER TABLE engineering_lesson_plan_decisions ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE engineering_lesson_plan_decisions FORCE ROW LEVEL SECURITY",
     # Audio/video import v1 (migration 0009, STEG 12) — see app/models/media_url_import.py.
     "ALTER TABLE media_url_imports ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE media_url_imports FORCE ROW LEVEL SECURITY",
@@ -67,6 +81,27 @@ RLS_STATEMENTS = [
     # every owner-scoped table, matching the rest of this list.
     "ALTER TABLE messages ENABLE ROW LEVEL SECURITY",
     "ALTER TABLE messages FORCE ROW LEVEL SECURITY",
+    # Chat request idempotency (migration 0090) — owner-scoped claim rows, committed with
+    # the user message before any provider call. Also enabled directly in the migration
+    # itself; listed here so this idempotent reapply path stays the single source of truth
+    # for every owner-scoped table.
+    "ALTER TABLE chat_request_claims ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE chat_request_claims FORCE ROW LEVEL SECURITY",
+    # Durable billable chat-attempt identity (migration 0091) — owner-scoped rows holding the
+    # reservation identity needed to reconcile a timeout/crash after restart. Also enabled
+    # directly in the migration itself; listed here so this idempotent reapply path stays the
+    # single source of truth for every owner-scoped table.
+    "ALTER TABLE chat_provider_attempts ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE chat_provider_attempts FORCE ROW LEVEL SECURITY",
+    # Founder calendar foundation (migration 0071 on the 0069-composition integration branch;
+    # 0069 on its own PR branch, 2026-11-15) -- ordinary owner-scoped,
+    # mutable table (same simple tier as documents/conversations above, not the heavier
+    # append-only tier life_intents/_MAINAI_EXECUTION_TABLES use below -- the Founder must be
+    # able to edit or delete their own calendar events outright). Also enabled directly in the
+    # migration itself; listed here too so this idempotent reapply path stays the single
+    # source of truth for every owner-scoped table, matching the rest of this list.
+    "ALTER TABLE calendar_events ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE calendar_events FORCE ROW LEVEL SECURITY",
     # Life Source Foundation Bootstrap (migration 0037) — see docs/
     # LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md. source_import_batches/source_import_batch_failures
     # are ordinary owner-scoped tracking tables; message_source_units is S1C (docs/
@@ -151,6 +186,16 @@ POLICY_DEFINITIONS = [
         "expr": "user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
     {
+        "table": "chat_request_claims",
+        "name": "chat_request_claims_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "chat_provider_attempts",
+        "name": "chat_provider_attempts_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
         "table": "document_chunks",
         "name": "document_chunks_isolation",
         # Deliberately narrower than Document itself (shared company knowledge, see the
@@ -164,6 +209,16 @@ POLICY_DEFINITIONS = [
         "table": "documents",
         "name": "documents_isolation",
         "expr": "uploaded_by = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "blueprint_drafts",
+        "name": "blueprint_drafts_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "calendar_events",
+        "name": "calendar_events_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
     {
         "table": "knowledge_versions",
@@ -188,6 +243,16 @@ POLICY_DEFINITIONS = [
     {
         "table": "claim_relationships",
         "name": "claim_relationships_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "claim_evidence_metadata",
+        "name": "claim_evidence_metadata_isolation",
+        "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
+    },
+    {
+        "table": "engineering_lesson_plan_decisions",
+        "name": "engineering_lesson_plan_decisions_isolation",
         "expr": "owner_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid",
     },
     {
@@ -538,6 +603,13 @@ _MAINAI_EXECUTION_TABLES = (
     # transitions in place (unreviewed -> authorized/dismissed/superseded), never rewritten
     # content, deletion only through the SECURITY DEFINER erasure path.
     "work_candidates",
+    # Life MainAI Intelligence program (Continuous Build Directive, Section B): github_evidence_
+    # candidates plays the SAME structural role work_candidates already plays -- a mutable row
+    # whose status transitions in place (unreviewed -> authorized/dismissed), observation fields
+    # (title/signals/source_url/observed_at) refreshed in place on every re-scan, deletion only
+    # through the SECURITY DEFINER erasure path. See app.models.github_evidence's own docstring
+    # for why this is a SEPARATE table from work_candidates rather than reusing it.
+    "github_evidence_candidates",
     # Migration 0057 (Life Execution Authorization Envelope): execution_scope_proposals and
     # execution_authorization_envelopes play the SAME structural role -- mutable rows whose
     # status transitions in place, deletion only through the SECURITY DEFINER erasure path.
@@ -562,6 +634,9 @@ _MAINAI_EXECUTION_TABLES = (
     # append-only, same structural role as provider_spend_usage_events above -- deletion only
     # through erase_own_provider_disclosure_events().
     "provider_disclosure_events",
+    # V4 runtime incidents: one small owner-scoped history table, same FORCE-RLS and
+    # ownership verification as the other runtime-observability tables.
+    "runtime_incidents",
     # Migration 0067 (MainAI Internal Workforce Foundation): owner-scoped organizational
     # agent registry, delegation broker receipts, context packages, assignments, performance
     # rollups. Ordinary mutable tables (baseline CRUD) — sit ABOVE coordination_agents (0046),
@@ -577,6 +652,14 @@ _MAINAI_EXECUTION_TABLES = (
     "workforce_lifecycle_events",
     "workforce_cost_budgets",
     "workforce_verification_decisions",
+    # Migration 0073 (claim_evidence_metadata): the evidence-quality producer's rows ride on
+    # knowledge_claims' own ownership -- one row per claim, owner-anchored composite FK, so
+    # it gets the same ownership-only treatment (RLS + policy + UPDATE kept for re-stamping).
+    "claim_evidence_metadata",
+    # Migration 0074 (engineering_lesson_plan_decisions): append-only history of which
+    # lesson changed which task's plan (the 0058-provenance edge) -- same structural role
+    # as the 0058 guard observations, SELECT/INSERT-only narrowing below.
+    "engineering_lesson_plan_decisions",
 )
 
 _AGENT_WORK_ASSIGNMENT_EVENTS_ALLOWED_PRIVILEGES = frozenset({"SELECT", "INSERT"})
@@ -793,6 +876,12 @@ def apply_mainai_job_runtime_privileges(engine: Engine, *, require_complete: boo
             logger.warning(message)
             return
 
+        # Self-healing, not merely narrowing: on a fresh database the migration may have run
+        # after ensure_app_role.py's broad grant, leaving these two tables with NO app-role
+        # privileges at all. Grant the exact allowed set before revoking the excess, so startup
+        # both repairs a missing grant and still removes UPDATE/DELETE/TRUNCATE/etc.
+        conn.execute(text("GRANT SELECT, INSERT ON mainai_job_events TO mainai_app"))
+        conn.execute(text("GRANT SELECT, INSERT, UPDATE ON mainai_job_proposals TO mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON mainai_job_events FROM mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON mainai_job_proposals FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_mainai_job_children() TO mainai_app"))
@@ -967,6 +1056,17 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_mainai_execution_children() TO mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON agent_work_assignment_events FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_agent_coordination_children() TO mainai_app"))
+        # Migration 0069 (System Activation Authorization): SELECT only -- no application code
+        # path, however reached, may ever write a row here (see that migration's own module
+        # docstring and app.models.agent_coordination.SystemActivationAuthorization). The REVOKE
+        # lives here rather than in the migration itself because mainai_app may not exist yet
+        # when migrations run in isolation (e.g. the "Alembic migration check" CI job).
+        conn.execute(
+            text(
+                "REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER "
+                "ON system_activation_authorizations FROM mainai_app"
+            )
+        )
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON capability_observation_events FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_capability_reality_children() TO mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON founder_memory_notes FROM mainai_app"))
@@ -986,11 +1086,19 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_project_entities_children() TO mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON work_candidates FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_work_candidates_children() TO mainai_app"))
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON github_evidence_candidates FROM mainai_app"))
+        conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_github_evidence_children() TO mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON execution_scope_proposals FROM mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON execution_authorization_envelopes FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_execution_authorization_children() TO mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON engineering_lesson_guard_observations FROM mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON supervisor_goal_leases FROM mainai_app"))
+        # Migration 0073 (claim_evidence_metadata): mutable on purpose -- re-stamping a
+        # corrected founder declaration must UPDATE the materialized verdict in place --
+        # but rows are never deleted by the app role (they die via ON DELETE CASCADE from
+        # knowledge_claims/users with their owner), so DELETE/TRUNCATE/REFERENCES/TRIGGER go.
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON claim_evidence_metadata FROM mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON engineering_lesson_plan_decisions FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_supervisor_goal_leases() TO mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON provider_spend_authorizations FROM mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON provider_spend_usage_events FROM mainai_app"))
@@ -1005,6 +1113,9 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         )
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON provider_disclosure_events FROM mainai_app"))
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_provider_disclosure_events() TO mainai_app"))
+        # V4 runtime incidents: owner-visible history, never deleted through the app role.
+        # Rows disappear only through the user FK cascade during account erasure.
+        conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON runtime_incidents FROM mainai_app"))
 
         for table in _MAINAI_EXECUTION_TABLES:
             owner = conn.execute(
@@ -1017,6 +1128,10 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
                 errors.append(f"{table}: must never be owned by mainai_app")
 
         for table, allowed in (
+            # Migration 0069 (System Activation Authorization): SELECT only -- no application
+            # code path, however reached, may ever write a row here. See that migration's own
+            # module docstring and app.models.agent_coordination.SystemActivationAuthorization.
+            ("system_activation_authorizations", frozenset({"SELECT"})),
             ("mainai_task_events", _MAINAI_EXECUTION_TASK_EVENT_TABLE_ALLOWED_PRIVILEGES),
             ("mainai_checkpoints", _MAINAI_EXECUTION_CHECKPOINT_TABLE_ALLOWED_PRIVILEGES),
             ("mainai_recovery_events", _MAINAI_RECOVERY_EVENT_TABLE_ALLOWED_PRIVILEGES),
@@ -1068,13 +1183,17 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("project_entity_relationships", frozenset({"SELECT", "INSERT"})),
             ("project_entity_aliases", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("work_candidates", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("github_evidence_candidates", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("execution_scope_proposals", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("execution_authorization_envelopes", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("engineering_lesson_guard_observations", frozenset({"SELECT", "INSERT"})),
+            ("claim_evidence_metadata", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("engineering_lesson_plan_decisions", frozenset({"SELECT", "INSERT"})),
             ("supervisor_goal_leases", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("provider_spend_authorizations", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("provider_spend_usage_events", frozenset({"SELECT", "INSERT"})),
             ("provider_disclosure_events", frozenset({"SELECT", "INSERT"})),
+            ("runtime_incidents", frozenset({"SELECT", "INSERT", "UPDATE"})),
         ):
             granted = _effective_table_privileges(conn, "mainai_app", table)
             if granted != allowed:

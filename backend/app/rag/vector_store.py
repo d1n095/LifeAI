@@ -5,6 +5,35 @@ from sqlalchemy.orm import Session
 
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
+from app.models.source_relationship import RelationshipType, SourceRelationship
+from app.rag.embedding_space import pad_to_storage
+
+
+def _like_pattern(value: str) -> str:
+    """Build a literal substring pattern, never a LIKE wildcard expression.
+
+    The text channel accepts the founder's raw query. Without escaping, a query containing
+    ``%`` or ``_`` becomes a wildcard and can match every chunk in the owner's library,
+    injecting irrelevant documents into an otherwise exact-term search. Backslash is escaped
+    first because it is the ESCAPE character itself.
+    """
+    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def _superseded_source_ids(owner_id: uuid.UUID):
+    """Sources that an explicit `supersedes` edge has replaced.
+
+    This is deliberately narrower than filtering on `active_truth_status == superseded`: a
+    source manually marked historical/superseded must still be retrievable with the Trust
+    Engine's explicit warning (app/rag/trust.py). Only a replacement recorded by the actual
+    replacement flow creates the edge, and that source's old chunks must stop competing with
+    its successor in both the semantic and text channels.
+    """
+    return select(SourceRelationship.to_source_id).where(
+        SourceRelationship.owner_id == owner_id,
+        SourceRelationship.relationship_type == RelationshipType.supersedes,
+    )
 
 
 def upsert_chunks(
@@ -13,6 +42,9 @@ def upsert_chunks(
     owner_id: uuid.UUID,
     chunks: list[str],
     vectors: list[list[float]],
+    *,
+    embedding_model: str | None = None,
+    embedding_native_dim: int | None = None,
 ) -> int:
     """Writes chunk rows scoped to owner_id (see app/models/document_chunk.py and the
     document_chunks_isolation policy in app/rls.py). The caller MUST have already run
@@ -31,6 +63,12 @@ def upsert_chunks(
             chunk_index=idx,
             text=chunk,
             embedding=vector,
+            # Embedding-space identity: stamp the model + native dim that produced this
+            # vector so retrieval can filter strictly to the active space and never compare
+            # across incompatible models/dims (app/rag/embedding_space.py). The caller has
+            # already zero-padded `vector` to the storage width.
+            embedding_model=embedding_model,
+            embedding_native_dim=embedding_native_dim,
         )
         for idx, (chunk, vector) in enumerate(zip(chunks, vectors))
     ]
@@ -51,6 +89,14 @@ def _hit_dict(chunk: DocumentChunk, score: float) -> dict:
         "active_truth_status": doc.active_truth_status.value if doc else None,
         "media_type": doc.media_type if doc else None,
         "project_id": str(doc.project_id) if doc and doc.project_id else None,
+        # Incremental document understanding (Life MainAI Intelligence program): when this
+        # source's content was last actually changed (Document.updated_at, bumped by SQLAlchemy's
+        # own onupdate on every real column change) — lets a caller recognize "this source is new
+        # or has changed since I last looked at it" without re-deriving it from created_at (which
+        # never changes) or re-querying Document separately. None only if the chunk's document
+        # join failed to resolve (same defensive pattern as classification/active_truth_status
+        # above), never a silently-wrong placeholder timestamp.
+        "document_updated_at": doc.updated_at.isoformat() if doc and doc.updated_at else None,
         # STEG 12: set only for a chunk built from a timed transcript segment
         # (app/rag/media_import.py) — None for ordinary text chunks, exactly mirroring
         # DocumentChunk.start_seconds/end_seconds themselves. Lets a citation (chat.py's
@@ -69,6 +115,8 @@ def search(
     *,
     project_id: uuid.UUID | None = None,
     document_id: uuid.UUID | None = None,
+    embedding_model: str | None = None,
+    embedding_native_dim: int | None = None,
 ) -> list[dict]:
     """Explicit owner_id filter in addition to RLS — see upsert_chunks's docstring on why
     this isn't relying on a single layer.
@@ -89,12 +137,30 @@ def search(
     is also what app/rag/retrieve.py's chat-context retrieval calls, so a deleted source can
     never be quoted back to the founder as if it still existed either.
     """
+    # Zero-pad a native query vector up to the storage column width (no-op when it already is
+    # that width). Cosine ranking is identical to a native-width column — see
+    # app/rag/embedding_space.py.
+    vector = pad_to_storage(vector)
     distance = DocumentChunk.embedding.cosine_distance(vector)
     stmt = (
         select(DocumentChunk, distance.label("distance"))
         .join(Document, Document.id == DocumentChunk.document_id)
-        .where(DocumentChunk.owner_id == owner_id, Document.deleted_at.is_(None))
+        .where(
+            DocumentChunk.owner_id == owner_id,
+            Document.deleted_at.is_(None),
+            Document.id.not_in(_superseded_source_ids(owner_id)),
+        )
     )
+    # Active-embedding-space guard: when the caller names the active (model, native_dim), only
+    # chunks stamped with that exact space are comparable — a zero-padded 768-d vector and a
+    # genuine 1536-d vector share this column but are semantically incomparable. Filtering here
+    # is the no-silent-mixing guarantee; chunks from any other model/dim (or legacy NULL
+    # identity) are simply never ranked against this query.
+    if embedding_model is not None and embedding_native_dim is not None:
+        stmt = stmt.where(
+            DocumentChunk.embedding_model == embedding_model,
+            DocumentChunk.embedding_native_dim == embedding_native_dim,
+        )
     if project_id is not None:
         stmt = stmt.where(Document.project_id == project_id)
     if document_id is not None:
@@ -114,6 +180,8 @@ def hybrid_search(
     project_id: uuid.UUID | None = None,
     classification: str | None = None,
     active_truth_status: str | None = None,
+    embedding_model: str | None = None,
+    embedding_native_dim: int | None = None,
 ) -> list[dict]:
     """DEL 5's hybrid search: combines the same semantic (pgvector) channel `search()` uses
     with a plain case-insensitive substring match on chunk text/document title, then merges
@@ -129,7 +197,11 @@ def hybrid_search(
     zero vector, which would return meaningless cosine-distance "matches". The text-match
     channel needs no embedding at all, so it keeps returning real results either way.
     """
-    base_filters = [DocumentChunk.owner_id == owner_id, Document.deleted_at.is_(None)]
+    base_filters = [
+        DocumentChunk.owner_id == owner_id,
+        Document.deleted_at.is_(None),
+        Document.id.not_in(_superseded_source_ids(owner_id)),
+    ]
     if project_id is not None:
         base_filters.append(Document.project_id == project_id)
     if classification is not None:
@@ -139,21 +211,36 @@ def hybrid_search(
 
     semantic_rows = []
     if vector is not None:
+        vector = pad_to_storage(vector)
+        semantic_filters = list(base_filters)
+        # Same active-embedding-space guard as search(): the semantic channel never compares
+        # across incompatible models/dims. The independent ILIKE text channel below is
+        # unaffected, so a model switch degrades hybrid search to exact-text matches rather
+        # than returning semantically meaningless cross-model "matches".
+        if embedding_model is not None and embedding_native_dim is not None:
+            semantic_filters.append(DocumentChunk.embedding_model == embedding_model)
+            semantic_filters.append(DocumentChunk.embedding_native_dim == embedding_native_dim)
         distance = DocumentChunk.embedding.cosine_distance(vector)
         semantic_stmt = (
             select(DocumentChunk, distance.label("distance"))
             .join(Document, Document.id == DocumentChunk.document_id)
-            .where(*base_filters)
+            .where(*semantic_filters)
             .order_by(distance)
             .limit(top_k)
         )
         semantic_rows = db.execute(semantic_stmt).all()
 
-    like_pattern = f"%{query_text}%"
+    like_pattern = _like_pattern(query_text)
     text_stmt = (
         select(DocumentChunk)
         .join(Document, Document.id == DocumentChunk.document_id)
-        .where(*base_filters, or_(DocumentChunk.text.ilike(like_pattern), Document.title.ilike(like_pattern)))
+        .where(
+            *base_filters,
+            or_(
+                DocumentChunk.text.ilike(like_pattern, escape="\\"),
+                Document.title.ilike(like_pattern, escape="\\"),
+            ),
+        )
         .limit(top_k)
     )
     text_rows = db.execute(text_stmt).scalars().all()

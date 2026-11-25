@@ -16,8 +16,30 @@ FOUNDER_EMAIL = "founder@lifeos.local"
 FOUNDER_PASSWORD = "TestFounderPassword123!"
 DIM = get_settings().embedding_dim
 MATCHING_VECTOR = [0.5] * DIM
+# The active embedding space these chunks are stamped with (see app/rag/embedding_space.py):
+# retrieval only ranks chunks whose (model, native_dim) matches the query vector's, so a row
+# inserted WITHOUT this identity is invisible to search.
+EMBED_MODEL = get_settings().default_embedding_model
 
 FAKE_ANSWER = "SLUTSATS: Detta ar den grundade slutsatsen.\nKRITIK/ALTERNATIV: Men det finns en alternativ tolkning att overvaga."
+
+
+@pytest.fixture(autouse=True)
+def _local_embedding(monkeypatch):
+    """The guarded retrieval path requires the local embedding transport.
+
+    Workbench now passes effect_guard=True exactly like chat. An external embedding provider
+    is refused before any call, so these tests exercise the supported local Ollama path rather
+    than accidentally testing an unguarded external side effect.
+    """
+    from app.providers.ollama_provider import OllamaProvider
+
+    async def _fake_embed(self, texts, model, **kwargs):
+        return [MATCHING_VECTOR for _ in texts]
+
+    monkeypatch.setattr(get_settings(), "default_embedding_provider", "ollama")
+    monkeypatch.setattr(get_settings(), "default_embedding_model", "nomic-embed-text")
+    monkeypatch.setattr(OllamaProvider, "embed", _fake_embed)
 
 
 @pytest.fixture
@@ -28,11 +50,7 @@ def _fake_provider(monkeypatch):
     async def _fake_chat(self, messages, model, **kwargs):
         return ChatResult(content=FAKE_ANSWER, provider="openai", model=model, raw_usage={"prompt_tokens": 12, "completion_tokens": 8})
 
-    async def _fake_embed(self, texts, model, **kwargs):
-        return [MATCHING_VECTOR for _ in texts]
-
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat)
-    monkeypatch.setattr(OpenAIProvider, "embed", _fake_embed)
 
 
 def _login(client) -> str:
@@ -56,8 +74,22 @@ def _make_source(superuser_db, owner_id, title, *, project_id=None, status=Activ
     )
     superuser_db.add(document)
     superuser_db.commit()
+    # Stamp the active embedding space (PR #333): the workbench analyze endpoint retrieves via
+    # active-space-scoped retrieve_context, which excludes unstamped (legacy NULL-identity)
+    # chunks — the real ingest path always stamps, so these fixtures must too.
+    from app.providers.registry import resolve_active
+
+    _p, _embed_model = resolve_active(superuser_db, role="embedding")
     superuser_db.add(
-        DocumentChunk(document_id=document.id, owner_id=owner_id, chunk_index=0, text=f"Innehall i {title}.", embedding=MATCHING_VECTOR)
+        DocumentChunk(
+            document_id=document.id,
+            owner_id=owner_id,
+            chunk_index=0,
+            text=f"Innehall i {title}.",
+            embedding=MATCHING_VECTOR,
+            embedding_model=_embed_model,
+            embedding_native_dim=len(MATCHING_VECTOR),
+        )
     )
     superuser_db.commit()
     return document
@@ -201,7 +233,6 @@ def test_save_idea_and_history_labels_map_to_proposed_and_historical(client, sup
 
 
 def test_save_ignores_source_ids_not_owned_by_caller(client, superuser_db, make_verified_user, _fake_provider):
-    founder_id = _founder_id(superuser_db)
     other, _ = make_verified_user(email="workbench-other@example.com")
     others_doc = _make_source(superuser_db, other.id, "Nagon annans kalla")
     csrf = _login(client)

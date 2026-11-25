@@ -210,6 +210,7 @@ async def run_corpus_review_job(
                 owner_id=document.uploaded_by,
                 purpose="corpus_review",
                 requested_by="jobs.handlers.corpus_review",
+                effect_guard=True,
             )
         except EgressDeniedError as exc:
             # Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md, V4):

@@ -42,6 +42,9 @@ def _fake_embed(monkeypatch):
         return [[0.1] * DIM for _ in texts]
 
     monkeypatch.setattr(OpenAIProvider, "embed", _embed)
+    # This suite isolates persistence from transport; dedicated routing tests cover
+    # multi-provider fallback. Never contact an installed/unmocked local runtime.
+    monkeypatch.setattr(get_settings(), "chat_fallback_order", "")
 
 
 def _login(client) -> str:
@@ -80,7 +83,8 @@ def _fake_chat_ok(content: str = "Testsvar."):
 
 
 async def _fake_chat_missing_key(self, messages, model, **kwargs):
-    raise ProviderError("OpenAI API-nyckel saknas.")
+    # This double fails before creating any HTTP request; it is safe to retry.
+    raise ProviderError("OpenAI API-nyckel saknas.", provider_request_may_have_left=False)
 
 
 async def _fake_chat_timeout(self, messages, model, **kwargs):
@@ -130,15 +134,18 @@ def test_provider_fails_before_producing_output_saves_user_message(client, super
     assert saved.status == MessageStatus.succeeded  # the USER message itself always succeeded
 
 
-def test_provider_timeout_is_retryable(client, monkeypatch):
+def test_provider_timeout_blocks_automatic_retry(client, monkeypatch):
     monkeypatch.setattr(OpenAIProvider, "chat", _fake_chat_timeout)
     csrf = _login(client)
     res = client.post("/api/chat", json={"message": "hej"}, headers={"X-CSRF-Token": csrf})
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["assistant_status"] == "failed"
-    assert body["error_category"] == "unreachable"
-    assert body["retryable"] is True
+    assert body["error_category"] == "external_effect_unknown"
+    assert body["retryable"] is False
+
+    retry = client.post(f"/api/chat/messages/{body['user_message_id']}/retry", headers={"X-CSRF-Token":csrf})
+    assert retry.status_code == 409
 
 
 # --- D/E: persistence survives a failure, and reload proves it -------------------------------
@@ -158,6 +165,16 @@ def test_reload_confirms_user_message_remains_after_provider_failure(client, mon
     user_messages = [m for m in messages if m["role"] == "user"]
     assert len(user_messages) == 1
     assert user_messages[0]["content"] == "Detta meddelande ska överleva ett AI-fel."
+
+    # The failed assistant row is part of the durable transcript. The reload contract must
+    # expose enough to show the failure and retry it, instead of returning only the user
+    # message and letting the UI silently drop the empty assistant row.
+    assistant_messages = [m for m in messages if m["role"] == "assistant"]
+    assert len(assistant_messages) == 1
+    failed = assistant_messages[0]
+    assert failed["status"] == "failed"
+    assert failed["error_category"] == "unreachable"
+    assert failed["in_reply_to_id"] == user_messages[0]["id"]
 
 
 # --- D/F: retry never duplicates, and is idempotent once succeeded ---------------------------
@@ -416,7 +433,7 @@ def test_never_egress_marked_retrieved_content_is_denied_before_any_provider_is_
 
     monkeypatch.setattr(OpenAIProvider, "chat", _tracking_chat)
 
-    async def _fake_retrieve_context(db, owner_id, query, top_k=5):
+    async def _fake_retrieve_context(db, owner_id, query, top_k=5, **kwargs):
         return [
             {
                 "document_id": "00000000-0000-0000-0000-000000000001",
@@ -467,7 +484,7 @@ def test_retrying_after_an_egress_denial_is_denied_again_not_silently_bypassed(c
 
     monkeypatch.setattr(OpenAIProvider, "chat", _tracking_chat)
 
-    async def _fake_retrieve_context(db, owner_id, query, top_k=5):
+    async def _fake_retrieve_context(db, owner_id, query, top_k=5, **kwargs):
         return [
             {
                 "document_id": "00000000-0000-0000-0000-000000000001",

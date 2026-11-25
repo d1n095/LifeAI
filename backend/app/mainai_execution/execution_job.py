@@ -31,6 +31,7 @@ that it defaults to pushing to a live repo."""
 
 import logging
 import subprocess
+import sys
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -145,7 +146,21 @@ CODE_AGENT_SYSTEM_PROMPT = (
 
 async def _handle_read_only_audit(db: Session, task: MainAITask) -> dict:
     messages = [Message(role="system", content=READ_ONLY_AUDIT_SYSTEM_PROMPT), Message(role="user", content=task.description)]
-    result, _attempted = await chat_with_fallback(db, messages)
+    # Freebuff EGRESS-0/EGRESS-1: chat_with_fallback() only routes a call through the Life
+    # Vault egress policy (default-deny gate, NEVER_EGRESS hard-deny, secret redaction, the
+    # disclosure ledger -- docs/LIFE_VAULT_EGRESS_CONTROL.md) when `owner_id` is passed; it is
+    # OPTIONAL and silently skips the entire gate when omitted (see that function's own
+    # docstring: "gate skipped, unchanged legacy behavior"). This call was sending `task.
+    # description` -- arbitrary, possibly sensitive, founder-authored content -- to a real
+    # external provider with NO egress gate at all. `propose_plan_via_ai()` (planner.py)
+    # already passes owner_id/task identity correctly; this call site had simply never been
+    # migrated. Fixed by passing the real, already-available task/goal identity, never a
+    # resolved FOUNDER_USER_ID or any other weaker stand-in for actual authorization context.
+    result, _attempted = await chat_with_fallback(
+        db, messages, owner_id=task.owner_id, purpose="mainai_read_only_audit",
+        requested_by="mainai_execution.execution_job._handle_read_only_audit", task_id=task.id, goal_id=task.goal_id,
+        effect_guard=True,
+    )
     return {"summary": result.content, "provider": result.provider, "model": result.model}
 
 
@@ -201,7 +216,13 @@ async def _propose_repo_edit(db: Session, task: MainAITask) -> dict:
     behavior (test_run_task_execution_job_repo_edit_with_an_absolute_ai_proposed_path_..., et
     al.) keep exercising the identical code, unchanged."""
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=task.description)]
-    result, _attempted = await chat_with_fallback(db, messages)
+    # Freebuff EGRESS-0/EGRESS-1 -- see _handle_read_only_audit()'s matching comment above for
+    # why this owner_id/task_id/goal_id is required, not optional.
+    result, _attempted = await chat_with_fallback(
+        db, messages, owner_id=task.owner_id, purpose="mainai_repo_edit_proposal",
+        requested_by="mainai_execution.execution_job._propose_repo_edit", task_id=task.id, goal_id=task.goal_id,
+        effect_guard=True,
+    )
     parsed = _parse_code_agent_response(result.content)
 
     repo_root = _repo_root().resolve()
@@ -318,7 +339,14 @@ async def _handle_repo_edit(
         db.commit()
 
     messages = [Message(role="system", content=CODE_AGENT_SYSTEM_PROMPT), Message(role="user", content=task.description)]
-    result, _attempted = await chat_with_fallback(db, messages)
+    # Freebuff EGRESS-0/EGRESS-1 -- see _handle_read_only_audit()'s matching comment for why
+    # this owner_id/task_id/goal_id/job_id is required, not optional. job_id is available here
+    # (unlike the two call sites above) since this is the real, worktree-backed edit path.
+    result, _attempted = await chat_with_fallback(
+        db, messages, owner_id=task.owner_id, purpose="mainai_repo_edit",
+        requested_by="mainai_execution.execution_job._handle_repo_edit", task_id=task.id, goal_id=task.goal_id, job_id=job.id,
+        effect_guard=True,
+    )
     parsed = _parse_code_agent_response(result.content)
 
     worktree_root = Path(worktree.path).resolve()
@@ -366,7 +394,12 @@ def _run_pytest(target: str, *, cwd: Path, timeout_seconds: int = 300) -> dict:
     as an ordinary failed result here too, for the same reason."""
     validate_targeted_tests_target(target)
     try:
-        result = subprocess.run(["python", "-m", "pytest", "-q", target], cwd=str(cwd), capture_output=True, text=True, timeout=timeout_seconds)
+        # R15 (2026-11-19): sys.executable, not "python" -- macOS has no `python` on PATH, and
+        # the FileNotFoundError that produced is an OSError, which used to escape this handler
+        # (only TimeoutExpired was caught) and strand the task at `running`.
+        result = subprocess.run([sys.executable, "-m", "pytest", "-q", target], cwd=str(cwd), capture_output=True, text=True, timeout=timeout_seconds)
+    except OSError as exc:
+        return {"target": target, "returncode": None, "passed": False, "error": "interpreter_unavailable", "detail": str(exc)[:500]}
     except subprocess.TimeoutExpired as exc:
         return {
             "target": target,
@@ -380,12 +413,29 @@ def _run_pytest(target: str, *, cwd: Path, timeout_seconds: int = 300) -> dict:
     return {"target": target, "returncode": result.returncode, "passed": result.returncode == 0, "stdout_tail": result.stdout[-4000:], "stderr_tail": result.stderr[-2000:]}
 
 
-def _handle_run_tests(task: MainAITask) -> dict:
+def _handle_run_tests(db: Session, task: MainAITask, *, goal: MainAIGoal) -> dict:
+    """Hardening-pass finding (real production-scope gap, same class as the one
+    `_handle_repo_edit()`'s own docstring already describes): a `run_tests` task is always a
+    SEPARATE task from the `repo_edit` task whose change it verifies (see
+    `_DEMO1_PLAN_JSON`-shaped plans) -- once `github_write_enabled` is on, `repo_edit`'s own
+    edit lands in its real, isolated worktree (worktree.py), never in this shared backend
+    checkout. Running this task's own targeted tests against `_backend_root()` unconditionally
+    -- as this function did before this fix -- meant they could never find the file a sibling
+    repo_edit task actually committed, in the one mode (real git) this task type exists to
+    verify for real. Fixed the exact same way `_handle_open_pr()` already finds its sibling's
+    branch: `_find_repo_edit_branch()` locates the completed repo_edit event for this goal and,
+    if it ran for real, its `worktree_path` -- identical fallback logic to the one
+    `run_task_execution_job()` already uses for this task's OWN post-dispatch verification
+    step (`verify_cwd`), now also applied to this task's internal pytest invocation so both
+    checks agree on where the real code actually lives."""
     targets = [step["target"] for step in task.verification_plan if step.get("kind") == "targeted_tests" and step.get("target")]
     if not targets:
         raise TaskExecutionError("run_tests task has no 'targeted_tests' entries in its verification_plan to run.")
+    edit_info = _find_repo_edit_branch(db, goal_id=goal.id)
+    worktree_path = edit_info.get("worktree_path") if edit_info else None
+    cwd = Path(worktree_path) / "backend" if worktree_path else _backend_root()
     try:
-        results = [_run_pytest(target, cwd=_backend_root()) for target in targets]
+        results = [_run_pytest(target, cwd=cwd) for target in targets]
     except VerificationStepError as exc:
         raise TaskExecutionError(str(exc)) from exc
     return {"results": results}
@@ -439,9 +489,39 @@ async def _handle_open_pr(db: Session, task: MainAITask, goal: MainAIGoal) -> di
     repo_owner = settings.github_repo.split("/", 1)[0]
     existing = await client.list_pull_requests_for_head(head=f"{repo_owner}:{head_branch}", base=base_branch, state="open")
     if existing:
+        # Security contract (founder directive, independent review finding): an existing
+        # open PR for this exact head/base must NEVER be silently treated as "ours, already
+        # done" just because the branch name matches. GitHub allows only one open PR per
+        # head/base pair, so if a human already has a real, non-draft PR open here, MainAI
+        # cannot create a second one anyway -- the only safe move is to fail closed and let
+        # a human resolve it, never attribute someone else's PR to this task's own work
+        # result. `draft` missing/null (an API shape MainAI has never actually seen, but
+        # must not guess past) is treated identically to "not ours" -- `is not True`, never
+        # a falsy check, so None/missing fails exactly like False.
         pr = existing[0]
+        if pr.get("draft") is not True:
+            raise TaskExecutionError(
+                f"An existing open PR #{pr.get('number')} already occupies {head_branch} -> {base_branch} and is not a "
+                f"MainAI-created draft (draft={pr.get('draft')!r}) -- refusing to silently attribute it to this task."
+            )
+        expected_sha = edit_info.get("commit_sha")
+        actual_sha = (pr.get("head") or {}).get("sha")
+        if expected_sha is None or actual_sha != expected_sha:
+            raise TaskExecutionError(
+                f"Existing draft PR #{pr.get('number')}'s head commit ({actual_sha!r}) does not match this task's own "
+                f"real pushed commit ({expected_sha!r}) -- refusing to treat it as this task's own work result."
+            )
     else:
         pr = await client.create_pull_request(title=title, body=body, head=head_branch, base=base_branch)
+        if pr.get("draft") is not True:
+            # Defense in depth: create_pull_request() always requests draft:true, but a
+            # response that doesn't confirm it (an account/App permission quirk, a future
+            # GitHub API change) must not be silently trusted -- fail closed rather than
+            # assume the request was honored.
+            raise TaskExecutionError(
+                f"GitHub did not confirm PR #{pr.get('number')} as a draft (draft={pr.get('draft')!r}) despite "
+                f"create_pull_request() requesting one -- refusing to treat this as a safe MainAI-owned result."
+            )
     return {
         "proposed": False,
         "pull_request_number": pr.get("number"),
@@ -551,7 +631,7 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
                     db.rollback()
                     return
             elif task.task_type == "run_tests":
-                work_result = _handle_run_tests(task)
+                work_result = _handle_run_tests(db, task, goal=goal)
             elif task.task_type == "open_pr":
                 work_result = await _handle_open_pr(db, task, goal)
             else:
@@ -696,7 +776,7 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
         # Same ordering discipline as the outcome except-block below: this function's own
         # write is flushed (not committed) FIRST, and mark_cancelled()'s own commit is called
         # LAST, so a crash between the two loses nothing durable either way.
-        _finalize_cancelled_task(db, task, reason="cooperative_cancel")
+        finalize_cancelled_task(db, task, reason="cooperative_cancel")
         try:
             mark_cancelled(db, job, worker_id=worker_id, lease_generation=lease_generation)
         except JobLeaseLostError:
@@ -829,7 +909,7 @@ def _finalize_task_outcome(
         if locked.mainai_job_id is not None:
             job = db.get(MainAIJob, locked.mainai_job_id, populate_existing=True)
             if job is not None and job.cancel_requested:
-                _finalize_cancelled_task(
+                finalize_cancelled_task(
                     db,
                     locked,
                     reason="cancel_requested_beats_success_finalize",
@@ -877,7 +957,7 @@ def _finalize_task_outcome(
     _rollup_goal_after_task_boundary(db, task=task)
 
 
-def _finalize_cancelled_task(db: Session, task: MainAITask, *, reason: str) -> None:
+def finalize_cancelled_task(db: Session, task: MainAITask, *, reason: str) -> None:
     """V0.3: the cooperative-cancel counterpart to `_finalize_task_outcome()` -- a genuinely
     DIFFERENT terminal outcome, never routed through that function, because a cancel is not a
     failure: it must never count against `task.attempts`, schedule a `next_retry_at`, or record

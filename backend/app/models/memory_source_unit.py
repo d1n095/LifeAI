@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Text, func
+from sqlalchemy import DateTime, Enum, ForeignKey, Text, func, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -18,14 +18,19 @@ class SourceKind(str, enum.Enum):
     never a generic 'document' — see §4.8's "Dokumentgranularitet".
 
     `message` is S1C (docs/LIFE_SOURCE_FOUNDATION_BOOTSTRAP.md, migration 0037) — see
-    message_source_units below. Future source kinds (media_segment, ...) follow the identical
-    pattern: a new enum value here plus a new subtype table, never a nullable column bolted
-    onto an existing subtype."""
+    message_source_units below. `repository_file` is S1D (migration 0072 on the
+    0069-composition integration branch; 0069 on its own PR branch,
+    docs/LIFE_PROJECT_KNOWLEDGE_INGESTION_DESIGN.md §4) — see RepositoryFileSourceUnit below;
+    identified by (repo_identity, file_path, commit_sha), never a document_id, since a
+    git-tracked repository file has never been uploaded through the Library pipeline. Future
+    source kinds (media_segment, ...) follow the identical pattern: a new enum value here plus
+    a new subtype table, never a nullable column bolted onto an existing subtype."""
 
     document_chunk = "document_chunk"
     document_version = "document_version"
     document_record = "document_record"
     message = "message"
+    repository_file = "repository_file"
 
 
 class SourceRole(str, enum.Enum):
@@ -97,6 +102,12 @@ class MemorySourceUnit(Base):
     """
 
     __tablename__ = "memory_source_units"
+    __table_args__ = (
+        # Model parity with migration 0037: identity dedup is enforced by the DB via
+        # uq_msu_owner_identity — declared here too so create_all-based test databases
+        # carry the SAME invariant (same pattern as the billing CHECK parity).
+        UniqueConstraint("owner_id", "source_identity_key", name="uq_msu_owner_identity"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
@@ -205,3 +216,35 @@ class MessageSourceUnit(Base):
 
     message_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("messages.id"), index=True)
     conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("conversations.id"), index=True)
+
+
+class RepositoryFileSourceUnit(Base):
+    """S1D (migration 0072 on the 0069-composition integration branch; 0069 on its own PR
+    branch, docs/LIFE_PROJECT_KNOWLEDGE_INGESTION_DESIGN.md §4) — a git-tracked
+    repository file at one exact commit, as a THIRD `MemorySourceUnit` subtype, the same
+    exclusive-arc pattern `DocumentSourceUnit`/`MessageSourceUnit` already established twice
+    (composite FK to `memory_source_units(id, owner_id, source_kind)`, every field permanently
+    immutable via `trg_rfsu_guard_update`, delete forbidden outside account erasure via
+    `trg_rfsu_no_delete`).
+
+    Identified by `(repo_identity, file_path, commit_sha)` — never a `document_id`: this
+    content was never uploaded through the Library pipeline. `commit_sha` is DB-CHECK-enforced
+    (`ck_rfsu_commit_sha_format`) to be a real, resolved 40-hex-character git SHA, never "HEAD"
+    or a branch name. A new commit touching the same `file_path` is always a NEW, separate row
+    (git's own history already is this architecture's version history) — never an update of an
+    existing one; `trg_rfsu_validate_fields` additionally verifies, for `exact` snapshots, that
+    `content_hash` genuinely is `sha256(content_text)` (no external live table exists to
+    cross-check against, unlike `document_chunks`/`messages` — `content_text` itself, captured
+    once from the real git blob at ingest time, IS the durable record)."""
+
+    __tablename__ = "repository_file_source_units"
+
+    memory_source_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("memory_source_units.id"), primary_key=True
+    )
+    owner_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    source_kind: Mapped[SourceKind] = mapped_column(Enum(SourceKind))
+
+    repo_identity: Mapped[str] = mapped_column(Text)
+    file_path: Mapped[str] = mapped_column(Text)
+    commit_sha: Mapped[str] = mapped_column(Text)

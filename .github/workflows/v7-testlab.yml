@@ -1,0 +1,56 @@
+name: V7 isolated integration test lab
+
+# Manual only: this job builds images, pulls local models and can run a four-hour soak.
+# It never references production secrets, volumes or deployments.
+on:
+  workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: "Reliability duration; 14400 is the F23 requirement"
+        required: false
+        default: "14400"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v7-testlab-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  testlab:
+    name: Isolated lab acceptance, soak and gate
+    # Playwright 1.56.1 has no Chromium build for ubuntu-26.04; keep the supported image.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      PYTHON: python3
+      TESTLAB_DURATION_SECONDS: ${{ inputs.duration_seconds }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install reproducible host dependencies
+        run: bash scripts/testlab/install_deps.sh
+
+      - name: Run isolated lab
+        run: bash scripts/testlab/ci.sh
+
+      - name: Upload exact-SHA evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v7-testlab-evidence
+          path: delivery/v7-testlab/evidence
+          if-no-files-found: warn

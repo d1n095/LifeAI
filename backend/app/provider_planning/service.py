@@ -19,7 +19,7 @@ from app.mainai_execution.checkpoint import (
     record_checkpoint,
 )
 from app.models.mainai_execution import MainAIGoal, MainAITask
-from app.models.usage import UsageLog
+from app.billing import record_usage as record_usage_event
 from app.models.work_intelligence import WorkStrategyExecution
 from app.providers.base import Message, ProviderError
 from app.providers.pricing import estimate_cost
@@ -106,10 +106,36 @@ PROVIDER_SYSTEM_PROMPT = (
 class RegistryPlanningAdapter:
     """Thin adapter over the canonical provider registry; no provider registry duplication."""
 
-    def __init__(self, db, *, provider_name=None, model=None):
+    def __init__(
+        self,
+        db,
+        *,
+        owner_id,
+        provider_name=None,
+        model=None,
+        task_id=None,
+        goal_id=None,
+        job_id=None,
+    ):
         self.db = db
+        self.owner_id = owner_id
+        if provider_name is None and model is None:
+            # plan_with_provider() must reserve provider spend against an explicit
+            # provider+model before it invokes anything. The default adapter previously
+            # left both unset, so every ordinary Supervisor planning call parked as
+            # PROVIDER_SPEND_NOT_AUTHORIZED forever even with a live founder grant. Resolve
+            # the same active chat provider the canonical fallback chain would use; callers
+            # that pass an explicit provider/model keep full control.
+            from app.providers.registry import resolve_active
+
+            active_provider, active_model = resolve_active(db, role="chat")
+            provider_name = active_provider.name
+            model = active_model
         self.provider_name = provider_name
         self.model = model
+        self.task_id = task_id
+        self.goal_id = goal_id
+        self.job_id = job_id
 
     async def propose(self, request_payload, *, timeout_seconds, max_output_bytes):
         from app.providers.registry import chat_with_fallback, get_provider
@@ -125,6 +151,26 @@ class RegistryPlanningAdapter:
                     "An explicit planning provider requires an explicit model.",
                     category="not_configured",
                 )
+            from app.egress_policy import enforce_egress_policy
+            from app.egress_policy.service import resolve_egress_owner
+
+            owner_id = resolve_egress_owner(
+                self.db, owner_id=self.owner_id, worker_lease=None
+            )
+            payload = [{"role": m.role, "content": m.content} for m in messages]
+            redacted = enforce_egress_policy(
+                self.db,
+                owner_id=owner_id,
+                provider=self.provider_name,
+                model=self.model,
+                purpose="development_planning",
+                requested_by="provider_planning.registry_adapter.explicit",
+                payload=payload,
+                task_id=self.task_id,
+                goal_id=self.goal_id,
+                job_id=self.job_id,
+            )
+            messages = [Message(role=m["role"], content=m["content"]) for m in redacted]
             provider = get_provider(self.provider_name)
             result = await provider.chat(
                 messages,
@@ -136,8 +182,15 @@ class RegistryPlanningAdapter:
             result, _attempted = await chat_with_fallback(
                 self.db,
                 messages,
+                owner_id=self.owner_id,
+                purpose="development_planning",
+                requested_by="provider_planning.registry_adapter",
+                task_id=self.task_id,
+                goal_id=self.goal_id,
+                job_id=self.job_id,
                 timeout=timeout_seconds,
                 max_tokens=max_output_bytes // 4,
+                effect_guard=True,
             )
         return ProviderResponse(
             content=result.content,
@@ -508,19 +561,18 @@ def _record_participation(
         usage = response.raw_usage or {}
         prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
         completion_tokens = int(usage.get("completion_tokens", 0) or 0)
-        db.add(
-            UsageLog(
-                user_id=request.owner_id,
-                conversation_id=None,
-                role="planning",
-                provider=response.provider,
-                model=response.model,
-                prompt_tokens=max(prompt_tokens, 0),
-                completion_tokens=max(completion_tokens, 0),
-                cost_usd=estimate_cost(
-                    response.provider, response.model, prompt_tokens, completion_tokens
-                ),
-            )
+        # Revenue & Compute Engine: the SINGLE accounting writer (audit row + rollups).
+        record_usage_event(
+            db,
+            user_id=request.owner_id,
+            tenant_id=None,
+            role="planning",
+            provider=response.provider,
+            model=response.model,
+            prompt_tokens=max(prompt_tokens, 0),
+            completion_tokens=max(completion_tokens, 0),
+            agent="provider-specialist",
+            task=getattr(request, "task_kind", None) or "provider_planning",
         )
     return specialist, evidence, idea_ids
 
@@ -638,7 +690,13 @@ async def plan_with_provider(
         },
     )
     selected_adapter = adapter or RegistryPlanningAdapter(
-        db, provider_name=provider_name, model=model
+        db,
+        owner_id=request.owner_id,
+        provider_name=provider_name,
+        model=model,
+        task_id=request.task_id,
+        goal_id=request.goal_id,
+        job_id=request.job_id,
     )
     planned_provider = (
         provider_name
@@ -804,18 +862,54 @@ async def plan_with_provider(
     # the process, never assumed satisfied just because spend was authorized above.
     from app.egress_policy import EgressDeniedError, enforce_egress_policy
 
+    adapter_payload = payload
+    if not isinstance(selected_adapter, RegistryPlanningAdapter):
+        try:
+            adapter_payload = enforce_egress_policy(
+                db,
+                owner_id=request.owner_id,
+                provider=planned_provider,
+                model=planned_model,
+                purpose="development_planning",
+                requested_by="provider_planning.plan_with_provider",
+                payload=payload,
+                task_id=request.task_id,
+                goal_id=request.goal_id,
+                job_id=request.job_id,
+            )
+        except EgressDeniedError as exc:
+            if spend_reserved:
+                release_provider_spend_call(
+                    db,
+                    owner_id=request.owner_id,
+                    source_ref=spend_source_ref,
+                    evidence={"request_hash": request_hash, "phase": "egress_denied"},
+                )
+            detail = {
+                "request_hash": request_hash,
+                "reason": exc.reason,
+                "provider_hint": planned_provider,
+                "model_hint": planned_model,
+                "context_set_id": str(context_set.id),
+                "unrelated_deterministic_work_preserved": True,
+            }
+            cp = _checkpoint(db, request, "EGRESS_DENIED", detail)
+            return PlanningResult(
+                "EGRESS_DENIED",
+                detail,
+                checkpoint_id=cp.id,
+                context_set_id=context_set.id,
+            )
+
+    started = time.monotonic()
     try:
-        payload = enforce_egress_policy(
-            db,
-            owner_id=request.owner_id,
-            provider=planned_provider,
-            model=planned_model,
-            purpose="development_planning",
-            requested_by="provider_planning.plan_with_provider",
-            payload=payload,
-            task_id=request.task_id,
-            goal_id=request.goal_id,
-            job_id=request.job_id,
+        response = await asyncio.wait_for(
+            selected_adapter.propose(
+                adapter_payload,
+                timeout_seconds=limits.timeout_seconds,
+                max_output_bytes=limits.max_output_bytes,
+            ),
+            timeout=limits.timeout_seconds + 1,
         )
     except EgressDeniedError as exc:
         if spend_reserved:
@@ -839,17 +933,6 @@ async def plan_with_provider(
             detail,
             checkpoint_id=cp.id,
             context_set_id=context_set.id,
-        )
-
-    started = time.monotonic()
-    try:
-        response = await asyncio.wait_for(
-            selected_adapter.propose(
-                payload,
-                timeout_seconds=limits.timeout_seconds,
-                max_output_bytes=limits.max_output_bytes,
-            ),
-            timeout=limits.timeout_seconds + 1,
         )
     except Exception as exc:  # noqa: BLE001 - provider boundary must checkpoint every failure
         # Window B: once propose() is entered, release only if failure is proven

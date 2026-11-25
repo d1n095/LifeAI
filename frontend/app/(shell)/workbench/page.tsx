@@ -32,9 +32,18 @@ export default function WorkbenchPage() {
   const [taskCreated, setTaskCreated] = useState(false);
 
   useEffect(() => {
-    api.listProjects().then(setProjects).catch(() => {});
-    api.listLibrary().then(setSources).catch(() => {});
+    Promise.all([api.listProjects(), api.listLibrary()])
+      .then(([projectRows, sourceRows]) => {
+        setProjects(projectRows);
+        setSources(sourceRows);
+      })
+      .catch((e: any) => setError(e.message));
   }, []);
+
+  // A source from another project must never remain selectable after the founder narrows the
+  // analysis to a project. The backend filters by both ids, but leaving a stale document id in
+  // the request would silently produce zero grounded results instead of a clear UI state.
+  const visibleSources = projectId ? sources.filter((source) => source.project_id === projectId) : sources;
 
   async function analyze() {
     if (!question.trim() || analyzing) return;
@@ -110,7 +119,10 @@ export default function WorkbenchPage() {
           <select
             id="wb-project"
             value={projectId}
-            onChange={(e) => setProjectId(e.target.value)}
+            onChange={(e) => {
+              setProjectId(e.target.value);
+              setDocumentId("");
+            }}
             className="rounded-lg border border-border bg-base px-3 py-2 text-sm"
           >
             <option value="">Alla projekt</option>
@@ -118,6 +130,11 @@ export default function WorkbenchPage() {
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>
+          {projectId && (
+            <Link href={`/projects/${projectId}`} className="self-center text-xs text-accent2 hover:underline">
+              Öppna projektet
+            </Link>
+          )}
 
           <label className="sr-only" htmlFor="wb-document">Källa</label>
           <select
@@ -126,8 +143,8 @@ export default function WorkbenchPage() {
             onChange={(e) => setDocumentId(e.target.value)}
             className="rounded-lg border border-border bg-base px-3 py-2 text-sm"
           >
-            <option value="">Alla källor</option>
-            {sources.map((s) => (
+            <option value="">{projectId ? "Alla källor i projektet" : "Alla källor"}</option>
+            {visibleSources.map((s) => (
               <option key={s.id} value={s.id}>{s.title}</option>
             ))}
           </select>

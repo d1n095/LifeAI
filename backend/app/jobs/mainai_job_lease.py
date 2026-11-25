@@ -41,12 +41,14 @@ _CLAIM_SQL = text("""
         lease_generation = lease_generation + 1,
         lease_expires_at = now() + make_interval(secs => :lease_seconds),
         last_heartbeat_at = now(),
-        started_at = COALESCE(started_at, now())
+        started_at = COALESCE(started_at, now()),
+        retry_count = COALESCE(retry_count, 0) + CASE WHEN status = 'running' THEN 1 ELSE 0 END
     WHERE id = (
         SELECT id FROM mainai_jobs
         WHERE status = ANY(:claimable_statuses)
            OR (
                 status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < now()
+                AND COALESCE(retry_count, 0) < COALESCE(max_retries, 3)
                 -- V0.2 (migration 0034): task_execution is the one job type with real,
                 -- semi-irreversible external side effects (local git commits, GitHub pushes
                 -- -- see app/mainai_execution/worktree.py) -- a dead one must never be
@@ -254,7 +256,7 @@ def mark_job_superseded(db: Session, *, job_id: uuid.UUID, superseded_by_job_id:
 
 
 class JobNotDeclinableError(Exception):
-    """Raised by mark_job_failed_after_governed_recovery_decline() when the target job is not
+    """Raised by mark_job_failed_after_recovery_decline() when the target job is not
     actually a dead job eligible for this outcome -- the identical TaskLiveness.dead
     re-verification mark_job_superseded() performs, for the same reason: recording a terminal
     outcome for a job that might still be legitimately alive (or already honestly terminal)
@@ -262,19 +264,29 @@ class JobNotDeclinableError(Exception):
     app/mainai_execution/recovery_takeover.py, the only caller."""
 
 
-def mark_job_failed_after_governed_recovery_decline(db: Session, *, job_id: uuid.UUID) -> None:
+def mark_job_failed_after_recovery_decline(db: Session, *, job_id: uuid.UUID) -> None:
     """The honest terminal outcome for a dead `task_execution` job when execute_takeover()
-    declines to hand it to V0.1's dispatch_ready_task() because the owning goal is (or has
-    ever been) execution-envelope-governed -- see recovery_takeover.py's
-    `_decline_takeover_for_governed_goal()`, the only caller.
+    declines to hand it to V0.1's dispatch_ready_task() -- two callers, same honest shape,
+    see recovery_takeover.py's `_decline_takeover_for_governed_goal()` and
+    `_decline_takeover_for_cancelled_task()`:
+
+      - the owning goal is (or has ever been) execution-envelope-governed, or
+      - the founder's own cancel_requested on this exact dead job was recorded before it
+        died, and reviving it under a fresh job would silently discard that cancellation
+        (Freebuff AV-1a/AV-2a finding: a founder's cancel request on a `running` task must
+        remain effective even if the job carrying it crashes before ever reaching one of
+        execution_job.py's own cooperative-cancel checkpoints).
+
+    (Renamed from `mark_job_failed_after_recovery_decline` -- same function, same
+    DB-level behavior, now honestly named for both callers instead of only the first.)
 
     Deliberately no `superseded_by_job_id`: this dead job is not being replaced by one
-    specific new job right now the way a real takeover creates one -- the task it belonged to
-    goes back to `ready`, and the goal's OWN Supervisor tick creates whatever new job it
-    needs, on its own schedule, once it rediscovers the task, under its own re-validated
-    authority. There is no 1:1 successor to record, so `status = 'failed'` (not
-    `'superseded'`, which migration 0034's own CHECK ties to a non-null
-    `superseded_by_job_id`) is the correct, honest terminal status here.
+    specific new job right now the way a real takeover creates one -- in the governed case
+    the task goes back to `ready` for the goal's OWN Supervisor tick to redispatch under its
+    own re-validated authority; in the cancelled case the task is finalized `cancelled` and
+    nothing will ever dispatch it again. There is no 1:1 successor to record either way, so
+    `status = 'failed'` (not `'superseded'`, which migration 0034's own CHECK ties to a
+    non-null `superseded_by_job_id`) is the correct, honest terminal status here.
 
     Reuses mark_job_superseded()'s exact TaskLiveness.dead re-verification shape (see that
     function's own docstring for why each of the two accepted branches is safe) so this

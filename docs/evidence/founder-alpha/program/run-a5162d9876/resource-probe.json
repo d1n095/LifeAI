@@ -1,0 +1,89 @@
+{
+  "generated_at": "2026-11-21T22:12:45.687369+00:00",
+  "commit": "6601fac3b83d29e6ac755affc2eac3abe1912d2c",
+  "environment": {
+    "database_url": "postgresql://postgres@127.0.0.1:55432/lifeos_program_a5162d9876",
+    "redis_url": "redis://@127.0.0.1:56379/14",
+    "port": 48473,
+    "python": "3.12.3"
+  },
+  "status": "PASS",
+  "blockers": [],
+  "startup_latency_s": 3.91,
+  "health_latency_ms": {
+    "p50": 31.74,
+    "p95": 48.52,
+    "max": 57.04
+  },
+  "login_latency_ms": 173.99,
+  "login_status": 200,
+  "api_latency_ms": {
+    "/api/documents": 14.74,
+    "/api/conversations": 9.73,
+    "/api/mainai/project-status": 85.71
+  },
+  "api_status": {
+    "/api/documents": 200,
+    "/api/conversations": 200,
+    "/api/mainai/project-status": 200
+  },
+  "chat_latency_ms": 257.63,
+  "chat_status": 200,
+  "chat_reply_chars": 167,
+  "concurrency": {
+    "requests": 40,
+    "workers": 10,
+    "statuses": [
+      200
+    ],
+    "p50_ms": 243.01,
+    "p95_ms": 330.02
+  },
+  "memory": {
+    "rss_before_mb": 187.6,
+    "rss_after_mb": 187.8,
+    "delta_mb": 0.2,
+    "repeated_reads": 100,
+    "note": "RSS delta is an observation, not proof of a leak; GC/allocator behavior varies.",
+    "process_tree_rss_mb": 187.8
+  },
+  "cpu": {
+    "window_s": 3.917,
+    "process_tree_cpu_seconds": 4.06,
+    "process_tree_cpu_percent": 103.7
+  },
+  "database": {
+    "status": "PASS",
+    "database": "lifeos_program_a5162d9876",
+    "size_bytes": 22010903,
+    "connections": 6,
+    "tables": {
+      "users": 2,
+      "documents": 1,
+      "document_chunks": 1,
+      "conversations": 3,
+      "messages": 6,
+      "memory_source_units": 7
+    },
+    "queues": {
+      "knowledge_import_jobs": {
+        "completed": 1
+      },
+      "mainai_jobs": {
+        "cancelled": 1,
+        "completed": 1
+      }
+    },
+    "slow_query_stats": {
+      "status": "BLOCKED",
+      "reason": "pg_stat_statements not installed"
+    }
+  },
+  "disk": {
+    "free_bytes": 78226411520,
+    "total_bytes": 92487929856,
+    "storage_root": "/tmp/lifeai-resource-probe-x_gm5kx9/storage",
+    "storage_root_bytes": 0
+  },
+  "log_path": "/tmp/lifeai-resource-probe-x_gm5kx9/backend.log"
+}

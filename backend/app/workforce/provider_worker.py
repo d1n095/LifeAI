@@ -16,6 +16,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.mainai_execution.approval import ApprovalRequiredError, require_task_approval
+from app.models.mainai_execution import MainAIGoal, MainAITask, MainAITaskStatus
 from app.models.workforce import WorkforceAgentProfile, WorkforceAssignment, WorkforceContextPackage
 from app.workforce.activation_gates import (
     REQUIRED_ACTIVATION_GATES,
@@ -29,6 +31,7 @@ from app.workforce.activation_gates import (
 )
 from app.workforce.authority import require_live_assignment_authority
 from app.workforce.broker import DelegationBrokerError, ingest_untrusted_result
+from app.incidents.service import record_incident_standalone
 from app.workforce.failure import mark_failure, record_checkpoint
 from app.workforce.injection import scrub_authority_mutations
 from app.workforce.kill_switch import assert_not_killed
@@ -151,6 +154,189 @@ def _in_process_worker(envelope: WorkerRequestEnvelope) -> dict:
     }
 
 
+# Task states that remain legitimate real-dispatch targets. Everything else -- cancelled,
+# failed, completed, blocked, or a transient retryable_failed awaiting the task-level retry
+# orchestrator's own scan (app/jobs/retry.py; not workforce's concern) -- fails closed. This
+# is the closest existing equivalent this codebase has to "rejected/revoked": there is no
+# separate approval-revocation event type (MainAITaskEventType is append-only; approval,
+# once granted, is never un-granted), so a task that was approved and then cancelled is the
+# modeled way "the founder no longer wants this dispatched" is expressed.
+_WORKFORCE_DISPATCHABLE_TASK_STATUSES = frozenset(
+    {
+        MainAITaskStatus.pending,
+        MainAITaskStatus.ready,
+        MainAITaskStatus.running,
+        MainAITaskStatus.waiting_external,
+        MainAITaskStatus.waiting_ci,
+    }
+)
+
+
+def require_live_task_authorization_for_workforce_dispatch(db: Session, *, owner_id: uuid.UUID, assignment: WorkforceAssignment) -> None:
+    """The per-task gate `execute_workforce_assignment()`'s `activate_provider` path was
+    missing (see docs/LIFE_EXECUTION_ARCHITECTURE_CONVERGENCE_RECOMMENDATION.md and the
+    executable proof in tests/backend/mainai/test_execution_authority_convergence_gap.py).
+    Reuses app.mainai_execution.approval.require_task_approval() -- the SAME real gate
+    app.agent_coordination.dispatch.evaluate_dispatch_readiness() already delegates to --
+    never a second approval engine. Always re-queries the task fresh (never trusts a result
+    computed earlier by this or any other call), so a cancellation or any other state change
+    that happens between an earlier readiness check and this call is caught here, not missed.
+
+    Raises ProviderActivationBlocked -- the existing vocabulary for "this workforce dispatch
+    cannot proceed" -- for every refusal reason: missing task link, cross-tenant task,
+    non-dispatchable task status, or no recorded approval. Never silently treats "nothing to
+    check" as "approved".
+
+    TRANSACTIONAL AUTHORIZATION (closes the gap docs/LIFE_WORKFORCE_AUTHORIZATION_RACE_WINDOW.md
+    names as unresolved -- see that file for the full threat model and why a sequential
+    re-check alone does not establish atomicity): the task lookup below takes a real
+    `SELECT ... FOR UPDATE` row lock, held for the remainder of the CALLER's transaction (this
+    function never commits or rolls back `db` itself). This is the exact same lock
+    `app.mainai_execution.executor._lock_task()` already takes on the identical row for
+    `cancel_task()`/`dispatch_ready_task()`/`retry_task()` -- deliberately reusing the lock
+    idiom that module's own hardening pass already established, not inventing a second one.
+    A concurrent `cancel_task()` attempting to lock the SAME task row blocks until this
+    function's caller's transaction ends (commit or rollback); whichever side acquires the
+    lock first determines the outcome the other side sees once it proceeds. This is the
+    smallest correct primitive for "prevent a revoked authorization from being accepted at
+    the execution boundary": as long as whatever eventually performs the real effect stays
+    inside the SAME transaction as this check (never committing in between), no concurrent
+    revocation can land between the check and the effect. See
+    tests/backend/mainai/test_workforce_task_authorization_concurrency.py for the genuine
+    two-connection proof, mirroring the pattern PR #379 already established for Blueprint's
+    own TOCTOU-safe approval (`test_blueprint_approval_concurrency.py`)."""
+    task_id_raw = (assignment.provenance or {}).get("mainai_task_id")
+    if not task_id_raw:
+        raise ProviderActivationBlocked("assignment has no linked MainAI task -- fails closed, never treated as pre-approved")
+    try:
+        task_id = uuid.UUID(str(task_id_raw))
+    except ValueError as exc:
+        raise ProviderActivationBlocked(f"assignment's linked task id is malformed: {task_id_raw!r}") from exc
+
+    # Filtered by owner_id in the query itself (not compared only after fetching) -- an
+    # explicit tenant boundary at the application layer, defense-in-depth alongside RLS.
+    # with_for_update(): see the transactional-authorization note above.
+    task = (
+        db.query(MainAITask)
+        .filter(MainAITask.id == task_id, MainAITask.owner_id == owner_id)
+        .with_for_update()
+        .first()
+    )
+    if task is None:
+        raise ProviderActivationBlocked(f"linked task {task_id} does not resolve to a real task owned by this tenant -- fails closed")
+
+    if task.status not in _WORKFORCE_DISPATCHABLE_TASK_STATUSES:
+        raise ProviderActivationBlocked(f"task {task.id} is {task.status.value}, not a live dispatch target -- fails closed")
+
+    goal = db.query(MainAIGoal).filter(MainAIGoal.id == task.goal_id, MainAIGoal.owner_id == owner_id).first()
+    if goal is None:
+        raise ProviderActivationBlocked(f"task {task.id}'s goal does not resolve for this tenant -- fails closed")
+
+    try:
+        require_task_approval(db, task=task, goal_approval_policy=goal.approval_policy)
+    except ApprovalRequiredError as exc:
+        raise ProviderActivationBlocked(f"task {task.id} requires founder approval before workforce dispatch") from exc
+def _execute_consultation_assignment(
+    db: Session,
+    *,
+    owner_id: uuid.UUID,
+    assignment: WorkforceAssignment,
+    profile: WorkforceAgentProfile,
+    envelope: WorkerRequestEnvelope,
+    goal_text: str,
+    instructions: str | None,
+    goal_id: uuid.UUID | None,
+    task_id: uuid.UUID | None,
+    job_id: uuid.UUID | None,
+    notes: list[str],
+) -> WorkerExecutionReceipt:
+    """Consultation branch of execute_workforce_assignment — a thin adapter over
+    app/openai_consult/mainai.consult_for_mainai_sync. NO second invocation stack: the
+    answer comes back through the same scrub → broker-ingestion → checkpoint pipeline as
+    any other worker output, and the egress disclosure ledger (with this assignment's
+    goal/task/job ids) is written by the consultation core itself.
+
+    Controlled error recovery: a PROVIDER-infrastructure failure (timeout, unreachable,
+    provider 5xx, contract-invalid answer → ConsultationServiceError) falls back to the
+    LOCAL in-process worker so the assignment still completes on the primary execution
+    path. Policy and authorization refusals (disabled, unauthorized, activation gates,
+    kill switch, recursion, budget, egress) are NOT caught — they fail closed."""
+    from app.openai_consult.mainai import consult_for_mainai_sync
+    from app.openai_consult.service import ConsultationServiceError
+
+    provider_invoked = False
+    provider_name = None
+    model_id = None
+    spend_reserved = False
+    spend_settled = False
+    try:
+        result, _stats = consult_for_mainai_sync(
+            db,
+            owner_id=owner_id,
+            goal_text=goal_text,
+            instructions=instructions,
+            goal_id=goal_id,
+            task_id=task_id,
+            job_id=job_id,
+            agent_key=profile.agent_key if profile is not None else None,
+        )
+        provider_invoked = True
+        provider_name = "openai"
+        model_id = result.model
+        spend_reserved = True
+        spend_settled = True
+        raw: dict[str, Any] = {
+            "answer": result.output_text,
+            "model": result.model,
+            "cost_usd": result.cost_usd,
+            "usage": {
+                "input_tokens": result.usage.input_tokens,
+                "output_tokens": result.usage.output_tokens,
+                "total_tokens": result.usage.total_tokens,
+            },
+        }
+        notes.append("consultation_completed")
+    except ConsultationServiceError:
+        notes.append("consultation_unavailable_local_fallback")
+
+        # The answer (or the absence of one) is UNTRUSTED DATA either way — same pipeline.
+        raw = _in_process_worker(envelope)
+
+    cleaned, stripped = scrub_authority_mutations(raw)
+    if stripped:
+        notes.append(f"scrubbed:{','.join(stripped)}")
+
+    ingest_untrusted_result(db, owner_id=owner_id, assignment=assignment, payload=cleaned)
+    record_checkpoint(
+        db,
+        owner_id=owner_id,
+        assignment=assignment,
+        checkpoint_kind="progress",
+        partial_result=cleaned,
+        external_effect_state="none_proven",
+        provenance={"provider_invoked": provider_invoked, "consultation": provider_invoked},
+    )
+
+    receipt_notes = notes + ["consultation_egress_ledger_recorded"] if provider_invoked else notes
+    return WorkerExecutionReceipt(
+        assignment_id=assignment.id,
+        provider_invoked=provider_invoked,
+        provider_name=provider_name,
+        model_id=model_id,
+        timeout=False,
+        cancelled=False,
+        raw_output_scrubbed=cleaned,
+        verification_status=assignment.verification_status,
+        # Budget reserve/settle happened inside the consultation core against the owner's
+        # shared daily consultation budget (not the goal-bound spend-authorization kernel,
+        # which stays reserved for goal-bound agent execution).
+        spend_reserved=spend_reserved,
+        spend_settled=spend_settled,
+        external_effect_state="none_proven",
+        notes=receipt_notes,
+    )
+
+
 def execute_workforce_assignment(
     db: Session,
     *,
@@ -163,6 +349,15 @@ def execute_workforce_assignment(
     model_id: str | None = None,
     timeout_seconds: float = 60.0,
     cancel: bool = False,
+    # Additive, independently authorized consultation path (app/openai_consult/mainai.py).
+    # consultation_mode=False keeps this function byte-for-byte identical to its
+    # pre-consultation behavior: the in-process worker stays the primary execution path
+    # and the staged provider path below is untouched.
+    consultation_mode: bool = False,
+    consultation_instructions: str | None = None,
+    consultation_goal_id: uuid.UUID | None = None,
+    consultation_task_id: uuid.UUID | None = None,
+    consultation_job_id: uuid.UUID | None = None,
 ) -> WorkerExecutionReceipt:
     """Run worker for an assignment.
 
@@ -219,6 +414,16 @@ def execute_workforce_assignment(
             external_effect_state="none_proven",
             partial_result={"cancelled_before_invoke": True},
         )
+        record_incident_standalone(
+            owner_id=owner_id,
+            error_code="worker_restart",
+            component="workforce.provider_worker",
+            severity="medium",
+            summary="Workforce-uppdrag avbröts före provider-anrop",
+            correlation_id=str(assignment.id),
+            app_version="0.1.0",
+            details={"assignment_id": str(assignment.id), "failure_class": "worker_restart"},
+        )
         return WorkerExecutionReceipt(
             assignment_id=assignment.id,
             provider_invoked=False,
@@ -234,9 +439,32 @@ def execute_workforce_assignment(
             notes=["cancelled_before_invoke"],
         )
 
+    if consultation_mode:
+        # MainAI-invoked OpenAI consultation via app/openai_consult/mainai.py — reuses the
+        # SAME gates as the founder path (egress ledger, budgets, safe errors) PLUS this
+        # orchestration's own authorization (mainai flag + activation gates + recursion
+        # guards). Consultation refusals raise (fail loud — nothing was invoked); the
+        # answer is ingested as UNTRUSTED DATA exactly like every other worker output.
+        return _execute_consultation_assignment(
+            db,
+            owner_id=owner_id,
+            assignment=assignment,
+            profile=profile,
+            envelope=envelope,
+            goal_text=goal_text,
+            instructions=consultation_instructions,
+            goal_id=consultation_goal_id,
+            task_id=consultation_task_id,
+            job_id=consultation_job_id,
+            notes=notes,
+        )
+
     if activate_provider:
         # Single authoritative gate object — UNKNOWN != VERIFIED → FAIL CLOSED.
         require_activation_allowed()
+        # Per-task founder-approval gate — delegates to the same real authority
+        # app.agent_coordination already uses; see the function's own docstring.
+        require_live_task_authorization_for_workforce_dispatch(db, owner_id=owner_id, assignment=assignment)
         if assignment.allow_execution_effects:
             raise ProviderActivationBlocked(
                 "Consequential execution effects refused for first provider-backed slice"
@@ -275,6 +503,16 @@ def execute_workforce_assignment(
             assignment=assignment,
             failure_class="provider_timeout",
             external_effect_state=external_effect_state,
+        )
+        record_incident_standalone(
+            owner_id=owner_id,
+            error_code="provider_timeout",
+            component="workforce.provider_worker",
+            severity="high",
+            summary="Provider-timeout under workforce-uppdrag",
+            correlation_id=str(assignment.id),
+            app_version="0.1.0",
+            details={"assignment_id": str(assignment.id), "failure_class": "provider_timeout"},
         )
         raw = {}
 
