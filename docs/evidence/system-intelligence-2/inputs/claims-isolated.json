@@ -1,0 +1,14 @@
+[
+  {
+    "source_id": "lifeai-memory-requirement",
+    "project_ref": "LifeAI",
+    "statement": "Add provenance to the memory engine",
+    "evidence": "docs/example/lifeai-memory.md"
+  },
+  {
+    "source_id": "lifeai-platform-memory-requirement",
+    "project_ref": "LifeAI Platform",
+    "statement": "Keep the existing provenance chain",
+    "evidence": "docs/example/lifeai-platform-memory.md"
+  }
+]

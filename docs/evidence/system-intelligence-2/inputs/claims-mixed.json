@@ -1,0 +1,14 @@
+[
+  {
+    "source_id": "lifeai-memory-requirement",
+    "project_ref": "LifeAI",
+    "statement": "Add provenance to the memory engine",
+    "evidence": "docs/example/lifeai-memory.md"
+  },
+  {
+    "source_id": "lifemusic-memory-requirement",
+    "project_ref": "LifeMusic",
+    "statement": "Add provenance to the memory engine",
+    "evidence": "docs/example/lifemusic-memory.md"
+  }
+]

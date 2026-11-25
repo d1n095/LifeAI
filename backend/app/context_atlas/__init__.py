@@ -12,6 +12,20 @@ from app.context_atlas.candidates import (
     find_candidates,
 )
 from app.context_atlas.capability_map import Capability, CapabilityMap, scan_capabilities
+from app.context_atlas.consistency import (
+    ConsistencyFinding,
+    ConsistencyReport,
+    Severity,
+    check_consistency,
+)
+from app.context_atlas.development_state import (
+    DevelopmentState,
+    Milestone,
+    RecoveryCandidate,
+    RecoveryReport,
+    load_development_state,
+    recover_development_state,
+)
 from app.context_atlas.git_evidence import (
     GitEvidence,
     GitRef,
@@ -35,6 +49,14 @@ from app.context_atlas.ownership import (
     OwnershipReport,
     WorkOwner,
     find_work_owners,
+)
+from app.context_atlas.project_scope import (
+    ProjectDefinition,
+    ProjectScopeReport,
+    ScopeClaim,
+    ScopeStatus,
+    project_scope_for_refs,
+    resolve_project_scope,
 )
 from app.context_atlas.recommendation import (
     CAPABILITY_ALIASES,
@@ -94,6 +116,17 @@ __all__ = [
     "Capability",
     "CapabilityFact",
     "CapabilityMap",
+    "ConsistencyFinding",
+    "ConsistencyReport",
+    "DevelopmentState",
+    "Milestone",
+    "ProjectDefinition",
+    "ProjectScopeReport",
+    "RecoveryCandidate",
+    "RecoveryReport",
+    "ScopeClaim",
+    "ScopeStatus",
+    "Severity",
     "ChangeImpact",
     "ContextClass",
     "ContextObservation",
@@ -126,18 +159,23 @@ __all__ = [
     "Verdict",
     "WorkOwner",
     "build_trace",
+    "check_consistency",
     "compare_sources",
     "find_candidates",
     "fingerprint",
     "find_work_owners",
     "forgotten_requirements",
+    "load_development_state",
     "load_pull_requests",
     "match_capabilities",
     "propose_relationship",
+    "project_scope_for_refs",
+    "recover_development_state",
     "recommend",
     "reconcile",
     "reconcile_disagreement",
     "scan_capabilities",
     "scan_local_git",
+    "resolve_project_scope",
     "scan_system_map",
 ]

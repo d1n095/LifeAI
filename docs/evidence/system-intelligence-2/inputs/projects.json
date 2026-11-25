@@ -1,0 +1,33 @@
+[
+  {
+    "project_id": "lifeai",
+    "name": "LifeAI",
+    "aliases": ["LifeAI Platform"]
+  },
+  {
+    "project_id": "l4tp",
+    "name": "L4TP",
+    "aliases": ["Life 4 The People"]
+  },
+  {
+    "project_id": "lifemusic",
+    "name": "LifeMusic",
+    "aliases": ["Life Music"]
+  },
+  {
+    "project_id": "lifeinvest",
+    "name": "LifeInvest",
+    "aliases": ["Life Invest"]
+  },
+  {
+    "project_id": "4thepeople",
+    "name": "4ThePeople",
+    "aliases": ["4 The People Commerce"]
+  },
+  {
+    "project_id": "legacy-crm",
+    "name": "Legacy CRM",
+    "aliases": ["Old CRM"],
+    "archived": true
+  }
+]

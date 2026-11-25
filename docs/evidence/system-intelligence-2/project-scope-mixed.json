@@ -1,0 +1,32 @@
+{
+  "status": "mixed",
+  "project_refs": [
+    "LifeAI",
+    "LifeMusic"
+  ],
+  "matched_project_ids": [
+    "lifeai",
+    "lifemusic"
+  ],
+  "unmatched_refs": [],
+  "ambiguous_refs": [],
+  "claims": [
+    {
+      "source_id": "lifeai-memory-requirement",
+      "project_ref": "LifeAI",
+      "statement": "Add provenance to the memory engine",
+      "evidence": "docs/example/lifeai-memory.md"
+    },
+    {
+      "source_id": "lifemusic-memory-requirement",
+      "project_ref": "LifeMusic",
+      "statement": "Add provenance to the memory engine",
+      "evidence": "docs/example/lifemusic-memory.md"
+    }
+  ],
+  "reason": "claims belong to more than one project; keep them separate even when their wording is similar",
+  "requires_review": true,
+  "allows_implementation": false,
+  "canonical_truth": null,
+  "execution_authorized": false
+}
