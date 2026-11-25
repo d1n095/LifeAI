@@ -37,7 +37,11 @@ C1/C2 verifierade med befintliga sviter (**73 passed**, 85,50 s) för projektmin
 omstart av arbetsstyrka och development state — ingen ny task engine byggdes.
 D1/D2: `mainai_executive/capability_truth.py` + `SystemIntelligence.capabilities(db)`
 redovisar implementerad/konfigurerad/tillgänglig/tillåten och den effektiva chat-kedjan
-utan att kontakta någon leverantör — **6 passed**, 28,62 s. `ruff check` → All checks passed. `git diff --check` rent.
+utan att kontakta någon leverantör — **6 passed**, 28,62 s.
+E1/E2: `chat/test_upload_to_grounded_answer.py` bevisar hela produktvägen — HTTP-upload →
+riktig worker-claim → ingest (chunk + embedding-space-stämpel) → chattfråga som grundas i
+dokumentet med korrekt källa, samt att en annan ägare aldrig kan ranka chunket — **2 passed**,
+10,50 s. `ruff check` → All checks passed. `git diff --check` rent.
 Hela atlas-sviten och hela backend-sviten kördes inte om.
 
 **Beroenden:** `6979c461` → `3680396a` → `790e2eaf` → `5b8c4630`. Endast
