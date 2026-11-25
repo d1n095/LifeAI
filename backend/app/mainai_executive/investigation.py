@@ -239,9 +239,18 @@ def investigate_engineering_request(
 
     dependency: dict[str, Any] | None = None
     if runtime is not None and missing["existing_modules"]:
+        module = missing["existing_modules"][0]
         try:
-            dependency = runtime.dependencies(missing["existing_modules"][0]).to_dict()
-            steps.append("dependencies_checked")
+            dependency_answer = runtime.dependencies(module)
+            dependency = dependency_answer.to_dict()
+            if dependency_answer.status == "found":
+                steps.append("dependencies_checked")
+            else:
+                # A not_found/unavailable answer is a result, not an observation that the
+                # dependency graph was actually inspected. Keep the distinction visible.
+                unverified.append(
+                    f"module_dependencies_{dependency_answer.status}:{module}"
+                )
         except Exception as exc:  # noqa: BLE001
             unverified.append(f"dependency_check_failed:{type(exc).__name__}")
 

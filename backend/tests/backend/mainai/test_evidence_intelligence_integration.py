@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 
-from app.context_atlas.runtime import SystemIntelligence
+from app.context_atlas.runtime import DependencyAnswer, SystemIntelligence
 from app.mainai_executive import (
     CRITERIA,
     ResourceSample,
@@ -403,3 +403,33 @@ def test_scenario_10_mocked_overlap_is_reported_without_interruption(superuser_d
     assert report["work_overlap"]["interrupted_agents"] is False
     assert report["execution_authorized"] is False
     assert "work_overlap_checked" in report["investigation_steps"]
+
+
+class _RuntimeWithMissingDependency:
+    """A runtime that can answer the dependency question only with a structured miss."""
+
+    def dependencies(self, module):
+        return DependencyAnswer(
+            module=module,
+            status="not_found",
+            limitations=("the module does not exist in this checkout",),
+        )
+
+
+def test_missing_dependency_is_not_reported_as_checked(
+    superuser_db, make_verified_user
+):
+    owner = _owner(make_verified_user, superuser_db)
+    report = investigate_engineering_request(
+        superuser_db,
+        owner_id=owner.id,
+        request="improve memory retrieval across founder notes",
+        runtime=_RuntimeWithMissingDependency(),
+    )
+
+    assert report["dependency_evidence"]["status"] == "not_found"
+    assert "dependencies_checked" not in report["investigation_steps"]
+    assert any(
+        item.startswith("module_dependencies_not_found:")
+        for item in report["unverified_areas"]
+    )
