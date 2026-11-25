@@ -27,8 +27,10 @@ PR-statusar. Inga nya tabeller, migrationer, nätverksanrop eller exekveringsrä
 
 **Faktiska resultat:** **19 passed, 61 warnings in 60.17 s** för de tre berörda sviterna
 (7 nya tester + 12 befintliga integrationsscenarier), **3 passed** (25,86 s) för
-`module_ownership` mot riktig Postgres/RLS, och chat-flödet verifierat med **22 passed**
-(45,91 s) för persistens/streaming. `ruff check` → All checks passed. `git diff --check` rent.
+`module_ownership` mot riktig Postgres/RLS, chat-flödet verifierat med **22 passed**
+(45,91 s) för persistens/streaming, och Scenario A mot **verklig lokal modell**
+(`qwen2.5:0.5b`): **1 passed** (28,30 s) — login → riktigt svar → två persisterade
+meddelanden → uppföljning → fyra meddelanden i historiken. `ruff check` → All checks passed. `git diff --check` rent.
 Hela atlas-sviten och hela backend-sviten kördes inte om.
 
 **Beroenden:** `6979c461` → `3680396a` → `790e2eaf` → `5b8c4630`. Endast
