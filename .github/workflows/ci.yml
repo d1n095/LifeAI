@@ -6,9 +6,10 @@ on:
     # Explicit prefixes (not a catch-all) — GitHub branch filters have no brace-expansion.
     branches: [main, "claude/**", "cursor/**", "codex/**", "security/**"]
   pull_request:
-    # Include agent integration bases so stacked PRs (e.g. cursor/* → claude/*) receive
-    # the same required Actions checks as PRs into main. Does not weaken or skip any job.
-    branches: [main, "claude/**", "cursor/**", "codex/**", "security/**", "transfer/freebuff-r15-20261119"]
+    # Include agent integration bases so stacked PRs (e.g. cursor/* → claude/*,
+    # freebuff/* → freebuff/*) receive the same required Actions checks as PRs into
+    # main. Does not weaken or skip any job, change permissions, or expose secrets.
+    branches: [main, "claude/**", "cursor/**", "codex/**", "security/**", "transfer/freebuff-r15-20261119", "freebuff/**"]
 
 # Cancel superseded runs on the same branch/PR to keep the queue short.
 concurrency:
@@ -430,6 +431,10 @@ jobs:
       E2E_FOUNDER_PASSWORD: TestFounderPassword123!
       E2E_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lifeos_e2e
       E2E_EMAIL_LOG_PATH: ${{ github.workspace }}/backend/e2e_test_emails.jsonl
+      # The app's production default is /var/lib/lifeai; the GitHub runner cannot create
+      # that path. Uploads must use a workspace-local storage root or every import fails
+      # before a job row exists (the UI then waits forever for a source that never appears).
+      STORAGE_ROOT: ${{ github.workspace }}/.e2e-uploads
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
