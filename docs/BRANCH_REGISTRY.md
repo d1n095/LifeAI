@@ -141,6 +141,40 @@ samt att WS-F:s fullständiga gap-register, en indexerad normaliserad hash, even
 inte en liveness-probe. Detaljer: `docs/CONTEXT_ATLAS.md`; evidens:
 `docs/evidence/context-atlas/`; competitor-analys: `docs/COMPETITOR_ENGINEERING_RESEARCH.md`.
 
+## Evidence-driven intelligensintegration (2026-11-24)
+
+**Branch:** `freebuff/evidence-intelligence-integration-20261124`, worktree `/tmp/si3`, bas
+`790e2eaf004528e72d249257f3de48fb3b83ece3` (System Intelligence runtime-branchen, som i sin
+tur innehåller `freebuff/life-workspaces` @ `8c7b335e`). Kodcommit `bdbaf7a4`.
+
+**Vad som ändrades:** `missing_piece.py` rapporterar nu explicita evidenslägen
+(`module_located` … `runtime_verified`) i stället för den import-härledda
+`likely_coverage_pct`. Nya read-only moduler: `investigation.py` (förstå-före-agera),
+`assumption_review.py` (invändning mot befintlig evidenshierarki, status `contradicted`),
+`engineering_decision.py` (sex alternativ, nio kriterier, aldrig ett påhittat medelvärde),
+`bottleneck.py` (endast `/proc` + disk, diagnos alltid `None` från ett prov) och
+`provider_eligibility.py` (deterministisk filterordning före all scoring; `policy_eligible`
+≠ `callable_models`). Elva nya integrationsscenarier; hela den påverkade sviten **24 passed**
+(46,84 s) mot riktig testdatabas/Redis. Ruff rent på ändrade filer.
+
+**Status:** endast lokal branch. Ingen push, ingen PR, ingen merge, ingen deploy,
+ingen VPS-/Docker-ändring, ingen migration (head kvar `0095`), `first_cycle_go=false`,
+`security/POLICY_LOCK.json` orörd. Ingen HTTP-route är kopplad; `app/main.py` är orörd.
+
+**Beroende och merge-ordning:** branchen är staplad på runtime-branchen `790e2eaf` och ska
+mergas efter (eller tillsammans med) den — inte före. Den rör ingen annan PR:s filer utom
+`backend/app/providers/registry.py`, som **alla** öppna PR:er #487–#506 också rör. Ändringen
+där är additiv (publikt `model_is_freshly_verified`-wrapper), men textuell konflikt är möjlig:
+rebase:a inte i förväg, utan först när den första av dessa PR:er faktiskt mergats
+(merge-regeln).
+
+**Blockeringar:** GitHub write-access saknas fortfarande (ingen credential helper, ingen
+token; `git ls-remote` visar ingen remote-branch och GitHub API visar 0 PR:er för branchen).
+Ingen CI-körning, ingen webbläsarjourney, ingen live-provider-call (scenario 7 stubbar
+providerkonfiguration; scenario 10 mockar overlap-payloaden). Detta är ärligt redovisat i
+`docs/EVIDENCE_INTELLIGENCE_INTEGRATION.md` och är inte samma sak som verifierad
+runtime-funktionalitet.
+
 ## Founder Alpha local AI — riktig lokal modell verifierad (2026-11-23)
 
 **Branch:** `freebuff/life-workspaces`, bas `04de94db7d7ccf51c23dd68670e789e8e9df6cde`.

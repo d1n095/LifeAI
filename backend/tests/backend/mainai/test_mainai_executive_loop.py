@@ -202,7 +202,13 @@ def test_missing_piece_detector_reuses_workforce(superuser_db):
     finding = detect_missing_pieces(founder_request="improve workforce routing intelligence")
     assert "app.workforce" in finding["existing_modules"]
     assert finding["propose_new_subsystem"] is False
-    assert finding["likely_coverage_pct"] >= 60
+    assert finding["percentage"] is None
+    assert finding["operational_claim"] is False
+    assert finding["evidence_states"]["app.workforce"] in (
+        "module_located",
+        "implementation_inspected",
+        "tests_observed",
+    )
 
 
 def test_observability_snapshot(superuser_db):

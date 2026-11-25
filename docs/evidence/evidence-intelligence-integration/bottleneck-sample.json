@@ -1,0 +1,64 @@
+{
+  "candidate_causes": [],
+  "captured_at": "2026-11-24T14:18:09.821047+00:00",
+  "diagnosis": null,
+  "diagnosis_withheld_because": "a single sample cannot distinguish CPU saturation, model size, context length, swapping, provider latency or competing workloads",
+  "execution_authorized": false,
+  "hardware_upgrade_justified": false,
+  "hardware_upgrade_note": "no single observation justifies a hardware purchase; collect a time series across the suspected window first",
+  "observations": [
+    {
+      "critical_threshold": 0.97,
+      "high_threshold": 0.9,
+      "observed": 0.6715,
+      "severity": "normal",
+      "signal": "memory_pressure",
+      "unit": "ratio"
+    },
+    {
+      "critical_threshold": 0.6,
+      "high_threshold": 0.25,
+      "observed": 0.3536,
+      "severity": "high",
+      "signal": "swap_used_ratio",
+      "unit": "ratio"
+    },
+    {
+      "critical_threshold": 2.5,
+      "high_threshold": 1.5,
+      "observed": 0.32,
+      "severity": "normal",
+      "signal": "load_per_cpu",
+      "unit": "ratio"
+    },
+    {
+      "critical_threshold": 0.97,
+      "high_threshold": 0.9,
+      "observed": 0.2118,
+      "severity": "normal",
+      "signal": "disk_used_ratio",
+      "unit": "ratio"
+    }
+  ],
+  "read_only": true,
+  "recommended_next_step": "measure the suspected signal over time and correlate it with the slow request; do not upgrade hardware on one sample",
+  "sample": {
+    "captured_at": "2026-11-24T14:18:09.821047+00:00",
+    "cpu_count": 2,
+    "disk_free_bytes": 72901160960,
+    "disk_total_bytes": 92487929856,
+    "disk_used_ratio": 0.2118,
+    "load_15m": 0.55,
+    "load_1m": 0.64,
+    "load_5m": 0.79,
+    "load_per_cpu": 0.32,
+    "mem_available_kb": 620712,
+    "mem_total_kb": 1889332,
+    "memory_pressure": 0.6715,
+    "source": "proc_and_disk",
+    "swap_free_kb": 1355640,
+    "swap_total_kb": 2097148,
+    "swap_used_ratio": 0.3536
+  },
+  "service_restart_required": false
+}

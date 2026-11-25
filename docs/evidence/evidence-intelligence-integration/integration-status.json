@@ -1,0 +1,69 @@
+{
+  "base_commit": "790e2eaf004528e72d249257f3de48fb3b83ece3",
+  "boundaries": {
+    "agent_dispatched": false,
+    "deployment": false,
+    "docker_or_service_restart": false,
+    "first_cycle_go": false,
+    "http_route_wired": false,
+    "main_merge": false,
+    "policy_lock_modified": false,
+    "production_changes": false,
+    "provider_invoked": false,
+    "vps_restart": false
+  },
+  "branch": "freebuff/evidence-intelligence-integration-20261124",
+  "changed_files": [
+    "backend/app/mainai_executive/__init__.py",
+    "backend/app/mainai_executive/assumption_review.py",
+    "backend/app/mainai_executive/bottleneck.py",
+    "backend/app/mainai_executive/engineering_decision.py",
+    "backend/app/mainai_executive/evidence_state.py",
+    "backend/app/mainai_executive/investigation.py",
+    "backend/app/mainai_executive/missing_piece.py",
+    "backend/app/mainai_executive/provider_eligibility.py",
+    "backend/app/providers/registry.py",
+    "backend/tests/backend/mainai/test_evidence_intelligence_integration.py",
+    "backend/tests/backend/mainai/test_mainai_executive_loop.py",
+    "docs/BRANCH_REGISTRY.md",
+    "docs/EVIDENCE_INTELLIGENCE_INTEGRATION.md",
+    "docs/evidence/evidence-intelligence-integration/bottleneck-sample.json",
+    "docs/evidence/evidence-intelligence-integration/capability-evidence.json",
+    "docs/evidence/evidence-intelligence-integration/provider-contract.json",
+    "docs/evidence/evidence-intelligence-integration/scenario-results.json"
+  ],
+  "code_commit": "bdbaf7a436504a45765d87350113fb2c24dada4a",
+  "commits": [
+    "2dfc6bbdb3d09e798aed596d9ce060617d7bf651 Document the evidence-driven integration and its limits",
+    "bdbaf7a436504a45765d87350113fb2c24dada4a Add evidence-driven investigation, objection review and eligibility checks"
+  ],
+  "docs_commit": "2dfc6bbdb3d09e798aed596d9ce060617d7bf651",
+  "github": {
+    "open_pr_range": "#487-#506",
+    "open_prs_checked": 20,
+    "pull_requests_for_branch": 0,
+    "remote_branch_present": false,
+    "shared_file_overlap": {
+      "backend/app/providers/registry.py": "all 20 open PRs touch this file; this branch adds only model_is_freshly_verified()"
+    }
+  },
+  "head_at_generation": "2dfc6bbdb3d09e798aed596d9ce060617d7bf651",
+  "migration_head": "0095",
+  "migrations_added": false,
+  "tests": {
+    "ruff": "clean on every changed file",
+    "scenario_file": "docs/evidence/evidence-intelligence-integration/scenario-results.json",
+    "summary": "24 passed, 589 warnings in 46.84s"
+  },
+  "tree": "97367fdad948996010847d0faef23af40c3e11fe",
+  "unverified": [
+    "no CI run",
+    "no browser journey",
+    "no live provider call",
+    "no VPS or Docker verification",
+    "no HTTP end-to-end request",
+    "scenario 7 provider configuration is stubbed",
+    "scenario 10 overlap payload is mocked"
+  ],
+  "worktree": "/tmp/si3"
+}

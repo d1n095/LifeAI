@@ -1,0 +1,326 @@
+{
+  "generated_from": "detect_missing_pieces + assess_modules",
+  "interpretation": "module location and test mentions are not runtime capability",
+  "missing_piece": {
+    "claimed_as_verified_implementation": false,
+    "evidence_basis": "explicit_evidence_states",
+    "evidence_detail": [
+      {
+        "basis": [
+          "module_file_located",
+          "source_inspected:19_executable_lines",
+          "test_files_mention_module:10"
+        ],
+        "limitations": [
+          "test file mention is not a passing test run"
+        ],
+        "module": "app.founder_memory",
+        "operational_claim": false,
+        "source_path": "/tmp/si3/backend/app/founder_memory/__init__.py",
+        "state": "tests_observed",
+        "test_references": [
+          "tests/backend/chat/test_chat_candidate_signal_capture.py",
+          "tests/backend/mainai/test_candidate_learning_signals.py",
+          "tests/backend/mainai/test_corpus_trial_harness.py",
+          "tests/backend/mainai/test_evidence_intelligence_integration.py",
+          "tests/backend/mainai/test_founder_behavior_requirements.py",
+          "tests/backend/mainai/test_founder_memory_foundation.py",
+          "tests/backend/test_cognitive_cycle_continuous.py",
+          "tests/backend/test_cognitive_gate.py",
+          "tests/backend/test_cross_session_continuity.py",
+          "tests/backend/test_decision_memory_integrity.py"
+        ]
+      },
+      {
+        "basis": [
+          "module_file_located",
+          "source_inspected:28_executable_lines",
+          "test_files_mention_module:8"
+        ],
+        "limitations": [
+          "test file mention is not a passing test run"
+        ],
+        "module": "app.inspectable_memory",
+        "operational_claim": false,
+        "source_path": "/tmp/si3/backend/app/inspectable_memory/__init__.py",
+        "state": "tests_observed",
+        "test_references": [
+          "tests/backend/mainai/test_founder_add_auto_link.py",
+          "tests/backend/mainai/test_inspectable_memory_foundation.py",
+          "tests/backend/mainai/test_mainai_executive_chaos_why.py",
+          "tests/backend/mainai/test_mainai_executive_loop.py",
+          "tests/backend/mainai/test_mainai_executive_ops_lanes.py",
+          "tests/backend/mainai/test_mainai_executive_scenarios.py",
+          "tests/backend/mainai/test_mainai_executive_security.py",
+          "tests/backend/mainai/test_memory_work_linkage.py"
+        ]
+      },
+      {
+        "basis": [
+          "module_file_located",
+          "source_inspected:16_executable_lines",
+          "test_files_mention_module:1"
+        ],
+        "limitations": [
+          "test file mention is not a passing test run"
+        ],
+        "module": "app.memory_work_linkage",
+        "operational_claim": false,
+        "source_path": "/tmp/si3/backend/app/memory_work_linkage/__init__.py",
+        "state": "tests_observed",
+        "test_references": [
+          "tests/backend/mainai/test_memory_work_linkage.py"
+        ]
+      },
+      {
+        "basis": [
+          "module_file_located",
+          "source_inspected:28_executable_lines",
+          "test_files_mention_module:6"
+        ],
+        "limitations": [
+          "test file mention is not a passing test run"
+        ],
+        "module": "app.memory_threads",
+        "operational_claim": false,
+        "source_path": "/tmp/si3/backend/app/memory_threads/__init__.py",
+        "state": "tests_observed",
+        "test_references": [
+          "tests/backend/context/test_goals_dreams_dependencies.py",
+          "tests/backend/context/test_memory_threads_foundation.py",
+          "tests/backend/context/test_problem_solution_decision_learning.py",
+          "tests/backend/mainai/test_capability_record_active_context_linking.py",
+          "tests/backend/mainai/test_founder_memory_foundation.py",
+          "tests/backend/mainai/test_memory_work_linkage.py"
+        ]
+      },
+      {
+        "basis": [
+          "module_file_located",
+          "source_inspected:67_executable_lines",
+          "test_files_mention_module:8"
+        ],
+        "limitations": [
+          "test file mention is not a passing test run"
+        ],
+        "module": "app.mainai_executive",
+        "operational_claim": false,
+        "source_path": "/tmp/si3/backend/app/mainai_executive/__init__.py",
+        "state": "tests_observed",
+        "test_references": [
+          "tests/backend/mainai/test_evidence_intelligence_integration.py",
+          "tests/backend/mainai/test_mainai_executive_chaos_why.py",
+          "tests/backend/mainai/test_mainai_executive_loop.py",
+          "tests/backend/mainai/test_mainai_executive_ops_lanes.py",
+          "tests/backend/mainai/test_mainai_executive_retrieval_dash.py",
+          "tests/backend/mainai/test_mainai_executive_scenarios.py",
+          "tests/backend/mainai/test_mainai_executive_security.py",
+          "tests/backend/mainai/test_mainai_school_wire.py"
+        ]
+      },
+      {
+        "basis": [
+          "module_file_located",
+          "source_inspected:23_executable_lines",
+          "test_files_mention_module:10"
+        ],
+        "limitations": [
+          "test file mention is not a passing test run"
+        ],
+        "module": "app.work_candidates",
+        "operational_claim": false,
+        "source_path": "/tmp/si3/backend/app/work_candidates/__init__.py",
+        "state": "tests_observed",
+        "test_references": [
+          "tests/backend/mainai/test_claims_to_goal_composed_chain.py",
+          "tests/backend/mainai/test_composed_autonomy_milestone.py",
+          "tests/backend/mainai/test_composed_autonomy_runtime_probe.py",
+          "tests/backend/mainai/test_composed_autonomy_soak_v2.py",
+          "tests/backend/mainai/test_composed_autonomy_soak_v4_long_autonomy.py",
+          "tests/backend/mainai/test_concept_reconciliation.py",
+          "tests/backend/mainai/test_first_bounded_self_improvement.py",
+          "tests/backend/mainai/test_founder_add_auto_link.py",
+          "tests/backend/mainai/test_github_evidence_candidates.py",
+          "tests/backend/mainai/test_goal_intake_path_a_worker_live.py"
+        ]
+      },
+      {
+        "basis": [
+          "module_file_located",
+          "source_inspected:15_executable_lines",
+          "test_files_mention_module:7"
+        ],
+        "limitations": [
+          "test file mention is not a passing test run"
+        ],
+        "module": "app.active_context",
+        "operational_claim": false,
+        "source_path": "/tmp/si3/backend/app/active_context/__init__.py",
+        "state": "tests_observed",
+        "test_references": [
+          "tests/backend/context/test_active_context_intelligence.py",
+          "tests/backend/context/test_goals_dreams_dependencies.py",
+          "tests/backend/context/test_memory_threads_foundation.py",
+          "tests/backend/context/test_problem_solution_decision_learning.py",
+          "tests/backend/mainai/test_capability_record_active_context_linking.py",
+          "tests/backend/mainai/test_founder_memory_foundation.py",
+          "tests/backend/mainai/test_inspectable_memory_foundation.py"
+        ]
+      },
+      {
+        "basis": [
+          "module_file_located",
+          "source_inspected:277_executable_lines",
+          "test_files_mention_module:10"
+        ],
+        "limitations": [
+          "test file mention is not a passing test run"
+        ],
+        "module": "app.mainai_execution.lessons",
+        "operational_claim": false,
+        "source_path": "/tmp/si3/backend/app/mainai_execution/lessons.py",
+        "state": "tests_observed",
+        "test_references": [
+          "tests/backend/mainai/test_founder_behavior_requirements.py",
+          "tests/backend/test_cognitive_acceptance_e2e.py",
+          "tests/backend/test_cognitive_cycle_continuous.py",
+          "tests/backend/test_cognitive_gate.py",
+          "tests/backend/test_cognitive_hardening.py",
+          "tests/backend/test_epistemics_integration.py",
+          "tests/backend/test_lesson_guard_observations.py",
+          "tests/backend/test_lesson_selection_integration.py",
+          "tests/backend/test_mainai_lesson_from_founder_correction.py",
+          "tests/backend/test_reasoning_loop_integrity.py"
+        ]
+      }
+    ],
+    "evidence_states": {
+      "app.active_context": "tests_observed",
+      "app.founder_memory": "tests_observed",
+      "app.inspectable_memory": "tests_observed",
+      "app.mainai_execution.lessons": "tests_observed",
+      "app.mainai_executive": "tests_observed",
+      "app.memory_threads": "tests_observed",
+      "app.memory_work_linkage": "tests_observed",
+      "app.work_candidates": "tests_observed"
+    },
+    "existing_modules": [
+      "app.founder_memory",
+      "app.inspectable_memory",
+      "app.memory_work_linkage",
+      "app.memory_threads",
+      "app.mainai_executive",
+      "app.work_candidates",
+      "app.active_context",
+      "app.mainai_execution.lessons"
+    ],
+    "matched_capabilities": [
+      "memory"
+    ],
+    "missing_pieces": [
+      "runtime_verification_not_observed"
+    ],
+    "operational_claim": false,
+    "percentage": null,
+    "percentage_note": "no coverage percentage is manufactured from module location",
+    "propose_new_subsystem": false,
+    "request_summary": "improve memory retrieval across founder notes",
+    "reuse_recommendation": "Implementation exists. Extend or repair it behind its current contract; a new subsystem is not justified by location or tests alone.",
+    "strongest_state": "tests_observed",
+    "weakest_state": "tests_observed"
+  },
+  "new_modules": {
+    "all_operational": false,
+    "detail": [
+      {
+        "basis": [
+          "module_file_located",
+          "source_inspected:180_executable_lines"
+        ],
+        "limitations": [],
+        "module": "app.mainai_executive.evidence_state",
+        "operational_claim": false,
+        "source_path": "/tmp/si3/backend/app/mainai_executive/evidence_state.py",
+        "state": "implementation_inspected",
+        "test_references": []
+      },
+      {
+        "basis": [
+          "module_file_located",
+          "source_inspected:257_executable_lines"
+        ],
+        "limitations": [],
+        "module": "app.mainai_executive.investigation",
+        "operational_claim": false,
+        "source_path": "/tmp/si3/backend/app/mainai_executive/investigation.py",
+        "state": "implementation_inspected",
+        "test_references": []
+      },
+      {
+        "basis": [
+          "module_file_located",
+          "source_inspected:118_executable_lines",
+          "test_files_mention_module:1"
+        ],
+        "limitations": [
+          "test file mention is not a passing test run"
+        ],
+        "module": "app.mainai_executive.assumption_review",
+        "operational_claim": false,
+        "source_path": "/tmp/si3/backend/app/mainai_executive/assumption_review.py",
+        "state": "tests_observed",
+        "test_references": [
+          "tests/backend/mainai/test_evidence_intelligence_integration.py"
+        ]
+      },
+      {
+        "basis": [
+          "module_file_located",
+          "source_inspected:191_executable_lines"
+        ],
+        "limitations": [],
+        "module": "app.mainai_executive.engineering_decision",
+        "operational_claim": false,
+        "source_path": "/tmp/si3/backend/app/mainai_executive/engineering_decision.py",
+        "state": "implementation_inspected",
+        "test_references": []
+      },
+      {
+        "basis": [
+          "module_file_located",
+          "source_inspected:227_executable_lines"
+        ],
+        "limitations": [],
+        "module": "app.mainai_executive.bottleneck",
+        "operational_claim": false,
+        "source_path": "/tmp/si3/backend/app/mainai_executive/bottleneck.py",
+        "state": "implementation_inspected",
+        "test_references": []
+      },
+      {
+        "basis": [
+          "module_file_located",
+          "source_inspected:210_executable_lines"
+        ],
+        "limitations": [],
+        "module": "app.mainai_executive.provider_eligibility",
+        "operational_claim": false,
+        "source_path": "/tmp/si3/backend/app/mainai_executive/provider_eligibility.py",
+        "state": "implementation_inspected",
+        "test_references": []
+      }
+    ],
+    "percentage": null,
+    "states": {
+      "app.mainai_executive.assumption_review": "tests_observed",
+      "app.mainai_executive.bottleneck": "implementation_inspected",
+      "app.mainai_executive.engineering_decision": "implementation_inspected",
+      "app.mainai_executive.evidence_state": "implementation_inspected",
+      "app.mainai_executive.investigation": "implementation_inspected",
+      "app.mainai_executive.provider_eligibility": "implementation_inspected"
+    },
+    "strongest_state": "tests_observed",
+    "weakest_state": "implementation_inspected"
+  },
+  "request": "improve memory retrieval across founder notes"
+}

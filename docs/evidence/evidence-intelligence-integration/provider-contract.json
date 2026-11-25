@@ -1,0 +1,13 @@
+{
+  "coding_agent_contract": {
+    "authoritative_source": "app.agent_coordination.adapter_config.adapter_availability",
+    "chat_provider": "openai",
+    "chat_provider_grants_coding_agent": false,
+    "chat_provider_grants_zai_development_agent": false,
+    "execution_authorized": false,
+    "integration_kind": "coding_agent",
+    "note": "coding-agent eligibility must come from the adapter registry's own availability facts; a configured chat provider is not evidence of a usable coding agent",
+    "openai_chat_adapter_grants_codex_cli": false
+  },
+  "note": "static contract only; no provider or adapter was contacted"
+}

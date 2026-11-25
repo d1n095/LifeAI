@@ -2,25 +2,18 @@
 
 Find the 80–90% already present; identify the missing 10–20%; reuse primitives.
 Does NOT authorize building anything.
+
+Evidence is reported as explicit states (``module_located`` … ``runtime_verified``), never as
+a coverage percentage. An importable module is not a working capability.
 """
 
 from __future__ import annotations
 
-import importlib
 import pkgutil
 from dataclasses import dataclass
 from typing import Any
 
-
-@dataclass(frozen=True)
-class MissingPieceFinding:
-    request_summary: str
-    existing_modules: list[str]
-    likely_coverage_pct: int
-    missing_pieces: list[str]
-    reuse_recommendation: str
-    propose_new_subsystem: bool  # always False unless genuinely empty
-
+from app.mainai_executive.evidence_state import assess_modules
 
 # Known MainAI capability areas → package roots already in-tree.
 _CAPABILITY_MAP: dict[str, tuple[str, ...]] = {
@@ -36,8 +29,31 @@ _CAPABILITY_MAP: dict[str, tuple[str, ...]] = {
     "spend": ("app.provider_spend",),
 }
 
+# Generic glue gaps that often dominate false "new system" proposals. These are checked for
+# every request; they never count as a matched capability on their own.
+_GLUE_MODULES: tuple[tuple[str, str], ...] = (
+    ("runtime wiring", "app.mainai_executive"),
+    ("work candidates", "app.work_candidates"),
+    ("active context", "app.active_context"),
+    ("lessons", "app.mainai_execution.lessons"),
+)
+
+
+@dataclass(frozen=True)
+class MissingPieceFinding:
+    request_summary: str
+    existing_modules: list[str]
+    evidence_states: dict[str, str]
+    missing_pieces: list[str]
+    reuse_recommendation: str
+    propose_new_subsystem: bool  # always False unless genuinely empty
+    operational_claim: bool
+
 
 def _module_exists(dotted: str) -> bool:
+    """Kept for callers that only need location; prefer ``assess_modules`` for evidence."""
+    import importlib
+
     try:
         importlib.import_module(dotted)
         return True
@@ -45,64 +61,86 @@ def _module_exists(dotted: str) -> bool:
         return False
 
 
-def detect_missing_pieces(*, founder_request: str) -> dict[str, Any]:
-    """Heuristic reuse scan — deterministic keyword → package map, not LLM architecture."""
+def detect_missing_pieces(
+    *,
+    founder_request: str,
+    repo_root: str | None = None,
+    integration_refs: dict[str, tuple[str, ...] | list[str]] | None = None,
+    runtime_refs: dict[str, tuple[str, ...] | list[str]] | None = None,
+) -> dict[str, Any]:
+    """Deterministic keyword → package map plus explicit evidence states.
+
+    ``integration_refs``/``runtime_refs`` are caller-supplied observations. Without them the
+    strongest possible state is ``tests_observed`` — file mentions, not passing tests.
+    """
     lower = founder_request.lower()
     matched: list[str] = []
-    existing: list[str] = []
-    missing: list[str] = []
+    modules: list[str] = []
 
     for keyword, packages in _CAPABILITY_MAP.items():
         if keyword.replace("_", " ") in lower or keyword in lower:
             matched.append(keyword)
-            for pkg in packages:
-                if _module_exists(pkg):
-                    existing.append(pkg)
-                else:
-                    missing.append(f"module_absent:{pkg}")
+            modules.extend(packages)
 
-    # Generic glue gaps that often dominate false "new system" proposals.
-    glue_checks = [
-        ("runtime wiring", "app.mainai_executive"),
-        ("work candidates", "app.work_candidates"),
-        ("active context", "app.active_context"),
-        ("lessons", "app.mainai_execution.lessons"),
-    ]
-    for label, pkg in glue_checks:
-        if _module_exists(pkg):
-            if pkg not in existing:
-                existing.append(pkg)
-        else:
-            missing.append(f"missing:{label}:{pkg}")
+    for _label, pkg in _GLUE_MODULES:
+        modules.append(pkg)
 
-    coverage = 0
-    if existing:
-        coverage = min(95, 70 + 5 * len(existing) - 10 * len(missing))
-        coverage = max(40, coverage)
+    # Stable order, no duplicates.
+    unique_modules = list(dict.fromkeys(modules))
+    evidence = assess_modules(
+        unique_modules,
+        repo_root=repo_root,
+        integration_refs=integration_refs,
+        runtime_refs=runtime_refs,
+    )
+    states: dict[str, str] = evidence["states"]
+    existing = [module for module, state in states.items() if state != "unknown"]
+    absent = [module for module, state in states.items() if state == "unknown"]
+
+    missing_pieces: list[str] = [f"module_absent:{module}" for module in absent]
+    if not missing_pieces:
+        if evidence["strongest_state"] != "runtime_verified":
+            missing_pieces.append("runtime_verification_not_observed")
+        elif evidence["weakest_state"] in ("module_located", "implementation_inspected", "tests_observed"):
+            missing_pieces.append("weaker_sibling_modules_not_verified")
+
+    propose_new = bool(matched) and not existing
+    strongest = evidence["strongest_state"]
+    if strongest == "runtime_verified":
+        recommendation = (
+            "Operational evidence exists for at least one module. Reuse it; verify the weaker "
+            "siblings before extending. Do not add a parallel subsystem."
+        )
+    elif strongest in ("integration_verified", "tests_observed", "implementation_inspected"):
+        recommendation = (
+            "Implementation exists. Extend or repair it behind its current contract; a new "
+            "subsystem is not justified by location or tests alone."
+        )
+    elif strongest == "module_located":
+        recommendation = "Module located only — inspect the implementation before deciding."
     elif matched:
-        coverage = 20
+        recommendation = "Sparse evidence — confirm the gap before designing new architecture."
     else:
-        coverage = 50  # unknown area — do not claim empty; claim uncertain
+        recommendation = (
+            "No capability keyword matched. That is not evidence of absence; investigate before "
+            "proposing a new component."
+        )
 
-    propose_new = coverage < 25 and len(existing) == 0
     return {
         "request_summary": founder_request[:200],
         "matched_capabilities": matched,
         "existing_modules": existing,
-        "likely_coverage_pct": coverage,
-        "missing_pieces": missing
-        or (
-            ["runtime_wiring_or_tests_or_observability"]
-            if coverage >= 70
-            else ["insufficient_existing_primitives_mapped"]
-        ),
-        "reuse_recommendation": (
-            "Reuse existing modules; wire composed path; do not add parallel subsystem."
-            if coverage >= 60
-            else "Sparse coverage — confirm gap before designing new architecture."
-        ),
+        "evidence_states": states,
+        "evidence_detail": [item.to_dict() for item in evidence["modules"]],
+        "strongest_state": strongest,
+        "weakest_state": evidence["weakest_state"],
+        "missing_pieces": missing_pieces,
+        "reuse_recommendation": recommendation,
         "propose_new_subsystem": propose_new,
-        "evidence_basis": "import_existence_scan",
+        "operational_claim": evidence["all_operational"],
+        "evidence_basis": "explicit_evidence_states",
+        "percentage": None,
+        "percentage_note": "no coverage percentage is manufactured from module location",
         "claimed_as_verified_implementation": False,
     }
 
