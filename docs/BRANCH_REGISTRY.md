@@ -38,6 +38,10 @@ omstart av arbetsstyrka och development state — ingen ny task engine byggdes.
 D1/D2: `mainai_executive/capability_truth.py` + `SystemIntelligence.capabilities(db)`
 redovisar implementerad/konfigurerad/tillgänglig/tillåten och den effektiva chat-kedjan
 utan att kontakta någon leverantör — **6 passed**, 28,62 s.
+Checkpoint för hela exekveringskön (steg 0–8, beviskarta och kvarvarande arbete):
+`docs/MAINAI_EXECUTION_QUEUE_STATUS.md`.
+D1: `tool_capability_view` kopplar `CAPABILITY_MANIFEST` + `get_capability_status` +
+`require_founder` + `CapabilityRecord` — **24 passed**, ruff rent.
 G1: kretsbrytaren har en tri-state-vy (`open`/`closed`/`unknown`) så en onåbar Redis
 rapporteras som okänd i stället för "stängd"; `chat_route_truth` tål att hälsoläsningen
 kastar, bedömer färskhet och läcker aldrig en DSN — **253 passed** (17 capability + 236
