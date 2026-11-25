@@ -34,6 +34,7 @@ from app.context.resolver import (
 from app.db import get_db
 from app.deps import require_founder
 from app.egress_policy import EgressDeniedError
+from app.founder_memory.prompt import format_founder_memory_instructions
 from app.founder_memory_signals import record_candidate_signal
 from app.incidents.service import record_incident, record_incident_standalone
 from app.limiter import limiter
@@ -476,6 +477,14 @@ async def _attempt_assistant_reply(
             db, owner_id=user.id, question="\n".join([m.content for m in history if m.role == MessageRole.user][-2:] + [user_message.content]))
     except Exception:
         logger.warning("project status block failed; reply unaffected", exc_info=True)
+    # The founder's own recorded preferences/decisions/corrections, so a new session does not
+    # have to be told the same thing twice. Read-only and fail-open like every other block.
+    try:
+        memory_context = format_founder_memory_instructions(db, owner_id=user.id)
+        if memory_context:
+            system_content += "\n\n" + memory_context
+    except Exception:
+        logger.warning("founder memory block failed; reply unaffected", exc_info=True)
     if conversation.project_id is not None:
         try:
             project_context = format_project_context_instructions(

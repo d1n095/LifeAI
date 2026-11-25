@@ -104,6 +104,16 @@ is only ever possible through `erase_own_founder_memory_children()`, wired into
 
 ## Candidate learning signals (migration 0053)
 
+## Recall in the chat prompt (read-only)
+
+`app/founder_memory/prompt.py` turns the owner's `status="active"` notes into a bounded
+system-prompt block (`MINNE`), newest first, at most 8 notes / 2000 characters. The label says
+these are the founder's own recorded statements, not verified facts, so the model cannot turn a
+preference into an observation. Superseded and disputed notes are excluded by construction
+(`list_current_founder_memory`), another owner's notes are never read, and the block is
+fail-open in `app/routers/chat.py`: a memory read failure never costs the founder the reply.
+This module never records, corrects or promotes a note.
+
 Founder direction, standing principle: **SIGNAL PRODUCER != TRUTH WRITER.** A live signal
 producer (currently `app.context.resolver`, wired into `app/routers/chat.py`, "purely
 observational" by its own code comment) must never write directly into

@@ -30,7 +30,9 @@ PR-statusar. Inga nya tabeller, migrationer, nätverksanrop eller exekveringsrä
 `module_ownership` mot riktig Postgres/RLS, chat-flödet verifierat med **22 passed**
 (45,91 s) för persistens/streaming, och Scenario A mot **verklig lokal modell**
 (`qwen2.5:0.5b`): **1 passed** (28,30 s) — login → riktigt svar → två persisterade
-meddelanden → uppföljning → fyra meddelanden i historiken. `ruff check` → All checks passed. `git diff --check` rent.
+meddelanden → uppföljning → fyra meddelanden i historiken. B2: grundarens aktiva
+minnesnoter bärs nu som ett avgränsat, owner-scopat `MINNE`-block i chat-prompten
+(**4 passed**, 12,83 s). `ruff check` → All checks passed. `git diff --check` rent.
 Hela atlas-sviten och hela backend-sviten kördes inte om.
 
 **Beroenden:** `6979c461` → `3680396a` → `790e2eaf` → `5b8c4630`. Endast
