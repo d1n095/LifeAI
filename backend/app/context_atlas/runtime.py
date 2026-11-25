@@ -285,6 +285,36 @@ class OverlapAssessment:
 
 
 @dataclass(frozen=True)
+class ModuleOwnership:
+    """Path-scoped ownership for one module, resolved through the system map.
+
+    MainAI can ask "which agent owns this module?" without knowing the file path. The path
+    comes from the static system map; the owners come from the existing coordination tables
+    through `find_work_owners()`. This is evidence of an assignment, never proof of a live
+    process and never execution authority.
+    """
+
+    module: str
+    status: str  # owned | clear | unclear | unknown | not_found | unavailable
+    path: str | None
+    ownership: OwnershipReport | None
+    evidence: tuple[str, ...]
+    limitations: tuple[str, ...]
+    execution_authorized: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "module": self.module,
+            "status": self.status,
+            "path": self.path,
+            "ownership": self.ownership.to_dict() if self.ownership is not None else None,
+            "evidence": list(self.evidence),
+            "limitations": list(self.limitations),
+            "execution_authorized": False,
+        }
+
+
+@dataclass(frozen=True)
 class UntrustedSourceReport:
     source_ref: str
     treated_as_data: bool
@@ -933,6 +963,65 @@ class SystemIntelligence:
             notes=tuple(notes),
         )
 
+    def module_ownership(
+        self,
+        db: Session,
+        *,
+        owner_id: uuid.UUID,
+        module: str,
+    ) -> ModuleOwnership:
+        """Resolve a dotted module to its path and report who already owns that path."""
+        name = (module or "").strip()
+        if not name:
+            return ModuleOwnership(
+                module=name,
+                status="unknown",
+                path=None,
+                ownership=None,
+                evidence=(),
+                limitations=("an empty module name cannot be resolved",),
+            )
+        try:
+            system = self._system_map()
+        except RuntimeError as exc:
+            return ModuleOwnership(
+                module=name,
+                status="unavailable",
+                path=None,
+                ownership=None,
+                evidence=(),
+                limitations=(str(exc),),
+            )
+        node = system.module(name)
+        if node is None:
+            return ModuleOwnership(
+                module=name,
+                status="not_found",
+                path=None,
+                ownership=None,
+                evidence=(),
+                limitations=("the module does not exist in this checkout",),
+            )
+
+        report = find_work_owners(db, owner_id=owner_id, paths=(node.path,))
+        evidence = tuple(
+            item for item in (node.path, *report.evidence_refs()) if item
+        )
+        limitations = [
+            "ownership is path-scoped: an assignment that does not name this file is not an owner",
+            "a non-terminal assignment is evidence of an assignment, not proof of a running process",
+        ]
+        if report.status == UNCLEAR:
+            limitations.append(report.reason)
+        return ModuleOwnership(
+            module=name,
+            status=report.status,
+            path=node.path,
+            ownership=report,
+            evidence=evidence,
+            limitations=tuple(limitations),
+        )
+
     @staticmethod
     def _intent(question: str) -> str:
         q = question.casefold()
@@ -1317,6 +1406,7 @@ __all__ = [
     "CapabilityAnswer",
     "DependencyAnswer",
     "IntegrationStatus",
+    "ModuleOwnership",
     "OverlapAssessment",
     "ProposalAssessment",
     "RecoveryView",

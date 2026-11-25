@@ -75,6 +75,14 @@ re-implements, the safety-relevant facts:
 `unverified_areas` as `decision_support_not_composed` instead of being guessed from partial
 evidence. A full atlas scan is ~17 s, so it is never started implicitly per investigation.
 
+`SystemIntelligence.module_ownership(db, owner_id=..., module=...)` answers "which agent owns
+this module?" without the caller knowing a file path: the dotted module is resolved through
+the static system map, and the resulting path is passed to the existing
+`ownership.find_work_owners()`. It reports `owned`/`clear`/`unclear`/`unknown`/`not_found`/
+`unavailable` with the assignment, agent and lease evidence. A non-terminal assignment is
+evidence of an assignment, not proof of a running process, and the payload never grants
+execution authority.
+
 ### `app/mainai_executive/assumption_review.py`
 
 `review_objection()` evaluates a founder objection against supplied evidence using the

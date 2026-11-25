@@ -21,14 +21,18 @@ alla statusar (inkl. `superseded`/`reversed`) ordagrant, och `prior_decision` ä
 argument — ingen schemastatus översätts till `rejected`/`postponed`. `integration_status()`
 märker en PR-capture äldre än 24 h (`capture_stale`, `capture_age_hours`) och namnger okända
 PR-statusar. Inga nya tabeller, migrationer, nätverksanrop eller exekveringsrättigheter;
-`execution_authorized=false` i varje payload.
+`execution_authorized=false` i varje payload. `SystemIntelligence.module_ownership()` svarar på
+"vilken agent äger den här modulen?" genom att slå upp modulens path i systemkartan och
+återanvända befintlig path-scoped ownership; okänd modul blir `not_found`, aldrig `owned`.
 
 **Faktiska resultat:** **19 passed, 61 warnings in 60.17 s** för de tre berörda sviterna
-(7 nya tester + 12 befintliga integrationsscenarier). `ruff check` → All checks passed.
-`git diff --check` rent. Hela atlas-sviten och hela backend-sviten kördes inte om.
+(7 nya tester + 12 befintliga integrationsscenarier), **3 passed** (25,86 s) för
+`module_ownership` mot riktig Postgres/RLS, och chat-flödet verifierat med **22 passed**
+(45,91 s) för persistens/streaming. `ruff check` → All checks passed. `git diff --check` rent.
+Hela atlas-sviten och hela backend-sviten kördes inte om.
 
 **Beroenden:** `6979c461` → `3680396a` → `790e2eaf` → `5b8c4630`. Endast
-`mainai_executive/investigation.py`, `context_atlas/runtime.py`, dokumentation och två nya
+`mainai_executive/investigation.py`, `context_atlas/runtime.py`, dokumentation och tre nya
 testfiler ändras. Filöverlapp mot #507–#511 ska verifieras före publicering. Mergeordning:
 efter #507–#511 och efter att `POLICY_LOCK`-divergensen är löst.
 
