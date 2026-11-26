@@ -161,6 +161,24 @@ def i04_per_attempt_egress_recheck(_args: argparse.Namespace) -> tuple[str, str]
     return "FAIL", f"egress model incomplete, missing: {missing} (present: {present})"
 
 
+def _called_names(function: ast.AST) -> set[str]:
+    """Names actually *called* in a function body.
+
+    Deliberately AST-based, not textual: Alpha's fail-closed `detect_conflict` explains in its
+    own docstring that it makes no `chat_with_fallback()` call, and a substring scan reads that
+    sentence as a call site. A docstring may therefore never decide a security invariant.
+    """
+    names: set[str] = set()
+    for node in ast.walk(function):
+        if isinstance(node, ast.Call):
+            target = node.func
+            if isinstance(target, ast.Name):
+                names.add(target.id)
+            elif isinstance(target, ast.Attribute):
+                names.add(target.attr)
+    return names
+
+
 def i05_detect_conflict_fail_closed(_args: argparse.Namespace) -> tuple[str, str]:
     """Alpha wins (§7.2): detect_conflict must make zero provider calls and invent no owner."""
     _requires("backend/app/mainai_execution/lesson_conflicts.py")
@@ -170,12 +188,9 @@ def i05_detect_conflict_fail_closed(_args: argparse.Namespace) -> tuple[str, str
     function = _function(tree, "detect_conflict")
     if function is None:
         return "FAIL", "detect_conflict is missing entirely"
-    segment = ast.get_source_segment(_read("backend/app/mainai_execution/lesson_conflicts.py") or "", function) or ""
-    calls = [
-        name
-        for name in ("chat_with_fallback", "resolve_egress_owner", "invoke_provider")
-        if name in segment
-    ]
+    calls = sorted(
+        _called_names(function) & {"chat_with_fallback", "resolve_egress_owner", "invoke_provider"}
+    )
     if calls:
         return "FAIL", f"detect_conflict still calls a provider path: {calls}"
     if "owner_id" in _arg_names(function):
@@ -323,15 +338,39 @@ def i11_no_dropped_tests(args: argparse.Namespace) -> tuple[str, str]:
 
 
 def i12_policy_lock_untouched(args: argparse.Namespace) -> tuple[str, str]:
-    """POLICY_LOCK is Z.ai's (§7.3); this delivery must not move it."""
+    """POLICY_LOCK is Z.ai's (§7.3); this delivery must not move it.
+
+    Three of the four cases are BLOCKED rather than PASS, because the file is **Alpha-only**:
+    neither this branch nor `86671468` carries it, so diffing against a base without a lock
+    returns an empty diff and would report "untouched" about a file that is not there at all.
+    A vacuous PASS on a security control is worse than no check. Pass the sha that actually owns
+    the lock (the Alpha candidate, `b313c9df`) once it is on the tree.
+    """
     if not args.policy_lock_base:
         return "BLOCKED", "--policy-lock-base not given"
-    code, output = _git("diff", "--stat", args.policy_lock_base, "--", "security/POLICY_LOCK.json")
+    relative = "security/POLICY_LOCK.json"
+    base = args.policy_lock_base
+    base_code, _ = _git("cat-file", "-e", f"{base}:{relative}")
+    here = (REPO_ROOT / relative).exists()
+    if not here and base_code != 0:
+        return "BLOCKED", (
+            f"no {relative} on this tree and none in {base} — the lock is Alpha-only, "
+            "so there is nothing to compare"
+        )
+    if not here:
+        return "BLOCKED", (
+            f"{relative} is not on this tree yet (it arrives from Alpha at merge); nothing to compare"
+        )
+    if base_code != 0:
+        return "BLOCKED", (
+            f"{base} has no {relative} — pass the sha that owns the lock (the Alpha candidate)"
+        )
+    code, output = _git("diff", "--stat", base, "--", relative)
     if code != 0:
-        return "BLOCKED", f"cannot diff against {args.policy_lock_base}"
+        return "BLOCKED", f"cannot diff against {base}"
     if output.strip():
-        return "FAIL", f"POLICY_LOCK differs from {args.policy_lock_base}: {output.strip()}"
-    return "PASS", f"security/POLICY_LOCK.json identical to {args.policy_lock_base}"
+        return "FAIL", f"POLICY_LOCK differs from {base}: {output.strip()}"
+    return "PASS", f"{relative} identical to {base}"
 
 
 def i13_first_cycle_go_false(_args: argparse.Namespace) -> tuple[str, str]:
@@ -350,6 +389,43 @@ def i13_first_cycle_go_false(_args: argparse.Namespace) -> tuple[str, str]:
     return "PASS", "no first_cycle_go=true found in config templates/policy"
 
 
+def i14_chat_router_union(_args: argparse.Namespace) -> tuple[str, str]:
+    """`routers/chat.py` is a real conflict that the handoff matrix did not list.
+
+    Alpha restructured this router around `_ChatContext`/`_build_chat_context`/
+    `_stream_chat_reply` (SSE streaming); my branch restructured the same entry points around
+    `_get_or_create_chat_turn`/`_replay_chat_request` (request idempotency, migration 0090).
+    Taking either side wholesale is silent damage: no streaming, or a second billable provider
+    call on a retried send. Both must survive, and the streaming entry point must resolve its
+    turn through the idempotent resolver — not a resurrected second turn path.
+    """
+    relative = "backend/app/routers/chat.py"
+    _requires(relative)
+    tree = _tree(relative)
+    if tree is None:
+        return "BLOCKED", "routers/chat.py could not be parsed"
+    streaming = all(_function(tree, name) is not None for name in ("_build_chat_context", "_stream_chat_reply"))
+    idempotent = all(_function(tree, name) is not None for name in ("_get_or_create_chat_turn", "_replay_chat_request"))
+    dual_path = _function(tree, "_create_or_get_conversation_and_user_message") is not None
+    problems: list[str] = []
+    if not streaming:
+        problems.append("Alpha's streaming path (_build_chat_context/_stream_chat_reply) is missing")
+    if not idempotent:
+        problems.append("idempotent turn resolver (_get_or_create_chat_turn/_replay_chat_request) is missing")
+    if dual_path:
+        problems.append("a second turn path (_create_or_get_conversation_and_user_message) survived")
+    stream_entry = _function(tree, "stream_chat")
+    if streaming and idempotent and stream_entry is not None:
+        wired = _called_names(stream_entry)
+        if "_create_or_get_conversation_and_user_message" in wired:
+            problems.append("stream_chat still uses the old non-idempotent turn path")
+        elif "_get_or_create_chat_turn" not in wired and "_stream_chat_reply" not in wired:
+            problems.append("stream_chat does not resolve its turn through a known path")
+    if problems:
+        return "FAIL", "; ".join(problems)
+    return "PASS", "streaming and idempotent turn resolution both present, one turn path"
+
+
 INVARIANTS: tuple[tuple[str, str, str, Callable[[argparse.Namespace], tuple[str, str]]], ...] = (
     ("INV-01", "Strömningskontrakt", "Alpha: StreamChunk/chat_stream, ingen ChatStreamChunk", i01_streaming_contract),
     ("INV-02", "Ollama egress-flaggor", "Alpha:s chat_stream + follow_redirects/trust_env=False", i02_ollama_egress_flags),
@@ -364,6 +440,7 @@ INVARIANTS: tuple[tuple[str, str, str, Callable[[argparse.Namespace], tuple[str,
     ("INV-11", "Inga tappade tester", "ingen parents testfil försvinner i mergen", i11_no_dropped_tests),
     ("INV-12", "POLICY_LOCK orörd", "Z.ai äger R31 (§7.3)", i12_policy_lock_untouched),
     ("INV-13", "first_cycle_go=false", "ingen aktivering i denna leverans", i13_first_cycle_go_false),
+    ("INV-14", "Chattrouter-union", "streaming + idempotent turn-resolver, en turn-väg", i14_chat_router_union),
 )
 
 
@@ -443,7 +520,10 @@ def main() -> int:
     parser.add_argument(
         "--policy-lock-base",
         default="",
-        help="sha to diff security/POLICY_LOCK.json against (enables INV-12)",
+        help=(
+            "sha that owns security/POLICY_LOCK.json — pass the Alpha candidate (b313c9df); "
+            "86671468 has no lock, so it yields BLOCKED, not PASS"
+        ),
     )
     parser.add_argument("--out", default="", help="write the JSON report here")
     args = parser.parse_args()

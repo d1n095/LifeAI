@@ -203,11 +203,35 @@ den andra sidans garanti.
 cd backend
 python scripts/acceptance/alpha_merge_invariants.py \
   --merged origin/scratch/alpha-merge \
-  --policy-lock-base 86671468 \
+  --policy-lock-base b313c9df \
   --out ../docs/evidence/founder-alpha/merge-invariants.json
 ```
 
+`--policy-lock-base` måste vara en sha som **faktiskt har** `security/POLICY_LOCK.json` (Alpha-
+kandidaten, `b313c9df`). `86671468` har ingen låsfil, och att diffa mot den gav tidigare ett tomt
+resultat som lästes som PASS för en fil som inte fanns — INV-12 är nu `BLOCKED` i det läget i
+stället.
+
 `--merged` krävs för INV-11 (ingen förälders testfil får försvinna i mergen) och
 `--policy-lock-base` för INV-12 (POLICY_LOCK är Z.ai:s). På en ogrenad gren är det **förväntat**
-att INV-01/03/04/05/06 fallerar: det är exakt de oavgjorda konflikterna, och skriptet finns för
-att bevisa att de är lösta — inte för att de ska se gröna ut före merge.
+att INV-01/03/04/06 fallerar och INV-14 fallerar på min sida: det är exakt de oavgjorda
+konflikterna, och skriptet finns för att bevisa att de är lösta — inte för att de ska se gröna ut
+före merge. De två sidorna fallerar **komplementära** invarianter; 14 PASS är först möjligt på en
+riktig merge.
+
+Invariantchecken läser kod via AST, inte via strängmatchning. INV-05 avgjordes tidigare av ordet
+`chat_with_fallback` i funktionens källtext — inklusive Alpha:s egen docstring som förklarar att
+funktionen *inte* anropar den — och gav därför ett falskt FAIL på kandidaten. En säkerhetsinvariant
+får inte kunna uppfyllas eller fällas av en kommentar.
+
+### Mäta en kandidat som inte bär den här grenen
+
+`mainai_capability_acceptance.py` validerar matrisen före körning och avbryter om en mappad modul
+saknas. Det är rätt på den egna grenen (en stavfel ska inte bli en tyst NOT_RUN) men fel när man
+mäter Codex kandidat, där mina sviter ännu inte finns. `--allow-missing` rapporterar då varje
+frånvarande modul vid namn som `NOT_RUN` i stället för att avbryta:
+
+```bash
+python scripts/acceptance/mainai_capability_acceptance.py --allow-missing \
+  --database-url … --app-database-url … --redis-url … --out-dir …
+```

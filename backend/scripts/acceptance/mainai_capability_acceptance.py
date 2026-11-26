@@ -320,8 +320,14 @@ def _tiers_for(capability: dict[str, Any]) -> list[str]:
     return sorted(seen, key=lambda value: TIER_ORDER[value])
 
 
-def validate_matrix() -> list[str]:
-    """Fail closed before any test runs: every referenced module must exist on disk."""
+def validate_matrix(allow_missing: bool = False) -> list[str]:
+    """Fail closed before any test runs: every referenced module must exist on disk.
+
+    `allow_missing` exists for exactly one situation: evaluating a tree that is not this
+    branch yet (Founder Alpha's candidate, which Codex merges into). There, a module this
+    branch owns is legitimately absent, and "absent on that tree" is the finding to report —
+    not a typo to abort on. The default stays strict so a real mapping typo still fails here.
+    """
     problems: list[str] = []
     seen_ids: set[str] = set()
     for capability in CAPABILITIES:
@@ -336,7 +342,7 @@ def validate_matrix() -> list[str]:
             target = BACKEND_ROOT / module.rstrip("/")
             # An alpha_merge suite legitimately does not exist before Codex merges Founder
             # Alpha; its leg reports NOT_RUN instead of pretending the module is missing.
-            if not target.exists() and tier != ALPHA_MERGE:
+            if not target.exists() and tier != ALPHA_MERGE and not allow_missing:
                 problems.append(f"{capability['id']}: missing {module}")
     return problems
 
@@ -481,7 +487,7 @@ def _run_group(
 
 
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
-    problems = validate_matrix()
+    problems = validate_matrix(args.allow_missing)
     if problems:
         raise SystemExit("capability matrix is invalid:\n  " + "\n  ".join(problems))
 
@@ -531,7 +537,9 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     for capability in selected:
         for tier in _tiers_for(capability):
             modules = _modules_for(capability, tier)
-            if tier == ALPHA_MERGE:
+            # Alpha-only suites, and (with --allow-missing) any module this tree does not
+            # carry, are filtered before the run so pytest never sees a nonexistent path.
+            if tier == ALPHA_MERGE or args.allow_missing:
                 modules = [module for module in modules if (BACKEND_ROOT / module).exists()]
             if not modules:
                 continue
@@ -565,22 +573,27 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             modules = _modules_for(capability, tier)
             if not modules:
                 continue
-            if tier == ALPHA_MERGE:
+            absent = [module for module in modules if not (BACKEND_ROOT / module).exists()]
+            if tier == ALPHA_MERGE or args.allow_missing:
                 modules = [module for module in modules if (BACKEND_ROOT / module).exists()]
                 if not modules:
+                    note = (
+                        "Alpha-only suite, absent from this tree until Codex merges "
+                        "Founder Alpha; it lights up automatically afterwards"
+                        if tier == ALPHA_MERGE
+                        else "no mapped module exists on this tree — reported, not measured"
+                    )
                     legs.append(
                         {
                             "tier": tier,
                             "status": "NOT_RUN",
-                            "note": (
-                                "Alpha-only suite, absent from this tree until Codex merges "
-                                "Founder Alpha; it lights up automatically afterwards"
-                            ),
+                            "note": note,
                             "tests": 0,
                             "failed": 0,
                             "skipped": 0,
                             "modules": _modules_for(capability, tier),
                             "missing_modules": [],
+                            "absent_modules": absent,
                             "failed_tests": [],
                         }
                     )
@@ -624,6 +637,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
                     "skipped": stats["skipped"],
                     "modules": modules,
                     "missing_modules": stats["missing_modules"],
+                    "absent_modules": absent,
                     "failed_tests": stats["failed_tests"],
                 }
             )
@@ -729,6 +743,19 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.append(f"Totals: {report['summary']}")
     lines.append("")
 
+    absent = [
+        (entry["id"], module)
+        for entry in report["capabilities"]
+        for leg in entry["legs"]
+        for module in leg.get("absent_modules", [])
+    ]
+    if absent:
+        lines.append("## Modules absent on this tree (reported, not measured)")
+        lines.append("")
+        for capability_id, module in absent:
+            lines.append(f"- **{capability_id}** `{module}`")
+        lines.append("")
+
     failures = [
         (entry["id"], leg)
         for entry in report["capabilities"]
@@ -802,6 +829,14 @@ def main() -> int:
         help="enable the needs_real_ollama tier (only if the pinned model is really installed)",
     )
     parser.add_argument("--timeout-seconds", type=int, default=3600)
+    parser.add_argument(
+        "--allow-missing",
+        action="store_true",
+        help=(
+            "report modules absent from this tree as NOT_RUN instead of aborting — use when "
+            "evaluating a candidate that does not carry this branch yet"
+        ),
+    )
     args = parser.parse_args()
 
     if args.list:

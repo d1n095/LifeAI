@@ -36,6 +36,33 @@ bevisat identiska på `13fc211b` och lämnas till egna brancher.
 `alpha_merge`-nivån och INV-01/03/04/05/06 ska kunna bli gröna. Ingen PR (token 403), ingen CI
 på branchen.
 
+**Uppföljning 2026-11-26 (mätt på kandidaten, inte antagen).** Kandidatens faktiska läge:
+`integration/founder-alpha-20261121` = `0adb108f` (oförändrad sedan 2026-11-21) och är **förfader**
+till `b313c9df` = PR #498 (open, draft) — det finns alltså ingen sammanslagen kandidat än.
+`alpha_merge_invariants.py` på `b313c9df` (`--policy-lock-base b313c9df`): **PASS 8 / FAIL 5 /
+BLOCKED 1**; samma körning på min gren: **PASS 6 / FAIL 6 / BLOCKED 2**, med komplementära fel.
+Kapacitetssviten på kandidaten gav **8 PASS / 1 FAIL / 1 NOT_RUN** (541 passed, 1 failed lokalt).
+Fem korrigeringar:
+
+- `backend/app/routers/chat.py` är en **sjuttonde konflikt som saknades** i matrisen (Alpha:s
+  streaming vs min idempotenta turn-resolver). Ny grind INV-14; ansvarig Codex.
+- `providers/registry.py` är **inte längre mekaniskt blockerad**: kandidaten har redan
+  lease-assertion, `_filter_local_only` och `_require_policy_candidate`. Min sida bidrar ensam med
+  `resolve_egress_owner`; Z.ai avgör om den ska tillbaka **efter** merge.
+- `routers/agents.py` och `security/POLICY_LOCK.json` konflikerar **inte** vid nuvarande tips;
+  POLICY_LOCK auto-mergas till Alpha:s (Z.ai:s) version, byte-identisk med `b313c9df`.
+- Vid merge av `70b7fda8` in i `b313c9df` är det **16** konflikter, inte 17.
+- **`security/POLICY_LOCK.json` finns bara på Alpha-sidan** (inte på min gren, inte i `86671468`).
+  Min verktygskörning visar att den sammanslagna kandidaten **fallerar A08** tills låset fått tre
+  poster för `backend/scripts/acceptance/` — `program_matrix.py`, `mainai_capability_acceptance.py`,
+  `alpha_merge_invariants.py` (sha256 i acceptanspaketets §11.3). Det är Z.ai:s fil; jag rör den inte.
+  På orörd `b313c9df` finns bara en post: den kända staleness i
+  `real-local-ai-verification.yml` (PR #492).
+
+Verktygen ändrades bara i mitt eget område: `--allow-missing` (mäta en kandidat som inte bär min
+gren), INV-05 går på AST i stället för strängmatchning (den gav falskt FAIL på kandidatens
+fail-closed-kod), INV-14 ny. Detaljer i acceptanspaketets §11.
+
 ## Integrationsberedskap mot Founder Alpha — `freebuff/mainai-context-atlas-decision-support-20261125` (2026-11-26)
 
 **Branch:** `freebuff/mainai-context-atlas-decision-support-20261125`.
@@ -47,8 +74,12 @@ och **74** enbart på Alpha-sidan. Ingen av sidorna är en superset — detta ä
 fast-forward.
 
 **Kollisionsyta:** 33 filer ändrade på båda sidor; `git merge` gav **17 verkliga konflikter**.
+> **Uppdatering 2026-11-26:** med de nuvarande tipsen (`70b7fda8` in i `b313c9df`) är det **16**
+> konflikter: `routers/chat.py` tillkommer, `routers/agents.py` och `POLICY_LOCK.json` konflikerar
+> inte längre. Se avsnittet om acceptanspaketet ovan och dess §11.4.
 Migrationer kolliderar **inte**: Alpha slutar på `0089`, min kedja fortsätter `0090`–`0095`
-linjärt med exakt en head.
+linjärt med exakt en head (verifierat: `0090.down_revision = "0089"` mot samma
+`0089_github_status_snapshots.py` på båda sidorna).
 
 **Åtgärdat i denna gren (säkra hinder):** `corpus_review.py` har nu Alpha:s `max_tokens=400`
 *och* min `effect_guard=True` (union i stället för val); `agent_orchestration.py` +

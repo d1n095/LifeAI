@@ -132,6 +132,11 @@ Två saker är värda att lyfta, eftersom de inte framgår av en filräkning:
 
 ## 4. Konflikterna: integrationsregel → verifieringsmetod → ansvarig
 
+> **Uppdaterad 2026-11-26:** matrisen nedan var ofullständig. En verklig merge av `70b7fda8` in i
+> `b313c9df` ger **16** konflikter, inte 17: `routers/chat.py` saknades helt, medan
+> `routers/agents.py` och `security/POLICY_LOCK.json` inte längre konflikerar vid nuvarande tips.
+> Se **§11.4** för den korrigerade raden, migrationsläget och vad som ändrades.
+
 Överlämningens §6 angav regel och motiv. Här är samma 17 filer med en **körbar**
 verifieringsmetod och en namngiven ägare. `INV-nn` är `alpha_merge_invariants.py`.
 
@@ -351,7 +356,8 @@ per kapacitet och `alpha_merge_invariants.py` skriver ut varje unmet invariant m
 
 Ändrade filer i `ecfc642c`: sju — två nya verktyg, en README-sektion, en rättad
 säkerhetsregressionstest, acceptansdokumentet, branchregistret och rättelsen i den tidigare
-överlämningen. `security/POLICY_LOCK.json` är **inte** bland dem (INV-12 PASS).
+överlämningen. `security/POLICY_LOCK.json` är **inte** bland dem — den finns över huvud taget
+inte på den här sidan (se §11.4), så INV-12 är `BLOCKED` här och `PASS` först på en merge.
 
 **Minimikommando för Codex, i ordning:**
 
@@ -360,15 +366,17 @@ git fetch origin freebuff/mainai-founderalpha-acceptance-20261126
 git switch -c scratch/alpha-merge origin/integration/founder-alpha-20261121
 
 cd backend
-python scripts/acceptance/alpha_merge_invariants.py --expected-head 0095
-#   före merge: PASS 7 / FAIL 5 / BLOCKED 1 — de fem är konflikterna
+python scripts/acceptance/alpha_merge_invariants.py --expected-head 0095 \
+  --policy-lock-base b313c9df
+#   före merge (på min gren): PASS 6 / FAIL 6 / BLOCKED 2 — de sex FAIL är konflikterna;
+#   BLOCKED = INV-11 (--merged) och INV-12 (POLICY_LOCK finns bara på Alpha)
 
 git merge freebuff/mainai-founderalpha-acceptance-20261126
 #   lös enligt §4 ovan; stoppa vid providers/registry.py och eskalera till Z.ai
 
 python scripts/acceptance/alpha_merge_invariants.py \
-  --merged HEAD --expected-head 0095 --policy-lock-base 86671468
-#   krav: PASS 13 / FAIL 0 / BLOCKED 0 innan något annat körs
+  --merged HEAD --expected-head 0095 --policy-lock-base b313c9df
+#   krav: PASS 14 / FAIL 0 / BLOCKED 0 innan något annat körs
 
 alembic heads          # exakt en rad: 0095
 alembic upgrade head   # mot färsk databas, inte en redan migrerad
@@ -384,3 +392,219 @@ python scripts/acceptance/mainai_capability_acceptance.py \
 Efter merge ska `A08` få ett grönt `alpha_merge`-ben (`test_migration_state_privileges.py` finns
 då) och `A05`/`A09` avgörs av om F2/F3 åtgärdats på egna brancher — paketet rapporterar det
 ärligt i stället för att runda det.
+
+---
+
+## 11. Codex-läget 2026-11-26 — kandidaten mätt, inte antagen
+
+Detta avsnitt tillkom i uppföljningsomgången. Det ersätter inget ovan; det rättar två saker som
+visade sig fel och lägger till det som saknades för att Codex ska kunna köra utan att gissa.
+
+### 11.1 Verifierat gren- och PR-läge
+
+Kontrollerat med `git ls-remote`/`git fetch` och GitHub API (`GET /repos/d1n095/LifeAI/pulls`),
+inte ur minnet:
+
+| Ref | SHA | Betydelse |
+|---|---|---|
+| `integration/founder-alpha-20261121` | `0adb108f` | Codex integrationsgren, **oförändrad sedan 2026-11-21** |
+| `claude/founder-alpha-pre-vps-consolidation` | `b313c9df` | PR **#498** (open, **draft**, base = integrationsgrenen) — nyaste kandidatinnehållet |
+| `freebuff/mainai-founderalpha-acceptance-20261126` | `70b7fda8` | denna gren, pushad, **ingen PR** (ingen skrivtoken här) |
+
+`0adb108f` är **förfader** till `b313c9df`, så PR #498 är den kandidat som ska verifieras; det
+finns ingen nyare Codex-merge. Min gren har merge-base `dd69cb30` med kandidaten och `86671468`
+med Alpha-sidan.
+
+Två praktiska konsekvenser:
+
+- **Det finns ingen sammanslagen kandidat än.** Det som mäts här är kandidaten *som den ligger*.
+  Siffrorna i §11.2–§11.3 är därför ett mått på kandidaten, inte på en merge.
+- **`tools/integration/freebuff_integration.py` kan inte användas för den här grenen.** Den är
+  hårdgrindad på en specifik gammal kandidat (`e392022`) och avvisar allt annat med flit. Det är
+  inte ett fel i verktyget och inte heller rätt mekanism här — Codex ska inte felsöka det.
+
+### 11.2 Kandidaten mätt med invarianterna (`b313c9df`)
+
+`python scripts/acceptance/alpha_merge_invariants.py --expected-head 0095 --policy-lock-base
+b313c9df` i en worktree på `b313c9df`: **PASS 8 / FAIL 5 / BLOCKED 1**.
+
+| PASS (kandidaten uppfyller redan) | FAIL (kräver mergen) | BLOCKED |
+|---|---|---|
+| INV-01 strömningskontrakt (`StreamChunk`, ingen `ChatStreamChunk`) | INV-02 `follow_redirects=False, trust_env=False` på streaming-klienten | INV-11 ingen tappad testfil (`--merged` krävs) |
+| INV-03 `settings.local_only_mode` | INV-08 `MessageOut` status-`field_validator` | |
+| INV-04 lease-assertion + `_filter_local_only` + `_require_policy_candidate` | INV-09 `effect_guard=True` i corpus_review | |
+| INV-05 `detect_conflict` fail-closed, ingen `owner_id` | INV-10 head **0089**, inte 0095 | |
+| INV-06 lease-kontraktet `lease_worker_id`/`lease_generation` | INV-14 idempotent turn-resolver saknas i chat-routern | |
+| INV-07 `authorized_by_user_id` obligatorisk | | |
+| INV-12 POLICY_LOCK identisk med kandidaten (den finns bara här) | | |
+| INV-13 `first_cycle_go=false` | | |
+
+Samma körning på min gren (`70b7fda8`, `--policy-lock-base b313c9df`) ger **PASS 6 / FAIL 6 /
+BLOCKED 2**: min sida saknar INV-01/03/04/06/14, kandidaten saknar INV-02/08/09/10/14 — i stort
+sett **komplementära** fel, och INV-12 kan inte avgöras här (filen finns inte). Det är den
+förväntade bilden av två grenar som var för sig är ofullständiga och tillsammans ska bli 14 PASS.
+Ingen av sidorna är "grön" före merge.
+
+### 11.3 Kandidaten mätt med kapacitetssviten (`b313c9df`)
+
+Samma körning med `--allow-missing`, riktig Postgres/Redis och `--allow-real-ollama`:
+
+- `local`: **1 failed, 541 passed, 1 skipped in 779,6 s**
+- `alpha_merge`: **10 passed in 17,6 s** (`tests/backend/test_migration_state_privileges.py` finns
+  på kandidaten — benet tänds alltså av sig själv, som det skulle)
+
+**8 PASS / 1 FAIL / 1 NOT_RUN:**
+
+| id | kapacitet | status | tester på kandidaten |
+|---|---|---|---|
+| A01 | samtal utan kunskapsbibliotek | `PASS` | 43 (2 av 5 moduler saknas) |
+| A02 | beständigt minne | `NOT_RUN` | 26 lokalt PASS; real-Ollama-benet har **inga moduler** här |
+| A03 | projektkontext | `PASS` | 21 |
+| A04 | dokument/beslut/uppgifter | `PASS` | 19 |
+| A05 | mål → plan → godkännande | `PASS` | 64 |
+| A06 | agentstatus ARBETAR/BLOCKERAD/KLAR | `PASS` | 69 (samma dokumenterade HTTP-lucka G2) |
+| A07 | ingen dubbelkörning | `PASS` | 58 |
+| A08 | ägarisolering och behörighet | **`FAIL`** | 154 + 10, **1 fel** (se nedan) |
+| A09 | återhämtning | `PASS` | 74 |
+| A10 | korrekta kapacitetspåståenden | `PASS` | 32 (samma dokumenterade lucka G3) |
+
+A02 är `NOT_RUN` och inte `PASS` eftersom den verkliga modell-delen av beständigt minne
+(`test_project_session_real_model.py`, `test_project_session_os_restart.py`) är mina och inte
+finns på kandidaten. Det är rätt status: "lokalt grönt, modellen otestad" får aldrig läsas som PASS.
+
+#### A08-fejlet har två oberoende orsaker — och en av dem skapar mergen
+
+`tests/security/test_security_controls.py::test_the_repository_policy_lock_verifies` fallerar.
+Uppmätt, inte gissat:
+
+| Orsak | Bevis | Vems |
+|---|---|---|
+| `.github/workflows/real-local-ai-verification.yml` har ändrats utan att låset uppdaterats | på **orörd** `b313c9df` ger `verify_lock` exakt **1** post: `changed control: … (expected 09076e19a887…, found 5febc65c8064…)` | Alpha/Z.ai — PR #492 är granskningspaketet för just den posten |
+| **mina tre acceptansskript är oskyddade styrningar** | med skripten på plats ger samma `verify_lock` **4** poster: de tre nedan som `uncovered control` | Z.ai (låset) + Codex (mergen) |
+
+Låset skyddar `backend/scripts/acceptance/*` fil för fil, och `program_matrix.py` (min gren) samt
+de två nya verktygen matchar mönstret men finns inte i `security/POLICY_LOCK.json`. Efter merge
+fallerar alltså **A08 på den sammanslagna kandidaten** tills låset fått tre poster — även om alla
+tester i övrigt är gröna. Det får inte "lösas" genom att hoppa över testet, och jag rör inte
+filen (Z.ai äger den). Hasherna Z.ai behöver, beräknade i den här grenen:
+
+| Fil | sha256 |
+|---|---|
+| `backend/scripts/acceptance/program_matrix.py` | `987726933c8b4b027de02f450db631889b4f7063239bcf3a810b9b5eca669936` |
+| `backend/scripts/acceptance/mainai_capability_acceptance.py` | `4c01c94c9311aca8d6a10db1562a2ab6e399818885eaf96943cd66ac2690455e` |
+| `backend/scripts/acceptance/alpha_merge_invariants.py` | `167eae557717b84b54990201b370b73656ad9753859d12c8e900bd25d2502fc5` |
+
+Rekommenderad grind före staging: `pytest tests/security/test_security_controls.py -q` **och**
+`python scripts/security/verify_policy_lock.py` (eller motsvarande) ska ge noll poster på den
+sammanslagna kandidaten. `--update` i låset är en granskad handling, inte ett testfix.
+
+### 11.4 Korrigeringar — fyra saker som var fel eller ofullständiga
+
+**1. `routers/chat.py` saknades i konfliktmatrisen (§4/§6).** En verklig merge av `70b7fda8` in i
+`b313c9df` ger **16** konflikter, och chat-routern är en av dem. Den är semantisk, inte textuell:
+Alpha byggde `_ChatContext`/`_build_chat_context`/`_stream_chat_reply` (SSE), min gren byggde
+`_get_or_create_chat_turn`/`_replay_chat_request` (idempotens, migration 0090) kring **samma**
+entry points. Att ta endera sidan helt tappar den andra garantin — antingen strömningen eller
+"ett meddelande ger aldrig två debiterbara provideranrop".
+
+| Fil | Regel | Verifiering | Ansvarig |
+|---|---|---|---|
+| `backend/app/routers/chat.py` | **Behåll bägge.** Alpha:s streaming-API + min idempotenta turn-resolver, och `stream_chat` måste lösa sin turn via `_get_or_create_chat_turn` — inte via en återuppstånden `_create_or_get_conversation_and_user_message` | INV-14 + `pytest tests/backend/chat/test_chat_request_idempotency.py tests/backend/chat/test_chat_streaming.py` | Codex |
+
+**2. Två rader i den gamla matrisen konflikerar inte längre — och POLICY_LOCK finns bara på ena
+sidan.** `routers/agents.py` (#5) och `security/POLICY_LOCK.json` (#17) går igenom merge utan
+konflikt. Viktigare: **filen finns inte alls på min sida**, inte heller i `86671468`; den är
+Alpha-only (`git ls-tree -r 70b7fda8` och `86671468` ger noll träffar, `b313c9df` och `0adb108f`
+ger `security/POLICY_LOCK.json`). Merge-resultatet är byte-identiskt med `b313c9df`, så Z.ai:s fil
+är intakt och ingen behöver lösa den — men INV-12 kan inte säga PASS på en gren som inte har filen.
+
+Att jämföra mot `86671468` var därför ett fel i mina egna kommandon: tom diff mot en bas utan lås
+ser ut som "orörd" om en fil som inte finns. INV-12 är nu `BLOCKED` i det läget (och i det helt
+frånvarande läget), och `--policy-lock-base` ska vara **`b313c9df`**, sha:n som äger låset. Det var
+det enda rena falska PASS jag hittade i mitt eget paket den här omgången.
+
+**3. Migrationsläget: nu mätt, inte bara påstått.** Kandidaten har head **0089**; mina `0090`–`0095`
+finns bara på min sida — det syns nu som INV-10 FAIL (`head is 0089, expected 0095`). Kedjan är
+additiv och kollisionsfri: `0090.down_revision = "0089"` mot *samma*
+`0089_github_status_snapshots.py` (`revision = "0089"`, `down_revision = "0088"`) på båda sidorna.
+Alltså: efter merge ska `alembic heads` ge exakt `0095`, och staging behöver
+`alembic upgrade head` för sex migrationer (chat-idempotens, provider-attempts, runtime-incidents,
+life-workspaces, workspace-sync/supervised goals, personal work management). Ingen omnumrering.
+
+**4. `providers/registry.py` är inte längre en blockerare i den form §7.1 beskrev.** Kandidatens fil
+innehåller redan alla tre skydd INV-04 mäter (`_verify_lease_assertion`, `_filter_local_only`,
+`_require_policy_candidate`), dvs. även den per-försök-omverifiering som §7.1 tillskrev min sida.
+Det som *bara* min sida har i den filen är `resolve_egress_owner(db, owner_id, worker_lease)` —
+en omläsning av jobbraden som bevisar anroparens ägare — plus `WorkerLease`. Kandidaten har
+varken modulen eller anropet.
+
+Konkret för Codex: **ta Alpha:s `registry.py`**. Det tappar exakt en härdning (owner-resolution),
+inte LOCAL_ONLY_MODE eller lease-kontraktet, och bryter ingen import: `resolve_egress_owner` finns
+kvar i `app/egress_policy/service.py` och används av `provider_planning/service.py` (enda
+anropsplatsen med `worker_lease=`). Om härdningen ska tillbaka är det Z.ai:s och grundarens beslut
+**efter** merge, som ett tillägg ovanpå Alpha:s modell — det blockerar inte längre mergen
+mekaniskt. INV-04/INV-06 ska ändå vara PASS efter merge; de mäter Alpha:s kontrakt.
+
+**Rättelse av min egen checker:** INV-05 gav först falskt FAIL på kandidaten eftersom den letade
+strängen `chat_with_fallback` i funktionens källtext — och Alpha:s fail-closed-funktion *förklarar
+i sin egen docstring* att den inte anropar den. INV-05 går nu på `ast.Call`-noder och ignorerar
+strängar. Kandidaten är alltså fail-closed (§7.2 gäller oförändrat: **min** sida är den som bryter
+direktivet), och det var verktyget, inte kandidaten, som hade felet.
+
+### 11.5 De sju områdena — reproducerbara kommandon
+
+Samma miljö hela vägen; `$PY` är en venv med `backend/requirements.txt`. Alla sviter nedan finns i
+den här grenen; kolumnen säger om de även finns på kandidaten idag.
+
+```bash
+cd backend
+export DATABASE_URL=postgresql://postgres@127.0.0.1:55432/lifeos_test_acceptance
+export APP_DATABASE_URL=postgresql://mainai_app:mainai_app_pw@127.0.0.1:55432/lifeos_test_acceptance
+export REDIS_URL=redis://127.0.0.1:56379/11
+export LIFEAI_TEST_DATABASE_NAME=lifeos_test_acceptance
+export OLLAMA_BASE_URL=http://127.0.0.1:11434
+PY=/tmp/r15-venv/bin/python
+```
+
+| # | Område | Kommando | På kandidaten idag |
+|---|---|---|---|
+| 1 | Beständigt minne | `$PY -m pytest tests/backend/chat/test_project_session_resume.py tests/backend/mainai/test_founder_memory_foundation.py tests/backend/mainai/test_inspectable_memory_foundation.py tests/backend/mainai/test_founder_memory_prompt.py -q` | `test_founder_memory_prompt.py` saknas |
+| 2 | Samtal utan kunskapsbibliotek | `$PY -m pytest tests/backend/chat/test_chat_context_status.py tests/backend/chat/test_chat_message_persistence.py tests/backend/chat/test_message_out_contract.py tests/backend/chat/test_chat_failure_recovery.py -q` | `test_message_out_contract.py`, `test_chat_failure_recovery.py` saknas |
+| 3 | Projektkontext | `$PY -m pytest tests/backend/test_projects_detail.py tests/backend/mainai/test_project_entities.py tests/backend/mainai/test_project_entity_work_candidate_capture.py -q` | `test_projects_detail.py` saknas |
+| 4 | Arbetsflöden och agentstatus | `$PY -m pytest tests/backend/mainai/test_founder_long_horizon_workflow.py tests/backend/mainai/test_execution_envelopes.py tests/backend/mainai/test_workforce_task_approval_enforcement.py tests/backend/mainai/test_agent_runtime_control_plane.py -q` | `test_founder_long_horizon_workflow.py`, `test_agent_runtime_control_plane.py` saknas |
+| 5 | Omstart och återhämtning | `$PY -m pytest tests/backend/test_mainai_execution_recovery.py tests/backend/test_mainai_execution_recovery_takeover.py tests/backend/mainai/test_recovery_takeover_authority_fencing.py tests/backend/mainai/test_worker_live_lease_expiry_takeover.py -q` — kör sedan `restart_check.py` före/efter en riktig omstart (nedan) | delvis (recovery-sviterna finns) |
+| 6 | Faktisk Ollama | `$PY scripts/acceptance/local_model_acceptance.py --chat-model qwen2.5:0.5b --embed-model all-minilm --out /tmp/local-model.json` | **finns** — återanvänds, ingen dubblering |
+| 7 | Behörigheter och ägarisolering | `$PY -m pytest tests/security/ tests/security_r15_egress/ tests/security_r15_successor/ tests/backend/chat/test_messages_rls.py tests/backend/test_runtime_table_privileges.py -q` | `tests/security_r15_egress/`, `tests/security_r15_successor/` saknas (mina) |
+
+Omstart (område 5) på HTTP-nivå — `restart_check.py` skapar inget, den läser bara, så en skillnad
+mellan två körningar är en riktig persistensbugg:
+
+```bash
+$PY scripts/acceptance/restart_check.py --api http://127.0.0.1:8011 --label before --out /tmp/restart-before.json
+# stoppa och starta API + worker på riktigt, sedan:
+$PY scripts/acceptance/restart_check.py --api http://127.0.0.1:8011 --label after --out /tmp/restart-after.json
+diff /tmp/restart-before.json /tmp/restart-after.json   # förväntat: ingen skillnad i varaktigt tillstånd
+```
+
+Riktig modell på område 1 och 2 (kräver installerad pinnad modell; annars NOT_RUN, aldrig PASS):
+
+```bash
+$PY scripts/acceptance/mainai_capability_acceptance.py --allow-real-ollama --only A01,A02 \
+  --database-url "$DATABASE_URL" --app-database-url "$APP_DATABASE_URL" \
+  --redis-url "$REDIS_URL" --out-dir ../docs/evidence/mainai-capability/real-ollama
+```
+
+En helhetskörning av alla tio kapaciteter är `--only`-flaggan utan argument (utelämnad), se §2.
+
+### 11.6 Ändringar i den här omgången
+
+Bara i mitt eget ansvarsområde — två verktyg och dokumentation. Ingen produktkod, ingen frontend,
+ingen chattimplementation, ingen ändring av Z.ai:s eller Claudes grenar, `POLICY_LOCK` orörd.
+
+| Ändring | Varför |
+|---|---|
+| `mainai_capability_acceptance.py --allow-missing` | verktyget avbröt på en kandidat som inte bär min gren; nu rapporteras frånvarande moduler som `NOT_RUN` med namnet utskrivet i stället för att körningen dör. Standard är fortfarande strikt, så en stavfel i matrisen fångas |
+| INV-05 går på `ast.Call` | falskt FAIL av en docstring; en säkerhetsinvariant får inte avgöras av en strängmatchning |
+| INV-14 chattrouter-union | konflikten i `routers/chat.py` fanns inte i matrisen och hade därför ingen grind alls |
+| INV-12 kräver ett sha som faktiskt äger låset | den gav PASS mot `86671468`, som inte har `POLICY_LOCK` alls; tom diff mot en frånvarande fil är ett falskt PASS på en säkerhetsgrind |
+| §11.3: A08-grinden dokumenterad | `verify_lock` ger 4 poster med mina skript på plats men 1 på orörd kandidat — skillnaden är mergens ansvar, inte kanditatens |

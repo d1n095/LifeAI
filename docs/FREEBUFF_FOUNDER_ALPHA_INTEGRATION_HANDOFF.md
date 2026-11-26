@@ -280,8 +280,30 @@ pytest tests/backend/test_migration_state_privileges.py tests/backend/test_runti
 | Draft-PR | **BLOCKED** — token saknar `Pull requests: write` (403) |
 | Frontend/Playwright visuellt | **NOT_RUN** — Chrome saknas i denna miljö |
 | 16 GB-VPS med produktionsmodell | **NOT_RUN** — denna maskin är 2 CPU/1 GB |
-| `security/POLICY_LOCK.json` | Divergerar, orörd, Z.ai ansvarar |
+| `security/POLICY_LOCK.json` | Divergerar, orörd, Z.ai ansvarar. **Uppdatering:** vid faktisk merge auto-mergas den till Alpha:s version utan konflikt (byte-identisk med `b313c9df`) — ingen behöver lösa den |
 | `first_cycle_go` | `false` — oförändrat |
+
+### Uppdatering 2026-11-26 (mätt på kandidaten, se acceptanspaketets §11)
+
+- **`providers/registry.py` är inte längre mekaniskt blockerad.** Kandidaten har redan
+  `_verify_lease_assertion` + `_filter_local_only` + `_require_policy_candidate`. Det min sida
+  ensam bidrar med i den filen är `resolve_egress_owner` (owner-resolution ur jobbraden). Codex kan
+  ta Alpha:s fil; om härdningen ska tillbaka är det Z.ai:s beslut **efter** merge, inte ett hinder
+  för mergen.
+- **`backend/app/routers/chat.py` tillkommer som konflikt** och fanns inte i §6. Regel: behåll
+  bägge — Alpha:s streaming-API plus min idempotenta turn-resolver. Grind: INV-14.
+- **`routers/agents.py` konflikerar inte längre** vid nuvarande tips.
+- **Migrationshead:** kandidaten ligger på `0089`, mina `0090`–`0095` är additiva ovanpå samma
+  `0089`-revision. Efter merge ska `alembic heads` ge `0095`; staging behöver sex migrationer.
+- **`security/POLICY_LOCK.json` finns bara på Alpha-sidan.** Den sammanslagna kandidaten fallerar
+  `tests/security/test_security_controls.py::test_the_repository_policy_lock_verifies` tills låset
+  fått tre poster för `backend/scripts/acceptance/` (`program_matrix.py`,
+  `mainai_capability_acceptance.py`, `alpha_merge_invariants.py`; sha256 i acceptanspaketets
+  §11.3). På orörd `b313c9df` finns bara en post i samma test: den kända staleness i
+  `real-local-ai-verification.yml` som PR #492 granskar. Låset är Z.ai:s — det ska uppdateras i en
+  granskad commit, inte kringgås.
+- **INV-12 ska köras med `--policy-lock-base b313c9df`**, inte `86671468`: den senare har ingen
+  låsfil, och en tom diff mot en frånvarande fil var ett falskt PASS.
 
 ## 12. SHA-referens
 
