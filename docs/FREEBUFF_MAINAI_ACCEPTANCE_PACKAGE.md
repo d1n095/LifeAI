@@ -335,3 +335,52 @@ extra setup.
 
 Ingen av dessa är dolda i rapporterna: `mainai_capability_acceptance.py` skriver ut nivåerna
 per kapacitet och `alpha_merge_invariants.py` skriver ut varje unmet invariant med bevis.
+
+---
+
+## 10. SHA-referens och exakta kommandon
+
+| Roll | Värde |
+|---|---|
+| Gren | `freebuff/mainai-founderalpha-acceptance-20261126` |
+| Bas (publicerad integrationsöverlämning) | `c854c2dfaa7c950abd3ace2e8fb36733aa066af8` |
+| Kod- och dokumentcommit för detta paket | `ecfc642c` |
+| Merge-base mot Alpha | `86671468a6dd271b61a3f985434130c4bf470ea8` |
+| Alpha/VPS-bas | `b313c9df812bc780c89f34f8d0bc296e21a2d342` |
+| Integrationsgren | `0adb108fa5145ad6b320950fb029bfaf96f003b4` |
+
+Ändrade filer i `ecfc642c`: sju — två nya verktyg, en README-sektion, en rättad
+säkerhetsregressionstest, acceptansdokumentet, branchregistret och rättelsen i den tidigare
+överlämningen. `security/POLICY_LOCK.json` är **inte** bland dem (INV-12 PASS).
+
+**Minimikommando för Codex, i ordning:**
+
+```bash
+git fetch origin freebuff/mainai-founderalpha-acceptance-20261126
+git switch -c scratch/alpha-merge origin/integration/founder-alpha-20261121
+
+cd backend
+python scripts/acceptance/alpha_merge_invariants.py --expected-head 0095
+#   före merge: PASS 7 / FAIL 5 / BLOCKED 1 — de fem är konflikterna
+
+git merge freebuff/mainai-founderalpha-acceptance-20261126
+#   lös enligt §4 ovan; stoppa vid providers/registry.py och eskalera till Z.ai
+
+python scripts/acceptance/alpha_merge_invariants.py \
+  --merged HEAD --expected-head 0095 --policy-lock-base 86671468
+#   krav: PASS 13 / FAIL 0 / BLOCKED 0 innan något annat körs
+
+alembic heads          # exakt en rad: 0095
+alembic upgrade head   # mot färsk databas, inte en redan migrerad
+
+python scripts/acceptance/mainai_capability_acceptance.py \
+  --allow-real-ollama \
+  --database-url "postgresql://postgres@<host>:<port>/lifeos_test_acceptance" \
+  --app-database-url "postgresql://mainai_app:<pw>@<host>:<port>/lifeos_test_acceptance" \
+  --redis-url "redis://<host>:56379/11" \
+  --out-dir ../docs/evidence/mainai-capability/merged
+```
+
+Efter merge ska `A08` få ett grönt `alpha_merge`-ben (`test_migration_state_privileges.py` finns
+då) och `A05`/`A09` avgörs av om F2/F3 åtgärdats på egna brancher — paketet rapporterar det
+ärligt i stället för att runda det.
