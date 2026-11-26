@@ -353,6 +353,7 @@ per kapacitet och `alpha_merge_invariants.py` skriver ut varje unmet invariant m
 | Merge-base mot Alpha | `86671468a6dd271b61a3f985434130c4bf470ea8` |
 | Alpha/VPS-bas | `b313c9df812bc780c89f34f8d0bc296e21a2d342` |
 | Integrationsgren | `0adb108fa5145ad6b320950fb029bfaf96f003b4` |
+| Uppföljning 2026-11-26 (kandidatmätning + verktygsfixar) | `9a09e69a` |
 
 Ändrade filer i `ecfc642c`: sju — två nya verktyg, en README-sektion, en rättad
 säkerhetsregressionstest, acceptansdokumentet, branchregistret och rättelsen i den tidigare
@@ -599,7 +600,11 @@ En helhetskörning av alla tio kapaciteter är `--only`-flaggan utan argument (u
 ### 11.6 Ändringar i den här omgången
 
 Bara i mitt eget ansvarsområde — två verktyg och dokumentation. Ingen produktkod, ingen frontend,
-ingen chattimplementation, ingen ändring av Z.ai:s eller Claudes grenar, `POLICY_LOCK` orörd.
+ingen chattimplementation, ingen ändring av Z.ai:s eller Claudes grenar, `POLICY_LOCK` orörd
+(den finns inte ens på den här sidan).
+
+**Commit:** `9a09e69a` på `freebuff/mainai-founderalpha-acceptance-20261126`, pushad (remote =
+local). Föregående leverans i samma gren var `70b7fda8`.
 
 | Ändring | Varför |
 |---|---|
