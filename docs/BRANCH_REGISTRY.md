@@ -6,6 +6,44 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Integrationsberedskap mot Founder Alpha — `freebuff/mainai-context-atlas-decision-support-20261125` (2026-11-26)
+
+**Branch:** `freebuff/mainai-context-atlas-decision-support-20261125`.
+**Integrationsmål:** `integration/founder-alpha-20261121` (`0adb108f`), via VPS-basen
+`b313c9df` (`claude/founder-alpha-pre-vps-consolidation`, PR #498).
+
+**Divergens (verifierad):** gemensam förfader `86671468`; **109** commits enbart på min gren
+och **74** enbart på Alpha-sidan. Ingen av sidorna är en superset — detta är inte en
+fast-forward.
+
+**Kollisionsyta:** 33 filer ändrade på båda sidor; `git merge` gav **17 verkliga konflikter**.
+Migrationer kolliderar **inte**: Alpha slutar på `0089`, min kedja fortsätter `0090`–`0095`
+linjärt med exakt en head.
+
+**Åtgärdat i denna gren (säkra hinder):** `corpus_review.py` har nu Alpha:s `max_tokens=400`
+*och* min `effect_guard=True` (union i stället för val); `agent_orchestration.py` +
+`routers/agents.py` + dess test följer Alpha:s publicerade `authorized_by_user_id`-kontrakt
+(obligatoriskt, inget default) med alignad `purpose`-taxonomi. Verifierat: **172 passed**
+(211,38 s) mot riktig Postgres/Redis; ruff rent.
+
+**BLOCKERAD konflikt — kräver ägarbeslut:** `backend/app/providers/registry.py` innehåller två
+inkompatibla egress-modeller (Alpha: `lease_worker_id`/`lease_generation` +
+`local_only_mode`-filtrering; min: `worker_lease` + locality-fail-closed +
+per-försök-omverifiering). `local_only_mode` saknas helt i min gren. Ska lösas av Z.ai (R31)
+och Codex — inte automatiskt.
+
+**Öppen policyfråga:** `mainai_execution/lesson_conflicts.py` — Alpha fail-closar
+`detect_conflict` med noll provideranrop (Task #60 krav 5, ownerlös founder-wide state); min
+gren kräver `owner_id` och gör ett riktigt anrop. **Alpha:s sida ska vinna.**
+
+**Beroenden:** branchen blockerar ingen annan gren och rör inte Claudes staging-filer eller
+Z:s säkerhetskod. `security/POLICY_LOCK.json` är orörd. `first_cycle_go=false`.
+
+**Nästa steg:** Codex mergar Alpha → denna gren enligt
+`docs/FREEBUFF_FOUNDER_ALPHA_INTEGRATION_HANDOFF.md` (konfliktmatris, ordningsföljd,
+verifieringskommandon, kvarvarande risker). Ingen PR finns (token saknar
+`Pull requests: write`, 403); ingen CI har kört på branchen.
+
 ## MainAI × Context Atlas — beslutsstöd i utredningsflödet (2026-11-25)
 
 **Branch:** `freebuff/mainai-context-atlas-decision-support-20261125`, bas
