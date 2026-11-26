@@ -132,8 +132,17 @@ class OllamaProvider(LLMProvider):
                 resp.raise_for_status()
                 data = _decode_json(resp, context="chat")
         except httpx.HTTPError as exc:
+            # A connection that was never established is provably pre-egress: retrying it
+            # cannot duplicate an external effect. A read timeout/error after the request
+            # may have been accepted stays ambiguous (True), which the registry turns into
+            # external_effect_unknown and blocks from blind retry. Without this distinction
+            # a stopped Ollama permanently blocked the founder's own message from retry even
+            # though nothing was ever sent.
+            never_sent = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
             raise ProviderError(
-                f"Lokal modell (Ollama) inte nåbar: {exc}", category=_http_error_category(exc)
+                f"Lokal modell (Ollama) inte nåbar: {exc}",
+                category=_http_error_category(exc),
+                provider_request_may_have_left=False if never_sent else True,
             ) from exc
         # A 2xx response is not proof of success: a malformed body, or Ollama's own 200-OK
         # error object, must fail closed as ProviderError — NOT escape as a raw KeyError/
@@ -191,11 +200,12 @@ class OllamaProvider(LLMProvider):
                         response.aiter_lines(), provider=self.name, model=model
                     ):
                         yield chunk
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
+            never_sent = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
             raise ProviderError(
                 "Lokal modell (Ollama) kunde inte nås under streaming.",
                 category="unreachable",
-                provider_request_may_have_left=True,
+                provider_request_may_have_left=False if never_sent else True,
             ) from None
 
     async def embed(self, texts: list[str], model: str, *, timeout: float | None = None) -> list[list[float]]:

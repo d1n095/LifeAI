@@ -69,11 +69,35 @@ async def test_chat_happy_path_returns_content_and_usage(mock_ollama):
 
 @pytest.mark.asyncio
 async def test_chat_timeout_fails_closed_as_unreachable(mock_ollama):
-    # Scenario #5 — provider timeout.
+    # Scenario #5 — provider timeout. A read timeout can happen after the request was
+    # accepted, so the effect stays ambiguous and a blind retry must stay blocked.
     mock_ollama(_raise(httpx.ReadTimeout("timed out")))
     with pytest.raises(ProviderError) as ei:
         await OllamaProvider().chat([], model="qwen2.5:0.5b")
     assert ei.value.category == "unreachable"
+    assert ei.value.provider_request_may_have_left is True
+
+
+@pytest.mark.asyncio
+async def test_chat_connection_refused_is_provably_pre_egress(mock_ollama):
+    # A stopped Ollama is the most common failure. The connection was never established,
+    # so nothing left the process: this must be retryable, not external_effect_unknown.
+    mock_ollama(_raise(httpx.ConnectError("connection refused")))
+    with pytest.raises(ProviderError) as ei:
+        await OllamaProvider().chat([], model="qwen2.5:0.5b")
+    assert ei.value.category == "unreachable"
+    assert ei.value.provider_request_may_have_left is False
+
+
+@pytest.mark.asyncio
+async def test_stream_connection_refused_is_provably_pre_egress(mock_ollama):
+    mock_ollama(_raise(httpx.ConnectError("connection refused")))
+    provider = OllamaProvider()
+    with pytest.raises(ProviderError) as ei:
+        async for _chunk in provider.stream_chat([], model="qwen2.5:0.5b"):
+            pass
+    assert ei.value.category == "unreachable"
+    assert ei.value.provider_request_may_have_left is False
 
 
 @pytest.mark.asyncio
