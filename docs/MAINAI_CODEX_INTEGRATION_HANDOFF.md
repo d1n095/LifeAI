@@ -10,15 +10,15 @@ verifieras och vad som fortfarande är ogjort.
 | --- | --- |
 | Arbetsgren | `freebuff/mainai-context-atlas-decision-support-20261125` |
 | Bas | `8c7b335e` |
-| Kod- och testinnehåll | `a8644b2a` |
-| Dokumentation ovanpå | `0e19e7a5` och detta dokument |
-| Antal commits över basen | 35 före detta dokument (36 med det) |
+| Kod- och testinnehåll | `a64b4a23` (`a8644b2a` plus den svit-säkrade assertionen) |
+| Dokumentation ovanpå | `0e19e7a5`, `2b659294` och detta dokument |
+| Antal commits över basen | 37 före detta dokument (38 med det) |
 | Upstream | ingen |
 | Remote-ref som innehåller HEAD | ingen (`git branch -r --contains HEAD` tom) |
 | Arbetsyta | ren |
 | Push / merge / deploy | inte gjort |
 
-Kandidaten är alltså branchens tips, inte en enskild commit. `a8644b2a` är den sista commit
+Kandidaten är alltså branchens tips, inte en enskild commit. `a64b4a23` är den sista commit
 som ändrar kod eller tester; allt efter den är dokumentation.
 
 ## 2. Vad som ska integreras
@@ -46,7 +46,7 @@ Om en snävare port ändå krävs är den tekniska beroendeordningen:
 | 4 | `624269e8` | `backend/app/work_management/service.py` | dubblettskydd för identiska öppna uppgifter |
 | 5 | `6145a764` | `backend/app/providers/ollama_provider.py` | retry efter stoppad lokal modell |
 | 6 | `90be8867`, `ee67cbe8` | `backend/tests/backend/chat/*` | felmatris och in-process-acceptans |
-| 7 | `a8644b2a` | `backend/tests/backend/chat/test_project_session_os_restart.py` | OS-processacceptans; endast test |
+| 7 | `a8644b2a`, `a64b4a23` | `backend/tests/backend/chat/test_project_session_os_restart.py` | OS-processacceptans; endast test |
 
 ## 3. Migrationsberoenden
 
@@ -114,7 +114,7 @@ export LIFEAI_TEST_DATABASE_NAME="lifeos_test_p1"
 
 # 5. Hela chat- + provider-sviterna
 /tmp/r15-venv/bin/python -m pytest tests/backend/chat tests/backend/providers -q
-#    förväntat: 358 passed (357 före OS-restart-testet)
+#    förväntat: 358 passed (chat 120 + providers 238)
 
 /tmp/r15-venv/bin/python -m ruff check \
   app/providers/ollama_provider.py tests/backend/chat tests/backend/providers
@@ -144,7 +144,7 @@ plain http till `127.0.0.1`. Det skriver också nyckeln `worker:heartbeat` i den
 | Riktig worker-process dödad; ny worker tar över utgången lease | **PASS** | `locked_by = os-restart-worker-b`, framtida `lease_expires_at` |
 | In-process-acceptans med riktig Ollama | **PASS** | 1 passed, 41 s |
 | Felmatris, 7 scenarier | **PASS** | 7 passed, stabil i fem körningar |
-| Hela chat- + provider-sviterna | **PASS** | 357 passed före det nya testet, 8 m 46 s; ruff rent |
+| Hela chat- + provider-sviterna | **PASS** | 358 passed: chat 120 (5 m 01 s) + providers 238 (4 m 29 s); ruff rent |
 | CI #511 (`29d09a78`, run `45562008534`) | **NOT PASS** | `in_progress` vid kontroll 2026-11-26 (startad 08:14) |
 | CI #507–#509 | **NOT PASS** | `cancelled`; bevisar ingenting |
 | CI #510 | **NOT RUN** | Run-id `45562002525` svarar 404 |

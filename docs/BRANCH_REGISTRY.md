@@ -10707,6 +10707,7 @@ external gates. No push, merge, deploy, or provider activation; `first_cycle_go=
 - **OS-processacceptans (2026-11-26):** `a8644b2a` lägger till
   `backend/tests/backend/chat/test_project_session_os_restart.py`: riktig `uvicorn`-process och
   riktig `python -m app.worker`, dödade med SIGKILL (backend A–D, worker A–B). 1 passed (75 s)
-  + 1 passed (43 s), ruff rent. Endast test – ingen produktionskod, inga migrationer, inga nya
-  miljövariabler. Exakt antal commits, SHA och testkommandon: se
+  + 1 passed (43 s); `a64b4a23` scopar konversationskontrollen så att testet även går i den
+  delade sviten. Efter ändringen: chat 120 passed + providers 238 passed = 358; ruff rent.
+  Endast test – ingen produktionskod, inga migrationer, inga nya miljövariabler. Exakt antal commits, SHA och testkommandon: se
   `docs/MAINAI_CODEX_INTEGRATION_HANDOFF.md`.

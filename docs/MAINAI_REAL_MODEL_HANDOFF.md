@@ -2,7 +2,7 @@
 
 Uppdaterad 2026-11-26. Arbetsgren:
 `freebuff/mainai-context-atlas-decision-support-20261125`, bas `8c7b335e`. Koden är
-`ee67cbe8` och OS-processacceptansen `a8644b2a`; överlämningsdokumentet följer i commits
+`ee67cbe8` och OS-processacceptansen `a8644b2a`/`a64b4a23`; överlämningsdokumentet följer i commits
 efter koden, så branchens exakta HEAD är `git rev-parse HEAD`. Ingen push, merge eller
 deployment har gjorts.
 
@@ -37,7 +37,7 @@ deployment har gjorts.
 | Verklig lokal modell genom projektflödet | **PASS** | `test_project_session_real_model.py`: 1 passed, 41 s |
 | Backend-omstart med sparad konversation | **PASS** | Samma test: stänger första lifespan, startar ny, historiken och nästa tur finns kvar |
 | Worker-omstart | **PASS** | Två riktiga `Worker().run_once()`-cykler i två instanser; konversationen oförändrad |
-| Verklig OS-processomstart (backend + worker) | **PASS** | `test_project_session_os_restart.py`: 1 passed, 75 s respektive 43 s |
+| Verklig OS-processomstart (backend + worker) | **PASS** | `test_project_session_os_restart.py`: 1 passed, 75 s respektive 43 s; chat 120 + providers 238 = 358 |
 | Fel och återhämtning, 7 scenarier | **PASS** | `test_chat_failure_recovery.py`: 7 passed, 5 körningar i följd utan flakiness |
 | Ollama nere före sändning + retry | **PASS** | Användarraden bevaras, felet är `unreachable`/retryable, retry återanvänder samma rad |
 | Avbrott under generering | **PASS** | Deltext visas men lagras aldrig som svar; blind retry och dubblett nekas 409 |
@@ -82,7 +82,9 @@ Endast embedding-anropet är stubbat (ingen 1536-dimensionell modell finns insta
 substitution som in-process-acceptansen gör. Chattmodellen är den riktiga lokala Ollama; en
 genomströmningsrecorder framför den sparar prompten men ändrar aldrig svaret.
 
-Körning: **1 passed** på 75 s och **1 passed** på 43 s i två följder; ruff rent.
+Körning: **1 passed** på 75 s och **1 passed** på 43 s i två följder; därefter hela sviterna
+med testet inkluderat: **chat 120 passed** (5 m 01 s) + **providers 238 passed** (4 m 29 s).
+Ruff rent.
 
 ## 3. Produktionsfixen i denna omgång
 

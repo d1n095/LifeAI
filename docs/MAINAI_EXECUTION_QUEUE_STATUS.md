@@ -263,7 +263,9 @@ omgången lägger till den återstående implementationen: riktiga OS-processer 
 
 ### PASS
 
-- `a8644b2a` – `tests/backend/chat/test_project_session_os_restart.py`. Riktig
+- `a8644b2a` (+ `a64b4a23`, som scopar konversationskontrollen till sin egen konversation så
+  att testet också går i den delade sviten) –
+  `tests/backend/chat/test_project_session_os_restart.py`. Riktig
   `uvicorn`-process (backend A–D) och riktig `python -m app.worker` (worker A–B), dödade med
   SIGKILL; backend B stängs dessutom med SIGTERM. **1 passed** på 75 s och **1 passed** på
   43 s i två följder; ruff rent.
@@ -278,6 +280,8 @@ omgången lägger till den återstående implementationen: riktiga OS-processer 
   - Konversationen är oförändrad (sex rader, en konversation) efter båda worker-processerna.
   - Endast embedding-anropet är stubbat; chattmodellen är riktig lokal Ollama och en
     genomströmningsrecorder framför den ändrar aldrig svaret.
+  - Hela sviterna efter ändringen: **chat 120 passed** (5 m 01 s) och **providers 238 passed**
+    (4 m 29 s) = 358; ruff rent.
 
 ### NOT_RUN / BLOCKED (oförändrat)
 
