@@ -397,6 +397,9 @@ teckenbudget, med instruktionen att inte använda dem som gällande utan att fr�
 | Kraschåterhämtning | `recovery_inspector` → `classifier` → `takeover`, lease-generation-fencing |
 | Korrekt slutrapport | `final_report` (enbart durabila rader, ingen LLM) |
 | Kontext mellan pass | `project_status`, `founder_memory.prompt`, `context_atlas` |
+| MainAI Executive | `mainai_executive.loop`/`reuse_gate`/`continuity`; oförändrade, ingen ny exekveringsväg |
+| Agentkoordinering och arbetsstatus | `agent_work_assignments` läses via `project_status.work_chain`; ingen assignment skrivs av denna ändring |
+| Provider- och modellrouting | `providers.registry.resolve_chat_chain`/`chat_with_fallback` + `circuit_breaker`; oförändrade, ingen ny fallback |
 
 ### 12.3 Verifiering
 
