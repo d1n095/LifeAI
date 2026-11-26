@@ -179,7 +179,7 @@ def _build_task_prompt(task: AgentTask) -> str:
     return "\n".join(lines)
 
 
-async def dispatch_task(db: Session, task_id: uuid.UUID, *, owner_id: uuid.UUID, dispatched_by: str) -> AgentTaskEvent:
+async def dispatch_task(db: Session, task_id: uuid.UUID, *, dispatched_by: str, authorized_by_user_id: uuid.UUID) -> AgentTaskEvent:
     """Sends the task to the code agent (a chat_with_fallback() call, same provider chain as
     ordinary chat) and records the raw response as an event. Does not parse/apply the diff —
     that is a deliberately separate, later increment (see module docstring's scope note); this
@@ -189,8 +189,8 @@ async def dispatch_task(db: Session, task_id: uuid.UUID, *, owner_id: uuid.UUID,
     result, attempted = await chat_with_fallback(
         db,
         messages,
-        owner_id=owner_id,
-        purpose="agent_dispatch",
+        owner_id=authorized_by_user_id,
+        purpose="agent_orchestration_dispatch_task",
         requested_by="agent_orchestration.dispatch_task",
         task_id=task.id,
         effect_guard=True,
@@ -240,7 +240,7 @@ def _latest_test_result_passed(db: Session, task_id: uuid.UUID) -> bool | None:
     return None
 
 
-async def review_task(db: Session, task_id: uuid.UUID, *, owner_id: uuid.UUID, reviewed_by: str) -> AgentTaskEvent:
+async def review_task(db: Session, task_id: uuid.UUID, *, reviewed_by: str, authorized_by_user_id: uuid.UUID) -> AgentTaskEvent:
     """The review agent's verdict is BLOCKED (raises) if no test results have been recorded
     yet — MainAI may not fabricate or skip verification (CLAUDE.md section 6's explicit
     prohibition). The verdict itself always comes from the provider's own answer, parsed from
@@ -260,8 +260,8 @@ async def review_task(db: Session, task_id: uuid.UUID, *, owner_id: uuid.UUID, r
     result, attempted = await chat_with_fallback(
         db,
         messages,
-        owner_id=owner_id,
-        purpose="agent_review",
+        owner_id=authorized_by_user_id,
+        purpose="agent_orchestration_review_task",
         requested_by="agent_orchestration.review_task",
         task_id=task.id,
         effect_guard=True,

@@ -210,6 +210,11 @@ async def run_corpus_review_job(
                 owner_id=document.uploaded_by,
                 purpose="corpus_review",
                 requested_by="jobs.handlers.corpus_review",
+                # Founder Alpha keeps a bounded output: a review is "a few sentences"; without
+                # a cap a local model can generate to its whole context, which exceeded the
+                # provider's 120s client timeout and failed the job. Preserved here so the
+                # integration is "keep both", not a choice between this and effect_guard.
+                max_tokens=400,
                 effect_guard=True,
             )
         except EgressDeniedError as exc:
