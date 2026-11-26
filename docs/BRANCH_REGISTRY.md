@@ -10686,7 +10686,7 @@ external gates. No push, merge, deploy, or provider activation; `first_cycle_go=
   `8c7b335e`; ingen upstream, ingen PR, ingen push.
 - **Nya commits i denna omgång:**
   - `6145a764` – en aldrig etablerad Ollama-anslutning klassas som bevisat pre-egress och
-    blir retrybar; read timeout förblir ambivalent. 15 providertester.
+    blir retrybar; read timeout förblir ambivalent. 19 providertester.
   - `90be8867` – sju fel-/återhämtningsscenarier genom riktig HTTP och Postgres.
   - `ee67cbe8` – verklig Ollama genom projektflödet, inkl. backend- och worker-omstart.
   - `cb52516a` och efterföljande docs-commits – överlämning, checkpoint och branch-register.

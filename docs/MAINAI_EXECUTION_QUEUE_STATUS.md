@@ -236,7 +236,7 @@ Jämfört med `integration/founder-alpha-20261121` (`0adb108f`, merge-base `dd69
 ### DEL 5 – tester och leverans: PASS för fokuserade sviter
 
 - `6145a764` providerfix: en aldrig etablerad Ollama-anslutning är bevisat pre-egress och
-  retrybar; read timeout förblir ambivalent. 15 providertester.
+  retrybar; read timeout förblir ambivalent. 19 providertester.
 - `90be8867` fel-/återhämtningssvit: 7 tester.
 - `ee67cbe8` real-model-acceptans: 1 test.
 - Hela `tests/backend/chat` + `tests/backend/providers`: **357 passed**, 8 m 46 s; ruff rent.

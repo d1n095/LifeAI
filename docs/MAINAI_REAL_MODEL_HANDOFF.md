@@ -42,7 +42,7 @@ Uppdaterad 2026-11-26. Arbetsgren:
 | Fallback förbjuden av policy | **PASS** | `CHAT_FALLBACK_ORDER=""`; extern provider anropas aldrig |
 | Projektkontext saknas/otillgänglig | **PASS** | Saknat projekt → 404 före någon rad; kastande kontextblock → turen lyckas utan blocket |
 | Annan användare | **PASS** | 403 för konversation, projekt och chatt |
-| Providerkontrakt efter fixen | **PASS** | `test_ollama_provider_failclosed.py`: 15 passed |
+| Providerkontrakt efter fixen | **PASS** | `test_ollama_provider_failclosed.py`: 19 passed |
 | Hela chat- + provider-sviterna | **PASS** | 357 passed, 8 m 46 s |
 | CI #511 | **NOT PASS** | Körningen `45562008534` är fortfarande `in_progress` |
 | CI #507–#509 | **NOT PASS** | `cancelled`; bevisar ingenting |
