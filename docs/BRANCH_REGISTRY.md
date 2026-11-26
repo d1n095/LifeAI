@@ -10708,4 +10708,5 @@ external gates. No push, merge, deploy, or provider activation; `first_cycle_go=
   `backend/tests/backend/chat/test_project_session_os_restart.py`: riktig `uvicorn`-process och
   riktig `python -m app.worker`, dödade med SIGKILL (backend A–D, worker A–B). 1 passed (75 s)
   + 1 passed (43 s), ruff rent. Endast test – ingen produktionskod, inga migrationer, inga nya
-  miljövariabler. Branchen är nu 34 commits över `8c7b335e`.
+  miljövariabler. Exakt antal commits, SHA och testkommandon: se
+  `docs/MAINAI_CODEX_INTEGRATION_HANDOFF.md`.
