@@ -1,12 +1,13 @@
 # MainAI – verklig modellacceptans och staging-överlämning
 
 Uppdaterad 2026-11-26. Arbetsgren:
-`freebuff/mainai-context-atlas-decision-support-20261125`, HEAD `ee67cbe8`, bas `8c7b335e`.
-Ingen push, merge eller deployment har gjorts.
+`freebuff/mainai-context-atlas-decision-support-20261125`, HEAD `cb52516a` (koden är
+`ee67cbe8`; sista commiten är detta dokument), bas `8c7b335e`. Ingen push, merge eller
+deployment har gjorts.
 
 ## 1. Beständighet och lokalt arbete
 
-- 29 commits mot `8c7b335e`; arbetsytan var ren efter commit.
+- 30 commits mot `8c7b335e`; arbetsytan var ren efter commit.
 - Branchen har **ingen upstream** och ingår inte i någon av PR #507–#511:s heads.
 - Reproducerbar bundle (skapas om efter sista commit):
 

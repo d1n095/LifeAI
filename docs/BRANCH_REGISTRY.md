@@ -10682,12 +10682,13 @@ external gates. No push, merge, deploy, or provider activation; `first_cycle_go=
 
 ## MainAI real-model acceptance — `freebuff/mainai-context-atlas-decision-support-20261125` (2026-11-26)
 
-- **HEAD:** `ee67cbe8`; bas `8c7b335e`; 29 commits; ingen upstream, ingen PR, ingen push.
+- **HEAD:** `cb52516a`; bas `8c7b335e`; 30 commits; ingen upstream, ingen PR, ingen push.
 - **Nya commits i denna omgång:**
   - `6145a764` – en aldrig etablerad Ollama-anslutning klassas som bevisat pre-egress och
     blir retrybar; read timeout förblir ambivalent. 15 providertester.
   - `90be8867` – sju fel-/återhämtningsscenarier genom riktig HTTP och Postgres.
   - `ee67cbe8` – verklig Ollama genom projektflödet, inkl. backend- och worker-omstart.
+  - `cb52516a` – överlämning, checkpoint och branch-register.
 - **Beroenden:** inga migrationer; inga nya miljövariabler. `chat.py` importerar moduler som
   infördes tidigare på branchen (`context_atlas`, `circuit_breaker`, `founder_memory/prompt`,
   `reuse_gate`).

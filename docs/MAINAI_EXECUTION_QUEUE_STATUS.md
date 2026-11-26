@@ -193,13 +193,13 @@ modelltransporten är fake; retrieval är isolerad till tomt resultat.
 
 ## Verklig modellacceptans och överlämning (2026-11-26)
 
-Arbetsgren `freebuff/mainai-context-atlas-decision-support-20261125`, HEAD `ee67cbe8`,
-bas `8c7b335e`, 29 commits, ingen upstream. Full överlämning:
+Arbetsgren `freebuff/mainai-context-atlas-decision-support-20261125`, HEAD `cb52516a`,
+bas `8c7b335e`, 30 commits, ingen upstream. Full överlämning:
 `docs/MAINAI_REAL_MODEL_HANDOFF.md`.
 
 ### DEL 1 – bevara arbetet: PASS
 
-- Arbetsytan ren; 29 commits mot basen; branchen har ingen upstream och ingen PR-head.
+- Arbetsytan ren; 30 commits mot basen; branchen har ingen upstream och ingen PR-head.
 - Bundle exporterad och verifierad i en isolerad klon med
   `scripts/ops/export_commit_stack.sh` (bundle + manifest + SHA256SUMS).
 - Hemlighetsskanningen hittade endast testfixturens lösenord, inte någon
