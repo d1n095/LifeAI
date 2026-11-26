@@ -12,11 +12,12 @@ verifieras och vad som fortfarande är ogjort.
 | Bas | `8c7b335e` |
 | Kod- och testinnehåll | `a64b4a23` (`a8644b2a` plus den svit-säkrade assertionen) |
 | Dokumentation ovanpå | `0e19e7a5`, `2b659294` och detta dokument |
-| Antal commits över basen | 37 före detta dokument (38 med det) |
+| Antal commits över basen | 37 före detta dokument; varje senare docs-commit ökar talet utan att ändra kandidatens innehåll (exakt antal och SHA finns i bundlens `manifest.json`) |
 | Upstream | ingen |
 | Remote-ref som innehåller HEAD | ingen (`git branch -r --contains HEAD` tom) |
 | Arbetsyta | ren |
 | Push / merge / deploy | inte gjort |
+| Publiceringsförsök | gjort 2026-11-26, **BLOCKED** på autentisering (avsnitt 10) |
 
 Kandidaten är alltså branchens tips, inte en enskild commit. `a64b4a23` är den sista commit
 som ändrar kod eller tester; allt efter den är dokumentation.
@@ -170,7 +171,19 @@ hemlighetsmönster och skriver `commit-stack.bundle`, `manifest.json` och `SHA25
 innehåller endast den egna branchen – inga andra agenters grenar och ingen historikomskrivning.
 
 Hemlighetsskanningen hittar endast testfixturens lösenord (`TestFounderPassword123!`), som
-redan finns i `tests/conftest.py` och inte är en produktionshemlighet.
+redan finns i `tests/conftest.py` och inte är en produktionshemlighet. En genomgång av alla
+tillagda rader i diffen mot basen (API-nycklar, tokens, privata nycklar, DSN:er med lösenord)
+hittar inget produktionsmaterial. De enda träffarna är loopback-lösenordet `mainai_app_pw`
+och teststrängen `super-secret-pw`:
+
+- `mainai_app_pw` finns **redan i basen** (`8c7b335e`) i `backend/tests/conftest.py`,
+  `backend/scripts/acceptance/*` med flera, och även på
+  `origin/integration/founder-alpha-20261121`. Det är ett lokalt testlösenord på `127.0.0.1`,
+  inte något som den här branchen inför.
+- `super-secret-pw` står i `test_capability_truth.py` som en påhittad sträng i ett negativt
+test som **assertar att den inte läcker ut** i routens payload.
+
+Ingen ny hemlighet tillkommer alltså med kandidaten.
 
 ## 8. Gränser för integrationen
 
@@ -188,3 +201,52 @@ redan finns i `tests/conftest.py` och inte är en produktionshemlighet.
    16 GB-VPS:en med den modell som ska användas i staging.
 3. Lös `chat.py`-konflikten en gång mot den samlade kandidaten och kör om sviterna i punkt 5.
 4. Fastställ publiceringsordning för #507–#511 + denna branch – utan force-push eller merge.
+5. Publicera branchen och öppna draft-PR:en så snart GitHub-autentisering finns (avsnitt 10);
+   fram till dess är bundlen den enda överlämningsvägen.
+
+## 10. Publiceringsförsök 2026-11-26 — blockerat, med exakt orsak
+
+Försöket gjordes mot den egna grenen, inte mot någon annans, med `--dry-run` först så att
+inget kunde publiceras av misstag:
+
+```
+$ git push --dry-run origin HEAD:refs/heads/freebuff/mainai-context-atlas-decision-support-20261125
+fatal: could not read Username for 'https://github.com': terminal prompts disabled
+(exit 128)
+
+$ git ls-remote git@github.com:d1n095/LifeAI.git HEAD     # SSH-alternativ
+ git@github.com: Permission denied (publickey).
+(exit 128)
+```
+
+`git config --get-all credential.helper` är tom, `GITHUB_TOKEN`/`GH_TOKEN` finns inte i miljön,
+`gh` är inte installerat och ingen SSH-nyckel är auktoriserad för repot. Det är hela
+blockeraren: **maskinen kan inte autentisera sig mot GitHub.** Det är inte en skyddad gren,
+inte en behörighetsfråga i repot och inte en konflikt — ett `--dry-run` når aldrig så långt.
+
+Så snart en credential finns går publiceringen att göra **utan historikomskrivning**, eftersom
+HEAD är en vanlig descendant av basen, arbetsytan är ren och ingen remote-ref innehåller HEAD:
+
+```bash
+cd /tmp/p1
+git push -u origin freebuff/mainai-context-atlas-decision-support-20261125
+git ls-remote --heads origin freebuff/mainai-context-atlas-decision-support-20261125  # ny gren, ej överskriven
+git branch -r --contains HEAD                                                          # endast den egna
+git rev-parse origin/freebuff/mainai-context-atlas-decision-support-20261125           # == HEAD
+```
+
+Draft-PR:en skapas sedan mot `integration/founder-alpha-20261121` (`0adb108f` vid kontrollen)
+och ska förbli draft tills Codex har löst `chat.py`-konflikten en gång mot den samlade
+kandidaten:
+
+```bash
+gh pr create --draft \
+  --base integration/founder-alpha-20261121 \
+  --head freebuff/mainai-context-atlas-decision-support-20261125 \
+  --title "MainAI candidate: OS-restart acceptance + decision support" \
+  --body-file docs/MAINAI_CODEX_INTEGRATION_HANDOFF.md
+```
+
+Pushen skapar en ny gren och rör ingen annan agents arbete: inga andra grenar skrivs, inget
+force-pushas, ingen historik skrivs om, ingen merge och ingen deployment. Tills credential
+finns är den verifierade bundlen i avsnitt 7 den enda överlämningsvägen.

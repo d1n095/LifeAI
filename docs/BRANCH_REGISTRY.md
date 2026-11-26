@@ -10711,3 +10711,17 @@ external gates. No push, merge, deploy, or provider activation; `first_cycle_go=
   delade sviten. Efter ändringen: chat 120 passed + providers 238 passed = 358; ruff rent.
   Endast test – ingen produktionskod, inga migrationer, inga nya miljövariabler. Exakt antal commits, SHA och testkommandon: se
   `docs/MAINAI_CODEX_INTEGRATION_HANDOFF.md`.
+- **Publiceringsförsök (2026-11-26) — BLOCKED på autentisering.** `git push --dry-run` mot
+  `origin` svarar `fatal: could not read Username for 'https://github.com'` (exit 128) och
+  SSH-alternativet `git ls-remote git@github.com:d1n095/LifeAI.git` svarar
+  `Permission denied (publickey)`. Ingen credential helper, ingen `GITHUB_TOKEN`/`GH_TOKEN`,
+  ingen `gh`, ingen auktoriserad nyckel. Blockeraren är alltså maskinens GitHub-autentisering
+  — inte en skyddad gren, inte en repo-behörighet och inte en konflikt; `--dry-run` når aldrig
+  fram till servern. Ingen push, ingen PR, ingen merge, ingen deployment, ingen force-push.
+  Branchen har fortfarande ingen upstream och ingen remote-ref innehåller HEAD, så en framtida
+  push skapar en ny gren utan historikomskrivning. Överlämning sker i stället som verifierad
+  bundle; exakta push-/PR-kommandon finns i `docs/MAINAI_CODEX_INTEGRATION_HANDOFF.md` §10.
+  Hemlighetsgenomgång av diffen mot basen: inga produktionshemligheter; endast det redan
+  existerande loopback-lösenordet `mainai_app_pw` (finns i basen och på
+  `origin/integration/founder-alpha-20261121`) och den påhittade strängen `super-secret-pw`
+  i ett negativt läckagetest.
