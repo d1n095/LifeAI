@@ -255,3 +255,42 @@ Jämfört med `integration/founder-alpha-20261121` (`0adb108f`, merge-base `dd69
 1. Invänta att CI #511 blir terminal och verifiera varje körning som PASS/FAIL/CANCELLED.
 2. Kör real-model-acceptansen på 16 GB-VPS:en med den modell som ska användas i staging.
 3. Fastställ publiceringsordning för #507–#511 + denna branch utan force-push eller merge.
+
+## OS-processomstart (2026-11-26, uppföljning)
+
+Föregående checkpoint startade om app-lifespan och worker-cykler i samma process. Den här
+omgången lägger till den återstående implementationen: riktiga OS-processer som dödas.
+
+### PASS
+
+- `a8644b2a` – `tests/backend/chat/test_project_session_os_restart.py`. Riktig
+  `uvicorn`-process (backend A–D) och riktig `python -m app.worker` (worker A–B), dödade med
+  SIGKILL; backend B stängs dessutom med SIGTERM. **1 passed** på 75 s och **1 passed** på
+  43 s i två följder; ruff rent.
+  - Backend A dör med returkod `-9`. Process B läser konversationen med samma session,
+    replay av samma `client_message_id` ger samma assistant-rad utan nytt modellanrop, och
+    nästa tur får historiken i modellprompten.
+  - Process C mot stängd Ollama-port: `failed`/`unreachable`/`retryable`, ingen fallback,
+    användarraden bevarad och assistant-raden tom. Process D retry lyckas mot samma rad.
+  - Annan grundare får 403 på konversation, projekt och chatt.
+  - Worker A dör med `-9` efter Redis-heartbeat; worker B tar över en kvarglömd
+    `running`-rad med utgången lease (`locked_by = os-restart-worker-b`, framtida lease).
+  - Konversationen är oförändrad (sex rader, en konversation) efter båda worker-processerna.
+  - Endast embedding-anropet är stubbat; chattmodellen är riktig lokal Ollama och en
+    genomströmningsrecorder framför den ändrar aldrig svaret.
+
+### NOT_RUN / BLOCKED (oförändrat)
+
+- CI #511 `45562008534`: `in_progress` även vid kontroll 2026-11-26 (startad 08:14,
+  `updated_at` oförändrad). Ingen terminal körning → aldrig PASS. #507–#509 `cancelled`,
+  #510:s run-id svarar 404.
+- 16 GB-VPS med produktionsmodell: NOT_RUN.
+- Webbläsare/frontend: NOT_RUN (Chrome saknas).
+- `security/POLICY_LOCK.json`: BLOCKED (Z).
+- Hela backend-sviten parallellt: NOT_RUN (2 GB VPS).
+
+### Första oavslutade moment
+
+1. CI #511 blir terminal → verifiera PASS/FAIL/CANCELLED (cancelled är aldrig grönt).
+2. Kör `test_project_session_os_restart.py` på 16 GB-VPS:en med produktionsmodellen.
+3. Fastställ publiceringsordning för #507–#511 + denna branch utan force-push eller merge.

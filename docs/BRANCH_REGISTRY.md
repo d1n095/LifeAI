@@ -10704,3 +10704,8 @@ external gates. No push, merge, deploy, or provider activation; `first_cycle_go=
   svarar 404. `security/POLICY_LOCK.json` divergerar fortfarande (Z). `first_cycle_go=false`.
 - **Bevis:** `docs/MAINAI_REAL_MODEL_HANDOFF.md`; 357 passed i chat- + provider-sviterna;
   real-model-acceptansen 1 passed (41 s); felmatrisen 7 passed i fem körningar.
+- **OS-processacceptans (2026-11-26):** `a8644b2a` lägger till
+  `backend/tests/backend/chat/test_project_session_os_restart.py`: riktig `uvicorn`-process och
+  riktig `python -m app.worker`, dödade med SIGKILL (backend A–D, worker A–B). 1 passed (75 s)
+  + 1 passed (43 s), ruff rent. Endast test – ingen produktionskod, inga migrationer, inga nya
+  miljövariabler. Branchen är nu 34 commits över `8c7b335e`.

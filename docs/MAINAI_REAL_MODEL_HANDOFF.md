@@ -2,8 +2,9 @@
 
 Uppdaterad 2026-11-26. Arbetsgren:
 `freebuff/mainai-context-atlas-decision-support-20261125`, bas `8c7b335e`. Koden är
-`ee67cbe8`; överlämningsdokumentet följer i commits efter koden, så branchens exakta HEAD är
-`git rev-parse HEAD`. Ingen push, merge eller deployment har gjorts.
+`ee67cbe8` och OS-processacceptansen `a8644b2a`; överlämningsdokumentet följer i commits
+efter koden, så branchens exakta HEAD är `git rev-parse HEAD`. Ingen push, merge eller
+deployment har gjorts.
 
 ## 1. Beständighet och lokalt arbete
 
@@ -36,6 +37,7 @@ Uppdaterad 2026-11-26. Arbetsgren:
 | Verklig lokal modell genom projektflödet | **PASS** | `test_project_session_real_model.py`: 1 passed, 41 s |
 | Backend-omstart med sparad konversation | **PASS** | Samma test: stänger första lifespan, startar ny, historiken och nästa tur finns kvar |
 | Worker-omstart | **PASS** | Två riktiga `Worker().run_once()`-cykler i två instanser; konversationen oförändrad |
+| Verklig OS-processomstart (backend + worker) | **PASS** | `test_project_session_os_restart.py`: 1 passed, 75 s respektive 43 s |
 | Fel och återhämtning, 7 scenarier | **PASS** | `test_chat_failure_recovery.py`: 7 passed, 5 körningar i följd utan flakiness |
 | Ollama nere före sändning + retry | **PASS** | Användarraden bevaras, felet är `unreachable`/retryable, retry återanvänder samma rad |
 | Avbrott under generering | **PASS** | Deltext visas men lagras aldrig som svar; blind retry och dubblett nekas 409 |
@@ -55,6 +57,32 @@ Den verkliga modellen var `qwen2.5:0.5b` på `http://127.0.0.1:11434`. Modellens
 medvetet inte innehållsligt assertat: testet kräver ett icke-tomt svar med
 `provider="ollama"` och rätt modellnamn. Allt annat – projektkontext i prompten, persistens,
 omstart, historik, behörigheter – är deterministiska assertioner mot HTTP och Postgres.
+
+## 2b. Verklig OS-processomstart (ny acceptans)
+
+`tests/backend/chat/test_project_session_os_restart.py` stänger gapet mellan "app-lifespan
+startas om" och "processen dödades". Testet startar en riktig `uvicorn`-process mot riktig
+Postgres, Redis och Ollama, samt en riktig `python -m app.worker`, och dödar dem med SIGKILL
+(backend B stängs dessutom med SIGTERM, en annan kodväg).
+
+| Moment | Bevis i testet |
+| --- | --- |
+| Backend-process A dör | `Popen.kill()`, returkod `-9`, ingen shutdown-hook |
+| Sessionen överlever | Samma cookiejar läser konversationen i process B utan ny inloggning |
+| Idempotens över processgräns | Samma `client_message_id` ger samma `assistant_message_id`; modellen anropas inte igen |
+| Fortsatt projektkontext | Modellprompten i process B innehåller första frågan och första svaret |
+| Modellen otillgänglig | Process C mot stängd port: `failed`/`unreachable`/`retryable`, ingen fallback, användarraden bevarad |
+| Återhämtning | Process D: retry av samma `user_message_id` lyckas och återanvänder assistant-raden |
+| Annan användare | 403 för konversation, projekt och chatt |
+| Worker A dör | Riktig `python -m app.worker`, heartbeat i Redis, sedan SIGKILL |
+| Worker B tar över | En kvarglömd `running`-rad med utgången lease får `locked_by = os-restart-worker-b` och framtida lease |
+| Ingen datadrift | Konversationen är fortfarande sex rader efter båda worker-processerna |
+
+Endast embedding-anropet är stubbat (ingen 1536-dimensionell modell finns installerad), samma
+substitution som in-process-acceptansen gör. Chattmodellen är den riktiga lokala Ollama; en
+genomströmningsrecorder framför den sparar prompten men ändrar aldrig svaret.
+
+Körning: **1 passed** på 75 s och **1 passed** på 43 s i två följder; ruff rent.
 
 ## 3. Produktionsfixen i denna omgång
 
@@ -89,6 +117,7 @@ kandidat och lös
 | 4 | `624269e8` | `backend/app/work_management/service.py` | dubblettskydd för identiska öppna uppgifter |
 | 5 | `6145a764` | `backend/app/providers/ollama_provider.py` | retry efter stoppad lokal modell |
 | 6 | `90be8867`, `ee67cbe8` | `backend/tests/backend/chat/*` | acceptans- och felmatris |
+| 7 | `a8644b2a` | `backend/tests/backend/chat/test_project_session_os_restart.py` | OS-processacceptans; endast test, ingen produktionsberoende |
 
 Övriga commits på branchen (`aca37661`, `1bc5e318`, `089de13c`, dokumentation och
 atlas-/system intelligence-arbete) är inte importkritiska för det nya chattflödet men ingår i
@@ -164,6 +193,10 @@ export LIFEAI_TEST_DATABASE_NAME="lifeos_test_p1"
 /tmp/r15-venv/bin/python -m pytest \
   tests/backend/providers/test_ollama_provider_failclosed.py -q
 
+# Verklig OS-processomstart av backend och worker
+/tmp/r15-venv/bin/python -m pytest \
+  tests/backend/chat/test_project_session_os_restart.py -q
+
 # Hela chat- + provider-sviterna (357 tester)
 /tmp/r15-venv/bin/python -m pytest tests/backend/chat tests/backend/providers -q
 
@@ -176,8 +209,9 @@ Modultestet hoppar med ett miljöskäl om `qwen2.5:0.5b` inte finns på
 
 ## 7. Kvarvarande grindar
 
-1. **CI:** #511 (`29d09a78`) var `in_progress` vid sista kontrollen. #507–#509 är
-   `cancelled`, #510:s run-id svarar 404. Ingen av dem är grönt bevis. Ingen push har gjorts,
+1. **CI:** #511 (`29d09a78`) var `in_progress` vid sista kontrollen och är fortfarande
+   `in_progress` vid kontrollen 2026-11-26 (startad 08:14, `updated_at` oförändrad).
+   #507–#509 är `cancelled`, #510:s run-id svarar 404. Ingen av dem är grönt bevis. Ingen push har gjorts,
    så inga körningar har avbrutits och inga PR-heads ändrats.
 2. **Staging på 16 GB:** kör om real-model-acceptansen med den modell som ska användas där.
    2 GB-värden klarar `qwen2.5:0.5b` men är inte representativ för produktionsmodellen.
