@@ -616,10 +616,16 @@ def test_project_journey_survives_real_os_process_restarts(tmp_path, superuser_d
             assert observed[1] is not None
             assert observed[1] > datetime.utcnow()  # noqa: DTZ003 - naive UTC column
 
-            # The worker restart changed nothing about the conversation.
+            # The worker restart changed nothing about the conversation. Scoped to this
+            # conversation on purpose: other tests in the same session may own their own.
             superuser_db.rollback()
             assert len(_messages(superuser_db, conversation_id)) == 6
-            assert superuser_db.query(Conversation).count() == 1
+            assert (
+                superuser_db.query(Conversation)
+                .filter_by(id=uuid.UUID(conversation_id))
+                .count()
+                == 1
+            )
 
             # Not asserted as SIGKILL: the restarted worker may already have finished the
             # abandoned job and moved on; only the takeover above is the claim under test.
