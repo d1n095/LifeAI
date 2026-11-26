@@ -10682,8 +10682,8 @@ external gates. No push, merge, deploy, or provider activation; `first_cycle_go=
 
 ## MainAI real-model acceptance — `freebuff/mainai-context-atlas-decision-support-20261125` (2026-11-26)
 
-- **HEAD:** branchens sista commit (koden är `ee67cbe8`; dokumentationen följer efter); bas
-  `8c7b335e`; **publicerad** 2026-11-26 som
+- **HEAD:** branchens sista commit (senaste kod är `40faa30f` och senaste testcommit
+  `f51b9ae1`; dokumentationen följer efter); bas `8c7b335e`; **publicerad** 2026-11-26 som
   `origin/freebuff/mainai-context-atlas-decision-support-20261125` med upstream satt;
   **ingen PR ännu** – PR-skapandet är blockerat av tokenbehörighet (sista punkten).
 - **Nya commits i denna omgång:**
@@ -10735,3 +10735,16 @@ external gates. No push, merge, deploy, or provider activation; `first_cycle_go=
   det redan existerande loopback-lösenordet `mainai_app_pw` (finns i basen och på
   `origin/integration/founder-alpha-20261121`) och den påhittade strängen `super-secret-pw`
   i ett negativt läckagetest.
+- **Långsiktigt grundararbetsflöde (2026-11-26) — PASS lokalt.** `8976adbd` gör målintaget
+  idempotent (samma owner + projekt + instruktion återanvänder ett aktivt mål; owner-raden
+  låses) och låter `POST /goals/{id}/plan` svara 409 `active_plan_exists` före AI-anropet om
+  en aktiv plan finns, så en HTTP-retry inte kan superseda planen och cancellera en körande
+  uppgift; avsiktlig omplanering kräver `?replan=true`. `40faa30f` visar `disputed`
+  Founder Memory-poster som en tydligt märkt `OSTRIDIGT`-rad i chattprompten i stället för att
+  tysta dem. `f51b9ae1` lägger till
+  `backend/tests/backend/mainai/test_founder_long_horizon_workflow.py` (A–G + HTTP-retry):
+  **8 passed, 17,44 s** mot riktig Postgres/RLS, riktiga leases och befintlig
+  recovery/verifiering; endast LLM-transporten fejkad. Regression: 67 passed i
+  founder-memory-, execution-API-, planner- och path-B-sviterna. Inga migrationer, inga nya
+  miljövariabler, ingen ändrad RLS/approval-policy. Branchen blockerar fortfarande ingen
+  annan gren; PR är fortfarande blockerad av tokenbehörigheten ovan.

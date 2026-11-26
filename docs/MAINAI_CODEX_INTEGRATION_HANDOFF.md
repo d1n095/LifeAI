@@ -10,7 +10,7 @@ verifieras och vad som fortfarande är ogjort.
 | --- | --- |
 | Arbetsgren | `freebuff/mainai-context-atlas-decision-support-20261125` |
 | Bas | `8c7b335e` |
-| Kod- och testinnehåll | `a64b4a23` (`a8644b2a` plus den svit-säkrade assertionen) |
+| Kod- och testinnehåll | `a64b4a23` (`a8644b2a` plus den svit-säkrade assertionen) samt det långsiktiga arbetsflödet i `8976adbd`, `40faa30f` och `f51b9ae1` (avsnitt 12) |
 | Dokumentation ovanpå | `0e19e7a5`, `2b659294` och detta dokument |
 | Antal commits över basen | 37 före detta dokument; varje senare docs-commit ökar talet utan att ändra kandidatens innehåll (exakt antal och SHA finns i bundlens `manifest.json`) |
 | Upstream | `origin/freebuff/mainai-context-atlas-decision-support-20261125` |
@@ -154,6 +154,9 @@ plain http till `127.0.0.1`. Det skriver också nyckeln `worker:heartbeat` i den
 | Webbläsare/frontend | **NOT RUN** | Chrome saknas; frontend ägs av Claude |
 | `security/POLICY_LOCK.json` | **BLOCKED** | Divergensen kvarstår; filen är orörd (Z ansvarar) |
 | Hela backend-sviten parallellt | **NOT RUN** | 2 GB VPS; endast fokuserade sviter |
+| Långsiktigt arbetsflöde, scenarier A–G (avsnitt 12) | **PASS** | `test_founder_long_horizon_workflow.py`: 8 passed, 17,44 s |
+| Retry av målintag/plan utan dubblett eller avbruten agent | **PASS** | Samma modul, HTTP-testet; 409 före AI-anropet |
+| Motsägelser i Founder Memory syns som OSTRIDIGT | **PASS** | Scenario F |
 
 ## 7. Reproducerbar bundle
 
@@ -350,3 +353,121 @@ kandidaten (avsnitt 9, punkt 3). Freebuff mergar inte, deployar inte och rör in
 `total_count: 0`), så det finns ingen CI-status för den publicerade tipen att läsa. CI #511
 (`45562008534`) är fortfarande `in_progress` med oförändrad `updated_at`
 (`2026-11-26T08:14:10Z`) – den ska läsas när den är terminal, och `in_progress` är aldrig PASS.
+
+## 12. Långsiktigt grundararbetsflöde 2026-11-26 — implementerat och verifierat
+
+### 12.1 Vad som faktiskt ändrades
+
+Kartläggningen (FAS 1–4) visade att kedjan redan finns och ägs av befintliga moduler:
+`projects`/`conversations` för projekt och historik, `founder_memory` + `project_memory` för
+beständiga beslut, `context_atlas` för systemkartan, `mainai_goals`/`mainai_plans`/
+`mainai_tasks` för arbetet, `mainai_jobs` med lease + fencing-token för kön,
+`mainai_execution` för körning/verifiering/recovery och `project_status.work_chain` för den
+läsbara arbetskedjan. Inget nytt uppgiftssystem och ingen ny tabell infördes. Tre verkliga
+luckor stängdes:
+
+1. **Idempotent målintag** (`planner.create_goal`, `POST /api/mainai/execution/goals`). Ett
+dubbelklick eller en HTTP-retry efter timeout kunde skapa två aktiva mål för exakt samma
+uppdrag. Nu återanvänds ett aktivt mål med samma owner, projekt och normaliserade instruktion.
+Owner-raden låses först, så två samtidiga submits serialiseras. Terminala mål blockerar aldrig
+ett nytt, och en annan instruktion är ett annat uppdrag.
+
+2. **En aktiv plan kan inte ersättas av en retry** (`POST /goals/{id}/plan`). `create_plan()`
+är en avsiktlig replan: den superseder den aktiva planen och cancellar varje icke-terminal
+uppgift, även en som en worker kör just nu. Rutten svarar nu **409** med
+`active_plan_exists` innan den betalda AI-planeringen anropas, om inte anroparen uttryckligen
+skickar `replan=true`. Automatisk replan (`replan.py`, triggad av en permanent failed task)
+använder `create_plan()` direkt och är oförändrad.
+
+3. **Motsägelser i Founder Memory syns** (`founder_memory/prompt.py`).
+`list_current_founder_memory()` exkluderar `disputed` med flit, men då försvann motsägelsen
+helt och modellen kunde se den ena av två motstridiga instruktioner som gällande. Promptblocket
+redovisar nu upp till tre disputed notes på en tydligt märkt `OSTRIDIGT`-rad inom samma
+teckenbudget, med instruktionen att inte använda dem som gällande utan att fråga.
+
+### 12.2 Återanvänt i stället för nytt
+
+| Behov | Befintlig mekanism som används |
+| --- | --- |
+| Projekt, historik, projektminne | `projects`, `conversations`, `messages`, `project_memory`, `founder_memory` |
+| Uppdragsnedbrytning | `mainai_execution.planner.create_plan` (AI-förslag + deterministisk persist) |
+| Befintliga uppgifter återanvänds | `work_management.create_task` (identisk öppen uppgift) + `create_goal` (identiskt aktivt mål) |
+| Auktoriserad fortsättning | `executor.dispatch_ready_task`, `claim_next_mainai_job`, approval-gate |
+| Arbetsstatus ARBETAR/BLOCKERAD/KLAR | `MainAITaskStatus`/`MainAIGoalStatus` + `project_status.work_chain` |
+| Kraschåterhämtning | `recovery_inspector` → `classifier` → `takeover`, lease-generation-fencing |
+| Korrekt slutrapport | `final_report` (enbart durabila rader, ingen LLM) |
+| Kontext mellan pass | `project_status`, `founder_memory.prompt`, `context_atlas` |
+
+### 12.3 Verifiering
+
+Nytt: `backend/tests/backend/mainai/test_founder_long_horizon_workflow.py` (8 tester). Riktig
+Postgres med RLS och den begränsade runtime-rollen, riktiga jobb-lease/claim, riktig
+`run_task_execution_job`, riktig subprocess-pytest i scenario G och den befintliga
+recovery-pipelinen i B/C. **Endast LLM-transporten är fejkad** (`OpenAIProvider.chat`); det står
+i modulens docstring. Ollama användes inte i denna modul – de riktiga modellerna täcks av de
+redan godkända `test_project_session_*`-modulerna, som inte kördes om (oförändrad kod).
+
+| Scenario | Vad som bevisas | Resultat |
+| --- | --- | --- |
+| A – projektet fortsätter nästa dag | Steg 1 körs klart, beroende steg blir `ready`, ny session ser samma mål/status/rapport, retry återanvänder målet | PASS |
+| B – modellen slutar svara | Instruktionen kvar, ingen `completed`/`verification_passed`, ingen work_result-checkpoint, exakt ett jobb; recovery klassificerar ärligt | PASS |
+| C – worker kraschar | Generisk reclaim rör inte `task_execution`; takeover skapar ett nytt jobb, gammal lease fencas, exakt ett levande jobb | PASS |
+| D – redan utfört arbete | Identisk uppgift och identiskt mål återanvänds; ett `done`-mål blockerar inte en ny uppgift | PASS |
+| E – kräver godkännande | Dispatch nekas utan approval-event, inget jobb skapas; efter grant exakt ett jobb, andra dispatch nekas | PASS |
+| F – motstridiga instruktioner | Supersederad instruktion syns inte; disputed syns bara som `OSTRIDIGT`, aldrig som gällande | PASS |
+| G – felaktig arbetsrapport | Jobbet är `completed` men tasken `failed`; rapporten säger failed, `unresolved_risk=True`, målet stängs inte | PASS |
+| HTTP-retry | Dubbel POST skapar ett mål; andra plananropet ger 409 utan AI-anrop och utan att cancellera tasken | PASS |
+
+```
+$ pytest tests/backend/mainai/test_founder_long_horizon_workflow.py -q
+8 passed in 17.44s
+
+$ pytest tests/backend/mainai/test_founder_memory_prompt.py \
+    tests/backend/test_mainai_execution_api.py \
+    tests/backend/test_mainai_execution_planner.py \
+    tests/backend/test_path_b_execution_scope_bridge.py -q
+67 passed in 101.31s
+
+$ ruff check app/mainai_execution/planner.py app/routers/mainai_execution.py \
+    app/founder_memory/prompt.py tests/backend/mainai/test_founder_long_horizon_workflow.py
+# endast E402 på planner.py:56 -- fanns redan på basen 8c7b335e, inte infört här
+```
+
+### 12.4 Integrationsberoenden och kontraktsändring
+
+- **`POST /api/mainai/execution/goals/{id}/plan` kräver nu `?replan=true` när målet redan har
+  en aktiv plan.** Utan flaggan svarar rutten 409 med `detail.error =
+  "active_plan_exists"`, `plan_id` och `plan_version`. Frontend/Codex måste skicka flaggan för
+  en avsiktlig omplanering; en vanlig retry ska inte göra det. Detta är den enda
+  kontraktsändringen.
+- `create_goal()` har två nya nyckelordsparametrar (`project_id`, `reuse_identical_active`),
+  båda med ofarliga defaultvärden; `work_candidates`/`github_evidence` är oförändrade.
+- Inga migrationer, inga nya miljövariabler, ingen ändrad RLS-policy, ingen ändrad
+  approval-policy.
+- Dedupe är medvetet textnära: samma uppdrag formulerat med andra ord skapar fortfarande ett
+  nytt mål. `project_status.work_chain` rapporterar sådana misstänkta dubbletter läsbart, men
+  blockerar dem inte.
+
+### 12.5 Kvarvarande begränsningar
+
+| Moment | Status | Orsak |
+| --- | --- | --- |
+| CI för denna tip | **NOT RUN** | Pushen startar inga workflows (`total_count: 0`) |
+| CI #511 | **NOT PASS** | `in_progress`; aldrig PASS förrän terminal |
+| 16 GB-VPS med produktionsmodell | **NOT RUN** | Maskinen är 2 CPU / 1 GB; Docker otillgängligt |
+| Riktig Ollama i A–G-modulen | **NOT RUN** | Modulen fejkar endast LLM-transporten; riktig modell finns i de tidigare acceptansmodulerna |
+| Frontend | **NOT RUN** | Chrome saknas; ägs av Claude |
+| `security/POLICY_LOCK.json` | **BLOCKED** | Divergensen kvarstår; filen orörd (Z ansvarar) |
+| Projektstatus per projekt | **MEDVETET** | `project_status` är grundarövergripande; projektkontexten i chatten är projektavgränsad |
+
+### 12.6 Commits
+
+| Commit | Innehåll |
+| --- | --- |
+| `8976adbd` | Idempotent målintag + 409-skydd för aktiv plan (planner, router) |
+| `40faa30f` | Disputed notes synliga som `OSTRIDIGT` i chattprompten |
+| `f51b9ae1` | A–G-integrationstestet + HTTP-retry-testet |
+| detta docs-commit | Avsnitt 12, §1/§6 uppdaterade |
+
+Kandidaten är fortfarande hela branchen, inte enskilda commits. Ingen merge, ingen deployment,
+ingen force-push och ingen `POLICY_LOCK`-ändring har gjorts.
