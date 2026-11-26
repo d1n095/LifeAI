@@ -285,4 +285,5 @@ pytest tests/backend/test_migration_state_privileges.py tests/backend/test_runti
 | Merge-base | `86671468a6dd271b61a3f985434130c4bf470ea8` |
 | Alpha/VPS-bas | `b313c9df812bc780c89f34f8d0bc296e21a2d342` |
 | Integrationsgren | `0adb108fa5145ad6b320950fb029bfaf96f003b4` |
-| Denna omgångs commits | se `git log 13fc211b..HEAD` (två commits: kod + dokumentation) |
+| Denna omgång — kodfixar | `45fe2fb9` (corpus_review `max_tokens`, agent-auth-kontrakt) |
+| Denna omgång — dokumentation | `69d61f59` (denna överlämning + branchregistret) |
