@@ -10724,7 +10724,8 @@ external gates. No push, merge, deploy, or provider activation; `first_cycle_go=
   grenen som **ny** gren (`[new branch]`, ingen force, ingen historikomskrivning) och upstream
   sattes; ingen annan gren skrevs och ingen persistent Git-konfig ändrades.
   Verifierat: `ls-remote` == HEAD, `git branch -r --contains HEAD` visar endast den egna
-  grenen. **PR:en kunde inte skapas:** `POST /pulls` → 403 och GraphQL `createPullRequest` →
+  grenen och `git rev-parse @{u}` ger samma SHA (efter en additiv fetch-refspec för den egna
+  grenen; övriga grenar orörda). **PR:en kunde inte skapas:** `POST /pulls` → 403 och GraphQL `createPullRequest` →
   `FORBIDDEN`, båda `Resource not accessible by personal access token`, medan samma token
   läser `pulls`/`contents`/`actions` (200). Det som behöver godkännas är
   **`Pull requests: Read and write`** på den befintliga token – inte en ny nyckel och inte en

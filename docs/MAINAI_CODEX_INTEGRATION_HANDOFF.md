@@ -297,7 +297,12 @@ $ git branch -r --contains HEAD
 
 `origin` är en single-branch-clone (fetch-refspec pekar bara på
 `transfer/freebuff-r15-20261119`), så tracking-refen skapades med en explicit
-`git fetch origin +refs/heads/<gren>:refs/remotes/origin/<gren>`.
+`git fetch origin +refs/heads/<gren>:refs/remotes/origin/<gren>`. För att
+`origin/<gren>` och `@{u}` ska fungera varaktigt lades dessutom **en** additiv
+fetch-refspec till för den egna grenen
+(`+refs/heads/<gren>:refs/remotes/origin/<gren>`); ingen annan gren påverkas och den kan tas
+bort med `git config --unset-all remote.origin.fetch` om den skulle störa. Efter det svarar
+`git rev-parse @{u}` samma SHA som HEAD.
 
 **Draft-PR: BLOCKED på tokenbehörighet.** En token finns på maskinen
 (`~/.config/github/token`, användare `d1n095`, admin på repot) och den kan läsa allt som
