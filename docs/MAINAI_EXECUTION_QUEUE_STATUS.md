@@ -111,6 +111,80 @@ development_state.py`. Inga nya lager tillagda.
 - Publiceringsordning får bestämmas först när körningarna är terminala; historiken skrivs
   inte om och `a178e11c` bevaras.
 
+## Implementation run 2026-11-26 (etapp 1–6)
+
+### Etapp 1 – läget: PASS
+
+- Arbetsgren `freebuff/mainai-context-atlas-decision-support-20261125`, 25 lokala commits mot
+  `8c7b335e`, ingen upstream, arbetsyta ren. Bundle från steg 0 finns kvar.
+- CI #507–#511: fyra körningar `in_progress`, fyra `cancelled`. Ingenting har pushats, så inga
+  körningar har avbrutits och inga PR-heads ändrats.
+
+### Etapp 2 – konversationsflödet: PASS (befintlig kod, inga nya luckor)
+
+Verifierat: autentiserad identitet (`require_founder`), durabel användarrad före provider,
+ total ordning (`created_at`, `id`), context retrieval, routing/fallback, streaming med
+avbrottshantering, retry utan dubbletter (claim + partiellt unikt index), sanerad felkontrakt,
+återhämtning efter processdöd (inflight-claim blockerar blind retry) och RLS.
+Bevis: 55 passed i `test_project_session_resume.py`, `test_messages_rls.py`,
+`test_chat_request_idempotency.py`, `test_message_sequence.py`; tidigare 108 passed i hela
+chat-sviten.
+
+### Etapp 3 – projektminne och arbetskontinuitet: PASS + en riktig fix
+
+Chatten injicerar projektkontext (mål, milstolpar, beslut, öppna uppgifter, källor),
+projektstatus, grundarens minne och continuity-checkpoints. Checkpoint-staleness mäts mot ny
+note, ny branch/PR-status och ny git-commit.
+
+Fix (`624269e8`): `create_task` återanvänder en identisk öppen uppgift (samma ägare, projekt,
+milstolpe, normaliserad titel och beskrivning) i stället för att skapa en andra rad. Testet
+skickar samma uppgift två gånger och får samma id.
+
+Bevis: 67 passed inkl. `test_project_memory.py` (checkpoint/staleness) och 55 inkl.
+återupptagningsscenariot.
+
+### Etapp 4 – systemförståelse i verklig användning: PASS (`3670d28a`)
+
+Utredningsmotorn och atlas-rekommendationen fanns men anropades aldrig från en levande väg.
+Nu: `app/mainai_executive/reuse_gate.py` känner igen bygg-intent (svenska/engelska), kör
+`investigate_engineering_request` läs-only och returnerar moduler, explicita evidensnivåer,
+verkliga käll-/testreferenser, tidigare projektbeslut, ägarskap och rekommendation.
+Chatten får blocket i prompten och svaret får `reuse_check` med `execution_authorized=False`.
+Svenska synonymer (`minne`, `dokument`, `chatt`, `projekt`, `sökning`) mappar till samma
+granskade moduler som engelska. Bevis: 7 passed (gate + riktig HTTP-väg).
+
+### Etapp 5 – felinjektion: PASS
+
+| Felväg | Bevis |
+| --- | --- |
+| Redis otillgänglig | `test_v5_fault_injection.py::test_03`, G1-sviten |
+| PostgreSQL tillfälligt otillgänglig | `test_04` |
+| Modellleverantör timeout | `test_05`; `test_chat_message_persistence.py` |
+| Fallback nekad av policy | `providers/test_routing_security_hardening.py` |
+| Dokument utan originalfil | `rag/test_library_import.py` (blob kan inte återställas / återskapas) |
+| Gamla checkpoints | `test_project_memory.py` (stale after note/PR/git) |
+| Felaktigt användar-ID | `test_messages_rls.py`; atlas-ägarskap |
+| Gammal agentlease | `test_operator_lease_effect_time_race.py`; `test_09` |
+| Motsägande evidens | `test_trust_engine.py`; `test_adversarial_reasoning.py` |
+| Misslyckad återhämtning | `test_mainai_execution_auto_recovery.py`; `test_01/02` |
+
+Körningar: 67 passed (V5 + projektminne + lease + recovery) och 81 passed, 1 skipped
+(biblioteksimport + routing-säkerhet + streaming).
+
+### Etapp 6 – slutlig integrationsverifiering: PASS
+
+`tests/backend/chat/test_project_session_resume.py` går genom riktig HTTP och riktig Postgres:
+inloggning → projekt → uppgift → chatt med projektkontext i prompten → omladdning → ny session
+som fortsätter historiken utan dubblett → andra konto nekas av founder-gaten. Endast
+modelltransporten är fake; retrieval är isolerad till tomt resultat.
+
+### NOT_RUN
+
+- Live extern modell och webbläsar-UI (ingen Chrome i miljön; frontend ägs av Claude).
+- Hela backend-sviten parallellt (2 GB VPS — endast fokuserade sviter).
+- CI som grönt bevis: körningarna är `cancelled`/`in_progress`, inte PASS.
+- `security/POLICY_LOCK.json`-divergensen kvarstår (Z).
+
 ## Kvar att göra
 
 1. Steg 8 när CI är terminal: verifiera varje körning, säkra publiceringsordning, ingen merge.
