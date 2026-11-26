@@ -53,15 +53,23 @@ Fem korrigeringar:
   POLICY_LOCK auto-mergas till Alpha:s (Z.ai:s) version, byte-identisk med `b313c9df`.
 - Vid merge av `70b7fda8` in i `b313c9df` är det **16** konflikter, inte 17.
 - **`security/POLICY_LOCK.json` finns bara på Alpha-sidan** (inte på min gren, inte i `86671468`).
-  Min verktygskörning visar att den sammanslagna kandidaten **fallerar A08** tills låset fått tre
-  poster för `backend/scripts/acceptance/` — `program_matrix.py`, `mainai_capability_acceptance.py`,
-  `alpha_merge_invariants.py` (sha256 i acceptanspaketets §11.3). Det är Z.ai:s fil; jag rör den inte.
-  På orörd `b313c9df` finns bara en post: den kända staleness i
-  `real-local-ai-verification.yml` (PR #492).
+  Den **fallerar redan på orörd `b313c9df`**: 1 post
+  (`.github/workflows/real-local-ai-verification.yml`, ändrad i `28954b31`/`eddddf53` utan att låset
+  regenererades). Sammanslagen kandidat: **20** poster (3 ändrade + 17 oskyddade — 16 av dem mina
+  acceptansskript, plus `v7-testlab.yml`). Det är A08:s enda fel och det är **inte** mergens.
+  Åtgärden är `docs/POLICY_LOCK_merged_candidate.patch` (49 rader, bara filposter, inget borttaget):
+  applicera + committa i samma granskade commit som mergen. Det är Z.ai:s fil; jag rör den inte.
+  Mätt: 20 poster → 0, `test_security_controls.py` 1 failed → 17 passed, INV-12 FAIL → PASS.
 
 Verktygen ändrades bara i mitt eget område: `--allow-missing` (mäta en kandidat som inte bär min
 gren), INV-05 går på AST i stället för strängmatchning (den gav falskt FAIL på kandidatens
 fail-closed-kod), INV-14 ny. Detaljer i acceptanspaketets §11.
+
+**A08-uppföljning samma dag:** INV-12 kräver nu att låset **verifierar** mot trädet (och att en
+avvikelse är mekanisk: header orörd, ingen kontroll avlistad, inga främmande poster). Den gamla
+formen krävde byte-identitet med basen och hade fällt exakt den regenerering A08 behöver, samtidigt
+som den godkände ett lås som inte verifierar. Nytt: `docs/POLICY_LOCK_merged_candidate.patch`.
+Detaljer i acceptanspaketets §12. Inga andra brancher rörda.
 
 ## Integrationsberedskap mot Founder Alpha — `freebuff/mainai-context-atlas-decision-support-20261125` (2026-11-26)
 

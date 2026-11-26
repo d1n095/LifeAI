@@ -212,6 +212,14 @@ kandidaten, `b313c9df`). `86671468` har ingen låsfil, och att diffa mot den gav
 resultat som lästes som PASS för en fil som inte fanns — INV-12 är nu `BLOCKED` i det läget i
 stället.
 
+INV-12 kräver att låset **verifierar** mot trädet, med repots egen
+`backend/scripts/security/verify_policy_lock.py` (inte en andra implementation). Det fångar att
+orörd `b313c9df` själv fallerar: `.github/workflows/real-local-ai-verification.yml` ändrades i
+`28954b31`/`eddddf53` utan att låset regenererades. En avvikelse från basen är `PASS` bara om den
+är mekanisk — `version`/`algorithm`/`description` orörda, ingen kontroll avlistad, inga poster som
+inte är skyddade kontroller. Den färdiga regenereringen för den sammanslagna kandidaten ligger i
+`docs/POLICY_LOCK_merged_candidate.patch`; acceptanspaketets §12 förklarar varför.
+
 `--merged` krävs för INV-11 (ingen förälders testfil får försvinna i mergen) och
 `--policy-lock-base` för INV-12 (POLICY_LOCK är Z.ai:s). På en ogrenad gren är det **förväntat**
 att INV-01/03/04/06 fallerar och INV-14 fallerar på min sida: det är exakt de oavgjorda

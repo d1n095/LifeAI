@@ -158,7 +158,7 @@ verifieringsmetod och en namngiven ägare. `INV-nn` är `alpha_merge_invariants.
 | 14 | `frontend/app/(shell)/page.tsx` | Manuell | Playwright | **Claude** |
 | 15 | `frontend/components/Sidebar.tsx` | Alpha + mina länkar | Playwright + manuell navigering | **Claude** |
 | 16 | `frontend/lib/api.ts` | Manuell | `tsc`/`next build` + Playwright | **Claude** |
-| 17 | `security/POLICY_LOCK.json` | **Rör inte** | INV-12 (`git diff --stat <bas> -- security/POLICY_LOCK.json`) | **Z.ai** |
+| 17 | `security/POLICY_LOCK.json` | **Rör inte** — regenerera mekaniskt med `docs/POLICY_LOCK_merged_candidate.patch` (§12) | INV-12 (låset ska **verifiera**, inte bara vara likt basen) | **Z.ai** |
 
 Två korrigeringar mot den tidigare överlämningen, båda verifierade i den här grenen:
 
@@ -427,7 +427,11 @@ Två praktiska konsekvenser:
 ### 11.2 Kandidaten mätt med invarianterna (`b313c9df`)
 
 `python scripts/acceptance/alpha_merge_invariants.py --expected-head 0095 --policy-lock-base
-b313c9df` i en worktree på `b313c9df`: **PASS 8 / FAIL 5 / BLOCKED 1**.
+b313c9df` i en worktree på `b313c9df`: **PASS 7 / FAIL 6 / BLOCKED 1** med nuvarande INV-12.
+(Den tidigare mätningen gav 8/5/1 eftersom INV-12 då bara jämförde med basen; ett lås som inte
+verifierar godkändes alltså mot en bas som har exakt samma fel — se §12. Mätningen kräver att
+verktyget finns på trädet, och då är det självt en oskyddad kontroll tills patchen i §12 är
+applicerad.)
 
 | PASS (kandidaten uppfyller redan) | FAIL (kräver mergen) | BLOCKED |
 |---|---|---|
@@ -437,7 +441,7 @@ b313c9df` i en worktree på `b313c9df`: **PASS 8 / FAIL 5 / BLOCKED 1**.
 | INV-05 `detect_conflict` fail-closed, ingen `owner_id` | INV-10 head **0089**, inte 0095 | |
 | INV-06 lease-kontraktet `lease_worker_id`/`lease_generation` | INV-14 idempotent turn-resolver saknas i chat-routern | |
 | INV-07 `authorized_by_user_id` obligatorisk | | |
-| INV-12 POLICY_LOCK identisk med kandidaten (den finns bara här) | | |
+| | INV-12 `POLICY_LOCK` **verifierar inte** — Alpha:s egen staleness, inte mergens (§12) | |
 | INV-13 `first_cycle_go=false` | | |
 
 Samma körning på min gren (`70b7fda8`, `--policy-lock-base b313c9df`) ger **PASS 6 / FAIL 6 /
@@ -473,31 +477,27 @@ A02 är `NOT_RUN` och inte `PASS` eftersom den verkliga modell-delen av beständ
 (`test_project_session_real_model.py`, `test_project_session_os_restart.py`) är mina och inte
 finns på kandidaten. Det är rätt status: "lokalt grönt, modellen otestad" får aldrig läsas som PASS.
 
-#### A08-fejlet har två oberoende orsaker — och en av dem skapar mergen
+#### A08-fejlet har två oberoende orsaker — ingen av dem är min branch
 
-`tests/security/test_security_controls.py::test_the_repository_policy_lock_verifies` fallerar.
-Uppmätt, inte gissat:
+`tests/security/test_security_controls.py::test_the_repository_policy_lock_verifies` fallerar, och
+det är A08:s **enda** fel (154 + 10 tester, 1 fel). Uppmätt på tre träd:
 
-| Orsak | Bevis | Vems |
-|---|---|---|
-| `.github/workflows/real-local-ai-verification.yml` har ändrats utan att låset uppdaterats | på **orörd** `b313c9df` ger `verify_lock` exakt **1** post: `changed control: … (expected 09076e19a887…, found 5febc65c8064…)` | Alpha/Z.ai — PR #492 är granskningspaketet för just den posten |
-| **mina tre acceptansskript är oskyddade styrningar** | med skripten på plats ger samma `verify_lock` **4** poster: de tre nedan som `uncovered control` | Z.ai (låset) + Codex (mergen) |
-
-Låset skyddar `backend/scripts/acceptance/*` fil för fil, och `program_matrix.py` (min gren) samt
-de två nya verktygen matchar mönstret men finns inte i `security/POLICY_LOCK.json`. Efter merge
-fallerar alltså **A08 på den sammanslagna kandidaten** tills låset fått tre poster — även om alla
-tester i övrigt är gröna. Det får inte "lösas" genom att hoppa över testet, och jag rör inte
-filen (Z.ai äger den). Hasherna Z.ai behöver, beräknade i den här grenen:
-
-| Fil | sha256 |
+| Träd | `verify_lock`-poster |
 |---|---|
-| `backend/scripts/acceptance/program_matrix.py` | `987726933c8b4b027de02f450db631889b4f7063239bcf3a810b9b5eca669936` |
-| `backend/scripts/acceptance/mainai_capability_acceptance.py` | `4c01c94c9311aca8d6a10db1562a2ab6e399818885eaf96943cd66ac2690455e` |
-| `backend/scripts/acceptance/alpha_merge_invariants.py` | `167eae557717b84b54990201b370b73656ad9753859d12c8e900bd25d2502fc5` |
+| orörd `b313c9df` (Alpha-tip) | **1** — `changed control: .github/workflows/real-local-ai-verification.yml (expected 09076e19a887…, found 5febc65c8064…)` |
+| min gren | kan inte mätas — `security/POLICY_LOCK.json` finns inte här |
+| sammanslagen kandidat (lokal scratch-merge) | **20** — 3 `changed` + 17 `uncovered` |
 
-Rekommenderad grind före staging: `pytest tests/security/test_security_controls.py -q` **och**
-`python scripts/security/verify_policy_lock.py` (eller motsvarande) ska ge noll poster på den
-sammanslagna kandidaten. `--update` i låset är en granskad handling, inte ett testfix.
+Den första posten är **Alpha:s egen**: två Alpha-commits ändrade en låst workflow utan att
+regenerera låset. Den andra gruppen är mina filer som matchar `backend/scripts/acceptance/*.py` men
+saknas i låset. Den tidigare analysen i det här avsnittet räknade bara tre oskyddade skript; det
+verkliga antalet är 17, plus att `ci.yml` och `s1a_privilege_policy.py` också ändras.
+
+Grundorsaken, varför workflowen **inte** ska återställas, den exakta patchen och beviset för att
+A08 blir grönt finns i **§12**. Rekommenderad grind före staging: `pytest
+tests/security/test_security_controls.py -q` **och** `python scripts/security/verify_policy_lock.py`
+ska ge noll poster på den sammanslagna kandidaten. `--update` i låset är en granskad handling,
+aldrig ett testfix.
 
 ### 11.4 Korrigeringar — fyra saker som var fel eller ofullständiga
 
@@ -613,3 +613,95 @@ local). Föregående leverans i samma gren var `70b7fda8`.
 | INV-14 chattrouter-union | konflikten i `routers/chat.py` fanns inte i matrisen och hade därför ingen grind alls |
 | INV-12 kräver ett sha som faktiskt äger låset | den gav PASS mot `86671468`, som inte har `POLICY_LOCK` alls; tom diff mot en frånvarande fil är ett falskt PASS på en säkerhetsgrind |
 | §11.3: A08-grinden dokumenterad | `verify_lock` ger 4 poster med mina skript på plats men 1 på orörd kandidat — skillnaden är mergens ansvar, inte kanditatens |
+
+**Omgång 2 (A08-åtgärden):**
+
+| Ändring | Varför |
+|---|---|
+| `docs/POLICY_LOCK_merged_candidate.patch` | den exakta, minimala regenereringen (3 ändrade + 17 tillagda poster, inget borttaget) så att Z.ai kan committa låset utan att göra om utredningen (§12) |
+| INV-12 kräver att låset **verifierar** | den gamla formen krävde att låset var byte-identiskt med basen, vilket hade fällt exakt den regenerering A08 behöver — och godkände samtidigt ett lås som inte verifierar. Nu: verifierar låset, och en avvikelse måste vara mekanisk (header orörd, ingen kontroll avlistad, inga främmande poster) |
+| §12: A08-grundorsaken | `b313c9df` fallerar **själv** på `.github/workflows/real-local-ai-verification.yml`; det är Alpha:s staleness sedan `28954b31`/`eddddf53`, inte mergen |
+
+## 12. A08/POLICY_LOCK — grundorsak och exakt integrationspatch
+
+A08 fallerar på **en** assertion: `tests/security/test_security_controls.py::test_the_repository_policy_lock_verifies`.
+Det här avsnittet ersätter den preliminära analysen i §11.3: den räknade tre oskyddade skript,
+men det verkliga antalet på den sammanslagna kandidaten är **17 oskyddade + 3 ändrade** kontroller.
+Ingen produktkod, ingen låst fil och ingen annans gren är ändrad för att komma fram till det.
+
+### 12.1 Vad som faktiskt avviker
+
+`verify_lock` (`backend/scripts/security/verify_policy_lock.py`) har tre felklasser: `changed`,
+`missing`, `uncovered`. Uppmätt med `git worktree` på respektive träd:
+
+| Träd | Poster | Vad |
+|---|---|---|
+| orörd `b313c9df` (Alpha-tip) | **1** | `changed control: .github/workflows/real-local-ai-verification.yml` (`09076e19a887…` → `5febc65c8064…`) |
+| sammanslagen kandidat, låset orört | **20** | 3 `changed` (`ci.yml`, `real-local-ai-verification.yml`, `s1a_privilege_policy.py`) + 17 `uncovered` (16 acceptansskript + `v7-testlab.yml`) |
+
+Det som spelar roll: **felet finns redan på Alpha-tipset**. Att mergen är ogjord, eller att min gren
+finns, är inte orsaken till att A08 är rött i dag.
+
+### 12.2 Varför Alpha-workflowen inte ska återställas
+
+Låset pinnar `09076e19…` — innehållet från `94367545`. Två senare Alpha-commits ändrade filen utan
+att regenerera låset:
+
+- `28954b31` lade till riktiga streamingkontroller mot installerad Ollama (+120 rader).
+- `eddddf53` bytte testdatabasens namn från `lifeos_reallocal_pytest` till `lifeos_test_reallocal`,
+  eftersom `tests/conftest.py` sedan `DISPOSABLE_DATABASE_NAME`-guarden **vägrar droppa** ett namn
+  som inte matchar `^lifeos_test(?:_[A-Za-z0-9]+)*$`. Steget föll alltså innan testerna ens kördes.
+
+Att återställa de pinnade bytena vore att **försvaga** grinden: ett steg som inte kör något, och
+färre riktiga modellkontroller. Regenerering är därför den enda korrekta åtgärden — och den ska ske
+som en granskad handling, inte som ett testfix.
+
+### 12.3 Patchen
+
+`docs/POLICY_LOCK_merged_candidate.patch` — 49 rader, en fil: `security/POLICY_LOCK.json`. Den
+innehåller **bara** filposter: 3 ändrade hashar och 17 tillagda. Inget tas bort, `version`,
+`algorithm` och `description` är orörda, och ingen kontroll avlistas. Patchen är genererad med låsets
+eget `--update` på en scratch-merge av `b313c9df` + min HEAD, inte handskriven.
+
+```bash
+git apply --check docs/POLICY_LOCK_merged_candidate.patch   # verifierat: rent mot b313c9df
+git apply docs/POLICY_LOCK_merged_candidate.patch
+cd backend && python scripts/security/verify_policy_lock.py  # policy lock verified: 45 controls unchanged
+```
+
+De tre ändrade kontrollerna är alla **förstärkningar**, granskade rad för rad:
+
+| Kontroll | Ändring | Riktning |
+|---|---|---|
+| `.github/workflows/real-local-ai-verification.yml` | Alpha:s streamingkontroller + fungerande testdatabas (§12.2) | starkare |
+| `.github/workflows/ci.yml` | mitt `r15-security-tests`-jobb + branchfilter; inget jobb borttaget, ingen `continue-on-error` | starkare |
+| `backend/scripts/security/s1a_privilege_policy.py` | två tabeller till i `_PROTECTED_TABLES` (`chat_request_claims`, `chat_provider_attempts`) med minimala grant | starkare |
+
+De 17 tillagda är mina egna verktyg (`program_matrix.py`, `mainai_capability_acceptance.py`,
+`alpha_merge_invariants.py` m.fl.) plus `.github/workflows/v7-testlab.yml`. De **ska** in i låset:
+`backend/scripts/acceptance/*.py` avgör vad projektet får påstå om sig själv, så ett verktyg som
+placeras utanför mönstret för att slippa låset vore en kringgång av kontrollen, inte en lösning.
+
+### 12.4 Bevis (kört, inte antaget)
+
+På scratch-mergen (`b313c9df` + min HEAD, 16 konflikter olösta — **ingen av dem i en låst fil**),
+samma träd före och efter patchen:
+
+| Steg | Före patchen | Efter patchen |
+|---|---|---|
+| `python scripts/security/verify_policy_lock.py` | 20 poster, exit 1 | `verified: 45 controls unchanged`, exit 0 |
+| `pytest tests/security/test_security_controls.py -q --confcutdir=tests/security` | **1 failed, 16 passed** (`test_the_repository_policy_lock_verifies`) | **17 passed** |
+| `alpha_merge_invariants.py --policy-lock-base b313c9df`, INV-12 | `FAIL` (20 poster) | `PASS` — "regenerated mechanically against b313c9df: 3 changed, 17 added, 0 delisted; verifies clean (45 controls)" |
+
+### 12.5 Vad som kvarstår — och för vem
+
+- **Z.ai:** committa `security/POLICY_LOCK.json` med patchen applicerad, i samma granskade commit
+  som mergen. Filen är Z.ai:s (`CODEOWNERS`) och jag rör den inte. Efter det är A08 grönt på den
+  sammanslagna kandidaten; inget annat i A08 behöver undersökas.
+- **Codex:** applicera patchen efter att konflikterna är lösta och kör
+  `python scripts/security/verify_policy_lock.py`. Ger den 0 poster är låset rätt. Ger den nya
+  poster beror det på att en lösning ändrat en låst fil — regenerera då med `--update` i samma
+  commit i stället för att handredigera hashar. Ingen av de 16 konflikterna ligger i en låst fil,
+  så det ska inte behövas.
+- **Kvar efter patchen:** A02 är fortfarande `NOT_RUN` (modelltesterna är mina) och
+  `needs_vps`-benet är otestat. Det är separata statusar, inte en del av A08.

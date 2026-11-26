@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import importlib.util
 import json
 import subprocess
 from datetime import datetime, timezone
@@ -102,6 +103,24 @@ def _git(*arguments: str) -> tuple[int, str]:
         ["git", *arguments], cwd=REPO_ROOT, text=True, capture_output=True, check=False
     )
     return result.returncode, result.stdout
+
+
+def _repo_lock_verifier() -> Any | None:
+    """The repository's own POLICY_LOCK verifier, loaded the way its test loads it.
+
+    INV-12 must not grow a second, subtly different implementation of the gate: the hash and
+    coverage rules stay in `backend/scripts/security/verify_policy_lock.py`, which is what A08's
+    `test_the_repository_policy_lock_verifies` asserts on.
+    """
+    path = REPO_ROOT / "backend" / "scripts" / "security" / "verify_policy_lock.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("alpha_merge_policy_lock", path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 # --------------------------------------------------------------------------------------------
@@ -337,20 +356,37 @@ def i11_no_dropped_tests(args: argparse.Namespace) -> tuple[str, str]:
     return "PASS", f"no test file from either parent was dropped (checked {checked} paths)"
 
 
-def i12_policy_lock_untouched(args: argparse.Namespace) -> tuple[str, str]:
-    """POLICY_LOCK is Z.ai's (§7.3); this delivery must not move it.
+def i12_policy_lock_integrity(args: argparse.Namespace) -> tuple[str, str]:
+    """POLICY_LOCK is Z.ai's (§7.3); this delivery must not move it on its own authority.
 
-    Three of the four cases are BLOCKED rather than PASS, because the file is **Alpha-only**:
-    neither this branch nor `86671468` carries it, so diffing against a base without a lock
-    returns an empty diff and would report "untouched" about a file that is not there at all.
-    A vacuous PASS on a security control is worse than no check. Pass the sha that actually owns
-    the lock (the Alpha candidate, `b313c9df`) once it is on the tree.
+    Three cases are BLOCKED rather than PASS, because the file is **Alpha-only**: neither this
+    branch nor `86671468` carries it, so diffing against a base without a lock returns an empty
+    diff and would report "untouched" about a file that is not there at all. A vacuous PASS on a
+    security control is worse than no check. Pass the sha that actually owns the lock (the Alpha
+    candidate, `b313c9df`) once it is on the tree.
+
+    On the merged candidate two further things must hold, and they are checked rather than
+    assumed:
+
+    * **the lock verifies against the resolved tree.** That is exactly what A08's
+      `test_the_repository_policy_lock_verifies` asserts, so a PASS without it would report a
+      security gate as satisfied while the gate is red.
+    * **if the lock differs from the base, the difference is a mechanical regeneration**: the
+      version/algorithm/description header is untouched, no control the base locked has been
+      delisted, and every added path is a file the verifier itself considers a protected control.
+
+    Why the lock legitimately differs: two Alpha commits (`28954b31` added real streaming checks,
+    `eddddf53` fixed a database name that made the step error out before running) edited
+    `.github/workflows/real-local-ai-verification.yml` without re-locking it. The base `b313c9df`
+    therefore does NOT verify, and copying its lock into the merge reproduces that failure. This
+    invariant reports FAIL on such a tree — the truth about it, not a merge defect — and the fix
+    is the reviewed regeneration in `docs/POLICY_LOCK_merged_candidate.patch`, never an edit here.
     """
     if not args.policy_lock_base:
         return "BLOCKED", "--policy-lock-base not given"
     relative = "security/POLICY_LOCK.json"
     base = args.policy_lock_base
-    base_code, _ = _git("cat-file", "-e", f"{base}:{relative}")
+    base_code, base_source = _git("show", f"{base}:{relative}")
     here = (REPO_ROOT / relative).exists()
     if not here and base_code != 0:
         return "BLOCKED", (
@@ -365,12 +401,53 @@ def i12_policy_lock_untouched(args: argparse.Namespace) -> tuple[str, str]:
         return "BLOCKED", (
             f"{base} has no {relative} — pass the sha that owns the lock (the Alpha candidate)"
         )
-    code, output = _git("diff", "--stat", base, "--", relative)
-    if code != 0:
-        return "BLOCKED", f"cannot diff against {base}"
-    if output.strip():
-        return "FAIL", f"POLICY_LOCK differs from {base}: {output.strip()}"
-    return "PASS", f"{relative} identical to {base}"
+
+    verifier = _repo_lock_verifier()
+    if verifier is None:
+        return "BLOCKED", (
+            "backend/scripts/security/verify_policy_lock.py is not on this tree, "
+            "so the lock cannot be verified (it arrives from Alpha at merge)"
+        )
+    try:
+        lock = json.loads((REPO_ROOT / relative).read_text(encoding="utf-8"))
+        base_lock = json.loads(base_source)
+    except (OSError, json.JSONDecodeError) as exc:
+        return "BLOCKED", f"cannot read {relative} or its {base} copy: {exc}"
+
+    breakages = verifier.verify_lock(REPO_ROOT, lock)
+    if breakages:
+        shown = "; ".join(breakages[:3])
+        more = f" (+{len(breakages) - 3} more)" if len(breakages) > 3 else ""
+        return "FAIL", (
+            f"{relative} does not verify against this tree ({len(breakages)} problems): "
+            f"{shown}{more}"
+        )
+
+    controls = lock.get("files") or {}
+    base_controls = base_lock.get("files") or {}
+    if lock == base_lock:
+        return "PASS", f"{relative} identical to {base} and verifies ({len(controls)} controls)"
+
+    structural: list[str] = []
+    for field in ("version", "algorithm", "description"):
+        if lock.get(field) != base_lock.get(field):
+            structural.append(f"header field {field!r} changed")
+    delisted = sorted(set(base_controls) - set(controls))
+    if delisted:
+        structural.append(f"{len(delisted)} control(s) delisted: {', '.join(delisted[:3])}")
+    protected = set(verifier.protected_files(REPO_ROOT))
+    stray = sorted(set(controls) - protected)
+    if stray:
+        structural.append(f"{len(stray)} entry(ies) are not protected controls: {', '.join(stray[:3])}")
+    if structural:
+        return "FAIL", f"{relative} differs from {base} and the difference is not mechanical: " + "; ".join(structural)
+
+    changed = sorted(path for path in controls if path in base_controls and controls[path] != base_controls[path])
+    added = sorted(set(controls) - set(base_controls))
+    return "PASS", (
+        f"regenerated mechanically against {base}: {len(changed)} changed, {len(added)} added, "
+        f"0 delisted; verifies clean ({len(controls)} controls)"
+    )
 
 
 def i13_first_cycle_go_false(_args: argparse.Namespace) -> tuple[str, str]:
@@ -438,7 +515,12 @@ INVARIANTS: tuple[tuple[str, str, str, Callable[[argparse.Namespace], tuple[str,
     ("INV-09", "Corpus review-union", "max_tokens=400 och effect_guard=True", i09_corpus_review_union),
     ("INV-10", "En migrationshead", "exakt en head, additiv kedja", i10_single_migration_head),
     ("INV-11", "Inga tappade tester", "ingen parents testfil försvinner i mergen", i11_no_dropped_tests),
-    ("INV-12", "POLICY_LOCK orörd", "Z.ai äger R31 (§7.3)", i12_policy_lock_untouched),
+    (
+        "INV-12",
+        "POLICY_LOCK intakt",
+        "Z.ai äger R31 (§7.3); en regenerering ska vara mekanisk och verifiera",
+        i12_policy_lock_integrity,
+    ),
     ("INV-13", "first_cycle_go=false", "ingen aktivering i denna leverans", i13_first_cycle_go_false),
     ("INV-14", "Chattrouter-union", "streaming + idempotent turn-resolver, en turn-väg", i14_chat_router_union),
 )

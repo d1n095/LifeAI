@@ -295,13 +295,14 @@ pytest tests/backend/test_migration_state_privileges.py tests/backend/test_runti
 - **`routers/agents.py` konflikerar inte längre** vid nuvarande tips.
 - **Migrationshead:** kandidaten ligger på `0089`, mina `0090`–`0095` är additiva ovanpå samma
   `0089`-revision. Efter merge ska `alembic heads` ge `0095`; staging behöver sex migrationer.
-- **`security/POLICY_LOCK.json` finns bara på Alpha-sidan.** Den sammanslagna kandidaten fallerar
-  `tests/security/test_security_controls.py::test_the_repository_policy_lock_verifies` tills låset
-  fått tre poster för `backend/scripts/acceptance/` (`program_matrix.py`,
-  `mainai_capability_acceptance.py`, `alpha_merge_invariants.py`; sha256 i acceptanspaketets
-  §11.3). På orörd `b313c9df` finns bara en post i samma test: den kända staleness i
-  `real-local-ai-verification.yml` som PR #492 granskar. Låset är Z.ai:s — det ska uppdateras i en
-  granskad commit, inte kringgås.
+- **`security/POLICY_LOCK.json` finns bara på Alpha-sidan — och den fallerar redan där.** Orörd
+  `b313c9df` ger **1** post (`.github/workflows/real-local-ai-verification.yml` ändrad i
+  `28954b31`/`eddddf53` utan att låset regenererades); den sammanslagna kandidaten ger **20**
+  (3 ändrade + 17 oskyddade, varav 16 är mina acceptansskript). Det är grundorsaken till A08-felet,
+  inte mergen. Den minimala regenereringen ligger som `docs/POLICY_LOCK_merged_candidate.patch`:
+  applicera och committa i samma granskade commit som mergen (Z.ai äger filen). Bevis: `verify_lock`
+  20 poster → 0, `test_security_controls.py` 1 failed → 17 passed, INV-12 FAIL → PASS. Se
+  acceptanspaketets §12.
 - **INV-12 ska köras med `--policy-lock-base b313c9df`**, inte `86671468`: den senare har ingen
   låsfil, och en tom diff mot en frånvarande fil var ett falskt PASS.
 
