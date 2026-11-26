@@ -326,6 +326,44 @@ def _add_dependency(
     return row
 
 
+def _normalized_title(title: str) -> str:
+    return " ".join((title or "").casefold().split())
+
+
+def _find_identical_open_task(
+    db: Session,
+    *,
+    owner_id: uuid.UUID,
+    project_id: uuid.UUID | None,
+    milestone_id: uuid.UUID | None,
+    title: str,
+    description: str | None,
+) -> Task | None:
+    """An open task with the same owner, project, milestone, title and description.
+
+    Re-sending the same request (a double click, a retried API call, or MainAI proposing an
+    existing task) must not create a second row. The match is deliberately narrow: same
+    project and milestone, normalised title, and identical description. A different
+    description is a different task, and a done/cancelled task never blocks a new one.
+    """
+    filters = [
+        Task.created_by == owner_id,
+        Task.deleted_at.is_(None),
+        Task.status.notin_([TaskStatus.done, TaskStatus.cancelled]),
+        Task.milestone_id.is_(None) if milestone_id is None else Task.milestone_id == milestone_id,
+        Task.project_id.is_(None) if project_id is None else Task.project_id == project_id,
+    ]
+    wanted_title = _normalized_title(title)
+    wanted_description = description or None
+    for task in db.query(Task).filter(*filters).all():
+        if _normalized_title(task.title) != wanted_title:
+            continue
+        if (task.description or None) != wanted_description:
+            continue
+        return task
+    return None
+
+
 def create_task(
     db: Session,
     *,
@@ -344,6 +382,16 @@ def create_task(
     )
     if status not in _ALLOWED_TRANSITIONS:
         raise InvalidTaskTransitionError(f"Okänd status: {status}.")
+    identical = _find_identical_open_task(
+        db,
+        owner_id=owner_id,
+        project_id=project_id,
+        milestone_id=milestone_id,
+        title=title,
+        description=description,
+    )
+    if identical is not None:
+        return identical
     task = Task(
         created_by=owner_id,
         project_id=project_id,
