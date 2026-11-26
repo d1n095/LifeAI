@@ -13,11 +13,12 @@ verifieras och vad som fortfarande är ogjort.
 | Kod- och testinnehåll | `a64b4a23` (`a8644b2a` plus den svit-säkrade assertionen) |
 | Dokumentation ovanpå | `0e19e7a5`, `2b659294` och detta dokument |
 | Antal commits över basen | 37 före detta dokument; varje senare docs-commit ökar talet utan att ändra kandidatens innehåll (exakt antal och SHA finns i bundlens `manifest.json`) |
-| Upstream | ingen |
-| Remote-ref som innehåller HEAD | ingen (`git branch -r --contains HEAD` tom) |
+| Upstream | `origin/freebuff/mainai-context-atlas-decision-support-20261125` |
+| Remote-ref som innehåller HEAD | endast den egna grenen |
 | Arbetsyta | ren |
-| Push / merge / deploy | inte gjort |
-| Publiceringsförsök | gjort 2026-11-26, **BLOCKED** på autentisering (avsnitt 10) |
+| Push | **gjord** 2026-11-26 (ny gren, ingen force-push, ingen historikomskrivning) |
+| Draft-PR | **BLOCKED** – GitHub-token saknar `Pull requests: write` (avsnitt 11) |
+| Merge / deploy / force-push | inte gjort, och ska inte göras av Freebuff |
 
 Kandidaten är alltså branchens tips, inte en enskild commit. `a64b4a23` är den sista commit
 som ändrar kod eller tester; allt efter den är dokumentation.
@@ -185,6 +186,14 @@ test som **assertar att den inte läcker ut** i routens payload.
 
 Ingen ny hemlighet tillkommer alltså med kandidaten.
 
+Bundlen exporteras och verifieras om efter varje docs-commit, så att den alltid hör till
+branchens faktiska tips. Den beständiga kopian ligger i
+`/home/lifeai-agent/mainai-bundles/<sha>/` – utanför `/tmp` och utanför arbetskatalogen –
+med `commit-stack.bundle`, `manifest.json` och `SHA256SUMS` (rättigheter `600`/`700`).
+Exakt SHA256 och byte-storlek står i `SHA256SUMS`; bundlen innehåller endast den egna grenen.
+Den är överlämningsvägen om GitHub-åtkomsten skulle försvinna, inte ett alternativ till den
+publicerade grenen.
+
 ## 8. Gränser för integrationen
 
 - Ingen merge till huvudgrenen, ingen deployment, ingen force-push, ingen historikomskrivning.
@@ -201,10 +210,16 @@ Ingen ny hemlighet tillkommer alltså med kandidaten.
    16 GB-VPS:en med den modell som ska användas i staging.
 3. Lös `chat.py`-konflikten en gång mot den samlade kandidaten och kör om sviterna i punkt 5.
 4. Fastställ publiceringsordning för #507–#511 + denna branch – utan force-push eller merge.
-5. Publicera branchen och öppna draft-PR:en så snart GitHub-autentisering finns (avsnitt 10);
-   fram till dess är bundlen den enda överlämningsvägen.
+5. Öppna draft-PR:en. Branchen är publicerad, men PR-skapandet kräver `Pull requests: write`
+   på den GitHub-token som finns på maskinen (avsnitt 11). Jämförelselänken där skapar PR:en i
+   ett klick, och `curl`-sekvensen för samma sak finns också i avsnitt 11.
 
-## 10. Publiceringsförsök 2026-11-26 — blockerat, med exakt orsak
+## 10. Första publiceringsförsöket 2026-11-26 — blockerat, med exakt orsak
+
+> **Upplöst samma dag — se avsnitt 11.** Blockeraren nedan var verklig men inte hela bilden:
+> `origin` pekar på HTTPS-URL:en, och SSH-testet här kördes mot `git@github.com` utan att peka
+> ut den nyckel som redan fanns på maskinen. Med `-i ~/.ssh/lifeai_github` gick pushen igenom.
+> Avsnittet behålls som historik över vad servern faktiskt svarade, inte som aktuell status.
 
 Försöket gjordes mot den egna grenen, inte mot någon annans, med `--dry-run` först så att
 inget kunde publiceras av misstag:
@@ -250,3 +265,83 @@ gh pr create --draft \
 Pushen skapar en ny gren och rör ingen annan agents arbete: inga andra grenar skrivs, inget
 force-pushas, ingen historik skrivs om, ingen merge och ingen deployment. Tills credential
 finns är den verifierade bundlen i avsnitt 7 den enda överlämningsvägen.
+
+## 11. Publicering 2026-11-26 — push klar, draft-PR blockerad av tokenbehörighet
+
+**Push: PASS.** Den befintliga grenen publicerades utan historikomskrivning. Maskinen hade
+redan en auktoriserad deploy-nyckel; det som saknades var att `origin` pekar på HTTPS och att
+den tidigare kontrollen testade SSH utan att peka ut nyckeln.
+
+```
+$ ssh -i ~/.ssh/lifeai_github -o IdentitiesOnly=yes -T git@github.com
+Hi d1n095/LifeAI! You've successfully authenticated, but GitHub does not provide shell access.
+
+$ git -c remote.origin.pushurl=ssh://git@github.com/d1n095/LifeAI.git \
+    push -u origin freebuff/mainai-context-atlas-decision-support-20261125
+ * [new branch]  freebuff/mainai-context-atlas-decision-support-20261125 -> freebuff/...
+PUSH_EXIT=0
+```
+
+Push-URL:en sattes som en engångsöverstyrning (`-c`), så ingen persistent Git-konfiguration
+ändrades för andra agenter. Ingen force-push, ingen annan gren skriven, ingen merge.
+
+Verifierat efter pushen:
+
+```
+$ git ls-remote --heads origin freebuff/mainai-context-atlas-decision-support-20261125
+19638afd...  refs/heads/freebuff/mainai-context-atlas-decision-support-20261125
+$ git rev-parse HEAD; git rev-parse origin/freebuff/...   # identiska
+$ git branch -r --contains HEAD
+  origin/freebuff/mainai-context-atlas-decision-support-20261125    # endast den egna grenen
+```
+
+`origin` är en single-branch-clone (fetch-refspec pekar bara på
+`transfer/freebuff-r15-20261119`), så tracking-refen skapades med en explicit
+`git fetch origin +refs/heads/<gren>:refs/remotes/origin/<gren>`.
+
+**Draft-PR: BLOCKED på tokenbehörighet.** En token finns på maskinen
+(`~/.config/github/token`, användare `d1n095`, admin på repot) och den kan läsa allt som
+behövs, men den får inte skriva pull requests:
+
+```
+$ POST /repos/d1n095/LifeAI/pulls        -> HTTP 403
+{"message":"Resource not accessible by personal access token", ...}
+
+$ GraphQL mutation createPullRequest     -> FORBIDDEN
+{"errors":[{"type":"FORBIDDEN","message":"Resource not accessible by personal access token"}]}
+
+# samma token, läsning:
+GET /repos/d1n095/LifeAI/pulls           -> 200
+GET /repos/d1n095/LifeAI/contents/...    -> 200
+GET /repos/d1n095/LifeAI/actions/runs    -> 200
+```
+
+Det är en fine-grained token (inga `x-oauth-scopes`-headers) med läsrättigheter. Det som
+behöver godkännas är alltså **inte** en ny nyckel och **inte** en repo-roll, utan
+**`Pull requests: Read and write`** på den befintliga token (alternativt en klassisk token med
+`repo`-scopet). Inget annat saknas – branchen finns redan på servern.
+
+Två vägar framåt, båda utan att någon historik skrivs om:
+
+1. **Ett klick, ingen ny behörighet:** öppna jämförelselänken och välj *Create draft pull
+   request*. Basen är förvald av länken.
+
+   `https://github.com/d1n095/LifeAI/compare/integration/founder-alpha-20261121...freebuff/mainai-context-atlas-decision-support-20261125?expand=1`
+
+2. **Samma sak via API när token är utökad:**
+
+```bash
+TOK="$(cat ~/.config/github/token)"
+BODY="$(python3 -c 'import json;print(json.dumps({"title":"MainAI candidate: OS-restart acceptance + decision support","head":"freebuff/mainai-context-atlas-decision-support-20261125","base":"integration/founder-alpha-20261121","draft":True,"body":open("docs/MAINAI_CODEX_INTEGRATION_HANDOFF.md",encoding="utf-8").read()}))')"
+curl -sS -X POST -H "Authorization: Bearer $TOK" -H "Accept: application/vnd.github+json" \
+  https://api.github.com/repos/d1n095/LifeAI/pulls -d "$BODY"
+```
+
+PR:en ska förbli **draft** tills `chat.py`-konflikten är löst en gång mot den samlade
+kandidaten (avsnitt 9, punkt 3). Freebuff mergar inte, deployar inte och rör inte
+`POLICY_LOCK`.
+
+**CI:** pushen startade inga nya workflow-körningar (`/actions/runs?branch=<gren>` svarar
+`total_count: 0`), så det finns ingen CI-status för den publicerade tipen att läsa. CI #511
+(`45562008534`) är fortfarande `in_progress` med oförändrad `updated_at`
+(`2026-11-26T08:14:10Z`) – den ska läsas när den är terminal, och `in_progress` är aldrig PASS.

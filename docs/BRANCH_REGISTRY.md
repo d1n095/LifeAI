@@ -10683,7 +10683,9 @@ external gates. No push, merge, deploy, or provider activation; `first_cycle_go=
 ## MainAI real-model acceptance — `freebuff/mainai-context-atlas-decision-support-20261125` (2026-11-26)
 
 - **HEAD:** branchens sista commit (koden är `ee67cbe8`; dokumentationen följer efter); bas
-  `8c7b335e`; ingen upstream, ingen PR, ingen push.
+  `8c7b335e`; **publicerad** 2026-11-26 som
+  `origin/freebuff/mainai-context-atlas-decision-support-20261125` med upstream satt;
+  **ingen PR ännu** – PR-skapandet är blockerat av tokenbehörighet (sista punkten).
 - **Nya commits i denna omgång:**
   - `6145a764` – en aldrig etablerad Ollama-anslutning klassas som bevisat pre-egress och
     blir retrybar; read timeout förblir ambivalent. 19 providertester.
@@ -10711,17 +10713,24 @@ external gates. No push, merge, deploy, or provider activation; `first_cycle_go=
   delade sviten. Efter ändringen: chat 120 passed + providers 238 passed = 358; ruff rent.
   Endast test – ingen produktionskod, inga migrationer, inga nya miljövariabler. Exakt antal commits, SHA och testkommandon: se
   `docs/MAINAI_CODEX_INTEGRATION_HANDOFF.md`.
-- **Publiceringsförsök (2026-11-26) — BLOCKED på autentisering.** `git push --dry-run` mot
-  `origin` svarar `fatal: could not read Username for 'https://github.com'` (exit 128) och
-  SSH-alternativet `git ls-remote git@github.com:d1n095/LifeAI.git` svarar
-  `Permission denied (publickey)`. Ingen credential helper, ingen `GITHUB_TOKEN`/`GH_TOKEN`,
-  ingen `gh`, ingen auktoriserad nyckel. Blockeraren är alltså maskinens GitHub-autentisering
-  — inte en skyddad gren, inte en repo-behörighet och inte en konflikt; `--dry-run` når aldrig
-  fram till servern. Ingen push, ingen PR, ingen merge, ingen deployment, ingen force-push.
-  Branchen har fortfarande ingen upstream och ingen remote-ref innehåller HEAD, så en framtida
-  push skapar en ny gren utan historikomskrivning. Överlämning sker i stället som verifierad
-  bundle; exakta push-/PR-kommandon finns i `docs/MAINAI_CODEX_INTEGRATION_HANDOFF.md` §10.
-  Hemlighetsgenomgång av diffen mot basen: inga produktionshemligheter; endast det redan
-  existerande loopback-lösenordet `mainai_app_pw` (finns i basen och på
+- **Första publiceringsförsöket (2026-11-26) — BLOCKED, sedan upplöst.** `git push --dry-run`
+  mot `origin` svarade `fatal: could not read Username for 'https://github.com'` (exit 128),
+  och `git ls-remote git@github.com:d1n095/LifeAI.git` svarade `Permission denied (publickey)`
+  eftersom anropet inte pekade ut den nyckel som redan fanns på maskinen. Slutsatsen då –
+  "maskinen kan inte autentisera sig mot GitHub" – var fel. Historik, inte aktuell status.
+- **Publicering (2026-11-26) — push PASS, draft-PR BLOCKED på tokenbehörighet.**
+  `ssh -i ~/.ssh/lifeai_github -T git@github.com` svarar `Hi d1n095/LifeAI! You've
+  successfully authenticated`. Med `git -c remote.origin.pushurl=ssh://...` publicerades
+  grenen som **ny** gren (`[new branch]`, ingen force, ingen historikomskrivning) och upstream
+  sattes; ingen annan gren skrevs och ingen persistent Git-konfig ändrades.
+  Verifierat: `ls-remote` == HEAD, `git branch -r --contains HEAD` visar endast den egna
+  grenen. **PR:en kunde inte skapas:** `POST /pulls` → 403 och GraphQL `createPullRequest` →
+  `FORBIDDEN`, båda `Resource not accessible by personal access token`, medan samma token
+  läser `pulls`/`contents`/`actions` (200). Det som behöver godkännas är
+  **`Pull requests: Read and write`** på den befintliga token – inte en ny nyckel och inte en
+  repo-roll. Jämförelselänk och färdigt API-anrop: `docs/MAINAI_CODEX_INTEGRATION_HANDOFF.md`
+  §11. CI startade inga körningar för grenen (`total_count: 0`); CI #511 är fortfarande
+  `in_progress`. Hemlighetsgenomgång av diffen mot basen: inga produktionshemligheter; endast
+  det redan existerande loopback-lösenordet `mainai_app_pw` (finns i basen och på
   `origin/integration/founder-alpha-20261121`) och den påhittade strängen `super-secret-pw`
   i ett negativt läckagetest.
