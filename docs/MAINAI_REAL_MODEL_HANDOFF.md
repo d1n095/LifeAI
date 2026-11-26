@@ -1,13 +1,14 @@
 # MainAI – verklig modellacceptans och staging-överlämning
 
 Uppdaterad 2026-11-26. Arbetsgren:
-`freebuff/mainai-context-atlas-decision-support-20261125`, HEAD `cb52516a` (koden är
-`ee67cbe8`; sista commiten är detta dokument), bas `8c7b335e`. Ingen push, merge eller
-deployment har gjorts.
+`freebuff/mainai-context-atlas-decision-support-20261125`, bas `8c7b335e`. Koden är
+`ee67cbe8`; överlämningsdokumentet följer i commits efter koden, så branchens exakta HEAD är
+`git rev-parse HEAD`. Ingen push, merge eller deployment har gjorts.
 
 ## 1. Beständighet och lokalt arbete
 
-- 30 commits mot `8c7b335e`; arbetsytan var ren efter commit.
+- Branchen innehåller samtliga commits i `git log 8c7b335e..HEAD`; arbetsytan var ren efter
+  commit.
 - Branchen har **ingen upstream** och ingår inte i någon av PR #507–#511:s heads.
 - Reproducerbar bundle (skapas om efter sista commit):
 
@@ -76,7 +77,8 @@ commitsen på samma branch. **Cherry-picka inte bara de tre sista commitsen** �
 importerar moduler som infördes tidigare på branchen och som saknas på båda
 integrationsgrenarna.
 
-Rekommenderad väg: integrera **hela branchen** (29 commits) som en kandidat och lös
+Rekommenderad väg: integrera **hela branchen** (samtliga commits mot `8c7b335e`) som en
+kandidat och lös
 `backend/app/routers/chat.py` en gång. Om en snävare port krävs är beroendeordningen:
 
 | Ordning | Commit | Fil(er) | Varför |
