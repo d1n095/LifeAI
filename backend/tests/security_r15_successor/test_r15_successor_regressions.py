@@ -158,7 +158,7 @@ def test_agent_dispatch_passes_effect_guard(monkeypatch):
 
     assert asyncio.run(
         agent_orchestration.dispatch_task(
-            None, task.id, owner_id=uuid.uuid4(), dispatched_by="test"
+            None, task.id, authorized_by_user_id=uuid.uuid4(), dispatched_by="test"
         )
     ) == "event"
     assert captured.get("effect_guard") is True

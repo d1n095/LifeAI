@@ -263,6 +263,13 @@ pytest tests/security/ -q
 pytest tests/backend/test_migration_state_privileges.py tests/backend/test_runtime_table_privileges.py -q
 ```
 
+> **Rättelse (2026-11-26):** `tests/backend/test_migration_state_privileges.py` finns **inte** i
+> den här grenen — `git ls-tree b313c9df` visar att den bara finns på Alpha-sidan, så raden ovan
+> fallerar före merge. Efter merge täcks den av acceptanspaketet
+> (`docs/FREEBUFF_MAINAI_ACCEPTANCE_PACKAGE.md`) på nivån `alpha_merge`, som tänds automatiskt
+> när filen finns. Använd `backend/scripts/acceptance/mainai_capability_acceptance.py` i stället
+> för att köra sviterna grupperat med JUnit-evidens.
+
 ## 11. Kvarvarande risker och NOT_RUN
 
 | Post | Status |

@@ -6,6 +6,36 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Acceptanspaket för Founder Alpha-kandidaten — `freebuff/mainai-founderalpha-acceptance-20261126` (2026-11-26)
+
+**Branch:** `freebuff/mainai-founderalpha-acceptance-20261126`, grenad från `c854c2df`
+(den publicerade integrationsöverlämningen). **Ingen merge, ingen deployment, ingen ändring av
+`security/POLICY_LOCK.json`, `first_cycle_go=false`.** Inga av Z.ai:s, Claudes eller Codex
+grenar är rörda.
+
+**Scope — verifiering, inte nya produktfunktioner:**
+`backend/scripts/acceptance/mainai_capability_acceptance.py` mappar de tio grundarkapaciteterna
+mot befintliga sviter och härleder PASS/FAIL/BLOCKED/NOT_RUN ur JUnit-bevis (samma tolkning som
+`program_matrix.py`), med nivåerna `local`, `alpha_merge`, `needs_real_ollama` och `needs_vps`.
+`backend/scripts/acceptance/alpha_merge_invariants.py` gör överlämningens 17
+konfliktdirektiv körbara (INV-01–INV-13). Överlämning:
+`docs/FREEBUFF_MAINAI_ACCEPTANCE_PACKAGE.md`.
+
+**Faktiska resultat (verifierade mot riktig Postgres/Redis/Ollama):**
+`2 failed, 642 passed, 1 skipped in 1028,01 s` för lokal nivå över alla tio kapaciteter — 8 av
+10 gröna. A02 mot **verklig** lokal modell (`qwen2.5:0.5b`), inklusive SIGKILL-omstart av
+`uvicorn` + `worker`: `31 passed` + `2 passed`. Invarianter före merge: `PASS 7, FAIL 5,
+BLOCKED 1`, där de fem felen är exakt de oavgjorda konflikterna (INV-01/03/04/05/06).
+
+**Fel som hittades:** ett **infört av mig och åtgärdat** — `security_r15_successor` anropade
+`dispatch_task(owner_id=…)` efter `45fe2fb9`:s byte till `authorized_by_user_id`. Två **befintliga**
+fel (`test_goal_intake_path_a_worker_live`, `test_recovery_takeover_authority_fencing`) är
+bevisat identiska på `13fc211b` och lämnas till egna brancher.
+
+**Beroenden:** branchen blockerar ingen annan gren. Den väntar på Codex merge för att
+`alpha_merge`-nivån och INV-01/03/04/05/06 ska kunna bli gröna. Ingen PR (token 403), ingen CI
+på branchen.
+
 ## Integrationsberedskap mot Founder Alpha — `freebuff/mainai-context-atlas-decision-support-20261125` (2026-11-26)
 
 **Branch:** `freebuff/mainai-context-atlas-decision-support-20261125`.

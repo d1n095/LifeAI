@@ -157,3 +157,57 @@ cd frontend
 CI=1 E2E_FOUNDER_PASSWORD=... E2E_INTERNAL_API_URL=http://127.0.0.1:8010 \
   npx playwright test e2e/founder-alpha-resilience.spec.ts --reporter=json --workers=1
 ```
+
+## MainAI capability acceptance (de tio grundarkapaciteterna)
+
+`mainai_capability_acceptance.py` mappar de tio kapaciteter grundaren namngav för
+Founder Alpha-kandidaten mot de sviter som redan bevisar dem, kör dem per miljönivå och härleder
+PASS/FAIL/BLOCKED/NOT_RUN ur JUnit-bevis — samma tolkning som `program_matrix.py` använder, så
+att en kapacitetsstatus och en workstream-status aldrig kan säga olika saker.
+
+Det är en orkestrator, inte en andra testsvit: varje test den kör fanns redan. Den skapar inga
+egna påståenden och ersätter ingen befintlig grind.
+
+```bash
+cd backend
+python scripts/acceptance/mainai_capability_acceptance.py --list
+
+python scripts/acceptance/mainai_capability_acceptance.py \
+  --database-url postgresql://postgres@127.0.0.1:55432/lifeos_test_capability \
+  --app-database-url postgresql://mainai_app:mainai_app_pw@127.0.0.1:55432/lifeos_test_capability \
+  --redis-url redis://127.0.0.1:56379/11 \
+  --out-dir ../docs/evidence/mainai-capability/local
+```
+
+Nivåer (en kapacitet rapporteras per nivå, så "lokalt grönt, modellen otestad" aldrig kan läsas
+som PASS):
+
+| nivå | betyder | aktiveras av |
+|---|---|---|
+| `local` | Postgres + Redis + den begränsade app-rollen | alltid |
+| `alpha_merge` | sviter som **bara finns på Founder Alpha-sidan**; tänds automatiskt efter Codex merge | alltid (NOT_RUN tills filen finns) |
+| `needs_real_ollama` | riktig Ollama med pinnad chattmodell | `--allow-real-ollama`, och bara om modellen faktiskt är installerad |
+| `needs_vps` | 16 GB VPS / produktionsmodell | aldrig lokalt |
+
+Documenterade luckor skrivs ut i rapporten (`gap`), inte förbi dem: en kapacitet kan vara
+`PASS` på det som finns och ändå bära en uttalad lucka.
+
+## Founder Alpha merge-invarianter
+
+`alpha_merge_invariants.py` gör varje konfliktdirektiv i
+`docs/FREEBUFF_FOUNDER_ALPHA_INTEGRATION_HANDOFF.md` §6 körbart. Ett direktiv i prosa är inte
+verifiering: efter Codex konfliktlösning skulle ingenting i repot märka om en sida tyst tappade
+den andra sidans garanti.
+
+```bash
+cd backend
+python scripts/acceptance/alpha_merge_invariants.py \
+  --merged origin/scratch/alpha-merge \
+  --policy-lock-base 86671468 \
+  --out ../docs/evidence/founder-alpha/merge-invariants.json
+```
+
+`--merged` krävs för INV-11 (ingen förälders testfil får försvinna i mergen) och
+`--policy-lock-base` för INV-12 (POLICY_LOCK är Z.ai:s). På en ogrenad gren är det **förväntat**
+att INV-01/03/04/05/06 fallerar: det är exakt de oavgjorda konflikterna, och skriptet finns för
+att bevisa att de är lösta — inte för att de ska se gröna ut före merge.
