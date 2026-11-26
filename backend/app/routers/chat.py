@@ -494,6 +494,27 @@ async def _attempt_assistant_reply(
                 system_content += "\n\nPROJEKTKONTEXT:\n" + project_context
         except Exception:
             logger.warning("project context block failed; reply unaffected", exc_info=True)
+    # Reuse-before-build: a founder asking for something LifeAI already has must see the
+    # existing implementation and its evidence before the model proposes new code. The
+    # check is read-only and only runs for explicit build/create wording, so a normal
+    # question never pays for a repository scan. Fail-open like every other context block.
+    reuse_check: dict | None = None
+    try:
+        from app.mainai_executive.reuse_gate import (
+            check_reuse_before_build,
+            format_reuse_instructions,
+        )
+
+        reuse_check = check_reuse_before_build(
+            db,
+            owner_id=user.id,
+            request_text=user_message.content,
+            project_id=conversation.project_id,
+        )
+        if reuse_check is not None:
+            system_content += "\n\n" + format_reuse_instructions(reuse_check)
+    except Exception:
+        logger.warning("reuse-before-build block failed; reply unaffected", exc_info=True)
     messages = [Message(role="system", content=system_content)]
     messages += [Message(role=m.role.value, content=m.content) for m in history]
     messages.append(Message(role="user", content=user_message.content))
@@ -565,6 +586,7 @@ async def _attempt_assistant_reply(
             error_category="provider_unverified",
             error_message=str(exc),
             retryable=False,
+            reuse_check=reuse_check,
             context_status=context_status_out,
             grounding_status=grounding_status,
             grounding_reason=retrieval_degraded_reason,
@@ -618,6 +640,7 @@ async def _attempt_assistant_reply(
             error_category=category,
             error_message=str(exc),
             retryable=category in _RETRYABLE_ERROR_CATEGORIES,
+            reuse_check=reuse_check,
             context_status=context_status_out,
             grounding_status=grounding_status,
             grounding_reason=retrieval_degraded_reason,
@@ -704,6 +727,7 @@ async def _attempt_assistant_reply(
         context_status=context_status_out,
         grounding_status=grounding_status,
         grounding_reason=retrieval_degraded_reason,
+        reuse_check=reuse_check,
     )
 
 

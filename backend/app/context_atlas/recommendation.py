@@ -43,6 +43,14 @@ CAPABILITY_ALIASES: dict[str, tuple[str, ...]] = {
     "identity": ("app.context_atlas", "app.rag.trust"),
     "projects": ("app.routers.projects", "app.project_status", "app.routers.project_entities"),
     "chat": ("app.routers.chat", "app.rag"),
+    # Swedish synonyms for the same reviewed components. The founder's request language must
+    # not decide whether existing evidence is found.
+    "minne": ("app.memory", "app.inspectable_memory", "app.project_memory", "app.memory_work_linkage"),
+    "dokument": ("app.routers.documents", "app.routers.library", "app.routers.knowledge", "app.rag"),
+    "chatt": ("app.routers.chat", "app.rag"),
+    "projekt": ("app.routers.projects", "app.project_status", "app.routers.project_entities"),
+    "sökning": ("app.rag", "app.routers.search"),
+    "sokning": ("app.rag", "app.routers.search"),
 }
 
 

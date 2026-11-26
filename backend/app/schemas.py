@@ -197,6 +197,10 @@ class ChatMessageOut(BaseModel):
     # where the original retrieval outcome was not persisted. See app/routers/chat.py.
     grounding_status: str = "unknown"
     grounding_reason: str | None = None
+    # Read-only reuse-before-build evidence for a build/create request: which existing
+    # modules and tests cover the area, plus the atlas recommendation. Always carries
+    # execution_authorized=False; it is context for the founder, never permission.
+    reuse_check: dict | None = None
 
 
 class ChatUnresolvedAttemptOut(BaseModel):

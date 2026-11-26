@@ -18,6 +18,15 @@ from app.mainai_executive.evidence_state import assess_modules
 # Known MainAI capability areas → package roots already in-tree.
 _CAPABILITY_MAP: dict[str, tuple[str, ...]] = {
     "memory": ("app.founder_memory", "app.inspectable_memory", "app.memory_work_linkage", "app.memory_threads"),
+    # Swedish synonyms: the founder writes in Swedish, and a capability scan that only
+    # matches English keywords would report "nothing exists" for a request that names an
+    # existing subsystem in Swedish. Same packages as their English counterparts.
+    "minne": ("app.founder_memory", "app.inspectable_memory", "app.memory_work_linkage", "app.memory_threads"),
+    "dokument": ("app.rag", "app.routers.documents", "app.routers.library"),
+    "chatt": ("app.routers.chat", "app.rag"),
+    "projekt": ("app.project_memory", "app.project_status", "app.routers.projects"),
+    "sökning": ("app.rag", "app.routers.search"),
+    "sokning": ("app.rag", "app.routers.search"),
     "workforce": ("app.workforce",),
     "planning": ("app.safe_planner", "app.mainai_execution", "app.development_driver"),
     "authority": ("app.execution_envelopes", "app.development_supervisor"),
