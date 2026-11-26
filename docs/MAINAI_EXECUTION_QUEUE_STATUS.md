@@ -190,3 +190,66 @@ modelltransporten är fake; retrieval är isolerad till tomt resultat.
 1. Steg 8 när CI är terminal: verifiera varje körning, säkra publiceringsordning, ingen merge.
 2. Om en verklig E1-lucka dyker upp (t.ex. saknad originalfil vid omindexering) ska den
    hanteras i egen commit med eget test — nuvarande sviter täcker de listade fallen.
+
+## Verklig modellacceptans och överlämning (2026-11-26)
+
+Arbetsgren `freebuff/mainai-context-atlas-decision-support-20261125`, HEAD `ee67cbe8`,
+bas `8c7b335e`, 29 commits, ingen upstream. Full överlämning:
+`docs/MAINAI_REAL_MODEL_HANDOFF.md`.
+
+### DEL 1 – bevara arbetet: PASS
+
+- Arbetsytan ren; 29 commits mot basen; branchen har ingen upstream och ingen PR-head.
+- Bundle exporterad och verifierad i en isolerad klon med
+  `scripts/ops/export_commit_stack.sh` (bundle + manifest + SHA256SUMS).
+- Hemlighetsskanningen hittade endast testfixturens lösenord, inte någon
+  produktionshemlighet. Inga untracked filer riskerar att försvinna.
+
+### DEL 2 – verklig AI i projektflödet: PASS
+
+`tests/backend/chat/test_project_session_real_model.py` (1 passed, 41 s) kör samma resa som
+den godkända `test_project_session_resume.py`, men med riktig Ollama `qwen2.5:0.5b`:
+inloggning → projekt → uppgift → chatt med projektkontext → sparat svar → två riktiga
+worker-cykler → full backend-lifespan-omstart → omladdning → fortsatt chatt med historiken i
+prompten → annan grundare nekas 403. Deterministiska assertioner är separerade från det enda
+modellstyrda: svaret är icke-tomt och har `ollama`-proveniens.
+
+### DEL 3 – fel och återhämtning: PASS
+
+`tests/backend/chat/test_chat_failure_recovery.py` (7 passed; fem körningar i följd):
+Ollama nere före sändning (och retry), avbrott under generering, backend-omstart, samma
+meddelande igen efter omstart, projektkontext saknas, projektkontext otillgänglig, fallback
+förbjuden av policy, samt annan användare. Varje test kontrollerar att historik, idempotens
+och behörigheter överlever felet — inte bara att ett fel returnerades.
+
+### DEL 4 – integrationsförberedelse: PASS (dokumenterad)
+
+Jämfört med `integration/founder-alpha-20261121` (`0adb108f`, merge-base `dd69cb30`) och
+`claude/founder-alpha-pre-vps-consolidation` (`b313c9df`, merge-base `86671468`). Båda saknar
+`context_atlas/`, `providers/circuit_breaker.py`, `founder_memory/prompt.py` och
+`reuse_gate.py`, så hela branchen måste integreras; tre commits kan inte cherry-pickas löst.
+**Inga migrationer** och inga nya miljövariabler. Claudes staging-filer och Z:s säkerhetskod
+är orörda.
+
+### DEL 5 – tester och leverans: PASS för fokuserade sviter
+
+- `6145a764` providerfix: en aldrig etablerad Ollama-anslutning är bevisat pre-egress och
+  retrybar; read timeout förblir ambivalent. 15 providertester.
+- `90be8867` fel-/återhämtningssvit: 7 tester.
+- `ee67cbe8` real-model-acceptans: 1 test.
+- Hela `tests/backend/chat` + `tests/backend/providers`: **357 passed**, 8 m 46 s; ruff rent.
+
+### NOT_RUN / BLOCKED
+
+- CI #511 `45562008534` är fortfarande `in_progress`; #507–#509 är `cancelled`; #510:s run-id
+  svarar 404. Ingen körning är PASS, och ingenting har pushats.
+- Webbläsare/frontend: Chrome saknas; frontend ägs av Claude.
+- Hela backend-sviten parallellt: 2 GB VPS, endast fokuserade sviter.
+- `security/POLICY_LOCK.json`: divergensen kvarstår (Z); filen är orörd.
+- Staging på 16 GB med produktionsmodell: inte körd här.
+
+### Första oavslutade moment
+
+1. Invänta att CI #511 blir terminal och verifiera varje körning som PASS/FAIL/CANCELLED.
+2. Kör real-model-acceptansen på 16 GB-VPS:en med den modell som ska användas i staging.
+3. Fastställ publiceringsordning för #507–#511 + denna branch utan force-push eller merge.

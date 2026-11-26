@@ -10679,3 +10679,26 @@ any isolated environment via `backend/scripts/ci/run_r15_security_suite.sh` (add
 returns permission denied on `/var/run/docker.sock`, so the DB/Redis-backed half is **unrun
 locally, not passing**. Exact-head GitHub Actions status and independent acceptance remain
 external gates. No push, merge, deploy, or provider activation; `first_cycle_go=false`.
+
+## MainAI real-model acceptance — `freebuff/mainai-context-atlas-decision-support-20261125` (2026-11-26)
+
+- **HEAD:** `ee67cbe8`; bas `8c7b335e`; 29 commits; ingen upstream, ingen PR, ingen push.
+- **Nya commits i denna omgång:**
+  - `6145a764` – en aldrig etablerad Ollama-anslutning klassas som bevisat pre-egress och
+    blir retrybar; read timeout förblir ambivalent. 15 providertester.
+  - `90be8867` – sju fel-/återhämtningsscenarier genom riktig HTTP och Postgres.
+  - `ee67cbe8` – verklig Ollama genom projektflödet, inkl. backend- och worker-omstart.
+- **Beroenden:** inga migrationer; inga nya miljövariabler. `chat.py` importerar moduler som
+  infördes tidigare på branchen (`context_atlas`, `circuit_breaker`, `founder_memory/prompt`,
+  `reuse_gate`).
+- **Integrationsläge:** `origin/integration/founder-alpha-20261121` (`0adb108f`, merge-base
+  `dd69cb30`) och `origin/claude/founder-alpha-pre-vps-consolidation` (`b313c9df`, merge-base
+  `86671468`) saknar alla fyra modulerna. Tre commits kan därför **inte** cherry-pickas löst;
+  hela branchen ska integreras som kandidat.
+- **Merge-ordning:** denna branch först när CI är terminal och granskad; därefter befintlig
+  ordning för #507–#511. Branchen blockerar ingen annan gren och påverkar inte Claudes
+  staging-filer eller Z:s säkerhetskod.
+- **Blockerare:** CI #511 `45562008534` är `in_progress`; #507–#509 `cancelled`; #510:s run-id
+  svarar 404. `security/POLICY_LOCK.json` divergerar fortfarande (Z). `first_cycle_go=false`.
+- **Bevis:** `docs/MAINAI_REAL_MODEL_HANDOFF.md`; 357 passed i chat- + provider-sviterna;
+  real-model-acceptansen 1 passed (41 s); felmatrisen 7 passed i fem körningar.
