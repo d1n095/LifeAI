@@ -15,11 +15,13 @@ import uuid
 
 from sqlalchemy.orm import Session
 
-from app.founder_memory.service import list_current_founder_memory
+from app.founder_memory.service import list_current_founder_memory, list_founder_memory
 
 MAX_NOTES = 8
 MAX_CHARS = 2000
 MAX_NOTE_CHARS = 400
+MAX_DISPUTED_NOTES = 3
+MAX_DISPUTED_NOTE_CHARS = 200
 
 
 def format_founder_memory_instructions(
@@ -38,7 +40,8 @@ def format_founder_memory_instructions(
     if limit <= 0 or max_chars <= 0:
         return ""
     notes = list_current_founder_memory(db, owner_id=owner_id)
-    if not notes:
+    disputed = list_founder_memory(db, owner_id=owner_id, status="disputed")
+    if not notes and not disputed:
         return ""
     notes = sorted(
         notes,
@@ -57,6 +60,30 @@ def format_founder_memory_instructions(
             break
         lines.append(line)
         used += len(line) + 1
+    # A disputed note is NOT current truth (list_current_founder_memory() deliberately
+    # excludes it), but silently dropping it is its own lie: the founder has two statements
+    # that contradict each other and no replacement has been recorded. Surface the
+    # contradiction as unresolved so the model asks instead of picking whichever active note
+    # happens to remain. Bounded like every other line; contents are never presented as current.
+    if disputed:
+        disputed_lines: list[str] = []
+        for note in sorted(
+            disputed,
+            key=lambda note: (note.observed_at or note.created_at, str(note.id)),
+            reverse=True,
+        )[:MAX_DISPUTED_NOTES]:
+            content = " ".join((note.content or "").split())
+            if len(content) > MAX_DISPUTED_NOTE_CHARS:
+                content = content[: MAX_DISPUTED_NOTE_CHARS - 3] + "..."
+            disputed_lines.append(f"[{note.note_type}] {content}")
+        line = (
+            "- OSTRIDIGT (grundarens uppgifter motsäger varandra och ingen ersättning är "
+            "registrerad — använd INTE som gällande; säg att det är oklart och fråga): "
+            + " | ".join(disputed_lines)
+        )
+        if used + len(line) <= max_chars:
+            lines.append(line)
+            used += len(line) + 1
     if not lines:
         return ""
     return (
