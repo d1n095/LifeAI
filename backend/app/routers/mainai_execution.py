@@ -118,9 +118,11 @@ def create_goal(request: Request, payload: MainAIGoalCreateIn, db: Session = Dep
         created_by="founder",
         risk_level=risk_level,
         approval_policy=payload.approval_policy,
+        project_id=payload.project_id,
+        # A double-submit or an HTTP retry after a timeout whose first request actually
+        # committed must reuse the mission already in flight, not start a parallel copy of it.
+        reuse_identical_active=True,
     )
-    if payload.project_id is not None:
-        goal.project_id = payload.project_id
     db.commit()
     return goal
 
@@ -142,8 +144,37 @@ def get_goal(goal_id: uuid.UUID, db: Session = Depends(get_db), user: User = Dep
 
 @router.post("/goals/{goal_id}/plan", response_model=MainAIPlanOut, status_code=status.HTTP_201_CREATED)
 @limiter.limit(f"{settings.rate_limit_default_per_minute}/minute")
-async def propose_and_create_plan(request: Request, goal_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_founder)):
+async def propose_and_create_plan(
+    request: Request,
+    goal_id: uuid.UUID,
+    replan: bool = False,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_founder),
+):
+    """AI-propose and persist a plan for `goal_id`.
+
+    `replan=true` is required once the goal already has an active plan. V0.3's `create_plan()`
+    treats a second call as a full replan: it supersedes the active plan and cancels every task
+    that has not reached a terminal state -- including a task a worker is executing right now.
+    That is correct for a deliberate founder replan, but it must never be the result of a plain
+    HTTP retry after a timeout: the first request may have committed and its work may already
+    be running. Without the explicit flag this route therefore refuses (409) instead of
+    silently cancelling real work, and it refuses BEFORE the paid AI planning call.
+    """
     goal = _get_goal_or_404(db, goal_id)
+    active_plan = db.execute(
+        select(MainAIPlan).where(MainAIPlan.goal_id == goal.id, MainAIPlan.status == MainAIPlanStatus.active)
+    ).scalar_one_or_none()
+    if active_plan is not None and not replan:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "active_plan_exists",
+                "plan_id": str(active_plan.id),
+                "plan_version": active_plan.version,
+                "message": "Goal already has an active plan. Pass replan=true to deliberately replace it (that cancels its unfinished tasks).",
+            },
+        )
     try:
         specs, _provider, _model = await planner.propose_plan_via_ai(db, goal=goal)
         plan = planner.create_plan(db, goal=goal, rationale="AI-proposed plan", tasks=specs, created_by="founder")

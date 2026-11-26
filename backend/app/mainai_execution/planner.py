@@ -36,6 +36,7 @@ from app.mainai_execution.lessons import (
 )
 from app.mainai_execution.verify import VerificationStepError, validate_targeted_tests_target
 from app.models.mainai_execution import (
+    ACTIVE_MAINAI_GOAL_STATUSES,
     TERMINAL_MAINAI_TASK_STATUSES,
     MainAIGoal,
     MainAIGoalRiskLevel,
@@ -48,6 +49,7 @@ from app.models.mainai_execution import (
     MainAITaskEventType,
     MainAITaskStatus,
 )
+from app.models.user import User
 from app.providers.base import Message
 
 logger = logging.getLogger(__name__)
@@ -136,6 +138,35 @@ class PlannedTaskSpec:
     max_attempts: int = 3
 
 
+def _normalized_instruction(text: str) -> str:
+    return " ".join((text or "").casefold().split())
+
+
+def _find_identical_active_goal(
+    db: Session,
+    *,
+    owner_id: uuid.UUID,
+    project_id: uuid.UUID | None,
+    original_instruction: str,
+) -> MainAIGoal | None:
+    """An already-active goal for the same owner, project and mission text.
+
+    Deliberately narrow: same project (including both sides being founder-wide/NULL), the same
+    normalised instruction, and a non-terminal goal. A finished goal never blocks a new one,
+    and a different instruction is a different mission even when the title happens to match.
+    """
+    wanted = _normalized_instruction(original_instruction)
+    filters = [
+        MainAIGoal.owner_id == owner_id,
+        MainAIGoal.status.in_(ACTIVE_MAINAI_GOAL_STATUSES),
+        MainAIGoal.project_id.is_(None) if project_id is None else MainAIGoal.project_id == project_id,
+    ]
+    for goal in db.execute(select(MainAIGoal).where(*filters).order_by(MainAIGoal.created_at.desc())).scalars():
+        if _normalized_instruction(goal.original_instruction) == wanted:
+            return goal
+    return None
+
+
 def create_goal(
     db: Session,
     *,
@@ -145,11 +176,37 @@ def create_goal(
     created_by: str,
     risk_level: MainAIGoalRiskLevel = MainAIGoalRiskLevel.low,
     approval_policy: str = "standard_repo_work",
+    project_id: uuid.UUID | None = None,
+    reuse_identical_active: bool = False,
 ) -> MainAIGoal:
     """Creates one durable goal in `pending` status -- planning has not started yet (see
-    create_plan(), which transitions it to `running` once a plan actually exists)."""
+    create_plan(), which transitions it to `running` once a plan actually exists).
+
+    `reuse_identical_active` is for the founder's own goal intake (POST /goals): a founder
+    double-submit, or an HTTP retry after a timeout whose first request actually committed,
+    must not create a second, parallel copy of the same mission. When it is set, the owner row
+    is locked first (the same serialisation `app.work_intelligence.service.create_strategy()`
+    uses) and an already-active goal with the identical project + instruction is returned
+    instead of inserting a duplicate. Candidate-authorisation callers leave it False: they
+    already own the idempotency of their own candidate row and must keep creating the goal
+    their candidate was authorised for.
+    """
+    if reuse_identical_active:
+        # Serialise two genuinely concurrent identical submissions for the same owner before
+        # the lookup, or both could miss each other's uncommitted row and insert two goals.
+        db.execute(select(User.id).where(User.id == owner_id).with_for_update()).scalar_one_or_none()
+        existing = _find_identical_active_goal(
+            db,
+            owner_id=owner_id,
+            project_id=project_id,
+            original_instruction=original_instruction,
+        )
+        if existing is not None:
+            return existing
+
     goal = MainAIGoal(
         owner_id=owner_id,
+        project_id=project_id,
         title=title,
         original_instruction=original_instruction,
         status=MainAIGoalStatus.pending,
