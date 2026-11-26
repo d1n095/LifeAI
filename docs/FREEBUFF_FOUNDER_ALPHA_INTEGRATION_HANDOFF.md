@@ -317,3 +317,4 @@ pytest tests/backend/test_migration_state_privileges.py tests/backend/test_runti
 | Integrationsgren | `0adb108fa5145ad6b320950fb029bfaf96f003b4` |
 | Denna omgång — kodfixar | `45fe2fb9` (corpus_review `max_tokens`, agent-auth-kontrakt) |
 | Denna omgång — dokumentation | `69d61f59` (denna överlämning + branchregistret) |
+| A08-åtgärden (patch + INV-12) | `ed714e5d` |
