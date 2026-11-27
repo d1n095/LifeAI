@@ -78,9 +78,10 @@ def test_an_implementation_task_changes_only_the_source(tmp_path):
 
 
 def test_a_focused_test_task_appends_only_its_test_and_preserves_existing_work(tmp_path):
-    (tmp_path / "calculator.py").write_text(
-        "def subtract(left, right):\n    return left - right\n", encoding="utf-8"
-    )
+    # The source file is deliberately ABSENT: a test-only task must never create it (that is
+    # the implementation task's work). The F2 E2E found that substring matching let
+    # `test_calculator.py` count as a mention of `calculator.py`, which silently turned this
+    # task into "both" and would have rewritten the source whenever it was missing.
     (tmp_path / "test_calculator.py").write_text(
         "def test_existing():\n    assert True\n", encoding="utf-8"
     )
@@ -88,6 +89,7 @@ def test_a_focused_test_task_appends_only_its_test_and_preserves_existing_work(t
         tmp_path, task_description="Lägg till ett focused test för subtract-funktionen i test_calculator.py"
     )
     assert _ids(candidate) == ["test", "verify", "gate", "stage", "commit"]
+    assert not (tmp_path / "calculator.py").exists(), "a test-only task must not create the source"
     test_step = next(step for step in candidate.steps if step.step_id == "test")
     assert test_step.capability == "patch_file"
     assert test_step.arguments["path"] == "test_calculator.py"
@@ -101,6 +103,13 @@ def test_a_focused_test_task_appends_only_its_test_and_preserves_existing_work(t
     assert verify.capability == "run_focused_test"
     stage = next(step for step in candidate.steps if step.step_id == "stage")
     assert stage.arguments["paths"] == ["test_calculator.py"]
+
+
+def test_a_description_that_mentions_both_files_stays_a_full_change(tmp_path):
+    candidate = _candidate(
+        tmp_path, task_description="Implementera subtract i calculator.py och lägg till focused test i test_calculator.py"
+    )
+    assert _ids(candidate) == ["source", "test", "verify", "gate", "stage", "commit"]
 
 
 def test_the_two_tasks_together_produce_distinct_cumulative_changes(tmp_path):

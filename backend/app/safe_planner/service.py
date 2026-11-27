@@ -605,17 +605,36 @@ def _recipe_scope(requested_outcome: str | None) -> str:
     text = " ".join((requested_outcome or "").lower().split())
     if not text:
         return "both"
-    mentions_test = "test" in text or "pytest" in text
-    mentions_source = any(
-        token in text
-        for token in (
+    # WHOLE TOKENS, not substrings (found by the F2 real E2E, 2026-11-27): substring matching
+    # read `test_calculator.py` as a mention of `calculator.py` and `subtract-funktionen` as a
+    # mention of `funktion`, so the plan's focused-test task was classified as "both". That
+    # mislabelled its commit and would have re-created the source file (duplicating the
+    # implementation task's work) whenever it was not already present. Tokenizing keeps each
+    # path/word distinct while preserving the previous behaviour for prose that genuinely names
+    # both halves.
+    # Hyphens are part of a token, so `subtract-funktionen` never decomposes into `funktionen`.
+    tokens = set(re.findall(r"[a-zåäö0-9_.\-]+", text))
+    # An EXPLICIT path is the most concrete thing a structured task description can say, so it
+    # decides the scope by itself (also when it is the only half named). A description that
+    # names both files genuinely owns the full change.
+    names_test_file = "test_calculator.py" in tokens
+    names_source_file = "calculator.py" in tokens
+    if names_test_file != names_source_file:
+        return "test" if names_test_file else "source"
+    if names_test_file and names_source_file:
+        return "both"
+    mentions_test = bool(tokens & {"test", "testet", "pytest"})
+    mentions_source = bool(
+        tokens
+        & {
             "calculator.py",
             "funktion",
+            "funktionen",
             "function",
             "helper",
             "implementera",
             "implementation",
-        )
+        }
     )
     if mentions_test and not mentions_source:
         return "test"
