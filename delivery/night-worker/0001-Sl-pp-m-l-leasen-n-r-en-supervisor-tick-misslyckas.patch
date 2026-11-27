@@ -1,0 +1,182 @@
+From 3fa497510959061ca0390a12f813ee816d78d8ab Mon Sep 17 00:00:00 2001
+From: Freebuff Agent <noreply@codebuff.com>
+Date: Fri, 27 Nov 2026 08:10:44 +0000
+Subject: [PATCH 1/2] =?UTF-8?q?Sl=C3=A4pp=20m=C3=A5l-leasen=20n=C3=A4r=20e?=
+ =?UTF-8?q?n=20supervisor-tick=20misslyckas?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+En tick som faller efter dispatch lämnade kvar en aktiv supervisor_goal_lease i upp
+till en timme: dispatch_ready_task() committar mitt i ticken (create_job()s atomiska
+commit), medan release-anropet låg i den transaktion som anroparen rullar tillbaka vid
+fel. Mätt i den isolerade miljön 2026-11-27: ett enda CandidateValidationError höll ett
+mål aktivt i 3600 s, vilket bryter nattkörningens återupptagning.
+
+Leasen släpps nu i en egen committad transaktion efter rollback, och ett release-fel får
+aldrig dölja tickens ursprungliga fel. Regressionsprovet faller utan fixen. En befintlig
+assertion mäter nu committat tillstånd i stället för sessionens ocommittade buffert.
+
+🤖 Generated with Codebuff
+Co-Authored-By: Codebuff <noreply@codebuff.com>
+---
+ .../production_entry.py                       | 30 ++++++-
+ .../test_supervisor_production_entry.py       | 83 ++++++++++++++++++-
+ 2 files changed, 110 insertions(+), 3 deletions(-)
+
+diff --git a/backend/app/development_supervisor/production_entry.py b/backend/app/development_supervisor/production_entry.py
+index 7d07a318..4c4949c9 100644
+--- a/backend/app/development_supervisor/production_entry.py
++++ b/backend/app/development_supervisor/production_entry.py
+@@ -186,6 +186,7 @@ async def run_authorized_goal_supervisor_tick(
+             )
+         return current
+ 
++    failure_release_done = False
+     try:
+         current_envelope = _reverify_authority()
+ 
+@@ -378,6 +379,33 @@ async def run_authorized_goal_supervisor_tick(
+         )
+ 
+         return await run_supervisor(db, scope=scope, bindings=bindings, worker_id=worker_id, bounds=bounds or SupervisorBounds())
++    except BaseException:
++        # A FAILED TICK MUST NOT LEAVE THIS GOAL LEASED FOR THE FULL TTL.
++        # `dispatch_ready_task()` performs a real mid-tick commit (create_job()'s own atomic
++        # commit), which makes THIS tick's `supervisor_goal_leases` claim durable BEFORE
++        # planning can still refuse the work. The release in `finally` below runs inside the
++        # caller's transaction, and `app/worker.py`'s `_advance_authorized_supervisor_goals()`
++        # rolls that transaction back on any exception -- so the already-committed, still-active
++        # lease used to survive the failure and block this goal's next unattended tick for the
++        # whole TTL. Measured in production (2026-11-27): one `CandidateValidationError` left a
++        # goal `active` for 3600 s, i.e. no retry and no progress for an hour, which is exactly
++        # the "resume after an error" property the nightly loop depends on.
++        #
++        # Released here in its OWN committed transaction, after rolling back whatever the failed
++        # tick had written, and a release failure is never allowed to mask the original error.
++        failure_release_done = True
++        db.rollback()
++        try:
++            release_supervisor_goal_lease(db, lease_id=lease_id, worker_id=worker_id, lease_generation=lease_generation)
++            db.commit()
++        except Exception:  # noqa: BLE001 - must never replace the tick's own exception
++            db.rollback()
++            logger.exception(
++                "Worker %s: could not release supervisor_goal_lease %s (goal %s) after a failed tick; "
++                "the goal may stay leased until the TTL expires.",
++                worker_id, lease_id, goal.id,
++            )
++        raise
+     finally:
+         # A False return here means this worker's OWN lease was no longer the active one by
+         # the time this tick tried to release it -- e.g. an operator action that legitimately
+@@ -387,7 +415,7 @@ async def run_authorized_goal_supervisor_tick(
+         # swallowing it would erase the one signal available to notice a worker's lease was
+         # lost mid-run, which is exactly the "detect lost ownership at a consequential
+         # boundary" this codebase already expects at every other lease-fenced write.
+-        if not release_supervisor_goal_lease(db, lease_id=lease_id, worker_id=worker_id, lease_generation=lease_generation):
++        if not failure_release_done and not release_supervisor_goal_lease(db, lease_id=lease_id, worker_id=worker_id, lease_generation=lease_generation):
+             logger.warning(
+                 "Worker %s: supervisor_goal_lease %s (goal %s) was no longer this worker's own active "
+                 "lease by the time this tick tried to release it -- likely reclaimed after an unexpectedly "
+diff --git a/backend/tests/backend/mainai/test_supervisor_production_entry.py b/backend/tests/backend/mainai/test_supervisor_production_entry.py
+index e9ec2111..8411d8f7 100644
+--- a/backend/tests/backend/mainai/test_supervisor_production_entry.py
++++ b/backend/tests/backend/mainai/test_supervisor_production_entry.py
+@@ -540,8 +540,12 @@ async def test_an_envelope_superseded_between_eligibility_read_and_execution_per
+     assert task.mainai_job_id is None
+ 
+     from app.models.supervisor_lease import SupervisorGoalLease
+-    lease = superuser_db.query(SupervisorGoalLease).filter(SupervisorGoalLease.goal_id == goal.id).one()
+-    assert lease.status == "released"  # still cleanly released despite the failure
++    # A failed tick releases its own lease and COMMITS that release (see
++    # test_a_tick_that_fails_after_dispatch_releases_its_goal_lease below). When nothing in the
++    # tick had been committed yet, the rollback leaves no lease row at all; either way the
++    # property that matters is identical: nothing is left `active` for the goal.
++    leases = superuser_db.query(SupervisorGoalLease).filter(SupervisorGoalLease.goal_id == goal.id).all()
++    assert all(lease.status == "released" for lease in leases)
+ 
+ 
+ @pytest.mark.asyncio
+@@ -658,3 +662,78 @@ async def test_a_fresh_task_claim_always_gets_a_clean_worktree_regardless_of_pri
+     assert status == ""  # the fresh claim for this tick's own task reset it clean
+     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo_root), capture_output=True, text=True, check=True).stdout.strip()
+     assert head == base_sha
++
++
++@pytest.mark.asyncio
++async def test_a_tick_that_fails_after_dispatch_releases_its_goal_lease(
++    superuser_db, make_verified_user, source_repo, monkeypatch
++):
++    """A FAILED tick must not keep the goal leased for the full TTL.
++
++    `dispatch_ready_task()` performs a real mid-tick commit (`create_job()`'s own atomic
++    commit), so by the time planning runs, this tick's `supervisor_goal_leases` claim is
++    already durable. When planning then refuses (here: a goal created under the human-reviewed
++    `standard_repo_work`, which the autonomous Safe Planner deliberately will not plan local
++    writes under), the caller (`app/worker.py`) rolls its transaction back -- and because the
++    release lived in that same transaction, the committed lease used to survive as `active`,
++    blocking the goal's next unattended tick until it expired. Measured in production
++    2026-11-27: 3600 s of no progress after a single CandidateValidationError.
++    """
++    from app.development_supervisor import service as supervisor_service
++    from app.models.mainai_job import MainAIJob
++    from app.models.supervisor_lease import SupervisorGoalLease
++    from app.safe_planner.service import CandidateValidationError
++
++    # Ordinary candidate=None bindings park on provider spend before planning; this test is
++    # about the lease, not about spend, so authorize it exactly as a founder grant would.
++    monkeypatch.setattr(supervisor_service, "_live_provider_spend_authorized", lambda db, scope: True)
++
++    owner, _ = make_verified_user()
++    goal = planner.create_goal(
++        superuser_db,
++        owner_id=owner.id,
++        title="failing tick",
++        # Matches the registered deterministic recipe, so planning reaches the approval-policy
++        # refusal without any provider call -- the same shape that refused in production.
++        original_instruction="Add a calculator subtract helper and its focused test",
++        created_by="test",
++    )
++    planner.create_plan(
++        superuser_db, goal=goal, rationale="single task",
++        tasks=[PlannedTaskSpec(description="edit a file", task_type="repo_edit")],
++        created_by="test",
++    )
++    envelope = _authorize(
++        superuser_db, owner.id, goal.id,
++        authorized_paths=["calculator.py", "test_calculator.py"],
++    )
++    superuser_db.commit()
++
++    with pytest.raises(CandidateValidationError, match="approval_policy"):
++        await run_authorized_goal_supervisor_tick(
++            superuser_db, goal=goal, envelope=envelope, worker_id="worker-a"
++        )
++
++    # Precondition that makes this regression real: a job was already dispatched AND
++    # committed before the refusal, so the lease claim is durable too.
++    # (`task.mainai_job_id` is written only AFTER create_job()'s commit, so it is rolled back
++    # here -- the job row itself, and the lease claim committed alongside it, are what stay.)
++    jobs = superuser_db.execute(select(MainAIJob).where(MainAIJob.owner_id == owner.id)).scalars().all()
++    assert jobs, "the tick must have dispatched a job before planning refused"
++
++    # The worker's caller rolls its transaction back on any exception (see
++    # app/worker.py's _advance_authorized_supervisor_goals); do the same so this reads the
++    # DURABLE state, not whatever the failed tick left in this session's uncommitted buffer.
++    superuser_db.rollback()
++
++    leases = superuser_db.execute(
++        select(SupervisorGoalLease).where(SupervisorGoalLease.goal_id == goal.id)
++    ).scalars().all()
++    assert [lease.status for lease in leases if lease.status == "active"] == []
++
++    # The whole point: the goal is claimable again immediately, by another worker too.
++    claim = claim_supervisor_goal_lease(
++        superuser_db, owner_id=owner.id, goal_id=goal.id, envelope_id=envelope.id,
++        worker_id="worker-b", lease_seconds=60,
++    )
++    assert claim is not None
+-- 
+2.43.0
+

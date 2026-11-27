@@ -6,6 +6,35 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Nattarbetsleveransen publicerad (2026-11-27)
+
+**Ny branch: `freebuff/night-worker-delivery-20261127`** (bas:
+`freebuff/founder-projects-in-status-20261126`, `85a1c10e` — den verifierade
+Founder Alpha-kandidaten, inte default-grenen). Innehåller `delivery/night-worker/`:
+redovisningen med PASS/FAIL/BLOCKED/NOT_RUN, `nightly-e2e.sh`, konfigurationsanteckningen och
+F7-patcharna, samt den här posten. Publicerad till `origin`; **ingen merge, ingen PR, ingen
+deployment**. `first_cycle_go=false` och `POLICY_LOCK` är oförändrade.
+
+**Varför:** den isolerade installationen kunde bevisligen köra en godkänd utvecklingsuppgift
+obevakat (plan → godkännande → envelope → spend-grant → worker-tick → isolerad worktree →
+tester → checkpoints → `completed`), inklusive kraschåterhämtning och idempotens över
+omstarter. Leveransen dokumenterar det som faktiskt mättes, inte bara HTTP 200.
+
+**Relaterad gren, egen och ej mergad: `freebuff/supervisor-failed-tick-lease-release-20261127`**
+(F7 — målets lease släpps när en supervisor-tick misslyckas). Två commits: `3fa49751` (fix +
+regressionsprov) och `f51e85bd` (registerpost, endast på den grenen). **Får inte mergas ensam:**
+utan åtgärden för det kvarlämnade `task_execution`-jobbet (F1 i
+`delivery/night-worker/README.md`) ger den ~2 s återförsök för en permanent felkonfigurerad
+måltick.
+
+**Avgränsning:** leveransgrenen innehåller ingen kod från F7-grenen, och F7-grenen innehåller
+ingen leveransdokumentation — patchar är kopplingen. Ingen av dem är aktiverad i den isolerade
+stacken, som fortfarande kör `85a1c10e`.
+
+**Kvarstående hinder:** Codex-SHA `26bbc2ab…` och Z.ai:s R31 Round 4-bundle finns inte på
+`origin` och har inte rekonstruerats; docker-baserad verifiering kräver behörighet rollen inte
+har.
+
 ## Blueprint-intelligensbacklogen KLAR: inkrementell dokumentförståelse (2026-11-14)
 
 **Ny branch: `claude/blueprint-incremental-document-understanding`** (PR #401, bas: #399
