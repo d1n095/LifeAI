@@ -1,0 +1,29 @@
+# Fynd från körningarna 2026-11-27 (verkliga, reproducerade)
+
+## T1 — SIGKILL mitt i en supervisor-tick lämnar mål-leasen aktiv i upp till TTL:n
+
+Efter en `kill -9` på workerprocessen mitt i ett körande jobb:
+
+  supervisor_goal_leases: status='active', acquired_at=10:54:28, expires_at=11:54:28
+  (TTL 3600 s = 2 x längsta enskilda operator-åtgärd)
+
+F7 släpper leasen när ticken KASTAR (egen committad transaktion efter rollback), men en dödad
+process kastar ingenting. Målet kan därför inte plockas upp igen förrän TTL:en gått ut — upp
+till en timmes stillestånd för just det målet.
+
+E2E:t flyttar därför klockan till TTL:ns sluttillstånd (expires_at = now() - 1 s) i stället för
+att vänta en timme; jobbets egen lease-utgång, takeover och omförsök sköts av den riktiga
+återhämtningspipen. Rekommendation (egen branch, rör F7:s lease-kontrakt): kort lease som
+förnyas per task, eller återtag när worker-identitet/generation bevisligen är en annan process.
+
+## T2 — krasch mellan dispatch-commit och jobbclaim lämnar tasken `running` utan återhämtning
+
+Reproducerat 2026-11-27 (körning "attempt 5 interrupted"): när workern dör efter att
+dispatch_ready_task() committat men innan jobbet claimats ligger jobbet kvar `queued` och
+tasken `running`. Ingen befintlig väg driver den vidare (jobbklaimningen hämtar `queued`-jobb
+men tasken är inte längre `ready`; recovery/takeover utgår från ett jobb som faktiskt kört).
+Resultat: tasken står still på attempts = 1, next_retry_at = NULL, och attempts-budgeten
+triggar aldrig.
+
+E2E:t dödar därför bara taskar som är genuint `running` — tillståndet ska inte tillverkas av
+testet, men fyndet är verkligt och bör få en egen branch.

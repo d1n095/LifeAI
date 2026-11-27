@@ -45,6 +45,47 @@ isolerade stacken. Pushad till `origin/freebuff/governed-execution-park-20261127
 stacken är återställd till den verifierade kandidaten `85a1c10e` — branchen är inte aktiverad
 där.
 
+## Nattarbete: tillfälliga fel verifierade med verkligt E2E (2026-11-27)
+
+**Ny branch: `freebuff/transient-failure-recovery-20261127`** (bas:
+`freebuff/governed-execution-park-20261127`, `09ed1bf8` — F1 + F7). Ingen PR ännu. Branchen
+innehåller **bara** E2E-verifieringen och dess fynd; ingen produktionskod ändras.
+
+**Varför:** F1/F7-verifieringen rörde aldrig den tillfälliga felvägen. Enhetstesterna för
+`lease.py`, recovery och `execute_takeover` bevisar var för sig att klockan räknas rätt, men
+inte att en **dödad worker** mitt i ett körande jobb leder tillbaka till arbete, eller att
+attempts-budgeten stoppar en task som felar om och om igen.
+
+**Vad:** `delivery/transient-failure-recovery/e2e-transient.py` kör i den isolerade stacken
+(riktig Postgres/Redis/backend/worker/Ollama, founder-inloggning, mål via API). Ett
+tillfälligt fel modelleras som det är i produktion: workern `kill -9`:as mitt i ett körande
+jobb; lease-utgång, takeover och omförsök är den riktiga transientvägen. Fas 1 kräver att
+tasken blir `completed` på **försök 2 av 3**, att en durabil retry/backoff-händelse finns, att
+det finns **exakt en** `completed`-händelse (ingen dubbelkörning) och att ett nytt jobb
+skapades. Fas 2 dödar varje försök som når `running` och kräver att upprepade avbrott alltid
+slutar i ett durabilt terminalt läge utan att budgeten överskrids eller en retry-klocka lämnas
+kvar.
+
+**Fynd (verkliga, ej åtgärdade här — egna brancher):**
+- **T1** — en SIGKILL mitt i en supervisor-tick lämnar `supervisor_goal_leases` `active` i upp
+till TTL:ens 3 600 s. F7 släpper leasen när ticken **kastar**, men en dödad process kastar
+ingenting, så målet kan inte plockas upp igen förrän TTL:en gått ut. E2E:t flyttar därför
+klockan (`expires_at = now() - 1 s`, exakt TTL-sluttillståndet) i stället för att vänta en
+timme; allt annat sköts av den riktiga återhämtningspipen.
+- **T2** — en krasch mellan `dispatch_ready_task()`s commit och jobbets claim lämnar tasken
+`running` med ett `queued` jobb som ingen befintlig väg driver vidare; budgeten triggar
+aldrig. Reproducerat 2026-11-27. E2E:t dödar därför bara taskar som är genuint `running`.
+
+**Beroende:** baseras på `freebuff/governed-execution-park-20261127`; F1/F7 måste mergas
+först. Oberoende av `freebuff/parked-goal-founder-recovery-20261127`,
+`freebuff/task-scoped-recipe-20261127` och `freebuff/goal-lease-lifecycle-20261127`.
+
+**Status:** verifierad i den isolerade stacken (körningsutskrift i
+`delivery/transient-failure-recovery/evidence/`), pushad till
+`origin/freebuff/transient-failure-recovery-20261127`, ej mergad, ej deployad;
+`first_cycle_go=false` och `POLICY_LOCK` oförändrade. Stacken återställd till `85a1c10e`
+efter körningen.
+
 ## Nattarbete: mål-lease släpps vid misslyckad supervisor-tick (2026-11-27)
 
 **Ny branch: `freebuff/supervisor-failed-tick-lease-release-20261127`** (bas:
