@@ -244,6 +244,15 @@ authority changing, never a timer. If the configuration is still refused, the ne
 it again under the new envelope — bounded, visible in `mainai_task_events`, and never
 unbounded.
 
+**Operational note on re-authorization.** `POST /api/execution-envelopes/goals/{id}/propose`
+keys idempotency on the proposed CONTENT (see that route's own docstring), so re-proposing the
+byte-identical scope returns the already-authorized proposal and its authorize call correctly
+refuses with `already authorized`. A founder re-authorization after fixing a configuration is
+therefore a deliberate new, explicitly stated scope (e.g. the same paths with the scoped
+commit capabilities the work actually needs) — which is also the honest shape: re-authorizing
+is a fresh authority decision, never an automatic replay of the old one. Nothing here invents
+a second way to grant authority.
+
 **What is preserved:** `mainai_checkpoints` are untouched, task events stay append-only, and
 the only state transitions used are the pre-existing `blocked` / `retryable_failed` / `failed`
 ones with the pre-existing attempts/backoff budget. Other tasks in the same goal keep being
