@@ -603,6 +603,11 @@ _MAINAI_EXECUTION_TABLES = (
     # status transitions in place (active -> released) and whose lease_generation is bumped in
     # place on takeover, deletion only through the SECURITY DEFINER erasure path.
     "supervisor_goal_leases",
+    # Migration 0090 (F4): the append-only lease HISTORY that lets the live table recycle one
+    # row per goal without losing which worker held it, at which generation, and when. Same
+    # structural role as mainai_job_events -- INSERT only, deletion only through the
+    # SECURITY DEFINER erasure path.
+    "supervisor_goal_lease_events",
     # Migration 0060 (Provider Spend Authorization): authorizations are mutable (status
     # transitions + spent counters under row lock); usage events are append-only. Deletion
     # only through erase_own_provider_spend_children().
@@ -1069,6 +1074,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
         conn.execute(text("GRANT EXECUTE ON FUNCTION erase_own_execution_authorization_children() TO mainai_app"))
         conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON engineering_lesson_guard_observations FROM mainai_app"))
         conn.execute(text("REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER ON supervisor_goal_leases FROM mainai_app"))
+        conn.execute(text("REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON supervisor_goal_lease_events FROM mainai_app"))
         # Migration 0073 (claim_evidence_metadata): mutable on purpose -- re-stamping a
         # corrected founder declaration must UPDATE the materialized verdict in place --
         # but rows are never deleted by the app role (they die via ON DELETE CASCADE from
@@ -1163,6 +1169,7 @@ def apply_mainai_execution_privileges(engine: Engine, *, require_complete: bool 
             ("claim_evidence_metadata", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("engineering_lesson_plan_decisions", frozenset({"SELECT", "INSERT"})),
             ("supervisor_goal_leases", frozenset({"SELECT", "INSERT", "UPDATE"})),
+            ("supervisor_goal_lease_events", frozenset({"SELECT", "INSERT"})),
             ("provider_spend_authorizations", frozenset({"SELECT", "INSERT", "UPDATE"})),
             ("provider_spend_usage_events", frozenset({"SELECT", "INSERT"})),
             ("provider_disclosure_events", frozenset({"SELECT", "INSERT"})),

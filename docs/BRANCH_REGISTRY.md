@@ -6,6 +6,35 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+
+## F4 — livscykel för avslutade mål-leases (2026-11-27)
+
+**Branch:** `freebuff/goal-lease-lifecycle-20261127`, bas `freebuff/governed-execution-park-20261127`
+(`09ed1bf8`). **Beroende:** F1+F7 måste mergas före denna. `first_cycle_go=false`, ingen
+merge/deploy.
+
+**Vad:** `supervisor_goal_leases` växte med en `released`-rad per tick (46+ rader för ett mål
+under en kort körning) eftersom den partiella unika indexen bara binder AKTIVA rader.
+`claim_supervisor_goal_lease()` återanvänder nu målets egen released-rad (samma rad,
+`lease_generation` +1, `released_at` nollställs; `FOR UPDATE SKIP LOCKED` så samtidiga claimants
+faller igenom till den befintliga konflikt-vägen), och en utgången aktiv lease tas fortfarande
+över på plats. Tillväxten blir O(mål) i stället för O(ticks).
+
+Revisionshistoriken flyttar till den nya append-only-tabellen `supervisor_goal_lease_events`
+(migration 0090): en rad per claim/takeover/release med worker, generation och tidsstämplar,
+skriven i samma transaktion som lease-ändringen. Migrationen backfillar befintliga rader
+(inkl. en `released`-händelse per redan släppt rad) innan de redundanta released-raderna tas
+bort. UPDATE är aldrig tillåtet och DELETE endast via den auktoriserade ägar-raderingen
+(`erase_own_supervisor_goal_leases()`, utökad att även ta historiken); `app/rls.py` verifierar
+exakt `SELECT, INSERT` för runtime-rollen. Förnyelser loggas medvetet inte (ingen
+ägandeändring, skulle återinföra per-tick-tillväxten).
+
+Tester: 7 nya i `tests/backend/mainai/test_supervisor_goal_lease_lifecycle.py` (en rad per mål
+över fem claims, generationsfencing, takeover, två samtidiga claimants, non-holder-release utan
+historikrad, DB-nivåns append-only även för ägaren, ägar-radering av båda tabellerna); 17 gröna
+tillsammans med den befintliga lease-sviten.
+
+
 ## Nattarbete: F1 + F7 som en sammanhängande säkerhetskorrigering (2026-11-27)
 
 **Ny branch: `freebuff/governed-execution-park-20261127`** (bas:

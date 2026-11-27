@@ -13,6 +13,7 @@ caller getting `None` back MUST treat this as "someone else already owns this go
 Supervisor loop right now" and skip it this tick -- never retry-with-force, never invent a
 second lease."""
 
+import json
 import uuid
 
 from sqlalchemy import text
@@ -53,25 +54,122 @@ class SupervisorLeaseLostError(Exception):
         )
 
 
+# F4: recycle the goal's OWN released row instead of inserting a new one every tick.
+# `released_at DESC` picks the most recently released row (there is normally exactly one after
+# this migration's backfill); `FOR UPDATE SKIP LOCKED` makes a concurrent claimer skip it and
+# fall through to the INSERT below, whose partial-unique conflict then correctly reports "still
+# held" instead of creating a second active row. `released_at` is cleared so the row's own
+# timestamps always describe its CURRENT hold; the previous hold survives in
+# `supervisor_goal_lease_events`.
+_RECYCLE_RELEASED_SQL = text("""
+    UPDATE supervisor_goal_leases
+    SET status = 'active',
+        worker_id = :worker_id,
+        envelope_id = :envelope_id,
+        lease_generation = supervisor_goal_leases.lease_generation + 1,
+        acquired_at = now(),
+        expires_at = now() + make_interval(secs => :lease_seconds),
+        last_heartbeat_at = now(),
+        released_at = NULL
+    WHERE id = (
+        SELECT id FROM supervisor_goal_leases
+        WHERE goal_id = :goal_id AND owner_id = :owner_id AND status = 'released'
+        ORDER BY released_at DESC NULLS LAST, acquired_at DESC
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+    )
+    RETURNING id, lease_generation
+""")
+
+
+_EVENT_SQL = text("""
+    INSERT INTO supervisor_goal_lease_events
+        (owner_id, goal_id, lease_id, worker_id, lease_generation, event_type, acquired_at, released_at, detail)
+    VALUES
+        (:owner_id, :goal_id, :lease_id, :worker_id, :lease_generation, :event_type,
+         CASE WHEN :event_type = 'released' THEN NULL ELSE now() END,
+         CASE WHEN :event_type = 'released' THEN now() ELSE NULL END,
+         CAST(:detail AS jsonb))
+""")
+
+
+def _record_lease_event(
+    db: Session,
+    *,
+    owner_id: uuid.UUID,
+    goal_id: uuid.UUID,
+    lease_id: uuid.UUID,
+    worker_id: str,
+    lease_generation: int,
+    event_type: str,
+    detail: dict | None = None,
+) -> None:
+    """Append one durable history row (migration 0090). Flush-only, like every other write in
+    this module: the caller's own transaction decides whether the claim/release and its history
+    become durable together (they always do, or neither does).
+
+    Deliberately NOT called for renewals: a heartbeat changes no ownership, and recording it
+    would reintroduce exactly the per-tick growth this lifecycle change removes.
+    """
+    db.execute(
+        _EVENT_SQL,
+        {
+            "owner_id": str(owner_id),
+            "goal_id": str(goal_id),
+            "lease_id": str(lease_id),
+            "worker_id": worker_id,
+            "lease_generation": lease_generation,
+            "event_type": event_type,
+            "detail": json.dumps(detail or {}),
+        },
+    )
+
+
 def claim_supervisor_goal_lease(
     db: Session, *, owner_id: uuid.UUID, goal_id: uuid.UUID, envelope_id: uuid.UUID, worker_id: str, lease_seconds: int
 ) -> tuple[uuid.UUID, int] | None:
     """Returns (lease_id, lease_generation) on a successful claim or stale-lease takeover, or
     `None` if another worker genuinely still holds this goal's lease. Does NOT commit -- the
     caller's own tick decides the transaction boundary, exactly like `renew_mainai_job_lease`."""
-    row = db.execute(
-        _CLAIM_SQL,
-        {
-            "owner_id": str(owner_id),
-            "goal_id": str(goal_id),
-            "envelope_id": str(envelope_id),
-            "worker_id": worker_id,
-            "lease_seconds": lease_seconds,
-        },
-    ).first()
+    params = {
+        "owner_id": str(owner_id),
+        "goal_id": str(goal_id),
+        "envelope_id": str(envelope_id),
+        "worker_id": worker_id,
+        "lease_seconds": lease_seconds,
+    }
+    recycled = db.execute(_RECYCLE_RELEASED_SQL, params).first()
+    if recycled is not None:
+        lease_id, generation = uuid.UUID(str(recycled[0])), int(recycled[1])
+        _record_lease_event(
+            db,
+            owner_id=owner_id,
+            goal_id=goal_id,
+            lease_id=lease_id,
+            worker_id=worker_id,
+            lease_generation=generation,
+            event_type="claimed",
+            detail={"recycled_released_row": True},
+        )
+        return lease_id, generation
+
+    row = db.execute(_CLAIM_SQL, params).first()
     if row is None:
         return None
-    return uuid.UUID(str(row[0])), int(row[1])
+    lease_id, generation = uuid.UUID(str(row[0])), int(row[1])
+    # Generation 1 means the plain INSERT won (no active lease existed); anything higher means
+    # the ON CONFLICT branch took over an EXPIRED active row in place -- the one distinction
+    # the old table expressed only by its absence.
+    _record_lease_event(
+        db,
+        owner_id=owner_id,
+        goal_id=goal_id,
+        lease_id=lease_id,
+        worker_id=worker_id,
+        lease_generation=generation,
+        event_type="taken_over" if generation > 1 else "claimed",
+    )
+    return lease_id, generation
 
 
 def renew_supervisor_goal_lease(db: Session, *, lease_id: uuid.UUID, worker_id: str, lease_generation: int, lease_seconds: int) -> None:
@@ -113,4 +211,22 @@ def release_supervisor_goal_lease(db: Session, *, lease_id: uuid.UUID, worker_id
         """),
         {"lease_id": str(lease_id), "worker_id": worker_id, "lease_generation": lease_generation},
     )
-    return result.rowcount > 0
+    if result.rowcount == 0:
+        # Nothing of this worker's was released (already released, or reclaimed) -- writing a
+        # `released` history row here would claim an event that never happened.
+        return False
+    row = db.execute(
+        text("SELECT owner_id, goal_id FROM supervisor_goal_leases WHERE id = :lease_id"),
+        {"lease_id": str(lease_id)},
+    ).first()
+    if row is not None:
+        _record_lease_event(
+            db,
+            owner_id=uuid.UUID(str(row[0])),
+            goal_id=uuid.UUID(str(row[1])),
+            lease_id=lease_id,
+            worker_id=worker_id,
+            lease_generation=lease_generation,
+            event_type="released",
+        )
+    return True
