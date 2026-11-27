@@ -297,6 +297,37 @@ def test_edit_is_fenced_hash_checked_and_replay_safe(superuser_db, tmp_path):
         )
 
 
+def test_create_without_expected_hash_creates_and_never_overwrites(superuser_db, tmp_path):
+    """A planned `create_file` step cannot know its own target's hash.
+
+    Omitting `expected_sha256` must mean "expect the path to be absent": the first write
+    creates the file, and any second write to the now-existing path fails closed rather than
+    silently overwriting it.
+    """
+    _, _, _, _, _, context = _foundation(superuser_db, tmp_path)
+
+    created = write_file(
+        superuser_db,
+        context,
+        path="new.txt",
+        content="first\n",
+        idempotency_key="create-without-hash",
+    )
+
+    assert created.result == "succeeded"
+    assert created.capability == "create_file"
+    assert (context.repository_root / "new.txt").read_text() == "first\n"
+    with pytest.raises(OperatorAuthorizationError):
+        write_file(
+            superuser_db,
+            context,
+            path="new.txt",
+            content="second\n",
+            idempotency_key="overwrite-without-hash",
+        )
+    assert (context.repository_root / "new.txt").read_text() == "first\n"
+
+
 def test_allowlisted_test_checkpoint_timeout_and_capability_gap(
     superuser_db, tmp_path, monkeypatch
 ):

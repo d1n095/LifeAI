@@ -959,10 +959,20 @@ def write_file(
     *,
     path: str,
     content: str | None,
-    expected_sha256: str | None,
+    expected_sha256: str | None = None,
     idempotency_key: str,
     delete: bool = False,
 ):
+    """Write/patch/delete one authorized path.
+
+    `expected_sha256` defaults to None, which means "I expect this path NOT to exist yet" --
+    the very next check (`before_hash != expected_sha256`) then fails closed if it does, so an
+    omitted hash can never silently overwrite an existing file. The default exists because a
+    planned `create_file` step has no honest way to know a not-yet-created file's hash: the
+    deterministic recipes always passed None for that case, but a provider-planned step that
+    omits the argument crashed `_invoke_operator()` with a TypeError instead of either creating
+    the file or failing closed. Found by the 2026-11-27 provider E2E.
+    """
     started = time.monotonic()
     _require_context(db, context, write=True, refuse_if_cancelled=True)
     target = _path(context, path, write=True)
