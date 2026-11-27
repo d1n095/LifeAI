@@ -185,6 +185,71 @@ Three consequences, all handled here:
    failure for the expected two-call resume case `run_supervisor()`'s own design already
    relies on (`test_two_job_chain_and_interruption_resume_are_canonical`).
 
+## The third door: the job CLAIM path, and the park that ends the retry loop (F1)
+
+Exclusion #1 above closes V0.1's own blanket tick, and `execute_takeover()` closes the
+recovery path (see `docs/ACTIVE_WORK_CLAUDE_RECOVERY_AUTHORITY.md`). A `mainai_jobs` row can
+still become claimable by `claim_next_mainai_job()` — most importantly the job
+`dispatch_ready_task()` durably creates in the MIDDLE of a Supervisor tick that then fails
+(measured in the isolated installation 2026-11-27: `dispatch_ready_task()`'s own commit landed,
+then planning raised `CandidateValidationError` because the goal's `approval_policy` was not
+scoped for unattended execution). That leftover job used to be handed straight to
+`run_task_execution_job()` -> `_propose_repo_edit()`, which writes in the SHARED checkout with
+zero envelope awareness.
+
+Two additions close it, both reusing the existing state model instead of adding a parallel
+work engine:
+
+1. **`run_task_execution_job()`'s own entry fence**
+   (`_fence_governed_task_execution()`). Checked at the executor's entry, so every caller —
+   the generic job poll, a founder-created `POST /api/mainai/jobs` row, a redelivered claim —
+   inherits it structurally. For a goal that has EVER had an
+   `ExecutionAuthorizationEnvelope` row (the same durable predicate as exclusion #1: any
+   status, so revocation can never reopen the older path) the job is fence-failed with
+   `capability_unavailable`, and a task still `running` on that job is finalized through the
+   ONE existing outcome gate — `retryable_failed` with the normal backoff clock, or `failed`
+   once its existing attempts budget is exhausted. A task already parked/finalized by another
+   boundary is never overwritten: the fence only neutralizes the job. The job is read with
+   `populate_existing=True`, because `SessionLocal` uses `expire_on_commit=False` and a job
+   claimed on the worker's separate superuser claim session may be invisible in an
+   already-loaded instance.
+
+2. **`run_authorized_goal_supervisor_tick()`'s config-refusal park.** A
+   `CandidateValidationError` is deterministic for the same goal configuration: retrying it
+every poll cycle reproduces the same refusal and, because the dispatch already committed,
+used to leave a fresh job behind each time (and, once the goal lease was correctly released,
+a redispatch every ~2 s). The tick now catches exactly this class, rolls back its own
+uncommitted work, commits a PARK in its own transaction, and then releases the goal lease in
+a second transaction: the task moves to `blocked` with
+`blocker_reason = "autonomous execution is refused by this goal's configuration"` and
+**no `next_retry_at` clock**, and a job whose lease this worker still holds is fence-failed in
+the same transaction. A job that is still `queued` (the common case —
+`claim_specific_mainai_job()` is flush-only, so the rollback returns the job to `queued`) is
+left for the fence above, which fails it without touching the parked task. The tick returns a
+`CONFIG_REFUSED` result instead of raising, so the worker's generic error log does not fill up
+every poll cycle.
+
+**Controlled resumption, not a dead end.** The park records the envelope it was refused
+under, and every tick reconciles it: at the top of
+`run_authorized_goal_supervisor_tick()`, `wake_tasks_blocked_for_supervisor_refusal()` wakes
+tasks parked under a DIFFERENT envelope than the goal's current active one — exactly ONE wake
+per founder re-authorization (a task parked under the SAME still-active envelope is never
+woken, so an unchanged configuration cannot become a wake/park loop). Deliberately a
+reconciliation, not a side effect fired from `authorize_execution_scope()`: the founder call
+already holds the GOAL row lock, and waking locks a TASK row — taking both there would add a
+goal->task vs task-only lock-ordering hazard to a founder-facing call, and a crash between the
+commit and any wake would lose it. Reconciling in the tick means nothing is lost: the next
+tick wakens it. That is the one deliberate seam in this design — the wake edge is founder
+authority changing, never a timer. If the configuration is still refused, the next tick parks
+it again under the new envelope — bounded, visible in `mainai_task_events`, and never
+unbounded.
+
+**What is preserved:** `mainai_checkpoints` are untouched, task events stay append-only, and
+the only state transitions used are the pre-existing `blocked` / `retryable_failed` / `failed`
+ones with the pre-existing attempts/backoff budget. Other tasks in the same goal keep being
+discovered on the next tick (the parked task is no longer bindable); other eligible goals are
+completely unaffected, because both mechanisms are per-goal/per-task.
+
 ## Local-only worktree, keyed by goal — not by job
 
 `SupervisorScope.repository_identity` is a single fixed string for an ENTIRE
@@ -315,6 +380,13 @@ capability strings that would apply if authorized.
   bindable task), and the cross-task worktree contamination fix (a fresh task claim always
   gets a clean worktree regardless of what an earlier, unrelated attempt left behind; a
   genuine resume never has its own in-progress uncommitted work wiped).
+- `tests/backend/mainai/test_governed_execution_park.py` (9): the F1 fence and park — a
+  governed leftover job is never executed (no `work_result` checkpoint, no
+  `verification_started` event), a superseded envelope still fences, a never-governed goal is
+  untouched, a parked task is never overwritten by the fence, a terminal job is a clean no-op
+  on redelivery, two REAL threads racing the same leftover job produce exactly one claim, an
+  expired `task_execution` lease is never blind-reclaimed, re-authorizing wakes a park exactly
+  once, and the park event records its reason, job and envelope.
 - `tests/backend/test_advance_tasks_excludes_envelope_governed_goals.py` (6): V0.1's own
   blanket auto-dispatch tick correctly excludes envelope-governed goals' tasks while leaving
   never-governed, ordinary (non-autonomous) goals completely unaffected; superseding a goal's

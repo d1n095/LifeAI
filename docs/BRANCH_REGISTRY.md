@@ -6,6 +6,42 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Nattarbete: F1 + F7 som en sammanhängande säkerhetskorrigering (2026-11-27)
+
+**Ny branch: `freebuff/governed-execution-park-20261127`** (bas:
+`freebuff/supervisor-failed-tick-lease-release-20261127`, dvs. `85a1c10e` + F7-fixen).
+Branchen **innehåller F7** och är den sammanhängande säkerhetskorrigering som F7-posten
+nedan uttryckligen kräver innan merge. Ingen PR ännu.
+
+**Varför:** F1 (hög) — ett kvarlämnat `task_execution`-jobb från en misslyckad
+Supervisor-tick kunde claimas av `claim_next_mainai_job()` och köras genom den
+envelope-blinda V0.1-vägen (`run_task_execution_job()` → `_propose_repo_edit()`), som skriver
+i den delade checkouten utan hänsyn till `allowed_paths`/`allowed_capabilities`/
+`maximum_risk`. Med F7:s lease-release blev dessutom en permanent felkonfigurerad måltick
+återförsökt var ~2 s.
+
+**Vad:** (1) `run_task_execution_job()` fick en strukturell ingångsfence: ett mål som
+någonsin haft en `ExecutionAuthorizationEnvelope` (vilken status som helst) körs aldrig av
+V0.1; jobbet fence-failas och en task som fortfarande är `running` på det finaliseras genom
+den befintliga outcome-gaten (`retryable_failed` med backoff, eller `failed` vid uttömd
+budget). (2) `run_authorized_goal_supervisor_tick()` parkerar nu en permanent
+`CandidateValidationError` i stället för att låta den repriseras: tasken blir `blocked` med
+synlig orsak och **utan** retry-klocka, jobbet fence-failas i samma transaktion (om leasen
+är vår), och leasen släpps i en egen committad transaktion. (3) Kontrollerad återupptagning:
+en founder-omauktorisering av envelope väcker parken exakt en gång
+(`wake_tasks_blocked_for_supervisor_refusal()`); samma aktiva envelope väcker aldrig.
+Checkpoints, append-only-händelser, attempts-/backoff-budget och övriga mål är oförändrade.
+
+**Tester:** 9 nya i `tests/backend/mainai/test_governed_execution_park.py` (bl.a. två riktiga
+trådar om samma kvarlämnade jobb, lease-expiry, idempotent omkörning, wake-exactly-once) +
+uppdaterat F7-regressionsprov (park + släppt lease + inget nytt jobb på nästa tick).
+
+**Beroende:** F7-branchen får fortfarande inte mergas ensam — merga denna branch i stället
+(den innehåller F7:s commit `3fa49751`). Inga andra brancher blockerar den.
+
+**Status:** verifierad lokalt (relevanta sviter gröna, ruff rent) och med verkligt E2E i den
+isolerade stacken. Ej pushad/mergad/deployad i denna post; `first_cycle_go=false` oförändrat.
+
 ## Nattarbete: mål-lease släpps vid misslyckad supervisor-tick (2026-11-27)
 
 **Ny branch: `freebuff/supervisor-failed-tick-lease-release-20261127`** (bas:
@@ -29,7 +65,9 @@ befintlig assertion mäter nu committat tillstånd i stället för sessionens oc
 **Känt beroende innan merge:** med leasen frisläppt återförsöker en permanent felkonfigurerad
 måltick var ~2 s. Det måste landa tillsammans med åtgärden för det kvarlämnade
 `task_execution`-jobbet (F1 i `delivery/night-worker/README.md`: envelope-blind V0.1-väg),
-som ska parkera tasken i stället för att lämna den `running`. **Mergas inte ensam.**
+som ska parkera tasken i stället för att lämna den `running`. **Mergas inte ensam** —
+beroendet är nu löst i `freebuff/governed-execution-park-20261127`, som innehåller denna
+branch och F1-fixen; merga den i stället.
 
 **Status:** verifierad lokalt (21/21 i testfilen, 35/35 i angränsande lease-/
 återhämtningssviter, ruff rent). Ej pushad, ej mergad, ej deployad. Den isolerade stacken kör

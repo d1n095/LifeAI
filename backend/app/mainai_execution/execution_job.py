@@ -40,6 +40,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.execution_envelopes.service import goal_has_ever_been_envelope_governed
 from app.integrations.github_client import GitHubClientError, get_github_client
 from app.jobs.mainai_job_lease import JobLeaseLostError, renew_mainai_job_lease
 from app.jobs.retry import compute_backoff_seconds
@@ -77,7 +78,7 @@ from app.models.mainai_execution import (
     MainAITaskEventType,
     MainAITaskStatus,
 )
-from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory
+from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory, MainAIJobStatus
 from app.models.mainai_recovery import MainAITaskWorktree
 from app.models.mainai_wait import MainAITaskWait, MainAITaskWaitStatus
 from app.providers.base import Message, ProviderError
@@ -724,10 +725,120 @@ async def _finalize_repo_edit(db: Session, task: MainAITask, work_result: dict) 
     return {"branch": worktree.branch, "base_branch": base_branch, "proposed": False, "commit_sha": remote_sha}
 
 
+GOVERNED_EXECUTION_FENCE_REASON = "governed_execution_fenced"
+
+
+def _fence_governed_task_execution(
+    db: Session,
+    *,
+    job: MainAIJob,
+    task: MainAITask,
+    goal: MainAIGoal | None,
+    worker_id: str,
+    lease_generation: int,
+) -> bool:
+    """THE structural fence: an EVER_ENVELOPE_GOVERNED goal is never executed by V0.1.
+
+    `app/worker.py`'s `_advance_mainai_execution_tasks()` already excludes governed goals'
+    tasks from its own blanket dispatch, and `execute_takeover()` already declines to
+    redispatch them. This closes the THIRD door into the same envelope-blind executor: a
+    `task_execution` row can still become claimable by `claim_next_mainai_job()` -- most
+    importantly a job `dispatch_ready_task()` durably created mid-Supervisor-tick before that
+    tick failed (see docs/LIFE_SUPERVISOR_PRODUCTION_ENTRY.md's F1 finding), or one created
+    through the generic founder-gated `POST /api/mainai/jobs` route. Claiming it here and
+    running `_handle_repo_edit()`/`_handle_read_only_audit()` would bypass
+    `allowed_paths`/`allowed_capabilities`/`maximum_risk` entirely and write into the SHARED
+    checkout instead of the goal-scoped worktree.
+
+    The predicate is the same durable EVER_GOVERNED fact the other two doors use: mere
+    existence of ANY `execution_authorization_envelopes` row, any status. A goal whose only
+    envelope was superseded/revoked must fail closed (no autonomous execution at all), never
+    silently reopen the older, wider, envelope-blind path.
+
+    Outcomes, all transactional (the caller's own commit makes them durable together):
+
+      * the job is fence-failed with the same `capability_unavailable` category every other
+        "this execution path is not available for this job" refusal already uses;
+      * a task still `running` on THIS job is finalized through the ONE existing outcome gate
+        (`_finalize_task_outcome`), so it lands in `retryable_failed` with the normal backoff
+        clock (or `failed` once its existing attempts budget is exhausted) -- never
+        `completed`, never silently stuck `running`. That backoff is also what keeps a
+        transient Supervisor failure from turning into a per-poll-cycle job loop: the task is
+        only redispatched by the worker's existing retry tick, within its existing budget.
+      * a task already parked/finalized by another boundary (e.g. the Supervisor's own
+        config-refusal park) is left completely untouched -- this fence only ever neutralizes
+        the job, never overwrites a more authoritative task state.
+
+    Returns True when the job was refused here (the caller must stop), False for any ordinary,
+    never-governed goal -- which keeps V0.1's existing behavior byte-for-byte unchanged.
+    """
+    if goal is None:
+        return False
+    job = db.get(MainAIJob, job.id, populate_existing=True)
+    if job is None or job.status != MainAIJobStatus.running:
+        # Nothing to refuse: a terminal job must never be re-run (and mark_failed's lease
+        # fence would correctly reject it anyway).
+        return False
+    if not goal_has_ever_been_envelope_governed(db, owner_id=goal.owner_id, goal_id=goal.id):
+        return False
+
+    # `SessionLocal` uses `expire_on_commit=False`, and a job claimed on another connection
+    # (the worker's superuser claim session) is invisible in an already-loaded instance -- the
+    # exact reason `process_claimed_mainai_job()` reads its own copy with populate_existing.
+    # This fence is structural, so it must not depend on its caller having done that.
+    task = db.get(MainAITask, task.id, populate_existing=True)
+    if task is None:
+        return False
+    if task.status == MainAITaskStatus.running and task.mainai_job_id in (None, job.id):
+        _finalize_task_outcome(
+            db,
+            task,
+            passed=False,
+            evidence={
+                "error": GOVERNED_EXECUTION_FENCE_REASON,
+                "reason": (
+                    "envelope-governed goal: the envelope-blind V0.1 executor must never run "
+                    "this work; only the envelope-scoped Supervisor may"
+                ),
+                "goal_id": str(goal.id),
+                "mainai_job_id": str(job.id),
+            },
+            job_id=job.id,
+        )
+
+    # Same crash-ordering discipline as every other outcome in this module: the task-side
+    # outcome above is flushed FIRST, and mark_failed()'s own commit is the single atomic
+    # commit for both effects.
+    try:
+        mark_failed(
+            db,
+            job,
+            worker_id=worker_id,
+            lease_generation=lease_generation,
+            error_category=MainAIJobErrorCategory.capability_unavailable,
+        )
+    except JobLeaseLostError:
+        logger.warning(
+            "task_execution job %s (task %s): lease lost while fencing governed execution.",
+            job.id,
+            task.id,
+        )
+        db.rollback()
+        return True
+    logger.warning(
+        "task_execution job %s (task %s): refused -- goal %s has ever been envelope-governed; "
+        "this work may only run through the envelope-scoped Supervisor.",
+        job.id,
+        task.id,
+        goal.id,
+    )
+    return True
+
+
 async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.UUID, *, worker_id: str, lease_generation: int, lease_seconds: int) -> None:
     """`db` must already be scoped to `owner_id`'s RLS context (app/worker.py's
     _set_mainai_job_rls_owner) before this is called, exactly like run_corpus_review_job()."""
-    job = db.get(MainAIJob, job_id)
+    job = db.get(MainAIJob, job_id, populate_existing=True)
     if job is None:
         return
     task = task_for_job(db, job)
@@ -735,6 +846,12 @@ async def run_task_execution_job(db: Session, job_id: uuid.UUID, owner_id: uuid.
         mark_failed(db, job, worker_id=worker_id, lease_generation=lease_generation, error_category=MainAIJobErrorCategory.unexpected)
         return
     goal = db.get(MainAIGoal, task.goal_id)
+    # F1 fence -- checked HERE, at the executor's own entry, so every caller of the V0.1
+    # executor inherits it structurally rather than each one needing to remember a check.
+    if _fence_governed_task_execution(
+        db, job=job, task=task, goal=goal, worker_id=worker_id, lease_generation=lease_generation
+    ):
+        return
 
     try:
         renew_mainai_job_lease(db, job_id, worker_id, lease_generation, lease_seconds)

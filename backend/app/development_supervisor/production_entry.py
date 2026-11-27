@@ -62,6 +62,7 @@ scope."""
 
 import logging
 import subprocess
+import uuid
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -88,10 +89,25 @@ from app.development_supervisor.service import (
 )
 from app.execution_envelopes import get_current_execution_envelope
 from app.intelligence_governance import record_execution
-from app.jobs.mainai_job_lease import claim_specific_mainai_job
+from app.jobs.mainai_job_lease import JobLeaseLostError, claim_specific_mainai_job
+from app.jobs.service import mark_failed_flush
+from app.mainai_execution.executor import _lock_task
+from app.mainai_execution.provider_wait_wake import (
+    SUPERVISOR_REFUSAL_PARK_BLOCKER,
+    SUPERVISOR_REFUSAL_PARK_REASON,
+    wake_tasks_blocked_for_supervisor_refusal,
+)
 from app.models.execution_envelope import ExecutionAuthorizationEnvelope
-from app.models.mainai_execution import MainAIGoal, MainAIGoalStatus, MainAITask, MainAITaskStatus
-from app.models.mainai_job import MainAIJobStatus
+from app.models.mainai_execution import (
+    MainAIGoal,
+    MainAIGoalStatus,
+    MainAITask,
+    MainAITaskEvent,
+    MainAITaskEventType,
+    MainAITaskStatus,
+)
+from app.models.mainai_job import MainAIJob, MainAIJobErrorCategory, MainAIJobStatus
+from app.safe_planner.service import CandidateValidationError
 from app.provider_spend import provider_spend_is_live
 from app.work_intelligence import bind_strategy_execution, create_strategy
 from app.db_clock import db_now
@@ -140,6 +156,93 @@ def eligible_authorized_goals(db: Session, *, limit: int = 20) -> list[tuple[Mai
     return [(goal, envelope) for goal, envelope in rows]
 
 
+def park_tasks_after_supervisor_refusal(
+    db: Session,
+    *,
+    goal: MainAIGoal,
+    attempted: list[tuple[uuid.UUID, uuid.UUID]],
+    execution_envelope_id: uuid.UUID,
+    refusal: str,
+    worker_id: str,
+) -> list[uuid.UUID]:
+    """F1: PARK the attempts a permanently refused Supervisor tick left behind.
+
+    `dispatch_ready_task()` commits the task -> `running` + a durable `task_execution` row
+    BEFORE planning runs. When planning then refuses with `CandidateValidationError` (e.g. an
+    approval policy not scoped for unattended execution), the refusal is deterministic for
+    the SAME goal configuration: retrying every poll cycle only reproduces it, and used to
+    leave a fresh job behind each time. The founder-decided outcome is a park, not unlimited
+    retries:
+
+      * the task moves to `blocked` with a durable reason and deliberately NO
+        `next_retry_at` clock, so nothing redispatches it every couple of seconds;
+      * the park records the execution envelope it was refused under, which is what lets a
+        founder's later re-authorization wake it exactly once
+        (`wake_tasks_blocked_for_supervisor_refusal()`);
+      * a job whose lease THIS worker still holds is fence-failed in the same transaction.
+        A job that is still `queued` (the common case: `claim_specific_mainai_job()` is
+        flush-only, so the failed tick's rollback returns it to `queued`) is deliberately left
+        alone here -- `run_task_execution_job()`'s own governed-execution fence neutralizes
+        it on its next claim and never touches a task that is no longer `running`.
+
+    Only tasks that are STILL `running` are parked. A task another boundary already finalized
+    is never overwritten -- parking is a state transition, not a reset. Flush-only: the
+    caller owns the commit, so the park is durable together with its job fence.
+    """
+    parked: list[uuid.UUID] = []
+    seen: set[uuid.UUID] = set()
+    for task_id, job_id in attempted:
+        if task_id in seen:
+            continue
+        seen.add(task_id)
+
+        job = db.get(MainAIJob, job_id, populate_existing=True)
+        if (
+            job is not None
+            and job.status == MainAIJobStatus.running
+            and job.locked_by == worker_id
+        ):
+            try:
+                mark_failed_flush(
+                    db,
+                    job,
+                    worker_id=worker_id,
+                    lease_generation=job.lease_generation,
+                    error_category=MainAIJobErrorCategory.capability_unavailable,
+                )
+            except JobLeaseLostError:
+                logger.warning(
+                    "Worker %s: lease lost while fencing job %s after a Supervisor config refusal.",
+                    worker_id,
+                    job_id,
+                )
+
+        task = _lock_task(db, task_id)
+        if task.status != MainAITaskStatus.running:
+            continue
+        task.status = MainAITaskStatus.blocked
+        task.next_retry_at = None
+        task.blocker_reason = SUPERVISOR_REFUSAL_PARK_BLOCKER
+        db.add(
+            MainAITaskEvent(
+                task_id=task.id,
+                owner_id=task.owner_id,
+                event_type=MainAITaskEventType.blocked,
+                detail={
+                    "reason": SUPERVISOR_REFUSAL_PARK_REASON,
+                    "phase": "CONFIG_REFUSED",
+                    "refusal": refusal[:500],
+                    "execution_envelope_id": str(execution_envelope_id),
+                    "mainai_job_id": str(job_id),
+                    "attempts": task.attempts,
+                },
+            )
+        )
+        parked.append(task.id)
+    db.flush()
+    return parked
+
+
 async def run_authorized_goal_supervisor_tick(
     db: Session,
     *,
@@ -186,9 +289,27 @@ async def run_authorized_goal_supervisor_tick(
             )
         return current
 
+    # F1: the (task, job) pairs this tick actually claimed. On a permanent, config-derived
+    # refusal these are the attempts that must be parked instead of being left `running` for
+    # the envelope-blind V0.1 executor (or redispatched every poll cycle).
+    attempted: list[tuple[uuid.UUID, uuid.UUID]] = []
     failure_release_done = False
     try:
         current_envelope = _reverify_authority()
+
+        # F1 CONTROLLED RESUMPTION, reconciled rather than fired as a side effect of the
+        # founder's authorize call: a task parked by a config refusal records the envelope it
+        # was refused under, and this wakes it exactly once when the goal's CURRENT active
+        # envelope is a different one. A task parked under the still-active envelope is never
+        # woken, so an unchanged configuration cannot become a wake/park loop. Doing it here
+        # (inside the tick's own transaction, before the task query) also means a crash between
+        # a founder's re-authorization and any wake loses nothing -- the next tick reconciles.
+        wake_tasks_blocked_for_supervisor_refusal(
+            db,
+            owner_id=goal.owner_id,
+            goal_id=goal.id,
+            execution_envelope_id=current_envelope.id,
+        )
 
         tasks = (
             db.execute(
@@ -322,6 +443,7 @@ async def run_authorized_goal_supervisor_tick(
                         "still-valid resume of this same worker's own earlier claim"
                     )
                 claimed_generation = job.lease_generation
+            attempted.append((task.id, job.id))
             execution = record_execution(
                 db,
                 owner_id=goal.owner_id,
@@ -379,6 +501,73 @@ async def run_authorized_goal_supervisor_tick(
         )
 
         return await run_supervisor(db, scope=scope, bindings=bindings, worker_id=worker_id, bounds=bounds or SupervisorBounds())
+    except CandidateValidationError as exc:
+        # F1: PARK A PERMANENT CONFIG REFUSAL -- NEVER AN UNBOUNDED RETRY LOOP.
+        #
+        # `dispatch_ready_task()` has already committed (task `running` + a durable
+        # `task_execution` job) by the time planning refuses. A `CandidateValidationError` is
+        # deterministic for the same goal configuration (most importantly: an approval policy
+        # that is not scoped for unattended execution -- exactly the shape measured in the
+        # isolated installation on 2026-11-27). Letting it escape used to leave the task
+        # `running` and the job claimable by the envelope-blind V0.1 executor, and -- once
+        # the goal lease was correctly released -- reproduced the same refusal every poll
+        # cycle. Parking is the founder-decided outcome: one durable `blocked` state with no
+        # clock, its job fenced, and a single controlled wake on the next founder
+        # re-authorization of the envelope.
+        failure_release_done = True
+        db.rollback()
+        parked: list[uuid.UUID] = []
+        try:
+            parked = park_tasks_after_supervisor_refusal(
+                db,
+                goal=goal,
+                attempted=attempted,
+                execution_envelope_id=envelope.id,
+                refusal=str(exc),
+                worker_id=worker_id,
+            )
+            db.commit()
+        except Exception:  # noqa: BLE001 - the park must never mask the refusal itself
+            db.rollback()
+            logger.exception(
+                "Worker %s: could not park goal %s after a Supervisor config refusal.",
+                worker_id,
+                goal.id,
+            )
+        try:
+            release_supervisor_goal_lease(
+                db, lease_id=lease_id, worker_id=worker_id, lease_generation=lease_generation
+            )
+            db.commit()
+        except Exception:  # noqa: BLE001 - the goal may stay leased until the TTL expires
+            db.rollback()
+            logger.exception(
+                "Worker %s: could not release supervisor_goal_lease %s (goal %s) after a "
+                "Supervisor config refusal.",
+                worker_id,
+                lease_id,
+                goal.id,
+            )
+        logger.warning(
+            "Worker %s: Supervisor tick for goal %s refused by configuration (%s); parked task(s) %s.",
+            worker_id,
+            goal.id,
+            exc,
+            [str(task_id) for task_id in parked],
+        )
+        return SupervisorResult(
+            "CONFIG_REFUSED",
+            goal.id,
+            0,
+            (),
+            (),
+            {
+                "reason": "autonomous execution is refused by this goal's configuration",
+                "refusal": str(exc),
+                "parked_task_ids": [str(task_id) for task_id in parked],
+                "execution_envelope_id": str(envelope.id),
+            },
+        )
     except BaseException:
         # A FAILED TICK MUST NOT LEAVE THIS GOAL LEASED FOR THE FULL TTL.
         # `dispatch_ready_task()` performs a real mid-tick commit (create_job()'s own atomic

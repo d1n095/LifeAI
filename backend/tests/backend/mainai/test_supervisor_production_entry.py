@@ -665,27 +665,37 @@ async def test_a_fresh_task_claim_always_gets_a_clean_worktree_regardless_of_pri
 
 
 @pytest.mark.asyncio
-async def test_a_tick_that_fails_after_dispatch_releases_its_goal_lease(
+async def test_a_permanently_refused_tick_parks_the_task_and_releases_its_goal_lease(
     superuser_db, make_verified_user, source_repo, monkeypatch
 ):
-    """A FAILED tick must not keep the goal leased for the full TTL.
+    """F1 + F7 together: a permanent config refusal is a PARK, not an unbounded retry loop.
 
     `dispatch_ready_task()` performs a real mid-tick commit (`create_job()`'s own atomic
     commit), so by the time planning runs, this tick's `supervisor_goal_leases` claim is
     already durable. When planning then refuses (here: a goal created under the human-reviewed
     `standard_repo_work`, which the autonomous Safe Planner deliberately will not plan local
-    writes under), the caller (`app/worker.py`) rolls its transaction back -- and because the
-    release lived in that same transaction, the committed lease used to survive as `active`,
-    blocking the goal's next unattended tick until it expired. Measured in production
-    2026-11-27: 3600 s of no progress after a single CandidateValidationError.
+    writes under), the old behavior left the task `running` -- for the envelope-blind V0.1
+    executor to pick up -- and, once the lease release was made durable (F7), reproduced the
+    same refusal every poll cycle. Measured in production 2026-11-27: 3600 s of no progress
+    after a single CandidateValidationError.
+
+    This asserts all three founder-decided properties at once:
+      * the goal lease is released immediately (F7 -- the goal is claimable again);
+      * the task is PARKED `blocked` with a durable reason and NO retry clock (F1 -- no new
+        job every couple of seconds);
+      * a second tick performs no work and creates no new job.
     """
     from app.development_supervisor import service as supervisor_service
+    from app.mainai_execution.provider_wait_wake import (
+        SUPERVISOR_REFUSAL_PARK_BLOCKER,
+        SUPERVISOR_REFUSAL_PARK_REASON,
+    )
+    from app.models.mainai_execution import MainAITaskEvent, MainAITaskEventType
     from app.models.mainai_job import MainAIJob
     from app.models.supervisor_lease import SupervisorGoalLease
-    from app.safe_planner.service import CandidateValidationError
 
     # Ordinary candidate=None bindings park on provider spend before planning; this test is
-    # about the lease, not about spend, so authorize it exactly as a founder grant would.
+    # about the refusal, not about spend, so authorize it exactly as a founder grant would.
     monkeypatch.setattr(supervisor_service, "_live_provider_spend_authorized", lambda db, scope: True)
 
     owner, _ = make_verified_user()
@@ -708,32 +718,136 @@ async def test_a_tick_that_fails_after_dispatch_releases_its_goal_lease(
         authorized_paths=["calculator.py", "test_calculator.py"],
     )
     superuser_db.commit()
+    task_id = superuser_db.execute(select(MainAITask.id).where(MainAITask.goal_id == goal.id)).scalar_one()
 
-    with pytest.raises(CandidateValidationError, match="approval_policy"):
-        await run_authorized_goal_supervisor_tick(
-            superuser_db, goal=goal, envelope=envelope, worker_id="worker-a"
-        )
+    result = await run_authorized_goal_supervisor_tick(
+        superuser_db, goal=goal, envelope=envelope, worker_id="worker-a"
+    )
+    superuser_db.commit()
+
+    # The refusal is a classified, durable outcome -- not an exception escaping into the
+    # worker's generic error log every two seconds.
+    assert result is not None
+    assert result.classification == "CONFIG_REFUSED"
+    assert str(task_id) in result.explanation["parked_task_ids"]
 
     # Precondition that makes this regression real: a job was already dispatched AND
-    # committed before the refusal, so the lease claim is durable too.
-    # (`task.mainai_job_id` is written only AFTER create_job()'s commit, so it is rolled back
-    # here -- the job row itself, and the lease claim committed alongside it, are what stay.)
+    # committed before the refusal.
     jobs = superuser_db.execute(select(MainAIJob).where(MainAIJob.owner_id == owner.id)).scalars().all()
-    assert jobs, "the tick must have dispatched a job before planning refused"
+    assert len(jobs) == 1, "the tick must have dispatched exactly one job before planning refused"
 
-    # The worker's caller rolls its transaction back on any exception (see
-    # app/worker.py's _advance_authorized_supervisor_goals); do the same so this reads the
-    # DURABLE state, not whatever the failed tick left in this session's uncommitted buffer.
-    superuser_db.rollback()
+    # F1: parked, blocked, no clock. The task is never left `running` for the V0.1 path.
+    task = superuser_db.get(MainAITask, task_id)
+    assert task.status == MainAITaskStatus.blocked
+    assert task.blocker_reason == SUPERVISOR_REFUSAL_PARK_BLOCKER
+    assert task.next_retry_at is None
+    park_event = superuser_db.execute(
+        select(MainAITaskEvent)
+        .where(
+            MainAITaskEvent.task_id == task.id,
+            MainAITaskEvent.event_type == MainAITaskEventType.blocked,
+        )
+        .order_by(MainAITaskEvent.created_at.desc())
+    ).scalars().first()
+    assert park_event is not None
+    assert park_event.detail["reason"] == SUPERVISOR_REFUSAL_PARK_REASON
+    assert park_event.detail["execution_envelope_id"] == str(envelope.id)
 
+    # F7: the lease is durably released -- the goal is claimable again immediately.
     leases = superuser_db.execute(
         select(SupervisorGoalLease).where(SupervisorGoalLease.goal_id == goal.id)
     ).scalars().all()
     assert [lease.status for lease in leases if lease.status == "active"] == []
-
-    # The whole point: the goal is claimable again immediately, by another worker too.
     claim = claim_supervisor_goal_lease(
         superuser_db, owner_id=owner.id, goal_id=goal.id, envelope_id=envelope.id,
         worker_id="worker-b", lease_seconds=60,
     )
     assert claim is not None
+    superuser_db.commit()
+
+    # F1: the park holds across ticks -- nothing to bind, and NO second job. This is the
+    # exact "a new job every other second" loop the park exists to prevent.
+    second = await run_authorized_goal_supervisor_tick(
+        superuser_db, goal=goal, envelope=envelope, worker_id="worker-b"
+    )
+    superuser_db.commit()
+    assert second is None
+    jobs_after = superuser_db.execute(select(MainAIJob).where(MainAIJob.owner_id == owner.id)).scalars().all()
+    assert [job.id for job in jobs_after] == [jobs[0].id]
+    assert superuser_db.get(MainAITask, task_id).status == MainAITaskStatus.blocked
+
+
+@pytest.mark.asyncio
+async def test_a_re_authorized_envelope_wakes_the_park_for_exactly_one_more_attempt(
+    superuser_db, make_verified_user, source_repo, monkeypatch
+):
+    """Controlled resumption through the REAL tick: one founder act -> one more attempt.
+
+    The park records the envelope it was refused under. The tick reconciles that against the
+    goal's CURRENT active envelope, so re-authorizing wakes it once, precisely; an unchanged
+    envelope never does. This is what makes the park recoverable without a timer -- and it
+    also proves the loop stays bounded: each founder act costs at most one dispatched job.
+    """
+    from app.development_supervisor import service as supervisor_service
+    from app.mainai_execution.provider_wait_wake import SUPERVISOR_REFUSAL_PARK_REASON
+    from app.models.mainai_execution import MainAITaskEvent, MainAITaskEventType
+    from app.models.mainai_job import MainAIJob
+
+    monkeypatch.setattr(supervisor_service, "_live_provider_spend_authorized", lambda db, scope: True)
+
+    owner, _ = make_verified_user()
+    goal = planner.create_goal(
+        superuser_db,
+        owner_id=owner.id,
+        title="re-authorized park",
+        original_instruction="Add a calculator subtract helper and its focused test",
+        created_by="test",
+    )
+    planner.create_plan(
+        superuser_db, goal=goal, rationale="single task",
+        tasks=[PlannedTaskSpec(description="edit a file", task_type="repo_edit")],
+        created_by="test",
+    )
+    first = _authorize(superuser_db, owner.id, goal.id, authorized_paths=["calculator.py", "test_calculator.py"])
+    superuser_db.commit()
+    task_id = superuser_db.execute(select(MainAITask.id).where(MainAITask.goal_id == goal.id)).scalar_one()
+
+    await run_authorized_goal_supervisor_tick(superuser_db, goal=goal, envelope=first, worker_id="worker-a")
+    superuser_db.commit()
+    assert superuser_db.get(MainAITask, task_id).status == MainAITaskStatus.blocked
+    jobs = superuser_db.execute(select(MainAIJob).where(MainAIJob.owner_id == owner.id)).scalars().all()
+    assert len(jobs) == 1
+
+    # Unchanged envelope: the next tick must NOT wake, and must not create anything.
+    assert await run_authorized_goal_supervisor_tick(superuser_db, goal=goal, envelope=first, worker_id="worker-a") is None
+    superuser_db.commit()
+    assert len(superuser_db.execute(select(MainAIJob).where(MainAIJob.owner_id == owner.id)).scalars().all()) == 1
+
+    second = _authorize(superuser_db, owner.id, goal.id, authorized_paths=["calculator.py", "test_calculator.py"])
+    superuser_db.commit()
+
+    result = await run_authorized_goal_supervisor_tick(superuser_db, goal=goal, envelope=second, worker_id="worker-a")
+    superuser_db.commit()
+
+    assert result is not None
+    assert result.classification == "CONFIG_REFUSED"
+    # Exactly one new job for the founder act -- the wake is not a loop.
+    jobs = superuser_db.execute(select(MainAIJob).where(MainAIJob.owner_id == owner.id)).scalars().all()
+    assert len(jobs) == 2
+    task = superuser_db.get(MainAITask, task_id)
+    assert task.status == MainAITaskStatus.blocked
+    wake_events = superuser_db.execute(
+        select(MainAITaskEvent).where(
+            MainAITaskEvent.task_id == task_id,
+            MainAITaskEvent.event_type == MainAITaskEventType.retry_scheduled,
+        )
+    ).scalars().all()
+    assert any(event.detail.get("reason") == "supervisor_refusal_envelope_reauth_wake" for event in wake_events)
+    park_events = superuser_db.execute(
+        select(MainAITaskEvent).where(
+            MainAITaskEvent.task_id == task_id,
+            MainAITaskEvent.event_type == MainAITaskEventType.blocked,
+        )
+    ).scalars().all()
+    assert park_events[-1].detail["reason"] == SUPERVISOR_REFUSAL_PARK_REASON
+    assert park_events[-1].detail["execution_envelope_id"] == str(second.id)

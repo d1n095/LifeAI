@@ -1,8 +1,15 @@
-"""Durable wake edges for provider-planning waits (spend park + WAITING_PROVIDER backoff).
+"""Durable wake edges for parked tasks (provider-planning waits + Supervisor config refusals).
 
 Park/release writers live in development_supervisor; this module owns reconsideration so
 founder authorization commits and worker ticks can recover the same way after a crash
 between grant and wake.
+
+`SUPERVISOR_REFUSAL_PARK_REASON` is the F1 park: a permanently refused Supervisor tick (e.g. a
+`CandidateValidationError` because the goal's approval policy is not scoped for unattended
+execution) parks its task `blocked` with NO retry clock, instead of leaving it `running` for
+the envelope-blind V0.1 executor or redispatching it every poll cycle. Its only wake edge is
+a founder RE-AUTHORIZING the goal's execution envelope: the park records the envelope it was
+refused under, and a new active envelope wakes it for exactly one controlled retry.
 """
 
 from __future__ import annotations
@@ -21,11 +28,15 @@ from app.models.mainai_execution import MainAITask, MainAITaskEvent, MainAITaskE
 PROVIDER_SPEND_PARK_REASON = "provider_spend_not_authorized_park"
 WAITING_PROVIDER_BACKOFF_REASON = "waiting_provider_defer_backoff"
 WAITING_PROVIDER_EXHAUSTED_REASON = "waiting_provider_defer_exhausted"
+SUPERVISOR_REFUSAL_PARK_REASON = "supervisor_config_refusal_park"
 
 PROVIDER_SPEND_PARK_BLOCKER = (
     "provider-assisted planning is not authorized for this scope"
 )
 WAITING_PROVIDER_BLOCKER = "provider planning is unavailable"
+SUPERVISOR_REFUSAL_PARK_BLOCKER = (
+    "autonomous execution is refused by this goal's configuration"
+)
 
 # Bounded WAITING_PROVIDER retries before leaving blocked without a clock (founder/outage review).
 WAITING_PROVIDER_MAX_BACKOFFS = 8
@@ -66,6 +77,94 @@ def is_waiting_provider_backoff_park(db: Session, *, task: MainAITask) -> bool:
         return False
     reason = _latest_block_or_retry_reason(db, task=task)
     return reason in {WAITING_PROVIDER_BACKOFF_REASON, WAITING_PROVIDER_EXHAUSTED_REASON}
+
+
+def is_supervisor_refusal_park(db: Session, *, task: MainAITask) -> bool:
+    """A task parked by `park_tasks_after_supervisor_refusal()` (F1): blocked with a durable
+    reason and deliberately NO `next_retry_at` clock. Never inferred from blocker text."""
+    if task.status != MainAITaskStatus.blocked:
+        return False
+    reason = _latest_block_or_retry_reason(db, task=task)
+    if reason == SUPERVISOR_REFUSAL_PARK_REASON:
+        return True
+    return task.blocker_reason == SUPERVISOR_REFUSAL_PARK_BLOCKER
+
+
+def wake_tasks_blocked_for_supervisor_refusal(
+    db: Session,
+    *,
+    owner_id: uuid.UUID,
+    goal_id: uuid.UUID,
+    execution_envelope_id: uuid.UUID,
+) -> list[MainAITask]:
+    """Controlled resumption edge for an F1 park: a founder RE-AUTHORIZING the goal's
+    execution envelope wakes tasks that were parked under a DIFFERENT envelope.
+
+    Deliberately narrow, mirroring `wake_tasks_blocked_for_provider_spend()`:
+
+      * only `blocked` tasks on this exact owner+goal whose latest durable reason is the
+        supervisor-refusal park -- unrelated blockers are never woken;
+      * a task parked under the SAME envelope that is still active is NOT woken. The
+        refusal is deterministic given that configuration, so waking it would only recreate
+        the same park on the next tick -- exactly the loop this park exists to stop;
+      * idempotent (a task already moved off `blocked` is skipped).
+
+    One wake per founder act, not one per poll cycle. If the configuration is still refused,
+    the task simply parks again under the new envelope -- bounded, visible, and never
+    unbounded."""
+    candidates = (
+        db.execute(
+            select(MainAITask).where(
+                MainAITask.owner_id == owner_id,
+                MainAITask.goal_id == goal_id,
+                MainAITask.status == MainAITaskStatus.blocked,
+            )
+        )
+        .scalars()
+        .all()
+    )
+    woken: list[MainAITask] = []
+    for task in candidates:
+        if not is_supervisor_refusal_park(db, task=task):
+            continue
+        event = db.execute(
+            select(MainAITaskEvent)
+            .where(
+                MainAITaskEvent.task_id == task.id,
+                MainAITaskEvent.owner_id == task.owner_id,
+                MainAITaskEvent.event_type == MainAITaskEventType.blocked,
+            )
+            .order_by(MainAITaskEvent.created_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        parked_under = (event.detail or {}).get("execution_envelope_id") if event is not None else None
+        if parked_under == str(execution_envelope_id):
+            continue
+        locked = _lock_task(db, task.id)
+        if locked.status != MainAITaskStatus.blocked:
+            continue
+        if not is_supervisor_refusal_park(db, task=locked):
+            continue
+        locked.status = MainAITaskStatus.ready
+        locked.blocker_reason = None
+        locked.next_retry_at = None
+        db.add(
+            MainAITaskEvent(
+                task_id=locked.id,
+                owner_id=locked.owner_id,
+                event_type=MainAITaskEventType.retry_scheduled,
+                detail={
+                    "reason": "supervisor_refusal_envelope_reauth_wake",
+                    "execution_envelope_id": str(execution_envelope_id),
+                    "previous_execution_envelope_id": parked_under,
+                    "attempts": locked.attempts,
+                },
+            )
+        )
+        woken.append(locked)
+    if woken:
+        db.flush()
+    return woken
 
 
 def count_waiting_provider_backoffs(db: Session, *, task: MainAITask) -> int:

@@ -228,6 +228,14 @@ def authorize_execution_scope(
     row.authorized_envelope_id = envelope.id
     row.updated_at = datetime.utcnow()
     db.flush()
+    # F1's controlled-resumption wake deliberately does NOT happen here. Waking a task means
+    # locking its row (`_lock_task`), and this function already holds the GOAL row lock; a
+    # concurrent Supervisor tick locks task rows, so taking both here would introduce a
+    # goal->task vs task-only lock-ordering hazard in a founder-facing call. The wake is a
+    # durable RECONCILIATION instead: `run_authorized_goal_supervisor_tick()`
+    # (`wake_tasks_blocked_for_supervisor_refusal`) compares each parked task's recorded
+    # envelope with the goal's current active one on every tick, so a crash between this
+    # commit and any wake loses nothing -- the next tick simply reconciles it.
     return row, envelope
 
 
