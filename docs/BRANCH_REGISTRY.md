@@ -7,6 +7,67 @@ varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en kon
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
 
+## Bootstrap-integrationskandidat — fem leveranser i en kedja (2026-11-27)
+
+**Branch:** `freebuff/bootstrap-integration-20261127`, bas `freebuff/governed-execution-park-20261127`
+(`09ed1bf8`, F1 + F7). **Strategisk referens:** PR #513 `docs/MAINAI_BOOTSTRAP_STRATEGY.md`
+(grundarbeslut om självständig utveckling; dokumentet är prioritering, inte ett nytt
+mandat). Ingen PR, ingen merge till default, ingen produktionsdeployment; `POLICY_LOCK` och
+`first_cycle_go=false` oförändrade.
+
+**Varför:** de fem leveranserna från 2026-11-27 rör samma subsystem och bygger på F1/F7, men var
+bara verifierade var för sig. Den här grenen är den sammansatta kandidaten: korrekt
+beroendeordning, en enda migrationskedja (`alembic heads` = **0090**) och en gemensam verifiering.
+Merge skedde med `--no-ff`; enda konflikten var denna fil, löst som union (ingen post tappad).
+
+**Kedja (merge-ordning):**
+
+| # | Leverans | Källa |
+|---|---|---|
+| 1 | F1 + F7 (bas) | `09ed1bf8` |
+| 2 | Founder-styrd återhämtning | `b1925137` |
+| 3 | F2 task-scopat recept | `91230051` |
+| 4 | F4 lease-livscykel (0090) | `3e959fae` |
+| 5 | Transient-E2E + fynd T1/T2 | `592cb73a` |
+
+**Eget arbete ovanpå kedjan:**
+
+- **T1 åtgärdad.** `release_supervisor_goal_leases_from_previous_process()` släpper, på workerns
+  första poll-cykel, aktiva mål-leases som innehas av **samma worker-identitet** (de måste
+  tillhöra en tidigare process), med append-only historik (`worker_process_restarted`). Andra
+  identiteters leases rörs aldrig; fenced writes gör en gammal process fail-closed. Verkligt
+  processbevis: `delivery/bootstrap-integration/evidence/e2e-t1.txt` (SIGKILL + omstart, lease
+  släppt inom ~1 s i stället för efter 3 600 s).
+- **T2 bedömd, inte blockerande.** Ett kvarlämnat `queued`-jobb claimas av ordinarie pollning och
+  återhämtas genom F1-fencen + den befintliga outcome-gaten (eller körs normalt för aldrig styrda
+  mål), även när `mainai_job_id` aldrig skrevs. Ingen ny återhämtningsväg och ingen ändrad
+  terminal-status för `queued`-jobb; beteendet låses i
+  `tests/backend/mainai/test_orphaned_dispatch_recovery.py`.
+- **F2 verifierat med verkligt E2E** (`evidence/e2e-f2.txt`): två olika `repo_edit`-uppgifter i
+  samma mål gav två separata commits (`calculator.py`, sedan `test_calculator.py`), källfilen
+  oförändrad mellan dem, ett `def subtract`/`def test_subtract`, och testet grönt i mål-worktreen.
+  Första körningen avslöjade en riktig heuristikdefekt (delsträngsmatchning klassade fokustestet
+  som `both`); den är rättad så att en explicit filväg avgör omfånget, med skärpta tester.
+
+**Beroenden:** innehåller F1/F7 (som därför inte ska mergas ensam), founder-vägen, F2, F4 och
+transient-E2E:t. Oberoende av `freebuff/life-workspaces`-kedjan (#507–#511), som vilar på en annan
+bas (`claude/det-kommer-mer-879lcm`). Inga kända konflikter med den kedjan i kod, men
+migrationsnummer måste stämmas av vid en framtida sammanslagning (F4 äger 0090; Life Workspaces
+äger 0093–0095).
+
+**Merge-ordning för en framtida integration:** denna gren först (den innehåller F1/F7), därefter
+Life Workspaces-kedjan efter att dess ägare hanterat R15/V7-försoningen. Inget annat blockerar.
+
+**Kandidatens status:** verifierad lokalt (bred svit i `delivery/bootstrap-integration/README.md`)
+och med två verkliga E2E-körningar i den isolerade stacken. Pushad till
+`origin/freebuff/bootstrap-integration-20261127`; exakt head verifieras med `git ls-remote`.
+Stacken är återställd till den tidigare verifierade kandidaten `85a1c10e` efter körningarna.
+
+**Överlämning:** grenen är avsedd att ta emot Mini:s och övriga agenters verifierade leveranser
+utan dubbelarbete — en leverans per gren/commit baserad på kedjans topp, verifierad före pålägg,
+`--no-ff` i beroendeordning, en enda migrationshead och uppdaterat register. Se
+`delivery/bootstrap-integration/README.md`s överlämningsavsnitt.
+
 ## Founder-styrd återhämtning av parkerade mål (2026-11-27)
 
 **Branch:** `freebuff/parked-goal-founder-recovery-20261127`, bas `freebuff/governed-execution-park-20261127`

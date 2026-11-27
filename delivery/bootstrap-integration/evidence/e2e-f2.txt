@@ -1,0 +1,19 @@
+== create goal (API) and a real two-task plan ==
+  goal = c04f0235-f6b7-40e9-8ab1-8bc1668ee93e
+  tasks: [('a9761165', 'Lägg till en subtract-funktion i calculator.py'), ('0dc1339a', 'Lägg till ett focused test för subtract-funktionen i test_calculator.py')]
+  envelope 3884fdeb-58af-4726-bb87-44d29682bcad (scoped stage+commit), spend authorized
+== the real worker executes both tasks through the Supervisor ==
+  task statuses: [('Lägg till en subtract-funktion i calcula', 'completed', 1), ('Lägg till ett focused test för subtract-', 'completed', 1)]
+  a9761165 events: ['approval_granted', 'completed', 'created', 'dispatched', 'ready', 'verification_passed']
+  0dc1339a events: ['approval_granted', 'completed', 'created', 'dispatched', 'ready', 'verification_passed']
+  goal status = completed
+== worktree evidence: two distinct, cumulative commits ==
+  recent commits: ['Add focused subtract test', 'Add subtract helper', 'Låt uppgiftens explicita filväg avgöra receptets omfång', 'Släpp mål-leases från en tidigare worker-process vid omstart', 'Integrera verifiera tillfälliga fel med verkligt E2E i bootstrap-kandidaten', 'Integrera Ge avslutade mål-leases en bunden livscykel med bevarad historik i bootstrap-kandidaten']
+  implementation commit files: ['calculator.py']
+  focused-test commit files:   ['test_calculator.py']
+== previous verified work preserved ==
+  calculator.py: def subtract count=1
+  test_calculator.py: def test_subtract count=1
+== the resulting test really passes in that worktree ==
+  1 passed in 0.01s
+F2 E2E OK

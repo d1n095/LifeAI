@@ -1,0 +1,7 @@
+  worker identity='ubuntu', goal=c04f0235-f6b7-40e9-8ab1-8bc1668ee93e
+  residue lease cf499278 active, expires_at=2026-11-27 22:07:41.723759
+  worker 1777596 SIGKILLed
+  worker restarted as 1777731
+  lease released at 2026-11-27 21:07:43.584104 (no TTL wait)
+  durable history reason='worker_process_restarted'
+T1 E2E OK
