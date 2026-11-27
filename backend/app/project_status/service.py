@@ -32,6 +32,7 @@ from app.mainai_execution.improvement_proposals import list_proposals
 from app.models.blueprint_draft import BlueprintDraft
 from app.models.improvement_proposal import ImprovementStatus
 from app.models.mainai_execution import MainAIGoal, MainAIGoalStatus
+from app.models.project import Project, Task, TaskStatus
 from app.models.problem_learning import LifeProblemDecision
 
 SCHEMA_VERSION = "1.1"
@@ -473,6 +474,40 @@ def project_status_relevant(question: str) -> bool:
     )) or any(phrase in text for phrase in ("var är vi", "where are we", "vad händer", "what is happening", "hur går det", "kan du", "what can you"))
 
 
+_MAX_PROJECTS_IN_PROMPT = 5
+
+
+def founder_project_lines(db: Session, *, owner_id: uuid.UUID) -> list[str]:
+    """Grundarens EGNA projekt (app/models/project.py, `/api/projects`) som promptrader.
+
+    En separat registermodell från MainAI-målen (`mainai_goals`): fram till nu innehöll
+    statusblocket bara mål/uppgifter/jobb, så frågan "vilka projekt finns?" besvarades med
+    "det finns inga projekt" trots att grundaren hade skapat projekt i projektvyn. Det är
+    exakt den sortens osanna påstående om den egna funktionaliteten som blocket finns för att
+    förhindra — inte en gissning från modellen, utan ett register den inte fick se.
+
+    Bara verkliga poster: namn, registrerad status och antal öppna (icke-avslutade) uppgifter.
+    Ägarskopt till `created_by`; ingen projektdata från andra konton läcker in i prompten.
+    """
+    rows = (
+        db.query(Project, func.count(Task.id))
+        .outerjoin(Task, (Task.project_id == Project.id) & (Task.status != TaskStatus.done))
+        .filter(Project.created_by == owner_id)
+        .group_by(Project.id)
+        .order_by(Project.created_at.desc())
+        .limit(_MAX_PROJECTS_IN_PROMPT)
+        .all()
+    )
+    if not rows:
+        return []
+    lines = ["- Grundarens projekt (verkliga registerposter från projektvyn):"]
+    for project, open_tasks in rows:
+        status_value = getattr(project.status, "value", project.status)
+        task_count = "1 öppen uppgift" if open_tasks == 1 else f"{open_tasks} öppna uppgifter"
+        lines.append(f'  - "{project.name}" → {status_value} ({task_count})')
+    return lines
+
+
 def format_project_status_instructions(db: Session, *, owner_id: uuid.UUID, question: str | None = None) -> str:
     """Compact prompt block so the founder's question "var är vi?" is answered from facts.
 
@@ -507,6 +542,7 @@ def format_project_status_instructions(db: Session, *, owner_id: uuid.UUID, ques
         f"{work['agents']['open_assignments']} öppna agentuppdrag "
         f"({len(work['agents']['blocked'])} blockerade)"
     )
+    lines += founder_project_lines(db, owner_id=owner_id)
     # R15 (2026-11-19): without the concrete goals, "vad hände med målet jag just godkände?"
     # got "det finns inget i projektregistret" even though the same block counted it as
     # completed -- the model could not see WHICH goals existed. Titles + real status only.

@@ -295,3 +295,54 @@ def test_project_status_requires_founder(client, make_verified_user):
     user, password = make_verified_user()
     _login(client, email=user.email, password=password)
     assert client.get("/api/mainai/project-status").status_code == 403
+
+
+def test_status_block_lists_the_founders_own_projects(db_session, founder, make_verified_user):
+    """W9: projektvyns register måste synas i statusblocket — och bara grundarens egna.
+
+    Regression: chatten svarade "det finns inga projekt" medan `/api/projects` hade ett
+    projekt. Modellen fick helt enkelt aldrig se projektregistret; statusblocket räknade bara
+    MainAI-mål. Testet låser både att projektet syns med verklig status och antal öppna
+    uppgifter, och att ett annat kontos projekt aldrig läcker in i grundarens prompt.
+    """
+    from app.models.project import Project, ProjectStatus, Task, TaskPriority, TaskStatus
+    from app.project_status.service import founder_project_lines
+
+    other, _ = make_verified_user()
+    _set_rls_user(db_session, other.id)
+    db_session.add(Project(name="Någon annans projekt", status=ProjectStatus.idea, created_by=other.id))
+    db_session.commit()
+
+    _set_rls_user(db_session, founder.id)
+    project = Project(name="LifeAI hemma-labb", status=ProjectStatus.active, created_by=founder.id)
+    db_session.add(project)
+    db_session.commit()
+    db_session.add(
+        Task(
+            project_id=project.id,
+            created_by=founder.id,
+            title="Verifiera lokalt samtal",
+            status=TaskStatus.in_progress,
+            priority=TaskPriority.high,
+        )
+    )
+    db_session.add(
+        Task(
+            project_id=project.id,
+            created_by=founder.id,
+            title="Redan klar",
+            status=TaskStatus.done,
+            priority=TaskPriority.low,
+        )
+    )
+    db_session.commit()
+
+    lines = founder_project_lines(db_session, owner_id=founder.id)
+    assert any(
+        "LifeAI hemma-labb" in line and "active" in line and "1 öppen uppgift" in line for line in lines
+    ), lines
+    assert not any("Någon annans projekt" in line for line in lines), "ownership must scope the block"
+
+    block = format_project_status_instructions(db_session, owner_id=founder.id, question="Vilka projekt finns?")
+    assert "LifeAI hemma-labb" in block
+    assert "PROJEKTSTATUS" in block
