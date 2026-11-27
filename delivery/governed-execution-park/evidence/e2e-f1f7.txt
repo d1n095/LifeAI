@@ -1,0 +1,20 @@
+== A: goal with the wrong approval policy (the production F1 shape) ==
+  goal A = e104c972-6ed1-4672-be65-e39fea7136cf
+  envelope ac691c83-2fb7-433b-90d8-077e85ce019b, spend authorized
+  task 65aba804-25b2-4190-b699-162aa3359c8b parked: status=blocked blocker_reason="autonomous execution is refused by this goal's configuration"
+  next_retry_at=None
+  jobs: [('34eac73c', 'failed', 'capability_unavailable')]
+== B: the leftover job is claimed by V0.1 and fenced ==
+  job 34eac73c -> failed / capability_unavailable
+== C: no job churn ==
+  jobs before=1 after 20 s=1; task still blocked
+== D: another, correctly configured goal still completes ==
+  goal B = e7df1488-caa4-4bce-a943-9d4aab27e171
+  goal B status=completed
+== E: founder fixes the configuration + re-authorizes -> one controlled retry ==
+  new envelope 035a7d80-0625-47c8-bd84-60b9dc644791; updated policy
+  task woken: status=completed
+  goal A status=completed
+  final jobs: [('34eac73c', 'failed', 'capability_unavailable'), ('ecf39830', 'completed', None)]
+  task event reasons: [None, None, None, None, 'supervisor_config_refusal_park', 'supervisor_refusal_envelope_reauth_wake', None, None, None]
+E2E OK

@@ -1,0 +1,8 @@
+=== Focused suites (fresh test DB per run) ===
+tests/backend/mainai/test_supervisor_production_entry.py + test_governed_execution_park.py
+  31 passed
+tests/backend/mainai/test_supervisor_goal_lease.py + test_worker_live_lease_expiry_takeover.py
+  + test_autonomy_spend_narrow_wire.py + test_recovery_takeover_authority_fencing.py
+  + test_execution_envelopes.py
+  50 passed
+ruff check on every touched app file: All checks passed.

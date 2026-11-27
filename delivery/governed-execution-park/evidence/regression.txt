@@ -1,0 +1,11 @@
+=== Broad regression: tests/backend/mainai/ + advance-tasks exclusion + executor/resilience/replan/auto-recovery ===
+=================================== FAILURES ===================================
+/tmp/f1f7/backend/app/development_operator/service.py:771: app.development_operator.service.OperatorCapabilityMissing: CAPABILITY_MISSING: search_text: the deterministic rg search tool is unavailable
+=========================== short test summary info ============================
+FAILED tests/backend/mainai/test_development_operator.py::test_structured_read_search_and_trace_are_provider_independent
+1 failed, 923 passed in 1176.01s (0:19:36)
+EXIT=1
+
+NOTE: the single failure is environmental -- 'rg' is not installed in this environment
+(app/development_operator/service.py raises OperatorCapabilityMissing). It fails identically
+on an unmodified checkout and is unrelated to this branch.
