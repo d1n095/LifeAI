@@ -115,9 +115,28 @@ class OllamaProvider(LLMProvider):
         # provider. Uses the shared `chat_token_limit()` helper (R15) rather than a bare
         # `int(max_tokens)` cast, so an invalid bound fails closed as a proper `ProviderError`
         # instead of a raw ValueError/TypeError, consistent with every other provider.
+        options: dict = {}
         token_limit = chat_token_limit(kwargs)
         if token_limit is not None:
-            payload["options"] = {"num_predict": token_limit}
+            options["num_predict"] = token_limit
+        # Sampling temperature, when the caller needs a reproducible answer (provider-assisted
+        # planning does). Ollama's own default is 0.8, which made the same planning prompt
+        # alternate between a valid candidate and prose on this runtime, measured 2026-11-27.
+        # Validated here rather than forwarded blindly, so a malformed value fails closed as a
+        # ProviderError like every other bound in this adapter.
+        temperature = kwargs.get("temperature")
+        if temperature is not None:
+            if (
+                not isinstance(temperature, (int, float))
+                or isinstance(temperature, bool)
+                or not 0 <= float(temperature) <= 2
+            ):
+                raise ProviderError(
+                    "Lokal modell (Ollama) fick en ogiltig temperatur.", category="invalid_request"
+                )
+            options["temperature"] = float(temperature)
+        if options:
+            payload["options"] = options
         try:
             async with httpx.AsyncClient(timeout=timeout or 120) as client:
                 resp = await client.post(f"{self.settings.ollama_base_url}/api/chat", json=payload)

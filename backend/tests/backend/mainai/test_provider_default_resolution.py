@@ -113,6 +113,31 @@ def test_local_only_helper_exposes_the_enforced_set():
     assert "openai" not in local_provider_names()
 
 
+@pytest.mark.asyncio
+async def test_local_planning_requests_deterministic_decoding(monkeypatch):
+    """Same prompt, same answer: the local runtime's own 0.8 default is not reproducible.
+
+    Measured 2026-11-27: with the default sampling the identical planning payload alternated
+    between a parseable candidate and prose. Hosted providers must keep their own defaults.
+    """
+    calls: list[dict] = []
+
+    class FakeProvider:
+        async def chat(self, messages, model, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(content="{}", provider="fake", model=model, raw_usage={})
+
+    monkeypatch.setattr("app.providers.registry.get_provider", lambda name: FakeProvider())
+
+    local = RegistryPlanningAdapter(object(), provider_name="ollama", model="llama3.1")
+    await local.propose({}, timeout_seconds=5, max_output_bytes=2000)
+    hosted = RegistryPlanningAdapter(object(), provider_name="openai", model="gpt-4o-mini")
+    await hosted.propose({}, timeout_seconds=5, max_output_bytes=2000)
+
+    assert calls[0]["temperature"] == 0
+    assert "temperature" not in calls[1]
+
+
 def test_module_helper_is_the_single_resolution_point(monkeypatch):
     """The adapter must use the helper (not a second, drifting copy of the same rules)."""
     _settings(monkeypatch, provider="ollama", model="llama3.1", local_only=True)

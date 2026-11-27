@@ -206,12 +206,20 @@ class RegistryPlanningAdapter:
                     category="not_configured",
                 )
             provider = get_provider(self.provider_name)
-            result = await provider.chat(
-                messages,
-                model=self.model,
-                timeout=timeout_seconds,
-                max_tokens=max_output_bytes // 4,
-            )
+            call_kwargs: dict = {
+                "timeout": timeout_seconds,
+                "max_tokens": max_output_bytes // 4,
+            }
+            # A planning answer must be reproducible: on the local runtime the provider's own
+            # sampling default (0.8) made this exact prompt alternate between a parseable
+            # candidate and prose -- measured on 2026-11-27. Deterministic decoding is requested
+            # only for local inference; hosted providers keep their own defaults, so no external
+            # behavior changes.
+            from app.providers.registry import local_provider_names
+
+            if self.provider_name in local_provider_names():
+                call_kwargs["temperature"] = 0
+            result = await provider.chat(messages, model=self.model, **call_kwargs)
         else:
             result, _attempted = await chat_with_fallback(
                 self.db,
