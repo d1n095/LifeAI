@@ -178,6 +178,26 @@ def authorize_envelope(s, goal_id: str) -> str:
     return current.json()["id"]
 
 
+def authorize_spend(s, goal_id: str, envelope_id: str) -> None:
+    """The Supervisor's own bounded gate requires this even when the selected plan is
+    deterministic (no provider call is made); F1/F7's E2E established the same contract."""
+    r = s.post(
+        f"{API}/api/provider-spend/authorize",
+        json={
+            "goal_id": goal_id,
+            "execution_envelope_id": envelope_id,
+            "max_cost_usd": 1.00,
+            "max_requests": 50,
+            "max_cost_per_request_usd": 0.20,
+            "allowed_providers": ["ollama"],
+            "allowed_models": ["llama3.1"],
+            "idempotency_key": f"f2-e2e-{goal_id}-{envelope_id}",
+        },
+        timeout=60,
+    )
+    r.raise_for_status()
+
+
 def wait_until(predicate, timeout, interval=3, label=""):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -231,7 +251,8 @@ def main() -> int:
     for task in planned:
         approve(s, task["id"])
     envelope = authorize_envelope(s, goal)
-    print(f"  envelope {envelope} (scoped stage+commit)")
+    authorize_spend(s, goal, envelope)
+    print(f"  envelope {envelope} (scoped stage+commit), spend authorized")
 
     print("== the real worker executes both tasks through the Supervisor ==")
     done = wait_until(
