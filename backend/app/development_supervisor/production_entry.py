@@ -186,6 +186,7 @@ async def run_authorized_goal_supervisor_tick(
             )
         return current
 
+    failure_release_done = False
     try:
         current_envelope = _reverify_authority()
 
@@ -378,6 +379,33 @@ async def run_authorized_goal_supervisor_tick(
         )
 
         return await run_supervisor(db, scope=scope, bindings=bindings, worker_id=worker_id, bounds=bounds or SupervisorBounds())
+    except BaseException:
+        # A FAILED TICK MUST NOT LEAVE THIS GOAL LEASED FOR THE FULL TTL.
+        # `dispatch_ready_task()` performs a real mid-tick commit (create_job()'s own atomic
+        # commit), which makes THIS tick's `supervisor_goal_leases` claim durable BEFORE
+        # planning can still refuse the work. The release in `finally` below runs inside the
+        # caller's transaction, and `app/worker.py`'s `_advance_authorized_supervisor_goals()`
+        # rolls that transaction back on any exception -- so the already-committed, still-active
+        # lease used to survive the failure and block this goal's next unattended tick for the
+        # whole TTL. Measured in production (2026-11-27): one `CandidateValidationError` left a
+        # goal `active` for 3600 s, i.e. no retry and no progress for an hour, which is exactly
+        # the "resume after an error" property the nightly loop depends on.
+        #
+        # Released here in its OWN committed transaction, after rolling back whatever the failed
+        # tick had written, and a release failure is never allowed to mask the original error.
+        failure_release_done = True
+        db.rollback()
+        try:
+            release_supervisor_goal_lease(db, lease_id=lease_id, worker_id=worker_id, lease_generation=lease_generation)
+            db.commit()
+        except Exception:  # noqa: BLE001 - must never replace the tick's own exception
+            db.rollback()
+            logger.exception(
+                "Worker %s: could not release supervisor_goal_lease %s (goal %s) after a failed tick; "
+                "the goal may stay leased until the TTL expires.",
+                worker_id, lease_id, goal.id,
+            )
+        raise
     finally:
         # A False return here means this worker's OWN lease was no longer the active one by
         # the time this tick tried to release it -- e.g. an operator action that legitimately
@@ -387,7 +415,7 @@ async def run_authorized_goal_supervisor_tick(
         # swallowing it would erase the one signal available to notice a worker's lease was
         # lost mid-run, which is exactly the "detect lost ownership at a consequential
         # boundary" this codebase already expects at every other lease-fenced write.
-        if not release_supervisor_goal_lease(db, lease_id=lease_id, worker_id=worker_id, lease_generation=lease_generation):
+        if not failure_release_done and not release_supervisor_goal_lease(db, lease_id=lease_id, worker_id=worker_id, lease_generation=lease_generation):
             logger.warning(
                 "Worker %s: supervisor_goal_lease %s (goal %s) was no longer this worker's own active "
                 "lease by the time this tick tried to release it -- likely reclaimed after an unexpectedly "

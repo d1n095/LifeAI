@@ -540,8 +540,12 @@ async def test_an_envelope_superseded_between_eligibility_read_and_execution_per
     assert task.mainai_job_id is None
 
     from app.models.supervisor_lease import SupervisorGoalLease
-    lease = superuser_db.query(SupervisorGoalLease).filter(SupervisorGoalLease.goal_id == goal.id).one()
-    assert lease.status == "released"  # still cleanly released despite the failure
+    # A failed tick releases its own lease and COMMITS that release (see
+    # test_a_tick_that_fails_after_dispatch_releases_its_goal_lease below). When nothing in the
+    # tick had been committed yet, the rollback leaves no lease row at all; either way the
+    # property that matters is identical: nothing is left `active` for the goal.
+    leases = superuser_db.query(SupervisorGoalLease).filter(SupervisorGoalLease.goal_id == goal.id).all()
+    assert all(lease.status == "released" for lease in leases)
 
 
 @pytest.mark.asyncio
@@ -658,3 +662,78 @@ async def test_a_fresh_task_claim_always_gets_a_clean_worktree_regardless_of_pri
     assert status == ""  # the fresh claim for this tick's own task reset it clean
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo_root), capture_output=True, text=True, check=True).stdout.strip()
     assert head == base_sha
+
+
+@pytest.mark.asyncio
+async def test_a_tick_that_fails_after_dispatch_releases_its_goal_lease(
+    superuser_db, make_verified_user, source_repo, monkeypatch
+):
+    """A FAILED tick must not keep the goal leased for the full TTL.
+
+    `dispatch_ready_task()` performs a real mid-tick commit (`create_job()`'s own atomic
+    commit), so by the time planning runs, this tick's `supervisor_goal_leases` claim is
+    already durable. When planning then refuses (here: a goal created under the human-reviewed
+    `standard_repo_work`, which the autonomous Safe Planner deliberately will not plan local
+    writes under), the caller (`app/worker.py`) rolls its transaction back -- and because the
+    release lived in that same transaction, the committed lease used to survive as `active`,
+    blocking the goal's next unattended tick until it expired. Measured in production
+    2026-11-27: 3600 s of no progress after a single CandidateValidationError.
+    """
+    from app.development_supervisor import service as supervisor_service
+    from app.models.mainai_job import MainAIJob
+    from app.models.supervisor_lease import SupervisorGoalLease
+    from app.safe_planner.service import CandidateValidationError
+
+    # Ordinary candidate=None bindings park on provider spend before planning; this test is
+    # about the lease, not about spend, so authorize it exactly as a founder grant would.
+    monkeypatch.setattr(supervisor_service, "_live_provider_spend_authorized", lambda db, scope: True)
+
+    owner, _ = make_verified_user()
+    goal = planner.create_goal(
+        superuser_db,
+        owner_id=owner.id,
+        title="failing tick",
+        # Matches the registered deterministic recipe, so planning reaches the approval-policy
+        # refusal without any provider call -- the same shape that refused in production.
+        original_instruction="Add a calculator subtract helper and its focused test",
+        created_by="test",
+    )
+    planner.create_plan(
+        superuser_db, goal=goal, rationale="single task",
+        tasks=[PlannedTaskSpec(description="edit a file", task_type="repo_edit")],
+        created_by="test",
+    )
+    envelope = _authorize(
+        superuser_db, owner.id, goal.id,
+        authorized_paths=["calculator.py", "test_calculator.py"],
+    )
+    superuser_db.commit()
+
+    with pytest.raises(CandidateValidationError, match="approval_policy"):
+        await run_authorized_goal_supervisor_tick(
+            superuser_db, goal=goal, envelope=envelope, worker_id="worker-a"
+        )
+
+    # Precondition that makes this regression real: a job was already dispatched AND
+    # committed before the refusal, so the lease claim is durable too.
+    # (`task.mainai_job_id` is written only AFTER create_job()'s commit, so it is rolled back
+    # here -- the job row itself, and the lease claim committed alongside it, are what stay.)
+    jobs = superuser_db.execute(select(MainAIJob).where(MainAIJob.owner_id == owner.id)).scalars().all()
+    assert jobs, "the tick must have dispatched a job before planning refused"
+
+    # The worker's caller rolls its transaction back on any exception (see
+    # app/worker.py's _advance_authorized_supervisor_goals); do the same so this reads the
+    # DURABLE state, not whatever the failed tick left in this session's uncommitted buffer.
+    superuser_db.rollback()
+
+    leases = superuser_db.execute(
+        select(SupervisorGoalLease).where(SupervisorGoalLease.goal_id == goal.id)
+    ).scalars().all()
+    assert [lease.status for lease in leases if lease.status == "active"] == []
+
+    # The whole point: the goal is claimable again immediately, by another worker too.
+    claim = claim_supervisor_goal_lease(
+        superuser_db, owner_id=owner.id, goal_id=goal.id, envelope_id=envelope.id,
+        worker_id="worker-b", lease_seconds=60,
+    )
+    assert claim is not None
