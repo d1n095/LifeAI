@@ -40,7 +40,10 @@ uppdaterat F7-regressionsprov (park + släppt lease + inget nytt jobb på nästa
 (den innehåller F7:s commit `3fa49751`). Inga andra brancher blockerar den.
 
 **Status:** verifierad lokalt (relevanta sviter gröna, ruff rent) och med verkligt E2E i den
-isolerade stacken. Ej pushad/mergad/deployad i denna post; `first_cycle_go=false` oförändrat.
+isolerade stacken. Pushad till `origin/freebuff/governed-execution-park-20261127`
+(`a124ba7d`), ej mergad, ej deployad; `first_cycle_go=false` oförändrat. Den isolerade
+stacken är återställd till den verifierade kandidaten `85a1c10e` — branchen är inte aktiverad
+där.
 
 ## Nattarbete: mål-lease släpps vid misslyckad supervisor-tick (2026-11-27)
 
