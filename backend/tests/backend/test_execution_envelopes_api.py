@@ -145,8 +145,15 @@ def test_current_envelope_is_none_when_never_authorized(client, db_session):
 def test_a_proposal_cannot_become_an_envelope_except_through_the_authorize_route(client):
     from app.main import app
 
-    authorizing_routes = [r for r in app.routes if getattr(r, "path", "").startswith("/api/execution-envelopes/") and "POST" in getattr(r, "methods", set()) and "authorize" in r.path]
+    authorizing_routes = [r for r in app.routes if getattr(r, "path", "").startswith("/api/execution-envelopes/proposals/") and "POST" in getattr(r, "methods", set()) and "authorize" in r.path]
     assert len(authorizing_routes) == 1
+    # `POST /goals/{id}/reauthorize` is the only OTHER route that creates an envelope, and it
+    # accepts no scope at all: it copies the currently active row (unchanged) and supersedes
+    # it, so it can never turn a proposal into an envelope or widen authority. See
+    # reauthorize_execution_scope()'s own docstring and
+    # tests/backend/mainai/test_parked_goal_founder_recovery.py's widening test.
+    reauthorizing_routes = [r for r in app.routes if getattr(r, "path", "").startswith("/api/execution-envelopes/") and "POST" in getattr(r, "methods", set()) and r.path.endswith("/reauthorize")]
+    assert len(reauthorizing_routes) == 1
 
 
 def test_founder_can_narrow_the_proposed_scope_through_the_api(client, db_session):

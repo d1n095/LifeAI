@@ -13,16 +13,21 @@ _advance_mainai_execution_tasks() poll-cycle tick already dispatches every `read
 automatically (see that function's own docstring) -- a manual "dispatch now" endpoint would
 just be racing the worker's next poll cycle for no real benefit."""
 
+import json
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.audit import record_audit
 from app.config import get_settings
 from app.db import get_db
 from app.deps import require_founder
+from app.execution_envelopes import get_current_execution_envelope
 from app.limiter import limiter
+from app.mainai_execution.approval import APPROVAL_POLICIES
+from app.mainai_execution.provider_wait_wake import wake_tasks_blocked_for_supervisor_refusal
 from app.mainai_execution import executor, final_report, planner
 from app.mainai_execution.executor import TaskNotCancellableError, TaskNotRetryableError
 from app.mainai_execution.liveness import task_liveness
@@ -52,6 +57,7 @@ from app.providers.verification import classify_provider_exception
 from app.schemas import (
     EngineeringLessonOut,
     MainAICheckpointOut,
+    MainAIGoalApprovalPolicyIn,
     MainAIGoalCreateIn,
     MainAIGoalDetailOut,
     MainAIGoalOut,
@@ -162,6 +168,102 @@ def get_goal_report(goal_id: uuid.UUID, db: Session = Depends(get_db), user: Use
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Goal not found.") from exc
     db.commit()
     return report
+
+
+@router.patch("/goals/{goal_id}/approval-policy", response_model=MainAIGoalOut)
+@limiter.limit(f"{settings.rate_limit_default_per_minute}/minute")
+def update_goal_approval_policy(request: Request, goal_id: uuid.UUID, payload: MainAIGoalApprovalPolicyIn, db: Session = Depends(get_db), user: User = Depends(require_founder)):
+    """Correct the ONE goal setting a configuration refusal actually names.
+
+    F1 parks a task when the Supervisor's own fail-closed checks refuse the goal's
+    configuration -- today, `goal.approval_policy != 'autonomous_development_work'` (see
+    `app/safe_planner/service.py` and `app/development_driver/service.py`). Without this route
+    the only way to correct that was direct database manipulation, which is exactly the
+    operator habit the envelope foundation exists to make unnecessary.
+
+    Deliberately narrow: only `approval_policy` is accepted, and only a name from the existing
+    `APPROVAL_POLICIES` registry (an unknown name fails closed everywhere else, so accepting it
+    here would only create a goal that can never run). The change is recorded in the immutable
+    `audit_log` in the SAME transaction as the goal update. Repeating the current value is a
+    no-op and writes no audit row.
+
+    This grants no execution authority: the goal still needs its current active envelope, and
+    a parked task is woken by the separate, explicit resume route below.
+    """
+    if payload.approval_policy not in APPROVAL_POLICIES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unknown approval_policy '{payload.approval_policy}'. Known: {', '.join(sorted(APPROVAL_POLICIES))}.",
+        )
+    goal = _get_goal_or_404(db, goal_id)
+    before = goal.approval_policy
+    if before == payload.approval_policy:
+        return goal
+    goal.approval_policy = payload.approval_policy
+    record_audit(
+        db,
+        user_id=user.id,
+        action="mainai_goal_approval_policy_changed",
+        entity_type="mainai_goal",
+        entity_id=str(goal.id),
+        detail=json.dumps({"before": before, "after": payload.approval_policy, "reason": payload.reason}),
+        request=request,
+        commit=False,
+    )
+    db.commit()
+    db.refresh(goal)
+    return goal
+
+
+@router.post("/goals/{goal_id}/resume-parked-tasks")
+@limiter.limit(f"{settings.rate_limit_default_per_minute}/minute")
+def resume_parked_tasks(request: Request, goal_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(require_founder)):
+    """Explicitly resume tasks parked by an F1 configuration refusal, under the goal's CURRENT
+    active envelope.
+
+    The wake itself is the existing, durable reconciliation
+    (`wake_tasks_blocked_for_supervisor_refusal`): it only touches tasks whose latest durable
+    reason is the Supervisor-refusal park, and it never wakes a task parked under the SAME
+    envelope that is still active (that refusal is deterministic, so waking it would only
+    recreate the park). Calling this route is therefore a fast, observable version of what the
+    next Supervisor tick already does on its own -- not a second mechanism, and never a way to
+    grant authority: without a current active envelope the route refuses (409) instead of
+    inventing one.
+    """
+    goal = _get_goal_or_404(db, goal_id)
+    envelope = get_current_execution_envelope(db, owner_id=goal.owner_id, goal_id=goal.id)
+    if envelope is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Goal has no current active execution authorization; re-authorize it before resuming.",
+        )
+    woken = wake_tasks_blocked_for_supervisor_refusal(
+        db,
+        owner_id=goal.owner_id,
+        goal_id=goal.id,
+        execution_envelope_id=envelope.id,
+    )
+    record_audit(
+        db,
+        user_id=user.id,
+        action="mainai_goal_parked_tasks_resumed",
+        entity_type="mainai_goal",
+        entity_id=str(goal.id),
+        detail=json.dumps(
+            {
+                "execution_envelope_id": str(envelope.id),
+                "woken_task_ids": [str(task.id) for task in woken],
+            }
+        ),
+        request=request,
+        commit=False,
+    )
+    db.commit()
+    return {
+        "goal_id": str(goal.id),
+        "execution_envelope_id": str(envelope.id),
+        "woken_task_ids": [str(task.id) for task in woken],
+    }
 
 
 @router.get("/tasks/{task_id}", response_model=MainAITaskDetailOut)
