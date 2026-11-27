@@ -13,7 +13,8 @@ dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 Founder Alpha-kandidaten, inte default-grenen). Innehåller `delivery/night-worker/`:
 redovisningen med PASS/FAIL/BLOCKED/NOT_RUN, `nightly-e2e.sh`, konfigurationsanteckningen och
 F7-patcharna, samt den här posten. Publicerad till `origin`; **ingen merge, ingen PR, ingen
-deployment**. `first_cycle_go=false` och `POLICY_LOCK` är oförändrade.
+deployment**. Publicerad commit: `7d2c08d6b6e58350c2142b03903bb17d0514961e`.
+`first_cycle_go=false` och `POLICY_LOCK` är oförändrade.
 
 **Varför:** den isolerade installationen kunde bevisligen köra en godkänd utvecklingsuppgift
 obevakat (plan → godkännande → envelope → spend-grant → worker-tick → isolerad worktree →

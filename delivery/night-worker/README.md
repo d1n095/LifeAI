@@ -165,6 +165,9 @@ HTTPS). Ingen force-push, ingen merge, ingen PR, ingen deployment.
 | `freebuff/night-worker-delivery-20261127` | `85a1c10e` | den här katalogen + registerposten |
 | `freebuff/supervisor-failed-tick-lease-release-20261127` | `85a1c10e` | F7-fixen `3fa49751` + registerposten `f51e85bd` |
 
+Publicerad commit på den här grenen: `7d2c08d6b6e58350c2142b03903bb17d0514961e`.
+F7-grenens topp är `f51e85bd5d1b94cb4bf15bc72c773d8452762a53` (själva fixen `3fa49751`).
+
 Basen `85a1c10e` fanns inte på `origin` före publiceringen, så grenarna bär med sig den
 verifierade kandidatens historik (76 respektive 78 commits från närmaste gemensamma förfader).
 Det är avsiktligt: det som publiceras är exakt den kod som verifierades, inte en ombaserad kopia.
