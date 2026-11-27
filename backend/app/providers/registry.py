@@ -44,6 +44,16 @@ _PROVIDERS: dict[str, type[LLMProvider]] = {
 # `settings.local_only_mode` -- never changes behavior for a non-local-only deployment.
 _LOCAL_PROVIDERS: frozenset[str] = frozenset({"ollama"})
 
+
+def local_provider_names() -> frozenset[str]:
+    """The providers that never leave this deployment's own network.
+
+    Public accessor so a caller that must decide "may this configured provider run under
+    LOCAL_ONLY_MODE" asks the same set this module enforces, instead of re-listing provider
+    names in a second place that could drift.
+    """
+    return _LOCAL_PROVIDERS
+
 # Reasonable default chat model per provider, used only when falling back to a provider that
 # has no explicit admin-configured model (the primary provider's own model comes from
 # ProviderConfig / settings, never from here).

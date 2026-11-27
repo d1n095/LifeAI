@@ -104,11 +104,46 @@ PROVIDER_SYSTEM_PROMPT = (
 )
 
 
+def _configured_default_provider() -> tuple[str | None, str | None]:
+    """The provider/model this deployment would call first anyway, or (None, None).
+
+    Used only when a caller supplies neither an explicit provider nor model. It never invents
+    a provider: it reads the same configured defaults `chat_with_fallback()` selects first, so
+    a spend reservation and the invocation it guards can name the identical pair.
+
+    LOCAL_ONLY_MODE is checked here because the explicit-provider path in
+    `RegistryPlanningAdapter.propose()` calls `get_provider()` directly and therefore never
+    passes through `chat_with_fallback()`'s local-only filtering. A non-local configured
+    default is returned as (None, None) in that mode, so the caller keeps failing closed
+    instead of quietly reaching an external API.
+    """
+    from app.config import get_settings
+    from app.providers.registry import local_provider_names
+
+    settings = get_settings()
+    provider = (settings.default_llm_provider or "").strip() or None
+    model = (settings.default_llm_model or "").strip() or None
+    if provider is None or model is None:
+        return None, None
+    if settings.local_only_mode and provider not in local_provider_names():
+        return None, None
+    return provider, model
+
+
 class RegistryPlanningAdapter:
     """Thin adapter over the canonical provider registry; no provider registry duplication."""
 
     def __init__(self, db, *, provider_name=None, model=None):
         self.db = db
+        # The Supervisor's ordinary production bindings carry no provider_adapter (see
+        # app.development_supervisor.service.WorkBinding), so this adapter is constructed with
+        # neither provider nor model. `plan_with_provider()` requires BOTH before it can
+        # reserve founder spend -- without this resolution every non-recipe task parked as
+        # PROVIDER_SPEND_NOT_AUTHORIZED even with a live grant, i.e. the configured model was
+        # structurally unreachable for real development work. Resolving the configured default
+        # keeps the reservation and the invocation on exactly the same provider/model.
+        if provider_name is None and model is None:
+            provider_name, model = _configured_default_provider()
         self.provider_name = provider_name
         self.model = model
 
