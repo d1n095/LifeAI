@@ -6,6 +6,35 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+## Nattarbete: mål-lease släpps vid misslyckad supervisor-tick (2026-11-27)
+
+**Ny branch: `freebuff/supervisor-failed-tick-lease-release-20261127`** (bas:
+`freebuff/founder-projects-in-status-20261126`, `85a1c10e` — den verifierade
+Founder Alpha-kandidaten, inte default-grenen). Ingen PR ännu (ingen push-åtkomst i miljön);
+patch exporterad till `delivery/night-worker/`.
+
+**Varför:** `run_authorized_goal_supervisor_tick()` claimar `supervisor_goal_leases` och
+släpper den i `finally`, men `dispatch_ready_task()` committar mitt i ticken
+(`create_job()`s atomiska commit). Faller ticken därefter rullar anroparen
+(`app/worker.py`s `_advance_authorized_supervisor_goals`) tillbaka transaktionen — inklusive
+releasen — så en redan committad, aktiv lease blev kvar. Mätt i den isolerade miljön: ett
+enda `CandidateValidationError` höll ett mål `active` i 3600 s, dvs. ingen återupptagning på
+en timme.
+
+**Vad:** leasen släpps i en egen committad transaktion efter rollback; ett release-fel får
+aldrig dölja tickens ursprungliga fel. Regressionsprov
+(`test_a_tick_that_fails_after_dispatch_releases_its_goal_lease`) faller utan fixen. En
+befintlig assertion mäter nu committat tillstånd i stället för sessionens ocommittade buffert.
+
+**Känt beroende innan merge:** med leasen frisläppt återförsöker en permanent felkonfigurerad
+måltick var ~2 s. Det måste landa tillsammans med åtgärden för det kvarlämnade
+`task_execution`-jobbet (F1 i `delivery/night-worker/README.md`: envelope-blind V0.1-väg),
+som ska parkera tasken i stället för att lämna den `running`. **Mergas inte ensam.**
+
+**Status:** verifierad lokalt (21/21 i testfilen, 35/35 i angränsande lease-/
+återhämtningssviter, ruff rent). Ej pushad, ej mergad, ej deployad. Den isolerade stacken kör
+fortfarande den verifierade kandidaten — denna branch är inte aktiverad där.
+
 ## Blueprint-intelligensbacklogen KLAR: inkrementell dokumentförståelse (2026-11-14)
 
 **Ny branch: `claude/blueprint-incremental-document-understanding`** (PR #401, bas: #399
