@@ -1,0 +1,54 @@
+PASS phase 1: a planned task exists
+  interrupting: task=running job=queued worker=1828690
+PASS phase 1: worker SIGKILLed while its job was running
+PASS phase 1: the worker process is genuinely gone
+PASS phase 1: worker restarted
+  goal lease not blocking (released by the restarted worker -- no clock change)
+phase 1 task: completed attempts 2/3 next_retry_at None
+PASS phase 1: the interrupted task reaches a terminal state
+PASS phase 1: the transient failure RECOVERS to completed -- completed
+PASS phase 1: it took a real second attempt -- 2
+PASS phase 1: a durable retry/backoff event was recorded -- 1
+PASS phase 1: exactly one completed event (no duplicate execution) -- 1
+PASS phase 1: recovery dispatched a new job -- 2
+PASS phase 2: a planned task exists
+  interrupting: task=running job=queued worker=1829089
+PASS phase 2: attempt 1 interrupted while the worker had it (1/3 used)
+  goal lease not blocking (released by the restarted worker -- no clock change)
+  interrupting: task=running job=queued worker=1830546
+PASS phase 2: attempt 2 interrupted while the worker had it (2/3 used)
+  goal lease not blocking (released by the restarted worker -- no clock change)
+  interrupting: task=running job=queued worker=1832071
+PASS phase 2: attempt 3 interrupted while the worker had it (3/3 used)
+  goal lease not blocking (released by the restarted worker -- no clock change)
+phase 2 task: failed attempts 3/3 next_retry_at None
+PASS phase 2: the attempts budget is never exceeded -- 3/3
+PASS phase 2: repeated interruptions still end in a durable terminal state -- failed
+PASS phase 2: no retry clock is left behind after the budget is exhausted
+phase 2: 3 real interruptions of a 3-attempt budget
+PASS phase 2: no new jobs are generated after the budget is exhausted -- 3 -> 3
+PASS phase 2: nothing is reported completed for the exhausted task
+PASS the completed task stayed completed (no collateral damage) -- completed
+
+E2E OK
+
+=== Efter körningen: beständigt arbete, budgetstopp och omplanering (samma stack, samma kandidat) ===
+
+Mål A "transient recovery" — completed, plan v1:
+  repo_edit completed 2/3   (avbruten med task=running/job=queued; återupptogs som försök 2)
+  repo_edit completed 1/3
+  commits: 15dee350 "Add subtract helper", f9c98039 "Add focused subtract test"
+  calculator.py: def subtract=1 | test_calculator.py: def test_subtract=1 | worktree clean
+  -> arbetet från det avbrutna försöket finns kvar, och den beroende uppgiften byggde vidare på det.
+
+Mål B "transient budget exhaustion" — failed, plan v2:
+  3 riktiga avbrott (task=running/job=queued) -> attempts 3/3, status failed, next_retry_at NULL
+  inga nya jobb för den tasken (3 -> 3), ingen completed-händelse
+  workern omplanerade automatiskt till plan v2 (bounded: MAX_AUTO_REPLANS=3)
+  de nya uppgifterna krävde nytt grundargodkännande (WAITING_APPROVAL; inget approval-arv)
+  efter godkännande: två repo_edit completed 1/3 -> commits 5158e8cd + 17f75cf1, worktree clean
+  målet stängdes som failed (originaltasken uttömde sin budget) — ingen tyst "completed".
+
+Not: den allra första körningen i den här sessionen dödade en kvarlämnad worker från en tidigare
+stackkörning (samma användare, äldre kod) i stället för den som körde jobbet; det var ett
+miljöfel, inte ett produktfel. Efter att exakt en worker säkrats är körningarna ovan reproducerbara.

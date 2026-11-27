@@ -79,6 +79,30 @@ utgår från ett jobb som faktiskt kört). Resultat: tasken står still på `att
 taskar som är **genuint running** — det tillståndet ska inte tillverkas artificiellt av
 testet, men fyndet är verkligt och bör få en egen branch.
 
+## Uppdatering 2026-11-27 — körd mot den sammansatta integrationskandidaten
+
+Drivrutinen är körd mot `freebuff/bootstrap-integration-20261127` (F1/F7 + founder-vägen + F2 + F4
++ denna leverans, plus T1-fixen). Resultatet ligger i
+`delivery/bootstrap-integration/evidence/e2e-transient-integration.txt` och motsäger två av
+begränsningarna ovan:
+
+- **T2 är live-bevisad som icke-blockerande.** Avbrottet skedde med `task=running, job=queued`
+  (exakt fönstret i fyndet), och uppgiften återhämtades av den ordinarie vägen till försök 2 med
+  durable backoff, exakt en `completed`-händelse och ett nytt jobb. Ingen ny återhämtningsväg
+  behövdes.
+- **Försöksbudgeten tar nu slut i E2E.** Med tätare avbrottspolling (receptet tar ~3 s) dödades
+  workern tre gånger i rad: `attempts 3/3`, `failed`, `next_retry_at = NULL`, inga nya jobb och
+  ingen `completed`-händelse. Målet omplanerades därefter (begränsat av `MAX_AUTO_REPLANS=3`),
+  de nya uppgifterna krävde nytt grundargodkännande och målet stängdes som `failed` — ingen tyst
+  framgång och ingen oändlig replan-loop.
+- **T1-fixen syns i varje cykel:** den omstartade workern släppte sin tidigare process lease utan
+  klockmanipulation (`no clock change`); `expire_goal_lease` är nu en dokumenterad fallback för
+  den äldre basen.
+
+Beständigt arbete kontrollerades efter körningen: mål A:s båda commits (`Add subtract helper`,
+`Add focused subtract test`) och mål B:s två replan-commits finns kvar, med rätt innehåll och ren
+arbetsyta.
+
 ## Vad som INTE verifierats
 
 - Ingen webbläsare i miljön: UI:t är inte granskat (körningen är ren API/DB/worker).

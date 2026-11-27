@@ -58,10 +58,15 @@ migrationsnummer måste stämmas av vid en framtida sammanslagning (F4 äger 009
 **Merge-ordning för en framtida integration:** denna gren först (den innehåller F1/F7), därefter
 Life Workspaces-kedjan efter att dess ägare hanterat R15/V7-försoningen. Inget annat blockerar.
 
-**Kandidatens status:** verifierad lokalt (bred svit i `delivery/bootstrap-integration/README.md`)
-och med två verkliga E2E-körningar i den isolerade stacken. Pushad till
-`origin/freebuff/bootstrap-integration-20261127`; exakt head verifieras med `git ls-remote`.
-Stacken är återställd till den tidigare verifierade kandidaten `85a1c10e` efter körningarna.
+**Kandidatens status:** verifierad lokalt (bred svit: 884 passed, se
+`delivery/bootstrap-integration/README.md`) och med **tre** verkliga E2E-körningar i den isolerade
+stacken: T1 (processbevis), F2 (två olika koduppgifter, kumulativa commits) och transient
+(återhämtning efter SIGKILL, beständigt arbete, tre riktiga avbrott till `3/3` med `failed`, ingen
+kvarlämnad retry-klocka och inga nya jobb). Transient-körningen träffade dessutom T2-fönstret
+live (`task=running, job=queued`) och återhämtade till försök 2 — T2 är därmed även empiriskt
+icke-blockerande. Pushad till `origin/freebuff/bootstrap-integration-20261127`; exakt head
+verifieras med `git ls-remote`. Stacken är återställd till den tidigare verifierade kandidaten
+`85a1c10e` efter körningarna.
 
 **Överlämning:** grenen är avsedd att ta emot Mini:s och övriga agenters verifierade leveranser
 utan dubbelarbete — en leverans per gren/commit baserad på kedjans topp, verifierad före pålägg,

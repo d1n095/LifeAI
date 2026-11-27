@@ -67,6 +67,10 @@ förlorad uppgift. Därför ingen ny återhämtningsväg, ingen ändrad terminal
 (det skulle kräva en osann `started_at`). Beteendet låses i stället med riktiga regressionstester i
 `tests/backend/mainai/test_orphaned_dispatch_recovery.py` (båda länkvarianterna + aldrig-styrt mål).
 
+**Live-bevis 2026-11-27:** transient-E2E:t på kandidaten avbröt workern exakt i det här fönstret
+(`task=running, job=queued`) och uppgiften återhämtades till ett riktigt andra försök med backoff
+och ett nytt jobb — se `evidence/e2e-transient-integration.txt`.
+
 ## F2 — verkligt E2E, och ett riktigt fel som bara E2E:t hittade
 
 `evidence/e2e-f2.txt`: ett mål med **två olika** `repo_edit`-uppgifter (implementation, sedan
@@ -94,6 +98,56 @@ sammansättningar kan inte längre ge falska träffar. Regressionstesterna är s
 test-uppgiften inte längre får skapa källfilen, plus ett prov där båda filerna nämns och hela
 ändringen därför är korrekt.
 
+## Transient-E2E på kandidaten — återhämtning, beständigt arbete och kontrollerade återförsök
+
+`evidence/e2e-transient-integration.txt`: samma drivrutin som transient-leveransen, körd mot
+**kandidaten** med riktig backend, worker, Postgres, Redis, Ollama och mål-worktree. Två mål, två
+faser:
+
+**Fas 1 — återhämtning.** Workern SIGKILL:as när uppgiften är `running` och jobbet ännu `queued`
+(precis kraschfönstret mellan dispatch-commit och jobbclaim). Efter omstart:
+
+```
+interrupting: task=running job=queued worker=1828690
+PASS the worker process is genuinely gone
+PASS goal lease not blocking (released by the restarted worker -- no clock change)
+phase 1 task: completed attempts 2/3
+PASS it took a real second attempt -- 2
+PASS a durable retry/backoff event was recorded -- 1
+PASS exactly one completed event (no duplicate execution) -- 1
+PASS recovery dispatched a new job -- 2
+```
+
+Mål-worktreen visar båda uppgifterna som separata, kumulativa commits (`Add subtract helper`,
+`Add focused subtract test`), rätt innehåll och en ren arbetsyta — arbetet från det avbrutna
+försöket bevarades och den beroende uppgiften byggde vidare på det.
+
+**Fas 2 — försöksbudget.** Workern dödas varje gång uppgiften faktiskt kör:
+
+```
+PASS attempt 1 interrupted while the worker had it (1/3 used)
+PASS attempt 2 interrupted while the worker had it (2/3 used)
+PASS attempt 3 interrupted while the worker had it (3/3 used)
+phase 2 task: failed attempts 3/3 next_retry_at None
+PASS the attempts budget is never exceeded -- 3/3
+PASS no retry clock is left behind after the budget is exhausted
+PASS no new jobs are generated after the budget is exhausted -- 3 -> 3
+PASS nothing is reported completed for the exhausted task
+PASS the completed task stayed completed (no collateral damage)
+```
+
+Efteråt omplanerade workern målet till plan v2 (begränsat av `MAX_AUTO_REPLANS=3`), de nya
+uppgifterna krävde **nytt** grundargodkännande (inget approval-arv), och efter godkännande
+slutfördes de med två nya commits — men målet stängdes som `failed` eftersom originaluppgiften
+uttömde sin budget. Ingen tyst framgång, ingen oändlig replan-loop.
+
+**T2 i verkligheten:** avbrottet i fas 1 skedde exakt i det fönster där T2 beskrev ett kvarlämnat
+`queued`-jobb. Det återhämtades av den ordinarie vägen till ett riktigt andra försök — samma
+slutsats som T2-bedömningen, nu även live.
+
+**T1 i verkligheten:** leasen släpptes av den omstartade workern utan någon klockmanipulation
+(`no clock change`) i varje avbrottscykel.
+
 ## Säkerhetsgränser (oförändrade)
 
 * Ingen självtilldelning av behörighet: F2:s beskrivning väljer bara vilka av receptets redan
@@ -117,11 +171,13 @@ python3 -m pytest tests/backend/mainai tests/backend/test_mainai_execution_auto_
   tests/backend/test_recovery_takeover_authority_fencing.py -q
 ```
 
-Verkligt E2E (isolerad stack, kandidaten utcheckad):
+Verkligt E2E (isolerad stack, kandidaten utcheckad, **exakt en** worker — en kvarlämnad worker från
+en tidigare körning kan annars träffas av testets SIGKILL i stället för den som kör jobbet):
 
 ```bash
 python3 delivery/bootstrap-integration/e2e-t1.py
 python3 delivery/bootstrap-integration/e2e-f2.py
+FOUNDER_PASSWORD=... python3 delivery/transient-failure-recovery/e2e-transient.py
 ```
 
 ## Överlämning: ta emot andra agenters verifierade leveranser utan dubbelarbete

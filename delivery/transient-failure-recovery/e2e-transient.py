@@ -8,9 +8,11 @@ process dies while a `task_execution` job is `running`. That is exactly the fail
 lease/recovery/takeover pipeline exists for -- nothing is simulated with fake clocks or
 in-process stubs.
 
-  Phase 1 -- RECOVERY. One SIGKILL mid-task. The job's lease expires, the existing recovery
-  pipeline inspects/classifies/takes over, the task is retried with a durable backoff clock
-  (`next_retry_at`), and attempt 2 COMPLETES. Exactly one `completed` event, no duplicate work.
+  Phase 1 -- RECOVERY. One SIGKILL mid-task. The restarted worker releases its previous
+  process's goal lease (the integrated T1 fix -- no clock is moved); the job's lease expires,
+  the existing recovery pipeline inspects/classifies/takes over, the task is retried with a
+  durable backoff clock (`next_retry_at`), and attempt 2 COMPLETES. Exactly one `completed`
+  event, no duplicate work.
 
   Phase 2 -- ATTEMPTS BUDGET. A second goal is killed once per attempt. After `max_attempts`
   failures the existing outcome gate marks the task `failed` and stops: no retry clock, no new
@@ -22,7 +24,6 @@ Both phases assert from durable Postgres state (`mainai_tasks`, `mainai_jobs`,
 Exit code 0 means every assertion below held.
 """
 
-import json
 import os
 import signal
 import subprocess
@@ -124,23 +125,36 @@ def kill_worker() -> int:
     raise SystemExit("worker did not die")
 
 
-def expire_goal_lease(goal_id: str) -> None:
-    """Move the goal lease to the exact state it reaches at the END of its TTL.
+def ensure_lease_progress(goal_id: str, timeout: float = 60) -> None:
+    """Let the goal become dispatchable again after the worker was killed mid-tick.
 
-    A SIGKILL mid-tick cannot release `supervisor_goal_leases` -- `dispatch_ready_task()`
-    commits that claim before the crash, and the TTL (DERIVED from the longest possible single
-    operator action, 2 x 1800 s) is what protects a genuinely long action from being stolen.
-    Waiting that out is not what this E2E is measuring (the finding that it takes that long is
-    reported separately), so the clock is advanced explicitly instead of the whole run being
-    an hour long. Nothing else about the state is touched: the job's own lease expiry is
-    handled by the real recovery pipeline.
+    On the integrated candidate a restarted worker releases its own previous process's lease on
+    its first poll cycle (T1 fix), so this normally observes the lease disappear within seconds
+    and touches no clock at all. Only if the lease is still active after the wait -- the older
+    base behaviour, where a SIGKILL left it `active` for the full hour -- is the clock moved to
+    the exact state it reaches at the END of its TTL. That fallback is printed, so the evidence
+    says which path was taken. Nothing else about the state is touched: the job's own lease
+    expiry is handled by the real recovery pipeline.
     """
+
+    def not_blocking() -> bool:
+        return one(
+            "SELECT count(*) AS n FROM supervisor_goal_leases "
+            "WHERE goal_id = %s AND status = 'active' AND expires_at > now()",
+            (goal_id,),
+        )["n"] == 0
+
+    if wait_for(not_blocking, timeout, interval=1):
+        print("  goal lease not blocking (released by the restarted worker -- no clock change)")
+        return
     with psycopg2.connect(DB) as conn, conn.cursor() as cur:
         cur.execute(
             "UPDATE supervisor_goal_leases SET expires_at = now() - interval '1 second' "
             "WHERE goal_id = %s AND status = 'active'",
             (goal_id,),
         )
+        moved = cur.rowcount
+    print(f"  FALLBACK: goal lease still active, moved its expiry to now (rows={moved})")
 
 
 def kill_when_running(task_id: str, timeout: float = 180) -> bool:
@@ -158,9 +172,14 @@ def kill_when_running(task_id: str, timeout: float = 180) -> bool:
             (f"%{task_id}%",),
         )
         if (row and row["status"] == "running") or (job and job["status"] == "running"):
+            print(
+                "  interrupting: task="
+                f"{row['status'] if row else None} job={job['status'] if job else None} "
+                f"worker={worker_pid()}"
+            )
             kill_worker()
             return True
-        time.sleep(0.15)
+        time.sleep(0.05)
     return False
 
 
@@ -279,7 +298,7 @@ def main() -> int:
 
     start_worker()
     check(worker_pid() is not None, "phase 1: worker restarted")
-    expire_goal_lease(goal_a)
+    ensure_lease_progress(goal_a)
 
     # Job lease TTL is 120 s in this stack; the takeover may only happen after it expires.
     recovered = wait_for(
@@ -350,15 +369,20 @@ def main() -> int:
         current = one("SELECT status FROM mainai_tasks WHERE id = %s", (str(task_b["id"]),))
         if current["status"] in {"completed", "failed", "cancelled"}:
             break
-        if current["status"] != "running":
-            time.sleep(3)
-            continue
-        if not kill_when_running(str(task_b["id"]), timeout=60):
+        # The recipe's real work takes ~3 s, so a coarse "is it running? then sleep" gate misses
+        # the window. kill_when_running() polls tightly and kills the moment the attempt is
+        # genuinely in flight; a short timeout keeps the loop responsive between attempts.
+        if not kill_when_running(str(task_b["id"]), timeout=5):
             continue
         interrupted += 1
-        check(True, f"phase 2: attempt {interrupted} interrupted while the worker had it")
+        state = one("SELECT attempts, max_attempts FROM mainai_tasks WHERE id = %s", (str(task_b["id"]),))
+        check(
+            True,
+            f"phase 2: attempt {interrupted} interrupted while the worker had it "
+            f"({state['attempts']}/{state['max_attempts']} used)",
+        )
         start_worker()
-        expire_goal_lease(goal_b)
+        ensure_lease_progress(goal_b)
         wait_for(
             lambda: one("SELECT status FROM mainai_tasks WHERE id = %s", (str(task_b["id"]),))["status"]
             != "running",
@@ -389,6 +413,7 @@ def main() -> int:
         final_b["next_retry_at"] is None,
         "phase 2: no retry clock is left behind after the budget is exhausted",
     )
+    print(f"phase 2: {interrupted} real interruptions of a {max_attempts}-attempt budget")
     jobs_after = one(
         "SELECT count(*) AS n FROM mainai_jobs WHERE input_refs::text LIKE %s",
         (f'%{task_b["id"]}%',),
