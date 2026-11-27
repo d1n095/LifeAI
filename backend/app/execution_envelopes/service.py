@@ -239,6 +239,93 @@ def authorize_execution_scope(
     return row, envelope
 
 
+def reauthorize_execution_scope(
+    db: Session,
+    *,
+    owner_id: uuid.UUID,
+    goal_id: uuid.UUID,
+    authorized_by: str,
+    idempotency_key: str,
+    reason: str | None = None,
+) -> ExecutionAuthorizationEnvelope:
+    """Re-issue a goal's CURRENT execution authority as a NEW envelope row with the SAME
+    authorized content -- the founder act that lets a configuration-refused, parked goal
+    resume without widening anything.
+
+    WHY A NEW ROW IS REQUIRED: F1's park records the envelope it was refused under, and its
+    only wake edge is a DIFFERENT current envelope (see
+    `wake_tasks_blocked_for_supervisor_refusal()`). Re-authorizing the same scope through the
+    ordinary propose -> authorize chain cannot produce that row: `propose_execution_scope()`
+    is idempotent on identical content and returns the already-`authorized` proposal, which
+    `authorize_execution_scope()` refuses to authorize twice. Without this function the
+    founder's only way to resume a parked goal with an unchanged scope would be to WIDEN it --
+    exactly the wrong incentive to build into a security boundary.
+
+    STRUCTURALLY CANNOT WIDEN AUTHORITY: `repository_identity`/`authorized_paths`/
+    `authorized_capabilities`/`authorized_risk` are copied from the CURRENT active row and are
+    never accepted from the caller. This function has no parameter that could expand them; a
+    founder who genuinely wants a different scope uses propose -> authorize, the reviewed path
+    that already exists. The prior row is `superseded`, never mutated, so the full
+    authorization history stays auditable.
+
+    Idempotent on `idempotency_key` (a retried request returns the row it already created).
+    Locks the goal row first, then the current envelope row -- the same goal-row fence
+    `authorize_execution_scope()` takes for its own first-governance TOCTOU window, and never
+    a new lock order relative to `execute_takeover()` (which only ever locks the goal row).
+    """
+    goal = db.execute(
+        select(MainAIGoal).where(MainAIGoal.id == goal_id, MainAIGoal.owner_id == owner_id).with_for_update()
+    ).scalar_one_or_none()
+    if goal is None:
+        raise ExecutionEnvelopeError(f"goal_id={goal_id} does not belong to owner_id={owner_id}")
+
+    existing = db.execute(
+        select(ExecutionAuthorizationEnvelope).where(
+            ExecutionAuthorizationEnvelope.owner_id == owner_id,
+            ExecutionAuthorizationEnvelope.idempotency_key == idempotency_key,
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+
+    current = db.execute(
+        select(ExecutionAuthorizationEnvelope)
+        .where(
+            ExecutionAuthorizationEnvelope.owner_id == owner_id,
+            ExecutionAuthorizationEnvelope.goal_id == goal_id,
+            ExecutionAuthorizationEnvelope.status == "active",
+        )
+        .with_for_update()
+    ).scalar_one_or_none()
+    if current is None:
+        raise ExecutionEnvelopeError(
+            "goal has no current active execution authorization to re-authorize"
+        )
+
+    envelope = ExecutionAuthorizationEnvelope(
+        owner_id=owner_id,
+        goal_id=goal_id,
+        source_proposal_id=current.source_proposal_id,
+        repository_identity=current.repository_identity,
+        authorized_paths=list(current.authorized_paths or []),
+        authorized_capabilities=list(current.authorized_capabilities or []),
+        authorized_risk=current.authorized_risk,
+        authorized_by=authorized_by,
+        idempotency_key=idempotency_key,
+        supersedes_envelope_id=current.id,
+        provenance={
+            "reauthorized_from_envelope_id": str(current.id),
+            "scope": "unchanged",
+            "reason": reason,
+        },
+    )
+    db.add(envelope)
+    db.flush()
+    current.status = "superseded"
+    db.flush()
+    return envelope
+
+
 def get_execution_scope_proposal(db: Session, *, owner_id: uuid.UUID, proposal_id: uuid.UUID) -> ExecutionScopeProposal | None:
     return db.execute(select(ExecutionScopeProposal).where(ExecutionScopeProposal.id == proposal_id, ExecutionScopeProposal.owner_id == owner_id)).scalar_one_or_none()
 

@@ -1081,6 +1081,15 @@ class MainAIGoalCreateIn(BaseModel):
     approval_policy: str = "standard_repo_work"
 
 
+class MainAIGoalApprovalPolicyIn(BaseModel):
+    """The ONE founder-correctable goal setting a configuration refusal names. Anything else
+    about a goal (its instruction, risk level) stays immutable here on purpose -- correcting a
+    refusal must not become a general goal rewrite."""
+
+    approval_policy: str
+    reason: str | None = None
+
+
 class MainAIGoalOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
@@ -1354,6 +1363,19 @@ class AuthorizeExecutionScopeIn(BaseModel):
     authorized_paths: list[str]
     authorized_capabilities: list[str]
     authorized_risk: str
+
+
+class ReauthorizeExecutionScopeIn(BaseModel):
+    """Founder input for re-issuing a goal's CURRENT execution authority unchanged.
+
+    Deliberately has NO authorized_paths/authorized_capabilities/authorized_risk fields: the
+    new envelope copies them from the currently active row, so this route cannot widen
+    authority even if a client sends extra JSON. A founder who wants a different scope uses
+    propose -> authorize (the reviewed path). `idempotency_key` makes an accidental retry a
+    no-op; omitting it means "one explicit founder act per call"."""
+
+    idempotency_key: str | None = None
+    reason: str | None = None
 
 
 class RejectExecutionScopeIn(BaseModel):

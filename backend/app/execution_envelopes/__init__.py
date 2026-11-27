@@ -13,6 +13,7 @@ from app.execution_envelopes.service import (
     list_execution_scope_proposals,
     list_unreviewed_execution_scope_proposals,
     propose_execution_scope,
+    reauthorize_execution_scope,
     reject_execution_scope,
 )
 
@@ -26,5 +27,6 @@ __all__ = [
     "list_execution_scope_proposals",
     "list_unreviewed_execution_scope_proposals",
     "propose_execution_scope",
+    "reauthorize_execution_scope",
     "reject_execution_scope",
 ]

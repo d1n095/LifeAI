@@ -6,6 +6,34 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+
+## Founder-styrd återhämtning av parkerade mål (2026-11-27)
+
+**Branch:** `freebuff/parked-goal-founder-recovery-20261127`, bas `freebuff/governed-execution-park-20261127`
+(`09ed1bf8`, F1+F7). **Beroende:** F1+F7 måste mergas före denna; den kan inte startas ensam.
+`first_cycle_go=false`, ingen merge, ingen deploy, ingen ändring av `POLICY_LOCK`/staging.
+
+**Vad:** de tre founder-akterna som gjorde F1-parkeringen återhämtningsbar utan SQL — vilket var
+den enda kvarvarande vägen i den isolerade installationen 2026-11-27:
+
+* `PATCH /api/mainai/execution/goals/{id}/approval-policy` — rättar den enda inställning som
+  vägran namnger. Endast namn ur `APPROVAL_POLICIES`; revision i den immutabla `audit_log` i
+  samma transaktion; upprepning av samma värde är en no-op.
+* `POST /api/execution-envelopes/goals/{id}/reauthorize` — ny envelope med **identiskt** scope
+  (kopierat från den aktiva raden, superseedar den gamla). Rutten tar inga scope-fält alls, så
+  den kan strukturellt inte utöka behörigheten; ett ändrat scope går via propose → authorize.
+* `POST /api/mainai/execution/goals/{id}/resume-parked-tasks` — kör den befintliga, durabila
+  väcknings-reconcilieringen (`wake_tasks_blocked_for_supervisor_refusal`) direkt i stället för
+  att vänta på nästa tick. 409 utan aktiv envelope; väcker aldrig en parkering under samma
+  fortfarande aktiva envelope.
+
+Inga nya motorer, ingen ny behörighetskälla. Tester: 10 nya i
+`tests/backend/mainai/test_parked_goal_founder_recovery.py` (bl.a. att klient-skickade
+`authorized_paths` ignoreras, idempotens, 400/409-vägarna och hela kedjan
+rätta → omauktorisera → återuppta); 61 gröna tillsammans med envelope-API:t, Path B-bryggan
+och F1/F7-sviterna. Ruff rent.
+
+
 ## Nattarbete: F1 + F7 som en sammanhängande säkerhetskorrigering (2026-11-27)
 
 **Ny branch: `freebuff/governed-execution-park-20261127`** (bas:

@@ -44,6 +44,7 @@ from app.execution_envelopes import (
     list_execution_authorization_envelopes,
     list_execution_scope_proposals,
     propose_execution_scope,
+    reauthorize_execution_scope,
     reject_execution_scope,
 )
 from app.models.user import User
@@ -52,6 +53,7 @@ from app.schemas import (
     ExecutionAuthorizationEnvelopeOut,
     ExecutionScopeProposalOut,
     ProposeExecutionScopeIn,
+    ReauthorizeExecutionScopeIn,
     RejectExecutionScopeIn,
 )
 
@@ -123,6 +125,39 @@ def authorize_execution_scope_route(proposal_id: uuid.UUID, payload: AuthorizeEx
             db, owner_id=user.id, proposal_id=proposal_id, authorized_by="founder",
             authorized_paths=payload.authorized_paths, authorized_capabilities=payload.authorized_capabilities,
             authorized_risk=payload.authorized_risk, envelope_idempotency_key=f"api-authorization:{proposal_id}",
+        )
+    except ExecutionEnvelopeError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    db.commit()
+    return envelope
+
+
+@router.post("/goals/{goal_id}/reauthorize", response_model=ExecutionAuthorizationEnvelopeOut, status_code=status.HTTP_201_CREATED)
+def reauthorize_execution_scope_route(goal_id: uuid.UUID, payload: ReauthorizeExecutionScopeIn, db: Session = Depends(get_db), user: User = Depends(require_founder)):
+    """Re-issue this goal's CURRENT active execution authorization as a new envelope with
+    IDENTICAL scope, superseding the old one.
+
+    This is the founder-side half of F1's controlled resumption: a task parked by a
+    configuration refusal is woken by a DIFFERENT current envelope, and the ordinary
+    propose -> authorize chain cannot produce one for an unchanged scope (the proposal is
+    already `authorized`). The route deliberately accepts no scope fields at all -- the content
+    is copied from the active row, so "re-authorize so it can retry" can never become
+    "silently widen authority". A founder who wants different scope uses the existing
+    propose -> authorize pair, which requires stating the paths explicitly.
+
+    Returns 400 (not 404) when the goal has no current active envelope: there is nothing to
+    re-authorize, and the honest next step is the normal proposal flow.
+    """
+    idempotency_key = payload.idempotency_key or f"api-reauthorize:{goal_id}:{uuid.uuid4()}"
+    try:
+        envelope = reauthorize_execution_scope(
+            db,
+            owner_id=user.id,
+            goal_id=goal_id,
+            authorized_by="founder",
+            idempotency_key=idempotency_key,
+            reason=payload.reason,
         )
     except ExecutionEnvelopeError as exc:
         db.rollback()
