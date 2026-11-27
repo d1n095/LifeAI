@@ -420,7 +420,11 @@ PLANNER_SYSTEM_PROMPT = (
     "får aldrig lista sitt eget index -- första tasken har alltid depends_on: []. Vanligaste felet "
     "är att sätta depends_on: [0] på task 0. En read_only_audit har alltid verification_plan: [] "
     "(den ändrar ingenting, det finns inget att köra); targeted_tests används bara med en riktig "
-    "testfilsökväg (t.ex. tests/backend/test_x.py), aldrig med en beskrivning i klartext. Håll planen minimal: bara de "
+    "testfilsökväg (t.ex. tests/backend/test_x.py), aldrig med en beskrivning i klartext. "
+    "VIKTIGT: varje task med task_type repo_edit MÅSTE ha en verification_plan med minst ett steg "
+    '{"kind": "targeted_tests", "target": "<riktig .py-testfilsökväg>"} -- annars avvisas hela '
+    "planen och ingen task skapas. Använd den testfil målet själv namnger när det finns en. "
+    "Håll planen minimal: bara de "
     "tasks som faktiskt krävs för målet, aldrig spekulativa extra steg. En task som ändrar "
     "kod (repo_edit) eller öppnar en PR (open_pr) ska nästan alltid ha approval_required=false "
     "(godkännande krävs bara för merge/deploy, inte för att föreslå en ändring som PR) -- men "
