@@ -1128,6 +1128,12 @@ async def run_supervisor(
             )
             try:
                 if recipe == "multiplication_repair":
+                    # Deliberately NOT task-scoped: a repair child exists to fix whatever
+                    # failed, so restricting it to "only the source" or "only the test" could
+                    # leave the failure in place forever (measured: a test-only repair kept
+                    # importing a helper that did not exist). F2's task scoping applies to
+                    # ordinary plan tasks, where the plan itself splits implementation from
+                    # its focused test.
                     recipe_candidate = build_multiplication_repair_candidate(context)
                 planning = plan_founder_request(
                     db,

@@ -425,8 +425,13 @@ def test_founder_intent_end_to_end_hands_native_plan_to_work_driver(
     traces = superuser_db.execute(
         select(WorkTraceEvent).order_by(WorkTraceEvent.sequence_number)
     ).scalars()
+    # F2: the recipe now COMMITS its verified change. Without that step the next task's
+    # fresh-claim worktree reset (`reset_goal_worktree_to_clean_head`) discarded it, which is
+    # exactly the "preserve previous verified work" property this plan shape depends on.
     assert [trace.action_detail["operator_capability"] for trace in traces] == [
         "create_file",
         "create_file",
         "run_focused_test",
+        "stage_scoped_changes",
+        "commit_scoped_changes",
     ]
