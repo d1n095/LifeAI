@@ -1,0 +1,24 @@
+# e2e-transient.py — isolerad stack 2026-11-27 (Postgres 55432, Redis 56381, backend 8000, riktig worker + Ollama)
+# commit: 09ed1bf8
+
+plan attempt 1 -> HTTP 502, retrying in 20 s
+PASS phase 1: a planned task exists
+PASS phase 1: worker SIGKILLed while its job was running
+PASS phase 1: the worker process is genuinely gone
+PASS phase 1: worker restarted
+phase 1 task: completed attempts 2/3 next_retry_at None
+PASS phase 1: the interrupted task reaches a terminal state
+PASS phase 1: the transient failure RECOVERS to completed -- completed
+PASS phase 1: it took a real second attempt -- 2
+PASS phase 1: a durable retry/backoff event was recorded -- 1
+PASS phase 1: exactly one completed event (no duplicate execution) -- 1
+PASS phase 1: recovery dispatched a new job -- 2
+PASS phase 2: a planned task exists
+phase 2 task: completed attempts 1/3 next_retry_at None
+PASS phase 2: the attempts budget is never exceeded -- 1/3
+PASS phase 2: repeated interruptions still end in a durable terminal state -- completed
+PASS phase 2: no retry clock is left behind after the budget is exhausted
+PASS phase 2: no new jobs are generated after the budget is exhausted -- 1 -> 1
+PASS the completed task stayed completed (no collateral damage) -- completed
+
+E2E OK
