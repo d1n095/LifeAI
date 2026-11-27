@@ -117,11 +117,34 @@ class CandidateEvaluation:
     result: PlanningResult | None = None
 
 
+# The exact envelope and argument contract, in the prompt rather than only in prose, because a
+# local 8B model measured on 2026-11-27 did two different things with the old wording: first it
+# refused outright ("I can't assist with tasks that require me to write or generate code" -- the
+# old prompt never said the answer is a PLAN, so a coding goal read as a coding request), and
+# once that framing was fixed it emitted a plausible but unparseable step map. Neither failure
+# may be fixed by loosening `parse_provider_envelope()`: the model has to meet the schema the
+# executor actually contracts, so the schema and every argument shape are stated literally here.
 PROVIDER_SYSTEM_PROMPT = (
-    "You are a planning specialist, not an execution authority. Return exactly one JSON "
-    "object matching the supplied schema. Never propose shell, merge, deploy, force push, "
-    "production mutation, credential access, or capabilities outside the supplied list. "
-    "State assumptions and unknowns. Confidence cannot resolve founder ambiguity."
+    "You are MainAI's planning specialist. You do not answer in prose and you do not write a "
+    "code answer in chat: you return exactly one JSON object describing the ordered steps an "
+    "executor will perform. This is a planning task, not code generation. "
+    "Return exactly this shape, with no extra keys and no markdown fences: "
+    '{"candidate": {"interpretation": "...", "requested_outcome": "...", "rationale": "...", '
+    '"steps": [{"step_id": "s1", "purpose": "...", "expected_result": "...", '
+    '"capability": "create_file", "arguments": {}, "required_risk": "LOCAL_WRITE", '
+    '"verification_required": false}], "assumptions": [], "unknowns": []}, '
+    '"clarification_required": false, "clarification_question": null, "capability_gaps": [], '
+    '"useful_components": [], "confidence": 0.5}. '
+    "required_risk is READ_ONLY, LOCAL_WRITE or LOCAL_EXECUTION. Argument contract: "
+    'create_file/patch_file -> {"path": "<allowed path>", "content": "<complete file content>"}; '
+    'read_file/list_files -> {"path": "<allowed path>"}; '
+    'run_focused_test -> {"profile_name": "focused_pytest", "arguments": ["<test file>.py"]}; '
+    'stage_scoped_changes -> {"paths": ["<allowed path>", "..."]}; '
+    'commit_scoped_changes -> {"message": "<one line, max 200 characters>"}. '
+    "Use only capabilities from the supplied list and only paths inside "
+    "repository_scope.allowed_paths. Never propose shell, merge, deploy, force push, production "
+    "mutation or credential access. Keep the plan minimal and ordered. State assumptions and "
+    "unknowns; confidence cannot resolve founder ambiguity."
 )
 
 
