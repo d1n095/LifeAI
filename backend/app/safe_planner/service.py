@@ -575,40 +575,327 @@ def safe_provider_prompt(request: FounderPlanningRequest, context_refs: list[dic
     }
 
 
-def deterministic_candidate(instruction: str, operator_context=None) -> PlanCandidate | None:
+_CALCULATOR_SOURCE_PATH = "calculator.py"
+_CALCULATOR_TEST_PATH = "test_calculator.py"
+
+# F2: the bounded operations this demo recipe registry can produce. Only these exact names
+# ever become code -- nothing is parsed out of prose into an arbitrary symbol, and every path
+# still has to be inside the OperatorContext envelope (validate_candidate() re-checks it).
+_CALCULATOR_OPERATIONS = {
+    "subtract": ("-", "7, 2", "5"),
+    "multiply": ("*", "3, 4", "12"),
+}
+
+
+def _recipe_scope(requested_outcome: str | None) -> str:
+    """Which half of a two-part change THIS task owns: "source", "test" or "both".
+
+    F2 (measured 2026-11-27): the deterministic recipe was GOAL-scoped -- every `repo_edit`
+    under a goal rewrote the same two files, so a plan whose first task implements the function
+    and whose second task adds its focused test had the second one repeat the first one's work
+    (and, between tasks, the worktree reset discarded nothing only because the first task had
+    already committed both files).
+
+    The ONLY input here is the task's own structured description (`MainAITask.description`,
+    passed as `FounderPlanningRequest.requested_outcome`) -- never the goal's prose, and never
+    as authority: it selects WHICH of the recipe's already-bounded steps to run, and every
+    selected path is still validated against the envelope. A description that names both
+    halves, or neither, keeps the previous full-change behaviour.
+    """
+    text = " ".join((requested_outcome or "").lower().split())
+    if not text:
+        return "both"
+    mentions_test = "test" in text or "pytest" in text
+    mentions_source = any(
+        token in text
+        for token in (
+            "calculator.py",
+            "funktion",
+            "function",
+            "helper",
+            "implementera",
+            "implementation",
+        )
+    )
+    if mentions_test and not mentions_source:
+        return "test"
+    if mentions_source and not mentions_test:
+        return "source"
+    return "both"
+
+
+def _read_worktree_text(operator_context, path: str) -> str | None:
+    if operator_context is None:
+        return None
+    target = operator_context.repository_root / path
+    return target.read_text(encoding="utf-8") if target.is_file() else None
+
+
+def _ensure_line(text: str, line: str) -> str:
+    if line in text:
+        return text
+    return text.rstrip() + "\n\n" + line + "\n"
+
+
+def _upsert_function(text: str | None, name: str, block: str) -> str:
+    """Append the function, or REPLACE an existing definition of the same name in place.
+
+    Cumulative and repairing at the same time: an earlier task's other helpers stay exactly
+    where they are (never rewritten, never dropped), while a definition this task owns is
+    corrected if it is already present -- which is what a repair child needs (the bounded
+    multiply recipe has always repaired a wrong `multiply` body, and losing that would turn a
+    repairable failure into a permanent one).
+
+    Bounded by construction: only the `def <name>(` line and the indented/blank lines that
+    follow it are replaced; everything else in the file is untouched.
+    """
+    if text is None or not text.strip():
+        return block
+    lines = text.splitlines()
+    start = next((index for index, line in enumerate(lines) if line.startswith(f"def {name}(")), None)
+    if start is None:
+        return text.rstrip() + "\n\n" + block
+    end = start + 1
+    while end < len(lines) and (not lines[end].strip() or lines[end].startswith((" ", "\t"))):
+        end += 1
+    updated = "\n".join(lines[:start] + block.rstrip("\n").splitlines() + lines[end:])
+    return updated + ("\n" if text.endswith("\n") else "")
+
+
+def _calculator_recipe_candidate(
+    *,
+    operation: str,
+    operator_context,
+    requested_outcome: str | None,
+    interpretation: str,
+    requested_result: str,
+    rationale: str,
+) -> PlanCandidate:
+    """One bounded calculator change, scoped to the task that asked for it.
+
+    Task-scoped, not goal-scoped (F2): a task that names only the implementation writes only
+    `calculator.py` and verifies it statically; a task that names only the test appends only
+    its test to `test_calculator.py` and runs it. Both are cumulative -- the earlier task's
+    committed work is never rewritten -- and neither invents a test file for a source-only
+    task, so the plan's own ordering (implement, then test) is preserved rather than
+    duplicated.
+    """
+    symbol, sample, expected = _CALCULATOR_OPERATIONS[operation]
+    scope = _recipe_scope(requested_outcome)
+    source_before = _read_worktree_text(operator_context, _CALCULATOR_SOURCE_PATH)
+    test_before = _read_worktree_text(operator_context, _CALCULATOR_TEST_PATH)
+
+    function_block = f"def {operation}(left, right):\n    return left {symbol} right\n"
+    test_definition = (
+        f"def test_{operation}():\n"
+        f"    assert {operation}({sample}) == {expected}\n"
+    )
+
+    steps: list[CandidateStep] = []
+    staged: list[str] = []
+    if scope in {"source", "both"}:
+        content = _upsert_function(source_before, operation, function_block)
+        if content != source_before:
+            steps.append(
+                CandidateStep(
+                    "source",
+                    f"add the {operation} helper",
+                    "source hash",
+                    "create_file" if source_before is None else "patch_file",
+                    {
+                        "path": _CALCULATOR_SOURCE_PATH,
+                        "content": content,
+                        "expected_sha256": (
+                            hashlib.sha256(source_before.encode()).hexdigest()
+                            if source_before is not None
+                            else None
+                        ),
+                    },
+                    required_risk=operator.LOCAL_WRITE,
+                )
+            )
+            staged.append(_CALCULATOR_SOURCE_PATH)
+    if scope in {"test", "both"}:
+        content = _upsert_function(
+            _ensure_line(test_before or "", f"from calculator import {operation}"),
+            f"test_{operation}",
+            test_definition,
+        )
+        if content != test_before:
+            steps.append(
+                CandidateStep(
+                    "test",
+                    f"add the focused {operation} test",
+                    "test hash",
+                    "create_file" if test_before is None else "patch_file",
+                    {
+                        "path": _CALCULATOR_TEST_PATH,
+                        "content": content,
+                        "expected_sha256": (
+                            hashlib.sha256(test_before.encode()).hexdigest()
+                            if test_before is not None
+                            else None
+                        ),
+                    },
+                    depends_on=("source",) if "source" in {step.step_id for step in steps} else (),
+                    required_risk=operator.LOCAL_WRITE,
+                )
+            )
+            staged.append(_CALCULATOR_TEST_PATH)
+
+    if not steps:
+        # Everything this task asks for is already present (an earlier task delivered it, or
+        # this exact task is being retried after a crash). Verify the existing work instead of
+        # inventing an empty commit -- `commit_scoped_changes` correctly refuses one.
+        return PlanCandidate(
+            interpretation=interpretation,
+            requested_outcome=requested_result,
+            rationale=(
+                rationale
+                + " The requested change is already present in this worktree, so this attempt "
+                "re-verifies it instead of duplicating it."
+            ),
+            facts=(f"The requested {operation} change is already present.",),
+            assumptions=(f"{_CALCULATOR_TEST_PATH} is an authorized path.",),
+            exclusions=("No merge, deploy, push, dependency installation, or unrelated edits.",),
+            steps=(
+                CandidateStep(
+                    "verify",
+                    "re-run the existing focused test",
+                    "pytest exit zero",
+                    "run_focused_test",
+                    {"profile_name": "focused_pytest", "arguments": [_CALCULATOR_TEST_PATH]},
+                    required_risk=operator.LOCAL_EXECUTION,
+                    verification_required=True,
+                ),
+                CandidateStep(
+                    "gate",
+                    "evaluate required deterministic evidence",
+                    "verification checkpoint",
+                    "verification_evaluate",
+                    depends_on=("verify",),
+                ),
+            ),
+        )
+
+    allowed_capabilities = set(operator_context.allowed_capabilities or ()) if operator_context is not None else set()
+    # Committing is what makes this task's verified work survive the NEXT task's fresh-claim
+    # worktree reset -- but it is a real capability the founder must have authorized. An
+    # envelope that does not include it gets the previous, uncommitted shape rather than an
+    # OUT_OF_SCOPE refusal: the recipe never assumes authority it was not given.
+    can_commit = not allowed_capabilities or {
+        "stage_scoped_changes",
+        "commit_scoped_changes",
+    }.issubset(allowed_capabilities)
+
+    if _CALCULATOR_TEST_PATH in staged:
+        verify_capability = "run_focused_test"
+        verify_result = "pytest exit zero"
+        verify_arguments = {"profile_name": "focused_pytest", "arguments": [_CALCULATOR_TEST_PATH]}
+    else:
+        # Source-only task: the focused test is the plan's NEXT task, so this one verifies the
+        # file it actually changed instead of skipping verification or inventing a test.
+        verify_capability = "run_static_check"
+        verify_result = "static check exit zero"
+        verify_arguments = {"profile_name": "ruff_check", "arguments": [_CALCULATOR_SOURCE_PATH]}
+    steps.append(
+        CandidateStep(
+            "verify",
+            f"verify the changed {operation} work",
+            verify_result,
+            verify_capability,
+            verify_arguments,
+            depends_on=(steps[-1].step_id,),
+            required_risk=operator.LOCAL_EXECUTION,
+            verification_required=True,
+        )
+    )
+    steps.append(
+        CandidateStep(
+            "gate",
+            "evaluate required deterministic evidence",
+            "verification checkpoint",
+            "verification_evaluate",
+            depends_on=("verify",),
+        )
+    )
+    if can_commit:
+        steps.append(
+            CandidateStep(
+                "stage",
+                "stage scoped changes",
+                "staged diff",
+                "stage_scoped_changes",
+                {"paths": staged},
+                depends_on=("gate",),
+                required_risk=operator.LOCAL_WRITE,
+            )
+        )
+        if scope == "source":
+            message = f"Add {operation} helper"
+        elif scope == "test":
+            message = f"Add focused {operation} test"
+        else:
+            message = f"Add {operation} helper and its focused test"
+        steps.append(
+            CandidateStep(
+                "commit",
+                "commit scoped changes",
+                "commit sha",
+                "commit_scoped_changes",
+                {"message": message},
+                depends_on=("stage",),
+                required_risk=operator.LOCAL_WRITE,
+            )
+        )
+    return PlanCandidate(
+        interpretation=interpretation,
+        requested_outcome=requested_result,
+        rationale=rationale,
+        facts=(f"The requested behavior is deterministic integer {operation}.",),
+        assumptions=("calculator.py and test_calculator.py are authorized paths.",),
+        exclusions=("No merge, deploy, push, dependency installation, or unrelated edits.",),
+        steps=tuple(steps),
+    )
+
+
+def deterministic_candidate(
+    instruction: str, operator_context=None, *, requested_outcome: str | None = None
+) -> PlanCandidate | None:
     """A tiny explicit recipe registry, not semantic inference or a generic prose executor.
 
     Only the historical subtract recipe is matched here so `plan_with_provider()` planning_mode
     continues to require provider assistance for ordinary multiplication goals. Gap-child
-    handoff uses `build_multiplication_repair_candidate()` directly."""
-    del operator_context  # reserved for callers that already selected a concrete recipe
+    handoff uses `build_multiplication_repair_candidate()` directly.
+
+    `requested_outcome` is the TASK's own description (see `_recipe_scope()`); it narrows which
+    of the recipe's bounded steps this task performs, never what it is allowed to touch.
+    """
     normalized = " ".join(instruction.lower().split())
     if "calculator" not in normalized or "subtract" not in normalized or "focused test" not in normalized:
         return None
-    source = "def subtract(left, right):\n    return left - right\n"
-    test = "from calculator import subtract\n\ndef test_subtract():\n    assert subtract(7, 2) == 5\n"
-    return PlanCandidate(
+    return _calculator_recipe_candidate(
+        operation="subtract",
+        operator_context=operator_context,
+        requested_outcome=requested_outcome,
         interpretation="Add one deterministic integer subtraction helper and its focused test.",
-        requested_outcome="A verified subtract helper in the authorized disposable repository.",
+        requested_result="A verified subtract helper in the authorized disposable repository.",
         rationale="Use the registered bounded calculator recipe; change only source and focused test.",
-        facts=("The requested behavior is deterministic integer subtraction.",),
-        assumptions=("calculator.py and test_calculator.py are authorized new paths.",),
-        exclusions=("No merge, deploy, push, dependency installation, or unrelated edits.",),
-        steps=(
-            CandidateStep("source", "create subtraction helper", "source hash", "create_file", {"path": "calculator.py", "content": source, "expected_sha256": None}, required_risk=operator.LOCAL_WRITE),
-            CandidateStep("test", "create focused subtraction test", "test hash", "create_file", {"path": "test_calculator.py", "content": test, "expected_sha256": None}, depends_on=("source",), required_risk=operator.LOCAL_WRITE),
-            CandidateStep("verify", "run focused subtraction test", "pytest exit zero", "run_focused_test", {"profile_name": "focused_pytest", "arguments": ["test_calculator.py"]}, depends_on=("test",), required_risk=operator.LOCAL_EXECUTION, verification_required=True),
-            CandidateStep("verification-gate", "evaluate required deterministic evidence", "verification checkpoint", "verification_evaluate", depends_on=("verify",)),
-        ),
     )
 
 
 def build_multiplication_repair_candidate(operator_context=None) -> PlanCandidate:
     """Bounded *demo* multiply repair recipe for the autonomous-gap live handoff.
 
-    Proves envelope → WorkBinding → registered PlanCandidate wiring. Requires the effective
+    Proves envelope -> WorkBinding -> registered PlanCandidate wiring. Requires the effective
     OperatorContext path envelope to already authorize both `calculator.py` and
     `test_calculator.py`; never silently broadens authority to write the test file.
+
+    Deliberately NOT task-scoped (F2 scoping applies to `deterministic_candidate()`, the
+    ordinary plan path): a repair child is created from a real failure and must produce the
+    whole fix, so narrowing it to "only the source" or "only the test" could leave the failure
+    in place. The write is still cumulative -- an existing helper/test is preserved, never
+    rewritten.
     """
     required_paths = ("calculator.py", "test_calculator.py")
     if operator_context is not None:
@@ -618,101 +905,13 @@ def build_multiplication_repair_candidate(operator_context=None) -> PlanCandidat
                 "multiplication_repair requires calculator.py and test_calculator.py in the "
                 "effective OperatorContext path envelope; refusing to broaden binding scope"
             )
-    test = (
-        "from calculator import multiply\n\n"
-        "def test_multiply():\n"
-        "    assert multiply(3, 4) == 12\n"
-    )
-    original = "def add(left, right):\n    return left + right\n"
-    test_exists = False
-    test_before = None
-    if operator_context is not None:
-        calc = operator_context.repository_root / "calculator.py"
-        if calc.is_file():
-            original = calc.read_text(encoding="utf-8")
-        test_path = operator_context.repository_root / "test_calculator.py"
-        if test_path.is_file():
-            test_exists = True
-            test_before = hashlib.sha256(test_path.read_bytes()).hexdigest()
-    if "def multiply" in original and "return left * right" in original:
-        updated = original
-    elif "def multiply" in original:
-        updated = original.split("def multiply", 1)[0].rstrip() + (
-            "\n\ndef multiply(left, right):\n    return left * right\n"
-        )
-    else:
-        updated = original.rstrip() + "\n\ndef multiply(left, right):\n    return left * right\n"
-    expected = hashlib.sha256(original.encode()).hexdigest()
-    test_step = CandidateStep(
-        "test",
-        "create or repair focused multiplication test",
-        "test hash",
-        "patch_file" if test_exists else "create_file",
-        {
-            "path": "test_calculator.py",
-            "content": test,
-            "expected_sha256": test_before,
-        },
-        depends_on=("patch",),
-        required_risk=operator.LOCAL_WRITE,
-    )
-    return PlanCandidate(
+    return _calculator_recipe_candidate(
+        operation="multiply",
+        operator_context=operator_context,
+        requested_outcome=None,
         interpretation="Add one deterministic integer multiplication helper and its focused test.",
-        requested_outcome="A verified multiply helper in the authorized disposable repository.",
+        requested_result="A verified multiply helper in the authorized disposable repository.",
         rationale="Use the registered bounded calculator multiplication recipe.",
-        facts=("The requested behavior is deterministic integer multiplication.",),
-        assumptions=("calculator.py already exists; test_calculator.py is an authorized path.",),
-        exclusions=("No merge, deploy, push, dependency installation, or unrelated edits.",),
-        steps=(
-            CandidateStep(
-                "patch",
-                "append or repair multiplication helper",
-                "source hash",
-                "patch_file",
-                {
-                    "path": "calculator.py",
-                    "content": updated,
-                    "expected_sha256": expected,
-                },
-                required_risk=operator.LOCAL_WRITE,
-            ),
-            test_step,
-            CandidateStep(
-                "verify",
-                "run focused multiplication test",
-                "pytest exit zero",
-                "run_focused_test",
-                {"profile_name": "focused_pytest", "arguments": ["test_calculator.py"]},
-                depends_on=("test",),
-                required_risk=operator.LOCAL_EXECUTION,
-                verification_required=True,
-            ),
-            CandidateStep(
-                "gate",
-                "evaluate required deterministic evidence",
-                "verification checkpoint",
-                "verification_evaluate",
-                depends_on=("verify",),
-            ),
-            CandidateStep(
-                "stage",
-                "stage scoped changes",
-                "staged diff",
-                "stage_scoped_changes",
-                {"paths": ["calculator.py", "test_calculator.py"]},
-                depends_on=("gate",),
-                required_risk=operator.LOCAL_WRITE,
-            ),
-            CandidateStep(
-                "commit",
-                "commit scoped changes",
-                "commit sha",
-                "commit_scoped_changes",
-                {"message": "Add multiplication helper"},
-                depends_on=("stage",),
-                required_risk=operator.LOCAL_WRITE,
-            ),
-        ),
     )
 
 
@@ -726,7 +925,9 @@ def plan_founder_request(db, *, request, operator_context, candidate=None):
         cp = _checkpoint(db, request, goal, task, "UNSAFE_REQUEST", detail)
         return PlanningResult("UNSAFE_REQUEST", detail, checkpoint_id=cp.id)
     selected = candidate or deterministic_candidate(
-        request.original_instruction, operator_context
+        request.original_instruction,
+        operator_context,
+        requested_outcome=request.requested_outcome,
     )
     if selected is None:
         goal, task, _ = _load_scope(db, request)

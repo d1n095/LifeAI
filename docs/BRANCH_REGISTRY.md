@@ -6,6 +6,36 @@ manuella motsvarigheten till vad MainAI själv ska kunna göra en dag (se `CLAUD
 varje gång en branch/PR skapas, mergas, stängs eller fryses, eller när en konflikt/risk för
 dubbelarbete upptäcks — se `CLAUDE.md`s "Branch Registry"-avsnitt för när.
 
+
+## F2 — task-scopat, kumulativt recept (2026-11-27)
+
+**Branch:** `freebuff/task-scoped-recipe-20261127`, bas `freebuff/governed-execution-park-20261127`
+(`09ed1bf8`). **Beroende:** F1+F7 måste mergas före denna. `first_cycle_go=false`, ingen
+merge/deploy.
+
+**Vad:** det deterministiska receptet (`app/safe_planner/service.py`) var **målscopat**: varje
+`repo_edit` under ett mål skrev samma två filer, så en plan med "implementera funktionen" följt
+av "lägg till fokustestet" upprepade första taskens arbete. Nu väljer taskens egen strukturerade
+beskrivning (`MainAITask.description` → `requested_outcome`) vilken av receptets redan bundna
+halvor som körs: implementation → endast `calculator.py` (verifieras med `ruff_check`),
+fokustest → endast `test_calculator.py` (append/upsert, befintliga tester bevaras, verifieras med
+`focused_pytest`). Utan beskrivning, eller när den nämner båda, behålls föregående fulla ändring.
+
+Kumulativt: en funktion/test som redan finns *rättas* på plats (bunden ersättning av just den
+definitionen) i stället för att dupliceras, och en task vars arbete redan är levererat blir en
+verifierad no-op (inget tomt commit). Om envelopen auktoriserar `stage_scoped_changes` +
+`commit_scoped_changes` avslutas receptet med stage+commit — det är vad som gör att taskens
+verifierade arbete överlever nästa tasks worktree-reset; utan de behörigheterna behålls den
+tidigare icke-committande formen i stället för att vägra. Reparationsreceptet
+(`build_multiplication_repair_candidate`) är medvetet INTE task-scopat: en reparation ska laga
+hela felet. Beskrivningen styr bara vilka steg som körs, aldrig behörighet — varje väg valideras
+fortfarande mot envelopen.
+
+Tester: 9 nya i `tests/backend/mainai/test_task_scoped_recipe.py`; 111 gröna tillsammans med
+safe-planner-, gap-, driver- och supervisor-sviterna (inkl. att en felaktig `multiply` fortfarande
+repareras och att en smal envelope fortfarande vägras).
+
+
 ## Nattarbete: F1 + F7 som en sammanhängande säkerhetskorrigering (2026-11-27)
 
 **Ny branch: `freebuff/governed-execution-park-20261127`** (bas:
