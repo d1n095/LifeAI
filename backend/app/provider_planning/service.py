@@ -44,12 +44,33 @@ class ProviderPlanningError(RuntimeError):
     pass
 
 
+# Local inference runs on the same CPU as the worker. Measured on the 2026-11-27 local stack
+# (llama3.1, 8 cores): ~22 prompt tokens/s and ~6.5 generated tokens/s, i.e. one complete Safe
+# Planner candidate costs 3-5 minutes. The hosted 60 s default would time out on every single
+# call and park the task as WAITING_PROVIDER even though the model was answering correctly --
+# measured twice before this bound existed. The local floor is deliberately generous and still
+# bounded; it is never applied to a non-local deployment, and it can never lower an explicitly
+# configured longer budget.
+LOCAL_ONLY_PLANNING_TIMEOUT_SECONDS = 900
+
+
 @dataclass(frozen=True)
 class ProviderPlanningLimits:
     max_candidates: int = 3
     max_payload_bytes: int = 32_000
     max_output_bytes: int = 64_000
     timeout_seconds: int = 60
+
+    @classmethod
+    def from_settings(cls) -> "ProviderPlanningLimits":
+        """The budget for this deployment -- local inference gets its own latency class."""
+        from app.config import get_settings
+
+        settings = get_settings()
+        timeout = max(1, int(settings.provider_planning_timeout_seconds))
+        if settings.local_only_mode:
+            timeout = max(timeout, LOCAL_ONLY_PLANNING_TIMEOUT_SECONDS)
+        return cls(timeout_seconds=timeout)
 
 
 @dataclass(frozen=True)
@@ -625,7 +646,7 @@ async def plan_with_provider(
     model: str | None = None,
     limits: ProviderPlanningLimits | None = None,
 ):
-    limits = limits or ProviderPlanningLimits()
+    limits = limits or ProviderPlanningLimits.from_settings()
     mode, terminal = planning_mode(db, request)
     if terminal:
         return terminal

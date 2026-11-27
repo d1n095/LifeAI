@@ -149,6 +149,15 @@ class Settings(BaseSettings):
     # Active provider (can be overridden at runtime via admin API -> DB config)
     default_llm_provider: str = "openai"
     default_llm_model: str = "gpt-4o-mini"
+
+    # Budget for ONE provider-assisted Safe Planner call. A hosted API answers in seconds;
+    # a local-only deployment runs inference on the same CPU as the worker, which is a
+    # different latency class entirely. Measured on the 2026-11-27 local stack: llama3.1
+    # evaluates ~22 prompt tokens/s and generates ~6.5 tokens/s, so one complete candidate
+    # takes 3-5 minutes. This is the hosted default; in LOCAL_ONLY_MODE the effective bound is
+    # raised to LOCAL_ONLY_PLANNING_TIMEOUT_SECONDS (app/provider_planning/service.py) and is
+    # never lowered below this value.
+    provider_planning_timeout_seconds: int = 60
     default_embedding_provider: str = "openai"
     default_embedding_model: str = "text-embedding-3-small"
 

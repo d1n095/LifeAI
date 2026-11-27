@@ -29,6 +29,7 @@ def _settings(monkeypatch, **values):
         default_llm_provider=values.get("provider", "ollama"),
         default_llm_model=values.get("model", "llama3.1"),
         local_only_mode=values.get("local_only", True),
+        provider_planning_timeout_seconds=values.get("planning_timeout", 60),
     )
     monkeypatch.setattr("app.config.get_settings", lambda: stub)
     return stub
@@ -78,6 +79,31 @@ def test_incomplete_configuration_resolves_to_nothing(monkeypatch, provider, mod
 
     assert adapter.provider_name is None
     assert adapter.model is None
+
+
+def test_local_inference_gets_its_own_planning_latency_class(monkeypatch):
+    """Measured 2026-11-27: one complete local candidate costs 3-5 minutes.
+
+    The hosted 60 s default timed out on every call, parking correctly-answered work as
+    WAITING_PROVIDER. LOCAL_ONLY_MODE therefore raises the bound; a non-local deployment keeps
+    exactly what an operator configured.
+    """
+    _settings(monkeypatch, local_only=True, planning_timeout=60)
+    local = provider_planning_service.ProviderPlanningLimits.from_settings()
+    assert local.timeout_seconds == provider_planning_service.LOCAL_ONLY_PLANNING_TIMEOUT_SECONDS
+
+    _settings(monkeypatch, local_only=False, planning_timeout=60)
+    hosted = provider_planning_service.ProviderPlanningLimits.from_settings()
+    assert hosted.timeout_seconds == 60
+
+
+@pytest.mark.parametrize("configured", [60, 900, 1800])
+def test_a_configured_budget_is_never_lowered(monkeypatch, configured):
+    _settings(monkeypatch, local_only=True, planning_timeout=configured)
+
+    limits = provider_planning_service.ProviderPlanningLimits.from_settings()
+
+    assert limits.timeout_seconds == max(configured, provider_planning_service.LOCAL_ONLY_PLANNING_TIMEOUT_SECONDS)
 
 
 def test_local_only_helper_exposes_the_enforced_set():
