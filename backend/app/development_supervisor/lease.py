@@ -230,3 +230,51 @@ def release_supervisor_goal_lease(db: Session, *, lease_id: uuid.UUID, worker_id
             event_type="released",
         )
     return True
+
+
+_RELEASE_PREVIOUS_PROCESS_SQL = text("""
+    UPDATE supervisor_goal_leases
+    SET status = 'released', released_at = now()
+    WHERE worker_id = :worker_id AND status = 'active'
+    RETURNING id, owner_id, goal_id, lease_generation
+""")
+
+
+def release_supervisor_goal_leases_from_previous_process(db: Session, *, worker_id: str) -> int:
+    """T1 (measured 2026-11-27): a `kill -9` of the worker mid-tick leaves the goal's lease
+    `active` for the full TTL (3 600 s), because a dead process never reaches the `except`
+    release F7 added -- F7 only covers ticks that RAISE. Nothing about the work itself is
+    duplicated (the fencing below guarantees that), but the goal cannot be picked up again for
+    up to an hour, which is exactly the unattended recovery the nightly loop depends on.
+
+    Called ONCE per process, before this process has claimed any lease at all, for leases held
+    by THIS worker identity. Every such row was acquired by a previous process: this process
+    cannot own a lease it has not claimed yet. Releasing them is therefore not a guess about
+    liveness -- it is the new process stating the only thing it can prove about itself.
+
+    Any other worker's lease is deliberately untouched: this function must never decide that a
+    DIFFERENT identity is dead (that needs a liveness signal this codebase does not have; the
+    TTL remains the bound for that case).
+
+    Losing the lease is safe for the previous process even if it somehow still runs: every
+    fenced write (`renew_...`, `release_...`, and the Operator's own supervisor-lease check)
+    requires the exact `(worker_id, lease_generation)` on a row whose status is still `active`,
+    so it fails closed instead of writing under authority it no longer holds. Runs on the
+    worker's superuser claim session, like the other cross-owner maintenance ticks, and does
+    NOT commit -- the caller decides the transaction boundary.
+
+    Returns the number of leases actually released (0 is the normal, healthy case).
+    """
+    rows = db.execute(_RELEASE_PREVIOUS_PROCESS_SQL, {"worker_id": worker_id}).all()
+    for lease_id, owner_id, goal_id, lease_generation in rows:
+        _record_lease_event(
+            db,
+            owner_id=uuid.UUID(str(owner_id)),
+            goal_id=uuid.UUID(str(goal_id)),
+            lease_id=uuid.UUID(str(lease_id)),
+            worker_id=worker_id,
+            lease_generation=int(lease_generation),
+            event_type="released",
+            detail={"reason": "worker_process_restarted"},
+        )
+    return len(rows)

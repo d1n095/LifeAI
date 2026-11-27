@@ -39,6 +39,7 @@ from app.account.erasure import attempt_storage_deletion_task, claim_storage_del
 from app.agent_coordination.service import expire_stale_active_leases
 from app.config import get_settings
 from app.db import SessionLocal, migration_engine
+from app.development_supervisor.lease import release_supervisor_goal_leases_from_previous_process
 from app.development_supervisor.production_entry import eligible_authorized_goals, run_authorized_goal_supervisor_tick
 from app.jobs.handlers.corpus_review import run_corpus_review_job
 from app.jobs.handlers.message_sequence_backfill import MESSAGE_SEQUENCE_BACKFILL_JOB_TYPE, run_message_sequence_backfill_job
@@ -244,6 +245,9 @@ class Worker:
         self.settings = get_settings()
         self.worker_id = _worker_id(self.settings)
         self._shutdown = asyncio.Event()
+        # T1: released on the first poll cycle, before this process can have claimed any goal
+        # lease of its own -- see `_release_supervisor_leases_from_previous_process`.
+        self._previous_process_leases_released = False
 
     def request_shutdown(self) -> None:
         # Graceful: only stops the loop from claiming a NEW job — a job already claimed and
@@ -754,6 +758,37 @@ class Worker:
             db.rollback()
             logger.exception("Worker %s: failed to resolve engineering lesson conflicts.", self.worker_id)
 
+    def _release_supervisor_leases_from_previous_process(self, db: Session) -> None:
+        """T1: a killed worker never reaches F7's `except` release, so its goal lease stays
+        `active` for the whole TTL and that goal cannot be picked up again for up to an hour.
+        On the FIRST poll cycle -- before this process has claimed anything -- release the goal
+        leases held by this same worker identity: they necessarily belong to a previous
+        process. Other worker identities are untouched (their TTL remains the bound), and the
+        fenced lease writes make a supposedly-dead previous process fail closed if it somehow
+        still runs. See `release_supervisor_goal_leases_from_previous_process`.
+
+        Runs once; a transient DB failure is retried on the next cycle rather than silently
+        skipping the reconciliation for the lifetime of the process.
+        """
+        if self._previous_process_leases_released:
+            return
+        try:
+            released = release_supervisor_goal_leases_from_previous_process(db, worker_id=self.worker_id)
+            db.commit()
+        except Exception:  # noqa: BLE001 - startup cleanup must never stop the poll loop
+            db.rollback()
+            logger.exception(
+                "Worker %s: kunde inte släppa mål-leases från en tidigare process.", self.worker_id
+            )
+            return
+        self._previous_process_leases_released = True
+        if released:
+            logger.warning(
+                "Worker %s: släppte %d mål-lease(s) som en tidigare process lämnade aktiva.",
+                self.worker_id,
+                released,
+            )
+
     def _expire_stale_agent_scope_leases(self, db: Session) -> None:
         """Runtime clock for AgentScopeLease TTL: status=active + expires_at < now must not
         permanently block PATH_CONFLICT / inventory forever. Bounded release via
@@ -812,6 +847,7 @@ class Worker:
         single-job-at-a-time budget."""
         claim_db = _ClaimSession()
         try:
+            self._release_supervisor_leases_from_previous_process(claim_db)
             await self._requeue_blocked_jobs(claim_db)
             self._reconcile_orphaned_documents(claim_db)
             self._retry_storage_deletion_tasks(claim_db)

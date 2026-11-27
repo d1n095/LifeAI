@@ -27,6 +27,7 @@ from sqlalchemy import text as sa_text
 from app.development_supervisor.lease import (
     claim_supervisor_goal_lease,
     release_supervisor_goal_lease,
+    release_supervisor_goal_leases_from_previous_process,
 )
 from app.execution_envelopes import authorize_execution_scope, propose_execution_scope
 from app.founder import FOUNDER_USER_ID
@@ -280,6 +281,77 @@ def test_the_event_history_is_append_only_at_the_database_layer(db_session, goal
 
     assert len(_events(db_session, goal)) == 1
     assert claim is not None
+
+
+def _another_goal_with_envelope(db):
+    """A second goal for the same owner, so a test can hold two leases from two identities."""
+    _set_rls_user(db)
+    goal = create_goal(
+        db,
+        owner_id=FOUNDER_USER_ID,
+        title="lease restart other goal",
+        original_instruction="edit a file",
+        created_by="test",
+    )
+    proposal = propose_execution_scope(
+        db,
+        owner_id=FOUNDER_USER_ID,
+        goal_id=goal.id,
+        idempotency_key=f"lease-restart-proposal-{uuid.uuid4()}",
+        proposed_paths=["README.md"],
+        proposed_capabilities=["read_file"],
+        proposed_risk="low",
+    )
+    _, envelope = authorize_execution_scope(
+        db,
+        owner_id=FOUNDER_USER_ID,
+        proposal_id=proposal.id,
+        authorized_by="founder",
+        authorized_paths=["README.md"],
+        authorized_capabilities=["read_file"],
+        authorized_risk="low",
+        envelope_idempotency_key=f"lease-restart-envelope-{uuid.uuid4()}",
+    )
+    db.commit()
+    return goal, envelope
+
+
+def test_a_restarted_process_releases_only_its_own_previous_leases(db_session, goal_with_envelope):
+    """T1: a `kill -9` never reaches F7's release, so the goal stays leased for the TTL.
+
+    On startup the new process releases the leases held by its OWN worker identity (it cannot
+    have claimed any yet), writes the release to the append-only history, and leaves every
+    other identity's lease exactly as it was -- that case is still bounded by the TTL, not
+    guessed about.
+    """
+    goal_a, envelope_a = goal_with_envelope
+    goal_b, envelope_b = _another_goal_with_envelope(db_session)
+
+    claim_a = _claim(db_session, goal_a, envelope_a, worker="worker-a")
+    claim_b = _claim(db_session, goal_b, envelope_b, worker="worker-b")
+    db_session.commit()
+    assert claim_a is not None and claim_b is not None
+
+    released = release_supervisor_goal_leases_from_previous_process(db_session, worker_id="worker-a")
+    db_session.commit()
+    assert released == 1
+
+    assert _lease_rows(db_session, goal_a)[0].status == "released"
+    assert _lease_rows(db_session, goal_b)[0].status == "active"
+
+    _set_rls_user(db_session)
+    detail = db_session.execute(
+        sa_text(
+            "SELECT detail->>'reason' FROM supervisor_goal_lease_events "
+            "WHERE goal_id = :g AND event_type = 'released'"
+        ),
+        {"g": str(goal_a.id)},
+    ).scalar_one()
+    assert detail == "worker_process_restarted"
+
+    # The restarted process can immediately run this goal again; the other one still blocks it.
+    assert _claim(db_session, goal_a, envelope_a, worker="worker-a") is not None
+    assert _claim(db_session, goal_b, envelope_b, worker="worker-a") is None
 
 
 def test_authorized_owner_erasure_removes_both_the_lease_and_its_history(db_session, goal_with_envelope):
