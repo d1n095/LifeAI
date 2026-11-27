@@ -9780,3 +9780,18 @@ Remote R15 checkpoint still equals the supplied SHA; no newer R15 head was adver
 Independent security acceptance remains external; `first_cycle_go=false`. No deployment or provider activation.
 
 Draft [PR #464](https://github.com/d1n095/LifeAI/pull/464) carries the isolated R15/#463 candidate against the exact transfer checkpoint. #463 stays frozen at `dbd7680d`; Freebuff R15 and Z.ai source heads were rechecked unchanged. Final targeted reply/nonce/intent/accounting regressions pass (48); full exact-head CI and independent acceptance remain separate gates. No merge/deploy/provider activation.
+
+## Freebuff lokal Founder Alpha-verifiering 2026-11-26 (nya VPS:en)
+
+Branch `freebuff/founder-projects-in-status-20261126`, bas `b313c9df` (installerad stagingbas).
+En commit `7ae02316`: chattens projektstatusblock listar grundarens egna projekt (ägarskopt till
+`created_by`) i stället för att bara räkna MainAI-mål — frågan "vilka projekt finns?" besvarades
+tidigare med "inga projekt" medan `/api/projects` hade ett. Regressionstest i
+`backend/tests/backend/test_project_status_work_chain.py`; 11 passed på egen disposable databas.
+Verifierad isolerad stack utan docker (Postgres 16.2 + pgvector 0.6.2, Redis 6.2, riktig Ollama
+0.40.18 med `llama3.1` + `nomic-embed-text`) enbart på 127.0.0.1 — recept i
+`delivery/founder-projects-in-status/local-stack-recipe.md`.
+Inte pushad: sandlådan saknar GitHub-credentials. Ingen merge, ingen deployment, ingen ändring av
+staging eller POLICY_LOCK; `first_cycle_go=false`.
+A08 oförändrat: samma 1 `changed control` (`real-local-ai-verification.yml`) på `b313c9df`, kräver
+Z.ai:s granskade låsregenerering i samma commit.
