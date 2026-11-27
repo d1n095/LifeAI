@@ -41,7 +41,7 @@ uppdaterat F7-regressionsprov (park + släppt lease + inget nytt jobb på nästa
 
 **Status:** verifierad lokalt (relevanta sviter gröna, ruff rent) och med verkligt E2E i den
 isolerade stacken. Pushad till `origin/freebuff/governed-execution-park-20261127`
-(`a124ba7d`), ej mergad, ej deployad; `first_cycle_go=false` oförändrat. Den isolerade
+(kod-commit `daa09f80`), ej mergad, ej deployad; `first_cycle_go=false` oförändrat. Den isolerade
 stacken är återställd till den verifierade kandidaten `85a1c10e` — branchen är inte aktiverad
 där.
 
