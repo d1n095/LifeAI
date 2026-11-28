@@ -1,0 +1,86 @@
+Modellassisterad planering i verklig körning — evidens 2026-11-28
+=================================================================
+
+Miljö: isolerad lokal stack (Postgres 127.0.0.1:55432/lifeai_dev, Redis :56381/0, Ollama
+127.0.0.1:11434 med llama3.1), backend `start-backend.sh` + exakt en worker `start-worker.sh`
+från /home/lifeai-security/lifeai-local-stack/repo. Drivrutin:
+`delivery/bootstrap-integration/e2e-provider.py`. Ingen produktionsdeployment; POLICY_LOCK och
+first_cycle_go=false orörda.
+
+Körning A — mål 2c625ab4-eb50-44fc-b4f8-eb5e91f24861, kandidat c672d9cb (06:14–06:25)
+---------------------------------------------------------------------------------------
+Sekventiell tvåuppgiftsplan genom den riktiga planeraren (samma `planner.create_plan` som
+routen använder); allt innehåll och alla steg kom från modellen.
+
+  dc156167 repo_edit  Skapa note_tools.py ...        completed attempts=1
+           events: approval_granted, completed, created, dispatched, ready, verification_passed
+  d9e52343 repo_edit  Skapa test_note_tools.py ...   completed attempts=1
+           events: approval_granted, completed, created, dispatched, ready, verification_passed
+  goal status = completed
+
+  provider_planning: dc156167 ACCEPTED ollama/llama3.1 100236 ms
+                     d9e52343 ACCEPTED ollama/llama3.1 107359 ms
+  provider_spend:    settled ollama/llama3.1, 416 resp. 439 completion tokens, cost 0.000000
+
+MÅL UPPNÅTT MEN ARBETET VAR INTE BESTÄNDIGT. Worktreen innehöll:
+
+  ?? note_tools.py       -> "def slugify(text: str) -> str: ..."
+  ?? test_note_tools.py  -> "import pytest\nfrom note_tools import slugify\n\ndef test_slugify(): ..."
+
+Två riktiga fel, båda åtgärdade i 798221f1:
+ 1. Modellen skrev platshållare i stället för komplett kod.
+ 2. Målet rapporterade completed medan inget var committat; nästa tasks worktree-reset hade
+    kastat arbetet. Drivrutinen faller nu closed som VERIFICATION_REQUIRED när en plan skrivit
+    filer utan att committa (via den befintliga reparationsvägen).
+
+Körning B — mål 293c8c74-dff8-4a3b-a490-fb819566c49d, kandidat 798221f1 (07:11–07:18)
+------------------------------------------------------------------------------------
+Modellens plan lade commit före sitt verifieringssteg. Operatorn kräver ett passerat
+verifierings-checkpoint före commit, så `OperatorVerificationRequired` kastades rakt ut ur
+`run_driver`. Workern loggade
+
+  ERROR mainai.worker: Worker ubuntu: failed to advance authorized Supervisor goal 293c8c74...
+  Traceback ... development_operator/service.py line 1287 in commit_changes
+  app.development_operator.service.OperatorVerificationRequired
+
+var ~2,3 sekund (41 förekomster) medan tasken stod kvar som `running` (attempts=3). Åtgärdat i
+6dabe546: undantaget fångas och blir VERIFICATION_REQUIRED; planerarprompten anger ordningen
+skriv -> test -> verifiering -> stage -> commit. Efter omstart på 6dabe546 finns inga nya
+"failed to advance" (sista 07:18:44, före omstarten).
+
+Körning C — mål 4819906b-7a85-4cd5-9e4a-8ac3e1fd5c2a, kandidat 6dabe546 (07:20–07:52)
+------------------------------------------------------------------------------------
+  task 498bcaae (Skapa note_tools.py ...)  -> blocked
+     plan: create_file note_tools.py (succeeded), create_file test_note_tools.py (succeeded),
+           run_focused_test (failed)  -> FAILED_NONRETRYABLE
+     pytest-utdata (work_trace_events b2aec0e7): "ERROR collecting test_note_tools.py"
+     dvs. modellens egen kod importerades inte rent.
+  repair-barn: 13d9a3dc, 976435db, 014aa8b0
+     beskrivningarna nästlas: "Repair the verification failure blocking: Repair the ..."
+  provider_planning: 498bcaae ACCEPTED 168093 ms, 13d9a3dc ACCEPTED 128710 ms,
+                     976435db ACCEPTED 154540 ms
+  provider_spend:    4 settled (696, 533, 680, 625 completion tokens), cost 0
+  goal status = running när körningen stoppades manuellt
+
+Worktreen efter körningen är ren på 6dabe546: note_tools.py och test_note_tools.py finns inte
+längre. Orsaken är dokumenterad i `production_entry.py`: en FRESH claim återställer mål-worktreen
+till senaste rena commit, och en reparationsbarn-task är en ny claim. Förälderns ocommittade kod
+(från ett plan som föll på teststeget) kastas därför innan barnet hinner reparera den.
+
+KVARVARANDE BLOCKERARE (en, tydligt avgränsad)
+----------------------------------------------
+En verifieringsmisslyckad task kan inte repareras i praktiken: barnet börjar från en ren
+worktree, så den kod som faktiskt misslyckades är borta, och beskrivningen nästlas för varje
+generation. Det är inte en modellfråga i första hand — kedjan behöver bevara det misslyckade
+tillståndet för barnet (t.ex. capture-commit före reset, eller ingen reset för
+reparationsbarn vars operator ändå fail-closed:ar på oväntad before_sha256) och bygga
+barnets beskrivning från rotorsaken i stället för från förälderns text.
+
+MODELLENS FAKTISKA FÖRMÅGA (mätt, inte gissat)
+----------------------------------------------
+* En planeringscall tar 100–170 s på 8 kärnor; kuvertet valideras och ACCEPTED av Safe Planner
+  varje gång i dessa körningar; spend settles korrekt, cost 0 (lokal modell).
+* llama3.1 producerar giltig JSON men inte tillförlitligt komplett, körbar kod: platshållare
+  (`...`) i körning A och en collection error i körning C. Modellens kodkvalitet — inte
+  planerings-, budget- eller behörighetskedjan — är den kvarvarande flaskhalsen för verkliga
+  utvecklingsuppgifter.

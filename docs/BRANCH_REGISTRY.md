@@ -68,6 +68,21 @@ icke-blockerande. Pushad till `origin/freebuff/bootstrap-integration-20261127`; 
 verifieras med `git ls-remote`. Stacken är återställd till den tidigare verifierade kandidaten
 `85a1c10e` efter körningarna.
 
+**Modellassisterad planering i verklig körning (2026-11-28):** tre fixar på grenen, alla
+pushade och verifierade — `798221f1` (drivrutinen vägrar rapportera lyckat arbete som aldrig
+committats; planerarprompten kräver komplett kod och stage/commit), `6dabe546` (ett
+felordnat `commit`-steg kraschade workern i en oändlig "failed to advance"-loop var ~2,3 s;
+fångas nu som `VERIFICATION_REQUIRED`). Evidens:
+`delivery/bootstrap-integration/evidence/e2e-provider-20261128.txt`. Tre körningar visade att
+planerings-, budget- och behörighetskedjan fungerar (kuvert ACCEPTED, spend settled, två tasks
+completed med `verification_passed` i en körning) men också **en kvarvarande blockerare**: en
+verifieringsmisslyckad tasks reparationsbarn börjar från en ren worktree (fresh claim återställer
+till senaste rena commit), så den kod som misslyckades är borta när barnet ska reparera den, och
+barnets beskrivning nästlas för varje generation. Det ska lösas genom att bevara det misslyckade
+tillståndet för barnet (capture-commit före reset, eller ingen reset för reparationsbarn) och
+bygga beskrivningen från rotorsaken — inte genom att lätta på verifieringen. Modellens
+kodkvalitet (llama3.1: platshållare/collection error) är den andra, separata flaskhalsen.
+
 **Överlämning:** grenen är avsedd att ta emot Mini:s och övriga agenters verifierade leveranser
 utan dubbelarbete — en leverans per gren/commit baserad på kedjans topp, verifierad före pålägg,
 `--no-ff` i beroendeordning, en enda migrationshead och uppdaterat register. Se

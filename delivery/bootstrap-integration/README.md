@@ -157,6 +157,34 @@ slutsats som T2-bedömningen, nu även live.
 * F4:s historik är append-only på databasnivå; runtime-rollen har bara `SELECT, INSERT`.
 * `POLICY_LOCK` och `first_cycle_go=false` är orörda; ingen merge/deploy.
 
+## Modellassisterad planering i verklig körning (2026-11-28)
+
+Kedjan kördes med den configurerade lokala modellen (llama3.1) som planerare i den isolerade
+stacken; fullständig evidens i `evidence/e2e-provider-20261128.txt`. Två fel som faktiskt
+blockerade självständig utveckling rättades, båda med tester och pushade:
+
+* `798221f1` — **beständighet.** En plan som skrev filer men aldrig committade kunde rapporteras
+  `COMPLETED` med `verification_passed` medan worktreen bara hade `?? note_tools.py`. Drivrutinen
+  faller nu closed som `VERIFICATION_REQUIRED` när en plan skrivit utan att committa;
+  planerarprompten kräver komplett körbar kod (inga platshållare) och stage/commit.
+* `6dabe546` — **ingen worker-krasch på felordnad plan.** Låg `commit` före verifieringen kastades
+  `OperatorVerificationRequired` ut ur `run_driver` och workern loggade "failed to advance" var
+  ~2,3 s i en oändlig loop. Undantaget blir nu `VERIFICATION_REQUIRED` genom den befintliga
+  reparationsvägen, och prompten anger ordningen skriv → test → verifiering → stage → commit.
+
+**Vad som fungerar (mätt):** modellen planerar riktiga mål genom `POST /goals/{id}/plan` och
+per task genom provider-planeringen (100–170 s per call på 8 kärnor), kuvertet valideras och blir
+`ACCEPTED`, spend settles korrekt (`cost 0` för lokal modell), och i en körning blev båda
+tasks `completed` med `verification_passed` och målet `completed`.
+
+**Kvarvarande blockerare (en):** en verifieringsmisslyckad tasks reparationsbarn claimas som en
+ny task, vilket återställer mål-worktreen till senaste rena commit — den kod som misslyckades är
+därmed borta när barnet ska reparera den, och barnets beskrivning nästlas för varje generation
+("Repair the verification failure blocking: Repair …"). Rätt riktning är att bevara det
+misslyckade tillståndet för barnet och bygga beskrivningen från rotorsaken; verifieringen ska
+inte lättas. Modellens kodkvalitet (llama3.1 skrev platshållare/icke-importerbar test) är en
+separat flaskhals, inte en kedjefråga.
+
 ## Så verifieras kandidaten
 
 ```bash
