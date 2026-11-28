@@ -115,3 +115,7 @@ Produktframgång mäts i verifierat slutfört arbete, sparad användartid, kvali
 
 ### Operativ tillämpning nu
 Freebuff, Codex, Z.ai och Mini behåller befintliga uppdrag. Ta in denna strategi vid naturlig överlämning; ingen dubbelimplementation eller avbrott. Integrationsansvarig verifierar vilken befintlig komponent som äger varje funktion och vilka delar som faktiskt saknas. Prioritera första fungerande arbetsledning och säkra driftgrindar före omfattande forskningsarbete. POLICY_LOCK och first_cycle_go=false oförändrade; inga nya behörigheter, automatiska merges, deployments eller provideraktiveringar genom dokumentet.
+
+
+## Grundarkrav — bevara hela projektportföljen och inventera alla auktoriserade källor
+Se [L4TP Portfolio & Archive Requirements](L4TP_PORTFOLIO_AND_ARCHIVE_REQUIREMENTS.md) för startregistret över produkter, verksamheter, böcker, hårdvara och gemensamma förmågor samt krav på rekursiv, beständig, källspårad inventering på fil-, arkivmedlems- och meddelandenivå. Life ska själv komplettera registret när material blir tillgängligt, med täckningsrapport, versionshistorik, konflikter och verifierbara källor. Återanvänd befintligt Library, projektminne och Blueprint. Privata original och manus får inte publiceras i öppna repos. P0 arbetsledning kvarstår; full historisk inventering och framtida produkter får inte blockera första säkra drift. Ingen ny exekveringsauktorisation.
