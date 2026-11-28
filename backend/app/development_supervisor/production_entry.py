@@ -67,6 +67,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.autonomous_gap.service import is_gap_generated_child
 from app.development_operator.service import COMMAND_PROFILES, OperatorContext
 from app.development_supervisor.lease import (
     claim_supervisor_goal_lease,
@@ -428,7 +429,18 @@ async def run_authorized_goal_supervisor_tick(
                 # claim_specific updates via raw SQL — expire the ORM identity so later
                 # Operator/_require_context reads see running+locked_by, not a stale queued row.
                 db.refresh(job)
-                reset_goal_worktree_to_clean_head(repo_root)
+                # EXCEPTION to the reset: a gap-generated child (in practice the verification
+                # repair child) exists to repair the state that just failed. Resetting first
+                # erases exactly that state -- the 2026-11-28 provider E2E measured a plan that
+                # wrote both files and then failed its focused test: the repair child started
+                # from a clean worktree, re-planned from nothing, failed again, and the chain
+                # nested ("Repair ... blocking: Repair ...") while the failed code was gone.
+                # Keeping the leftovers is safe by the same argument as the general reset:
+                # every real write still fails closed on an unexpected before_sha256, so a
+                # reader/planner sees the real content and a write can never silently overwrite
+                # something it did not expect.
+                if not is_gap_generated_child(db, owner_id=goal.owner_id, task=task):
+                    reset_goal_worktree_to_clean_head(repo_root)
             if claimed_generation is None:
                 db.refresh(job)
                 still_valid = (

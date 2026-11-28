@@ -35,14 +35,20 @@ from psycopg2.extras import RealDictCursor
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STACK = Path(os.environ.get("LIFEAI_STACK", Path.home() / "lifeai-local-stack"))
-API = "http://127.0.0.1:8000"
-DB = "postgresql://postgres@127.0.0.1:55432/lifeai_dev"
+# The E2E owns one database and one API base so it never shares a goal queue with another
+# running environment (2026-11-28: a Docker-hosted worker from 2026-11-26 exists on this host;
+# it has no connections to this Postgres, but an owned database keeps that true by construction).
+API = os.environ.get("LIFEAI_API", "http://127.0.0.1:8000")
+DB = os.environ.get("LIFEAI_E2E_DB", "postgresql://postgres@127.0.0.1:55432/lifeai_dev")
+APP_DB = os.environ.get(
+    "LIFEAI_E2E_APP_DB", "postgresql://mainai_app:mainai_app_pw@127.0.0.1:55432/lifeai_dev"
+)
 EMAIL = "founder@lifeai.local"
 PASSWORD = os.environ.get("FOUNDER_PASSWORD", "dev-only-founder-pass")
 
 os.environ.setdefault("DATABASE_URL", DB)
-os.environ.setdefault("APP_DATABASE_URL", "postgresql://mainai_app:mainai_app_pw@127.0.0.1:55432/lifeai_dev")
-os.environ.setdefault("REDIS_URL", "redis://127.0.0.1:56381/0")
+os.environ.setdefault("APP_DATABASE_URL", APP_DB)
+os.environ.setdefault("REDIS_URL", os.environ.get("LIFEAI_E2E_REDIS", "redis://127.0.0.1:56381/0"))
 os.environ.setdefault("SECRET_KEY", "dev-only-local-secret")
 os.environ.setdefault("ENVIRONMENT", "development")
 os.environ.setdefault("LOCAL_ONLY_MODE", "true")
