@@ -141,6 +141,12 @@ PROVIDER_SYSTEM_PROMPT = (
     'run_focused_test -> {"profile_name": "focused_pytest", "arguments": ["<test file>.py"]}; '
     'stage_scoped_changes -> {"paths": ["<allowed path>", "..."]}; '
     'commit_scoped_changes -> {"message": "<one line, max 200 characters>"}. '
+    "A step that writes a file MUST set verification_required: true, and the plan MUST end "
+    'with a final step {"step_id": "verify", "purpose": "record verification", '
+    '"expected_result": "verification recorded", "capability": "verification_evaluate", '
+    '"arguments": {}, "required_risk": "READ_ONLY", "verification_required": false} -- without '
+    "it the run ends as VERIFICATION_REQUIRED instead of COMPLETE. Add a run_focused_test step "
+    "before the final step whenever the test file already exists or this plan creates it. "
     "Use only capabilities from the supplied list and only paths inside "
     "repository_scope.allowed_paths. Never propose shell, merge, deploy, force push, production "
     "mutation or credential access. Keep the plan minimal and ordered. State assumptions and "

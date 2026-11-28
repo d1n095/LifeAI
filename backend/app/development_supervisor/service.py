@@ -761,6 +761,37 @@ def _apply_deferred(assessments, deferred: dict[uuid.UUID, str]):
 
 
 def _checkpoint(db, *, goal, task, job_id, phase, state):
+    # WAITING_APPROVAL is a durable STATE, not progress: the worker re-observes it on every poll
+    # cycle (2 s) while the founder has not yet decided, and that observation is identical each
+    # time. Writing a fresh append-only row per observation made one parked goal accumulate
+    # 9 855 checkpoint rows in ~3 hours on the 2026-11-27 local stack -- pure table growth and
+    # write amplification for a state that never changed. Reuse the existing row when the
+    # selected task is unchanged; any genuinely different state still inserts.
+    if phase == "WAITING_APPROVAL":
+        previous = (
+            db.execute(
+                select(MainAICheckpoint)
+                .where(
+                    MainAICheckpoint.goal_id == goal.id,
+                    MainAICheckpoint.owner_id == goal.owner_id,
+                )
+                .order_by(MainAICheckpoint.created_at.desc())
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
+        if previous is not None:
+            stored = previous.executor_state or {}
+            same_task = previous.task_id == (task.id if task else None)
+            if (
+                same_task
+                and stored.get("step") == "development_supervisor"
+                and stored.get("phase") == "WAITING_APPROVAL"
+                and (stored.get("supervisor_state") or {}).get("selected_task_id")
+                == state.get("selected_task_id")
+            ):
+                return previous
     row = MainAICheckpoint(
         goal_id=goal.id,
         task_id=task.id if task else None,

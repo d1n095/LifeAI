@@ -256,12 +256,24 @@ def main() -> int:
     print(f"  envelope {envelope} scoped to {PATHS}; spend grant ollama/llama3.1")
 
     print("== the running worker executes the tasks through the Supervisor + local model ==")
-    wait_until(
-        lambda: all(t["status"] in {"completed", "failed", "cancelled"} for t in tasks(goal)),
-        timeout=3600,
-        interval=10,
-        label="all tasks terminal",
-    )
+    approved: set[str] = {task["id"] for task in planned}
+
+    def advance() -> bool:
+        """Approve replanned children like the founder would, then report terminal state.
+
+        A bounded automatic replan legitimately creates NEW tasks with no inherited approval;
+        this driver plays the founder for them (bounded by `approve`'s own contract) so a
+        single run can observe a whole goal, not just its first plan.
+        """
+        current = tasks(goal)
+        for row in current:
+            key = str(row["id"])
+            if row["status"] == "ready" and key not in approved:
+                approve(s, key)
+                approved.add(key)
+        return all(row["status"] in {"completed", "failed", "cancelled"} for row in current)
+
+    wait_until(advance, timeout=3600, interval=10, label="all tasks terminal")
     final = tasks(goal)
     for task in final:
         events = [e["event_type"] for e in task_events(str(task["id"]))]
