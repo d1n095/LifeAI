@@ -100,6 +100,21 @@ Reparationsbarnet startar alltså fortfarande från senaste rena commit; att gö
 reparation självförsörjande (eller att fånga de misslyckade skrivningarna som en beständig bas)
 är en egen ändring med egen design och egna tester — inte ett reset-undantag.
 
+**2026-11-28 (pass 2): reparationsluckan, fixturfelet och full regression.** Grenen står på
+`fdfa9857`. `1c9b0fb7` checkpointar misslyckade kodförsök (`capture_failed_attempt`) som en
+patch utanför mål-worktreen, med excerpt + hash i LifeProblem-provenance — det stänger luckan
+att det som misslyckades var borta innan reparationsbarnet claimade, utan att ändra
+beskrivningsformatet (som är ett verifierat kontrakt). `530a7bad` rättar en dubblerad
+stage/commit i composed autonomy-fixturen; milestone, soak v1–v4 och lease-takeover föll på en
+oförändrad bas av det skälet. `2f2888c2` inventerar arbetsledningen (P0b) och gör
+E2E-spendgranten modellriktig. `fdfa9857` dokumenterar full regression i isolerad miljö:
+**862 passed, 1 failed** på 19 min — enda felet är
+`test_winning_worker_resumes_from_stale_authority_checkpoint_and_completes`, en fixturgap mot
+commit-grinden (798221f1) som behöver ett eget beslut; ingen grind lättades.
+Lokal modellmätning: `qwen2.5-coder:7b` ger giltig JSON men lägger till egna fält i kandidaten;
+llama3.1 gav prosa före `format:"json"`. Nästa konkreta blockerare är en korrigerande andra
+planeringschans (`attempt_limit` är 1), inte format eller budget.
+
 **Överlämning:** grenen är avsedd att ta emot Mini:s och övriga agenters verifierade leveranser
 utan dubbelarbete — en leverans per gren/commit baserad på kedjans topp, verifierad före pålägg,
 `--no-ff` i beroendeordning, en enda migrationshead och uppdaterat register. Se
