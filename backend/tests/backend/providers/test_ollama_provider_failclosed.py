@@ -84,6 +84,39 @@ async def test_chat_maps_max_tokens_to_num_predict(mock_ollama):
 
 
 @pytest.mark.asyncio
+async def test_chat_json_mode_constrains_decoding_to_a_json_object(mock_ollama):
+    """Provider-assisted planning must get JSON by construction, not by luck.
+
+    Measured 2026-11-28: a repair child's planning call answered with prose, the envelope failed
+    as "provider output is not valid JSON", and the task could never plan again -- deterministic
+    temperature made the retry produce the same prose. `format: "json"` is Ollama's own
+    constrained-decoding switch, forwarded only when a caller asks for it.
+    """
+    seen: dict = {}
+
+    def handler(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"message": {"content": "{}"}})
+
+    mock_ollama(handler)
+    await OllamaProvider().chat([], model="qwen2.5:0.5b", json_mode=True)
+    assert seen["format"] == "json"
+
+
+@pytest.mark.asyncio
+async def test_chat_without_json_mode_sends_no_format(mock_ollama):
+    seen: dict = {}
+
+    def handler(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"message": {"content": "hej"}})
+
+    mock_ollama(handler)
+    await OllamaProvider().chat([], model="qwen2.5:0.5b")
+    assert "format" not in seen
+
+
+@pytest.mark.asyncio
 async def test_chat_without_max_tokens_sends_no_options_override(mock_ollama):
     seen: dict = {}
 

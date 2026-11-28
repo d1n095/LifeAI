@@ -231,6 +231,11 @@ class RegistryPlanningAdapter:
 
             if self.provider_name in local_provider_names():
                 call_kwargs["temperature"] = 0
+                # Local inference must return the JSON envelope by construction, not by luck:
+                # measured 2026-11-28, one repair-child call answered with prose and the task
+                # then had no path back to planning at all (deterministic temperature made the
+                # retry produce the same prose). Ollama's `format: "json"` constrains decoding.
+                call_kwargs["json_mode"] = True
             result = await provider.chat(messages, model=self.model, **call_kwargs)
         else:
             result, _attempted = await chat_with_fallback(

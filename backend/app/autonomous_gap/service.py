@@ -162,7 +162,17 @@ class GapCapabilityError(GapGenerationError):
 # Attempt-specific fields that must NOT participate in LifeProblem semantic identity /
 # create_problem() provenance equality. They are recorded as LifeProblemEvent detail instead
 # so worker takeover with a different worker_id converges on the same canonical gap.
-_ATTEMPT_PROVENANCE_KEYS = frozenset({"requested_by", "attempt_worker_id", "attempt_at"})
+# Attempt-specific provenance never participates in semantic gap identity. `failure_evidence`
+# belongs here: it carries the exact signal of THIS attempt (e.g. a provider response hash for
+# PROVIDER_FAILED), so two attempts of the same task produced the same idempotency key with a
+# different provenance and `create_problem()` raised "idempotency key reused with different
+# fields: provenance" (measured 2026-11-28 in the provider E2E). A repair child could therefore
+# never record its own recovery gap and the tick repeated forever. The evidence is not lost --
+# it is recorded on the attempt event instead, and the gap's own reason/required_outcome stay
+# in the semantic key.
+_ATTEMPT_PROVENANCE_KEYS = frozenset(
+    {"requested_by", "attempt_worker_id", "attempt_at", "failure_evidence"}
+)
 
 # Driver / planner classifications that are structured, durable gap signals for live wiring.
 LIVE_GAP_SIGNAL_CLASSIFICATIONS = frozenset(
@@ -286,18 +296,29 @@ def _gap_identity_key(gap: DiscoveredGap) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _record_gap_attempt_event(db: Session, *, problem: LifeProblem, requested_by: str) -> None:
+def _record_gap_attempt_event(
+    db: Session,
+    *,
+    problem: LifeProblem,
+    requested_by: str,
+    failure_evidence: dict | None = None,
+) -> None:
     """Attempt-specific provenance lives on LifeProblemEvent, not LifeProblem.provenance, so
     semantic gap identity survives worker takeover with a different worker_id.
 
     Uses the existing allowed event_type `outcome_recorded` (migration 0042 CHECK) with a
-    structured detail discriminator -- no new migration required."""
+    structured detail discriminator -- no new migration required. `failure_evidence` is kept
+    here for exactly the same reason: it describes THIS attempt, and putting it on the problem
+    made a repeat attempt collide with its own earlier evidence."""
+    detail: dict = {"gap_attempt": True, "requested_by": requested_by}
+    if failure_evidence:
+        detail["failure_evidence"] = dict(failure_evidence)
     db.add(
         LifeProblemEvent(
             owner_id=problem.owner_id,
             problem_id=problem.id,
             event_type="outcome_recorded",
-            detail={"gap_attempt": True, "requested_by": requested_by},
+            detail=detail,
             actor_type="system",
         )
     )
@@ -361,7 +382,12 @@ def record_gap(db: Session, *, owner_id: uuid.UUID, gap: DiscoveredGap, requeste
         mainai_task_id=gap.source_task_id,
         mainai_job_id=gap.source_job_id,
     )
-    _record_gap_attempt_event(db, problem=problem, requested_by=requested_by)
+    _record_gap_attempt_event(
+        db,
+        problem=problem,
+        requested_by=requested_by,
+        failure_evidence=gap.failure_evidence,
+    )
     return problem
 
 

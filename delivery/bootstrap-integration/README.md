@@ -208,6 +208,41 @@ python3 delivery/bootstrap-integration/e2e-f2.py
 FOUNDER_PASSWORD=... python3 delivery/transient-failure-recovery/e2e-transient.py
 ```
 
+## Parallella agentuppdrag och mottagning (2026-11-28)
+
+Från 2026-11-28 är arbetet delat: **Codex** har permanent autonom drift och lokal
+agentorkestrering, **Z.ai** har oberoende säkerhetsgranskning och härdning, och den här grenen
+har **integrationsansvaret** (sammansättning, verifiering, merge-ordning, register). Uppdragen
+överlappar inte: Codex bygger drift, Z.ai granskar, den här grenen avgör vad som får läggas på
+kedjan och i vilken ordning.
+
+**Grindar en leverans måste passera innan den läggs på kedjan** (ingen av dem får lättas för att
+få igenom en leverans):
+
+1. Baserad på kedjans aktuella topp (`git merge-base --is-ancestor <topp> <leverans>`), inte på
+   en äldre bas.
+2. Egen verifieringskörning på en **egen databas** — aldrig delad `lifeos_test` samtidigt som en
+   annan svit kör (det ger falska fel: `alembic upgrade head` kolliderar och tester failar på
+   lås, inte på kod).
+3. `alembic heads` slutar i **en** enda head.
+4. Diffen innehåller bara det leveransen säger sig göra; orelaterade fixar går i egen gren.
+5. Pålägg med `--no-ff` i beroendeordning + uppdaterat `docs/BRANCH_REGISTRY.md`.
+6. Säkerhetsgränser orörda: `POLICY_LOCK`, `first_cycle_go=false`, ingen provideraktivering,
+   ingen deployment, ingen merge till default.
+
+**Isolerad E2E-miljö (rekommenderad för varje leverans):** egen databas `lifeai_e2e` (skapad som
+`CREATE DATABASE lifeai_e2e TEMPLATE lifeai_dev`), `start-e2e-backend.sh` (port **8010**) och
+`start-e2e-worker.sh` (Redis db **1**) i `~/lifeai-local-stack`, och drivrutinen tar
+`LIFEAI_API`, `LIFEAI_E2E_DB`, `LIFEAI_E2E_APP_DB`, `LIFEAI_E2E_REDIS`. Kontrollera alltid att
+**exakt en** backend och **exakt en** worker kör mot den databasen innan en mätning.
+
+**Miljöfakta att känna till:** på värden finns en Docker-container (id `04b3c46f44de…`, uid
+10001) som sedan 2026-11-26 kör en äldre `uvicorn app.main:app --host 0.0.0.0 --port 8000` och
+`python -m app.worker` (PID 15918/16231). Den har **inga** anslutningar till den lokala
+Postgres-instansen (varken `lifeai_dev` eller `lifeai_e2e`) och alla `mainai_jobs.locked_by` i
+lokal DB är `ubuntu`, dvs. den claimar inga jobb här. Den ska inte stoppas eller ändras; den
+egna databasen är det som gör konkurrensen strukturellt omöjlig.
+
 ## Överlämning: ta emot andra agenters verifierade leveranser utan dubbelarbete
 
 Kedjan är avsiktligt byggd för att ta emot Mini och övriga agenters arbete:

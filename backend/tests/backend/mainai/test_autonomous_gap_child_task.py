@@ -67,7 +67,7 @@ from app.models.mainai_execution import (
     MainAITaskEventType,
     MainAITaskStatus,
 )
-from app.models.problem_learning import LifeProblem
+from app.models.problem_learning import LifeProblem, LifeProblemEvent
 from app.request_context import current_user_id as current_user_id_var
 
 
@@ -294,6 +294,61 @@ def test_duplicate_gap_discovered_twice_yields_exactly_one_canonical_task(db_ses
     assert [t.id for t in first.inserted_tasks] == [t.id for t in second.inserted_tasks]
     count = db_session.query(MainAITask).filter(MainAITask.plan_id == plan.id, MainAITask.description == "Fix the duplicate gap").count()
     assert count == 1
+
+
+def test_the_same_gap_with_a_different_attempt_evidence_is_still_one_problem(db_session, owner_id):
+    """A retried attempt carries different failure evidence for the SAME semantic gap.
+
+    Measured 2026-11-28 in the provider E2E: a repair child failed provider planning twice and
+    the second attempt raised "idempotency key reused with different fields: provenance" from
+    the gap's own problem -- the failure could never be recorded, so the tick repeated forever
+    without ever producing a new child. Attempt evidence belongs on the attempt event, not on
+    the semantic problem."""
+    goal, plan = _goal_and_plan(db_session, owner_id)
+    a, _b = _tasks(db_session, plan.id)
+    scope = _scope(goal)
+    gap = _verification_failure_gap(
+        goal, scope, a.id, reason="provider output was prose", required_outcome="Plan the repair again"
+    )
+
+    first = record_gap(db_session, owner_id=owner_id, gap=gap, requested_by="test")
+    db_session.commit()
+    second = record_gap(
+        db_session,
+        owner_id=owner_id,
+        gap=dataclasses.replace(
+            gap, failure_evidence={"signal": "PROVIDER_FAILED", "response_sha256": "a" * 64}
+        ),
+        requested_by="test",
+    )
+    third = record_gap(
+        db_session,
+        owner_id=owner_id,
+        gap=dataclasses.replace(
+            gap, failure_evidence={"signal": "PROVIDER_FAILED", "response_sha256": "b" * 64}
+        ),
+        requested_by="test",
+    )
+    db_session.commit()
+
+    assert second.id == first.id
+    assert third.id == first.id
+    problem_count = (
+        db_session.query(LifeProblem)
+        .filter(LifeProblem.idempotency_key.like("autonomous_gap:%"))
+        .count()
+    )
+    assert problem_count >= 1
+    events = (
+        db_session.query(LifeProblemEvent)
+        .filter(LifeProblemEvent.problem_id == first.id, LifeProblemEvent.event_type == "outcome_recorded")
+        .all()
+    )
+    recorded = [
+        (event.detail or {}).get("failure_evidence", {}).get("response_sha256") for event in events
+    ]
+    # The attempt evidence is preserved on the event even though it is not part of identity.
+    assert "b" * 64 in recorded
 
 
 # ---------------------------------------------------------------- 6. Provider Idea != Authority

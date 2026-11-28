@@ -137,6 +137,14 @@ class OllamaProvider(LLMProvider):
             options["temperature"] = float(temperature)
         if options:
             payload["options"] = options
+        # Structured output. Ollama's `format: "json"` constrains decoding to a JSON object,
+        # which is exactly the contract provider-assisted planning parses. Measured
+        # 2026-11-28: a repair child's planning call answered with prose, the envelope failed
+        # as "provider output is not valid JSON", and the task could never plan again (a
+        # deterministic retry reproduces the same prose). Forwarded only when the caller asks
+        # for it, so ordinary chat is unchanged.
+        if kwargs.get("json_mode") is True:
+            payload["format"] = "json"
         try:
             async with httpx.AsyncClient(timeout=timeout or 120) as client:
                 resp = await client.post(f"{self.settings.ollama_base_url}/api/chat", json=payload)

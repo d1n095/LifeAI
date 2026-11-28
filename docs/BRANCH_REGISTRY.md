@@ -83,6 +83,16 @@ tillståndet för barnet (capture-commit före reset, eller ingen reset för rep
 bygga beskrivningen från rotorsaken — inte genom att lätta på verifieringen. Modellens
 kodkvalitet (llama3.1: platshållare/collection error) är den andra, separata flaskhalsen.
 
+**2026-11-28: två nya integrationsfixar + isolerad mätmiljö.** `cb5ffcb8` — en gap-genererad
+reparationsbarn-task hoppar nu över reset-on-fresh-claim, så den kod som faktiskt misslyckades
+finns kvar när barnet ska reparera den; samma commits på grenen (JSON-läge `format:
+"json"` för lokal planering, och `failure_evidence` flyttad från problemets provenance till
+försöks-eventet) åtgärdar två fel som mättes live i E2E:t: `provider output is not valid JSON`
+som gjorde en task oplanerbar för alltid, och `idempotency key reused with different fields:
+provenance` som gjorde att ett upprepat fel aldrig kunde registreras (ticken upprepades i
+all oändlighet). Mätmiljön är nu isolerad: databasen `lifeai_e2e`, port 8010, Redis db 1 — den
+lokala `lifeai_dev`-stacken och den Docker-körda workern från 2026-11-26 delar aldrig kö.
+
 **Överlämning:** grenen är avsedd att ta emot Mini:s och övriga agenters verifierade leveranser
 utan dubbelarbete — en leverans per gren/commit baserad på kedjans topp, verifierad före pålägg,
 `--no-ff` i beroendeordning, en enda migrationshead och uppdaterat register. Se
