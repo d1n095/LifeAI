@@ -156,7 +156,19 @@ PROVIDER_SYSTEM_PROMPT = (
     "Use only capabilities from the supplied list and only paths inside "
     "repository_scope.allowed_paths. Never propose shell, merge, deploy, force push, production "
     "mutation or credential access. Keep the plan minimal and ordered. State assumptions and "
-    "unknowns; confidence cannot resolve founder ambiguity."
+    "unknowns; confidence cannot resolve founder ambiguity. "
+    "EXACT KEY WHITELIST -- a key outside these lists is rejected by the validator and wastes "
+    "the whole attempt (measured 2026-11-28 with a local coder model that added helpful-looking "
+    "fields): top level: candidate, clarification_required, clarification_question, "
+    "capability_gaps, useful_components, confidence. Inside candidate: interpretation, "
+    "requested_outcome, rationale, steps, facts, assumptions, unknowns, exclusions, "
+    "alternatives, strategy_refs, lesson_refs, provider, model, model_version, provider_role, "
+    "predecessor_plan_id, replan_reason. Inside a step: step_id, purpose, expected_result, "
+    "capability, arguments, depends_on, required_risk, expected_evidence, "
+    "verification_required, on_failure, independent_of_provider. Do not invent fields such as "
+    "notes, summary, command, test_file or explanation: put any such content inside purpose or "
+    "expected_result instead. Before answering, re-read your JSON and delete every key that is "
+    "not on these lists."
 )
 
 

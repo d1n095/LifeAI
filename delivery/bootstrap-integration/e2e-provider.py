@@ -60,8 +60,71 @@ os.environ.setdefault("LOCAL_ONLY_MODE", "true")
 os.environ.setdefault("STORAGE_ROOT", str(STACK / "storage"))
 os.environ.setdefault("EMBEDDING_DIM", "1536")
 
-SOURCE = "note_tools.py"
-TEST = "test_note_tools.py"
+# Two genuinely different tasks, so "it works" is not one memorised case: a string-slugging
+# function with punctuation, and a length-bounded truncation with an ellipsis. Pick with
+# LIFEAI_E2E_SCENARIO; everything else (planner, operator, commits, pytest) is the same path.
+SCENARIOS = {
+    "slugify": {
+        "title": "Provider E2E: slugify-modul med fokustest",
+        "source": "note_tools.py",
+        "test": "test_note_tools.py",
+        "function": "slugify",
+        "instruction": (
+            "Skapa filen note_tools.py med funktionen slugify(text: str) -> str som gör om en "
+            "text till en slug: gemener, orden separerade med ett bindestreck, och alla andra "
+            "tecken borttagna. Skapa också filen test_note_tools.py med minst ett focused test "
+            "som verifierar slugify. Endast note_tools.py och test_note_tools.py får skapas "
+            "eller ändras."
+        ),
+        "impl_desc": (
+            "Skapa note_tools.py med funktionen slugify(text: str) -> str som gör om en text "
+            "till en slug: gemener, orden separerade med ett bindestreck, alla andra tecken "
+            "borttagna"
+        ),
+        "test_desc": (
+            "Skapa test_note_tools.py med ett focused test som verifierar slugify, inklusive ett "
+            "fall med versaler och skiljetecken"
+        ),
+        "behavior": (
+            "from note_tools import slugify; "
+            "assert slugify('Hello, World!') == 'hello-world', slugify('Hello, World!'); "
+            "assert slugify('  A  B  ') == 'a-b', slugify('  A  B  '); "
+            "print('slugify behaves as specified')"
+        ),
+    },
+    "truncate": {
+        "title": "Provider E2E: truncate-modul med fokustest",
+        "source": "text_utils.py",
+        "test": "test_text_utils.py",
+        "function": "truncate",
+        "instruction": (
+            "Skapa filen text_utils.py med funktionen truncate(text: str, limit: int) -> str som "
+            "returnerar text oförändrad om den är högst limit tecken lång, och annars kortar "
+            "den till limit tecken följt av tre punkter. Skapa också filen test_text_utils.py "
+            "med minst ett focused test som verifierar truncate. Endast text_utils.py och "
+            "test_text_utils.py får skapas eller ändras."
+        ),
+        "impl_desc": (
+            "Skapa text_utils.py med funktionen truncate(text: str, limit: int) -> str som kortar "
+            "text till limit tecken plus tre punkter när den är längre, annars returnerar texten"
+        ),
+        "test_desc": (
+            "Skapa test_text_utils.py med ett focused test som verifierar truncate för både kort "
+            "och lång text"
+        ),
+        "behavior": (
+            "from text_utils import truncate; "
+            "assert truncate('abcdefghij', 5) == 'abcde...', truncate('abcdefghij', 5); "
+            "assert truncate('abc', 5) == 'abc', truncate('abc', 5); "
+            "print('truncate behaves as specified')"
+        ),
+    },
+}
+SCENARIO = os.environ.get("LIFEAI_E2E_SCENARIO", "slugify")
+assert SCENARIO in SCENARIOS, f"unknown LIFEAI_E2E_SCENARIO={SCENARIO!r}; pick one of {sorted(SCENARIOS)}"
+SCEN = SCENARIOS[SCENARIO]
+SOURCE = SCEN["source"]
+TEST = SCEN["test"]
 PATHS = [SOURCE, TEST]
 CAPS = [
     "create_file",
@@ -73,12 +136,7 @@ CAPS = [
     "stage_scoped_changes",
     "commit_scoped_changes",
 ]
-INSTRUCTION = (
-    f"Skapa filen {SOURCE} med funktionen slugify(text: str) -> str som gör om en text till "
-    "en slug: gemener, orden separerade med ett bindestreck, och alla andra tecken borttagna. "
-    f"Skapa också filen {TEST} med minst ett focused test som verifierar slugify. "
-    f"Endast {SOURCE} och {TEST} får skapas eller ändras."
-)
+INSTRUCTION = SCEN["instruction"]
 WORKTREES = Path("/tmp/mainai-supervisor-goal-worktrees")
 
 
@@ -122,7 +180,7 @@ def create_goal(s) -> str:
     r = s.post(
         f"{API}/api/mainai/execution/goals",
         json={
-            "title": "Provider E2E: slugify-modul med fokustest",
+            "title": SCEN["title"],
             "original_instruction": INSTRUCTION,
             "risk_level": "low",
             "approval_policy": "autonomous_development_work",
@@ -133,14 +191,8 @@ def create_goal(s) -> str:
     return r.json()["id"]
 
 
-DESC_IMPLEMENT = (
-    "Skapa note_tools.py med funktionen slugify(text: str) -> str som gör om en text till en "
-    "slug: gemener, orden separerade med ett bindestreck, alla andra tecken borttagna"
-)
-DESC_TEST = (
-    "Skapa test_note_tools.py med ett focused test som verifierar slugify, inklusive ett fall "
-    "med versaler och skiljetecken"
-)
+DESC_IMPLEMENT = SCEN["impl_desc"]
+DESC_TEST = SCEN["test_desc"]
 
 
 def plan_with_model(s, goal_id: str) -> list[dict]:
@@ -381,8 +433,9 @@ def main() -> int:
     assert (worktree / SOURCE).exists(), f"{SOURCE} was never created"
     assert (worktree / TEST).exists(), f"{TEST} was never created"
     source = (worktree / SOURCE).read_text(encoding="utf-8")
-    print(f"  {SOURCE}: {len(source.splitlines())} lines, has slugify={('def slugify' in source)}")
-    assert "def slugify" in source, source[:400]
+    marker = f"def {SCEN['function']}"
+    print(f"  {SOURCE}: {len(source.splitlines())} lines, has {SCEN['function']}={(marker in source)}")
+    assert marker in source, source[:400]
     dirty = git(worktree, "status", "--porcelain").strip()
     print(f"  uncommitted changes: {dirty or '(none)'}")
     # Durability: the run must have committed its own work; an uncommitted worktree change is
@@ -397,10 +450,7 @@ def main() -> int:
         [
             sys.executable,
             "-c",
-            "from note_tools import slugify; "
-            "assert slugify('Hello, World!') == 'hello-world', slugify('Hello, World!'); "
-            "assert slugify('  A  B  ') == 'a-b', slugify('  A  B  '); "
-            "print('slugify behaves as specified')",
+            SCEN["behavior"],
         ],
         cwd=str(worktree),
         capture_output=True,
