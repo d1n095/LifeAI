@@ -551,6 +551,34 @@ def run_driver(
             )
         try:
             result = _invoke_operator(db, context, step, idem)
+        except operator.OperatorVerificationRequired as exc:
+            # The operator requires a passed verification checkpoint before it will commit, so
+            # a plan that orders stage/commit before its verification step hits this. It is a
+            # plan-ordering defect, not a crash: failing the step closed through the existing
+            # verification repair path keeps the tick loop alive (2026-11-28: this exception
+            # escaped run_driver and the worker logged "failed to advance" every ~2.3s).
+            cp = _checkpoint(
+                db,
+                context,
+                task,
+                goal,
+                phase="VERIFY",
+                classification="VERIFICATION_REQUIRED",
+                state=state,
+            )
+            return DriverResult(
+                "VERIFY",
+                "VERIFICATION_REQUIRED",
+                len(state["completed"]),
+                {
+                    "verification_passed": False,
+                    "failed_capability": step.capability,
+                    "capability": step.capability,
+                    "verification_required": True,
+                    "reason": str(exc),
+                },
+                cp.id,
+            )
         except operator.OperatorCapabilityMissing as exc:
             result = operator.capability_missing(
                 db,

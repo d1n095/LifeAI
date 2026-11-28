@@ -145,7 +145,9 @@ PROVIDER_SYSTEM_PROMPT = (
     '"...", "<implementation here>", "pass" or a TODO body -- write the real function and the '
     "real test. A plan that writes a file MUST also stage and commit it (stage_scoped_changes "
     "then commit_scoped_changes); an uncommitted write is discarded by the next task and the "
-    "plan is rejected. A step that writes a file MUST set verification_required: true, and the plan MUST end "
+    "plan is rejected. The order is fixed: write, run the test, evaluate verification, and "
+    "ONLY THEN stage and commit -- the operator refuses to commit before a passed "
+    "verification checkpoint. A step that writes a file MUST set verification_required: true, and the plan MUST end "
     'with a final step {"step_id": "verify", "purpose": "record verification", '
     '"expected_result": "verification recorded", "capability": "verification_evaluate", '
     '"arguments": {}, "required_risk": "READ_ONLY", "verification_required": false} -- without '
