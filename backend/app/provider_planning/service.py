@@ -696,6 +696,344 @@ def _allocate_provider_spend_source_ref(db, *, owner_id, base_ref: str) -> str:
     )
 
 
+# Two invocations per planning attempt, never an open retry loop: the first answer and exactly
+# one correction. A local planner measured on 2026-11-28 answered with a well-formed candidate
+# that carried an extra key; strict validation rejected it, and because decoding is deterministic
+# (temperature 0) every later attempt reproduced the identical rejected answer, so the task could
+# never finish. Feeding the validator's own message back once is the shortest honest fix: the
+# second answer still passes the same parser, and a second failure parks the task through the
+# existing PROVIDER_FAILED recovery path instead of retrying again.
+MAX_PLANNING_INVOCATIONS = 2
+
+CORRECTION_INSTRUCTION = (
+    "Your previous answer was rejected by the schema validator. Return the same plan again with "
+    "exactly the whitelisted keys and no others, and with every argument in the stated shape. "
+    "A second rejection is final: the task is then parked for recovery instead of retried."
+)
+
+
+def _planning_invocation_budget(request) -> int:
+    """Cap the invocations of one planning attempt: the request's budget, never more than two."""
+    declared = max(1, int(getattr(request, "max_provider_attempts", 1) or 1))
+    return min(MAX_PLANNING_INVOCATIONS, declared)
+
+
+def _sanitize_validation_feedback(message: str, *, limit: int = 240) -> str:
+    """Bounded, redacted text the model may see.
+
+    The validator's messages are produced by this module, but they are still passed through the
+    canonical redaction and flattened to a single printable line so no candidate content (paths,
+    source text, secrets echoed from a candidate) can ride back out inside an error string.
+    """
+    text = " ".join(str(message).split())
+    text = operator.redact(text)
+    text = "".join(ch for ch in text if ch.isprintable())
+    return text[:limit]
+
+
+def _corrected_payload(payload: dict, feedback: str, *, max_bytes: int) -> dict | None:
+    """The first-attempt payload plus bounded correction feedback, or None when it cannot fit.
+
+    The payload byte bound is a hard limit, so the feedback is trimmed to fit rather than the
+    bound being raised. If even the shortest form exceeds the bound, return None and let the
+    caller fail closed -- never send an oversized payload.
+    """
+    for budget in (240, 160, 80, 32):
+        corrected = {
+            **payload,
+            "correction": {
+                "previous_attempt_rejected": feedback[:budget],
+                "instruction": CORRECTION_INSTRUCTION,
+            },
+        }
+        encoded = json.dumps(corrected, sort_keys=True, separators=(",", ":")).encode()
+        if len(encoded) <= max_bytes:
+            return corrected
+    return None
+
+
+async def _invoke_planning_attempt(
+    db,
+    *,
+    request,
+    request_hash,
+    context_set,
+    payload,
+    selected_adapter,
+    planned_provider,
+    planned_model,
+    provider_name,
+    model,
+    limits,
+) -> tuple[ProviderResponse | None, PlanningResult | None, int]:
+    """One bounded provider invocation: spend gate, egress gate, propose, settle.
+
+    Returns ``(response, terminal, latency_ms)``. A non-None ``terminal`` means this
+    invocation could not produce a response at all (spend not authorized, crash window,
+    concurrent hold, egress denial, provider failure) and the caller must return it as-is.
+    Keeping the gate order inside one function is deliberate: every attempt, first or
+    corrective, passes the identical spend/egress checks -- a retry is not a privileged path.
+    """
+    # Spend gate: a live boolean alone must never open a billed call. Reserve first.
+    # Explicit provider+model required so ceilings can be bound before money is spent.
+    from app.provider_spend import (
+        ProviderSpendError,
+        release_provider_spend_call,
+        reserve_provider_spend_call,
+        settle_provider_spend_call,
+    )
+    from app.models.provider_spend import (
+        ProviderSpendUsageEvent,
+        ProviderSpendUsageStatus,
+    )
+
+    spend_base_ref = (
+        f"provider-planning:{request.owner_id}:{request.task_id}:{request.job_id}:{request_hash}"
+    )
+    spend_source_ref = _allocate_provider_spend_source_ref(
+        db, owner_id=request.owner_id, base_ref=spend_base_ref
+    )
+    spend_reserved = False
+    if not planned_provider or not planned_model:
+        detail = {
+            "request_hash": request_hash,
+            "reason": (
+                "provider-assisted planning requires an explicit provider and model before "
+                "invocation so spend can be reserved against founder ceilings"
+            ),
+            "provider_hint": planned_provider,
+            "model_hint": planned_model,
+            "context_set_id": str(context_set.id),
+            "unrelated_deterministic_work_preserved": True,
+        }
+        cp = _checkpoint(db, request, "PROVIDER_SPEND_NOT_AUTHORIZED", detail)
+        return None, PlanningResult(
+            "PROVIDER_SPEND_NOT_AUTHORIZED",
+            detail,
+            checkpoint_id=cp.id,
+            context_set_id=context_set.id,
+        ), 0
+
+    preexisting = db.execute(
+        select(ProviderSpendUsageEvent).where(
+            ProviderSpendUsageEvent.owner_id == request.owner_id,
+            ProviderSpendUsageEvent.source_ref == spend_source_ref,
+        )
+    ).scalar_one_or_none()
+    try:
+        reserved_event, reservation_created = reserve_provider_spend_call(
+            db,
+            owner_id=request.owner_id,
+            goal_id=request.goal_id,
+            source_ref=spend_source_ref,
+            provider=planned_provider,
+            model=planned_model,
+            task_id=request.task_id,
+            job_id=request.job_id,
+            evidence={"request_hash": request_hash, "phase": "pre_call"},
+        )
+        spend_reserved = True
+    except ProviderSpendError as exc:
+        detail = {
+            "request_hash": request_hash,
+            "reason": str(exc),
+            "provider_hint": planned_provider,
+            "model_hint": planned_model,
+            "context_set_id": str(context_set.id),
+            "unrelated_deterministic_work_preserved": True,
+        }
+        cp = _checkpoint(db, request, "PROVIDER_SPEND_NOT_AUTHORIZED", detail)
+        return None, PlanningResult(
+            "PROVIDER_SPEND_NOT_AUTHORIZED",
+            detail,
+            checkpoint_id=cp.id,
+            context_set_id=context_set.id,
+        ), 0
+
+    # Crash window A: a prior ticket left this source_ref reserved (invoke may have
+    # completed before settle). Never re-invoke. Consume reserved holds as conservative
+    # actuals so the ambiguous call is not labelled unspent, then wait honestly.
+    if (
+        preexisting is not None
+        and preexisting.status == ProviderSpendUsageStatus.reserved.value
+        and reserved_event.status == ProviderSpendUsageStatus.reserved.value
+    ):
+        settle_provider_spend_call(
+            db,
+            owner_id=request.owner_id,
+            source_ref=spend_source_ref,
+            prompt_tokens=int(reserved_event.reserved_prompt_tokens or 0),
+            completion_tokens=int(reserved_event.reserved_completion_tokens or 0),
+            cost_usd=reserved_event.reserved_cost_usd or Decimal("0"),
+            evidence={
+                "request_hash": request_hash,
+                "phase": "crash_before_settle_reconcile",
+                "reason": "unresolved reservation; refusing re-invoke",
+            },
+        )
+        detail = {
+            "request_hash": request_hash,
+            "reason": (
+                "prior provider spend reservation was still reserved after a crash window; "
+                "refusing to re-invoke the provider for the same source_ref"
+            ),
+            "failure_category": "unresolved_reservation",
+            "provider_hint": planned_provider,
+            "model_hint": planned_model,
+            "context_set_id": str(context_set.id),
+            "spend_source_ref": spend_source_ref,
+            "unrelated_deterministic_work_preserved": True,
+        }
+        cp = _checkpoint(db, request, "WAITING_PROVIDER", detail)
+        return None, PlanningResult(
+            "WAITING_PROVIDER",
+            detail,
+            checkpoint_id=cp.id,
+            context_set_id=context_set.id,
+        ), 0
+
+    # Concurrent first-reserve race: another caller won the INSERT for this source_ref
+    # and the hold is still live. Do not settle their hold (they may still be inside
+    # propose), and do not invoke. Settled non-creators should not reach here — allocate
+    # mints a fresh :aN after settle/release so a new attempt creates its own row.
+    if (
+        not reservation_created
+        and reserved_event.status == ProviderSpendUsageStatus.reserved.value
+    ):
+        detail = {
+            "request_hash": request_hash,
+            "reason": (
+                "another caller already holds the provider spend reservation for this "
+                "source_ref; refusing a concurrent second invoke"
+            ),
+            "failure_category": "concurrent_reservation",
+            "provider_hint": planned_provider,
+            "model_hint": planned_model,
+            "context_set_id": str(context_set.id),
+            "spend_source_ref": spend_source_ref,
+            "unrelated_deterministic_work_preserved": True,
+        }
+        cp = _checkpoint(db, request, "WAITING_PROVIDER", detail)
+        return None, PlanningResult(
+            "WAITING_PROVIDER",
+            detail,
+            checkpoint_id=cp.id,
+            context_set_id=context_set.id,
+        ), 0
+
+    # Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md): spend
+    # authority governs WHETHER a call may happen; this governs WHAT CONTENT that call may
+    # carry -- MODEL_REQUESTED_CONTEXT != AUTHORIZED_EGRESS_CONTEXT is a separate boundary
+    # from PROVIDER_SPEND_NOT_AUTHORIZED, checked here immediately before the payload leaves
+    # the process, never assumed satisfied just because spend was authorized above.
+    from app.egress_policy import EgressDeniedError, enforce_egress_policy
+
+    try:
+        payload = enforce_egress_policy(
+            db,
+            owner_id=request.owner_id,
+            provider=planned_provider,
+            model=planned_model,
+            purpose="development_planning",
+            requested_by="provider_planning.plan_with_provider",
+            payload=payload,
+            task_id=request.task_id,
+            goal_id=request.goal_id,
+            job_id=request.job_id,
+        )
+    except EgressDeniedError as exc:
+        if spend_reserved:
+            release_provider_spend_call(
+                db,
+                owner_id=request.owner_id,
+                source_ref=spend_source_ref,
+                evidence={"request_hash": request_hash, "phase": "egress_denied"},
+            )
+        detail = {
+            "request_hash": request_hash,
+            "reason": exc.reason,
+            "provider_hint": planned_provider,
+            "model_hint": planned_model,
+            "context_set_id": str(context_set.id),
+            "unrelated_deterministic_work_preserved": True,
+        }
+        cp = _checkpoint(db, request, "EGRESS_DENIED", detail)
+        return None, PlanningResult(
+            "EGRESS_DENIED",
+            detail,
+            checkpoint_id=cp.id,
+            context_set_id=context_set.id,
+        ), 0
+
+    started = time.monotonic()
+    try:
+        response = await asyncio.wait_for(
+            selected_adapter.propose(
+                payload,
+                timeout_seconds=limits.timeout_seconds,
+                max_output_bytes=limits.max_output_bytes,
+            ),
+            timeout=limits.timeout_seconds + 1,
+        )
+    except Exception as exc:  # noqa: BLE001 - provider boundary must checkpoint every failure
+        # Window B: once propose() is entered, release only if failure is proven
+        # pre-external-effect. Ambiguous post-boundary failures leave the reservation
+        # held so retry takes the Window A refuse-re-invoke path.
+        if spend_reserved and _provider_failure_allows_spend_release(exc):
+            release_provider_spend_call(
+                db,
+                owner_id=request.owner_id,
+                source_ref=spend_source_ref,
+                evidence={"request_hash": request_hash, "phase": "provider_failure"},
+            )
+        safe = classify_provider_exception(exc)
+        detail = {
+            "request_hash": request_hash,
+            "reason": "provider-dependent planning call did not complete",
+            "failure_category": safe.result.value,
+            "failure_message": safe.message,
+            "provider_hint": provider_name,
+            "model_hint": model,
+            "context_set_id": str(context_set.id),
+            "spend_source_ref": spend_source_ref,
+            "spend_released": bool(
+                spend_reserved and _provider_failure_allows_spend_release(exc)
+            ),
+            "unrelated_deterministic_work_preserved": True,
+        }
+        cp = _checkpoint(db, request, "WAITING_PROVIDER", detail)
+        return None, PlanningResult(
+            "WAITING_PROVIDER",
+            detail,
+            checkpoint_id=cp.id,
+            context_set_id=context_set.id,
+        ), 0
+    usage = response.raw_usage or {}
+    prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+    completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+    settled_cost = estimate_cost(
+        response.provider, response.model, prompt_tokens, completion_tokens
+    )
+    if settled_cost is None:
+        settled_cost = Decimal("0")
+    settle_provider_spend_call(
+        db,
+        owner_id=request.owner_id,
+        source_ref=spend_source_ref,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cost_usd=settled_cost,
+        evidence={
+            "request_hash": request_hash,
+            "phase": "settled",
+            "provider": response.provider,
+            "model": response.model,
+        },
+    )
+    latency_ms = int((time.monotonic() - started) * 1000)
+    return response, None, latency_ms
+
+
 async def plan_with_provider(
     db,
     *,
@@ -766,275 +1104,98 @@ async def plan_with_provider(
         or getattr(selected_adapter, "model", None)
         or getattr(selected_adapter, "default_model", None)
     )
-    # Spend gate: a live boolean alone must never open a billed call. Reserve first.
-    # Explicit provider+model required so ceilings can be bound before money is spent.
-    from app.provider_spend import (
-        ProviderSpendError,
-        release_provider_spend_call,
-        reserve_provider_spend_call,
-        settle_provider_spend_call,
-    )
-    from app.models.provider_spend import (
-        ProviderSpendUsageEvent,
-        ProviderSpendUsageStatus,
-    )
-
-    spend_base_ref = (
-        f"provider-planning:{request.owner_id}:{request.task_id}:{request.job_id}:{request_hash}"
-    )
-    spend_source_ref = _allocate_provider_spend_source_ref(
-        db, owner_id=request.owner_id, base_ref=spend_base_ref
-    )
-    spend_reserved = False
-    if not planned_provider or not planned_model:
-        detail = {
-            "request_hash": request_hash,
-            "reason": (
-                "provider-assisted planning requires an explicit provider and model before "
-                "invocation so spend can be reserved against founder ceilings"
-            ),
-            "provider_hint": planned_provider,
-            "model_hint": planned_model,
-            "context_set_id": str(context_set.id),
-            "unrelated_deterministic_work_preserved": True,
-        }
-        cp = _checkpoint(db, request, "PROVIDER_SPEND_NOT_AUTHORIZED", detail)
-        return PlanningResult(
-            "PROVIDER_SPEND_NOT_AUTHORIZED",
-            detail,
-            checkpoint_id=cp.id,
-            context_set_id=context_set.id,
-        )
-
-    preexisting = db.execute(
-        select(ProviderSpendUsageEvent).where(
-            ProviderSpendUsageEvent.owner_id == request.owner_id,
-            ProviderSpendUsageEvent.source_ref == spend_source_ref,
-        )
-    ).scalar_one_or_none()
-    try:
-        reserved_event, reservation_created = reserve_provider_spend_call(
-            db,
-            owner_id=request.owner_id,
-            goal_id=request.goal_id,
-            source_ref=spend_source_ref,
-            provider=planned_provider,
-            model=planned_model,
-            task_id=request.task_id,
-            job_id=request.job_id,
-            evidence={"request_hash": request_hash, "phase": "pre_call"},
-        )
-        spend_reserved = True
-    except ProviderSpendError as exc:
-        detail = {
-            "request_hash": request_hash,
-            "reason": str(exc),
-            "provider_hint": planned_provider,
-            "model_hint": planned_model,
-            "context_set_id": str(context_set.id),
-            "unrelated_deterministic_work_preserved": True,
-        }
-        cp = _checkpoint(db, request, "PROVIDER_SPEND_NOT_AUTHORIZED", detail)
-        return PlanningResult(
-            "PROVIDER_SPEND_NOT_AUTHORIZED",
-            detail,
-            checkpoint_id=cp.id,
-            context_set_id=context_set.id,
-        )
-
-    # Crash window A: a prior ticket left this source_ref reserved (invoke may have
-    # completed before settle). Never re-invoke. Consume reserved holds as conservative
-    # actuals so the ambiguous call is not labelled unspent, then wait honestly.
-    if (
-        preexisting is not None
-        and preexisting.status == ProviderSpendUsageStatus.reserved.value
-        and reserved_event.status == ProviderSpendUsageStatus.reserved.value
-    ):
-        settle_provider_spend_call(
-            db,
-            owner_id=request.owner_id,
-            source_ref=spend_source_ref,
-            prompt_tokens=int(reserved_event.reserved_prompt_tokens or 0),
-            completion_tokens=int(reserved_event.reserved_completion_tokens or 0),
-            cost_usd=reserved_event.reserved_cost_usd or Decimal("0"),
-            evidence={
-                "request_hash": request_hash,
-                "phase": "crash_before_settle_reconcile",
-                "reason": "unresolved reservation; refusing re-invoke",
-            },
-        )
-        detail = {
-            "request_hash": request_hash,
-            "reason": (
-                "prior provider spend reservation was still reserved after a crash window; "
-                "refusing to re-invoke the provider for the same source_ref"
-            ),
-            "failure_category": "unresolved_reservation",
-            "provider_hint": planned_provider,
-            "model_hint": planned_model,
-            "context_set_id": str(context_set.id),
-            "spend_source_ref": spend_source_ref,
-            "unrelated_deterministic_work_preserved": True,
-        }
-        cp = _checkpoint(db, request, "WAITING_PROVIDER", detail)
-        return PlanningResult(
-            "WAITING_PROVIDER",
-            detail,
-            checkpoint_id=cp.id,
-            context_set_id=context_set.id,
-        )
-
-    # Concurrent first-reserve race: another caller won the INSERT for this source_ref
-    # and the hold is still live. Do not settle their hold (they may still be inside
-    # propose), and do not invoke. Settled non-creators should not reach here — allocate
-    # mints a fresh :aN after settle/release so a new attempt creates its own row.
-    if (
-        not reservation_created
-        and reserved_event.status == ProviderSpendUsageStatus.reserved.value
-    ):
-        detail = {
-            "request_hash": request_hash,
-            "reason": (
-                "another caller already holds the provider spend reservation for this "
-                "source_ref; refusing a concurrent second invoke"
-            ),
-            "failure_category": "concurrent_reservation",
-            "provider_hint": planned_provider,
-            "model_hint": planned_model,
-            "context_set_id": str(context_set.id),
-            "spend_source_ref": spend_source_ref,
-            "unrelated_deterministic_work_preserved": True,
-        }
-        cp = _checkpoint(db, request, "WAITING_PROVIDER", detail)
-        return PlanningResult(
-            "WAITING_PROVIDER",
-            detail,
-            checkpoint_id=cp.id,
-            context_set_id=context_set.id,
-        )
-
-    # Life Vault / External-AI Egress Control (docs/LIFE_VAULT_EGRESS_CONTROL.md): spend
-    # authority governs WHETHER a call may happen; this governs WHAT CONTENT that call may
-    # carry -- MODEL_REQUESTED_CONTEXT != AUTHORIZED_EGRESS_CONTEXT is a separate boundary
-    # from PROVIDER_SPEND_NOT_AUTHORIZED, checked here immediately before the payload leaves
-    # the process, never assumed satisfied just because spend was authorized above.
-    from app.egress_policy import EgressDeniedError, enforce_egress_policy
-
-    try:
-        payload = enforce_egress_policy(
-            db,
-            owner_id=request.owner_id,
-            provider=planned_provider,
-            model=planned_model,
-            purpose="development_planning",
-            requested_by="provider_planning.plan_with_provider",
-            payload=payload,
-            task_id=request.task_id,
-            goal_id=request.goal_id,
-            job_id=request.job_id,
-        )
-    except EgressDeniedError as exc:
-        if spend_reserved:
-            release_provider_spend_call(
-                db,
-                owner_id=request.owner_id,
-                source_ref=spend_source_ref,
-                evidence={"request_hash": request_hash, "phase": "egress_denied"},
-            )
-        detail = {
-            "request_hash": request_hash,
-            "reason": exc.reason,
-            "provider_hint": planned_provider,
-            "model_hint": planned_model,
-            "context_set_id": str(context_set.id),
-            "unrelated_deterministic_work_preserved": True,
-        }
-        cp = _checkpoint(db, request, "EGRESS_DENIED", detail)
-        return PlanningResult(
-            "EGRESS_DENIED",
-            detail,
-            checkpoint_id=cp.id,
-            context_set_id=context_set.id,
-        )
-
-    started = time.monotonic()
-    try:
-        response = await asyncio.wait_for(
-            selected_adapter.propose(
+    # Bounded corrective retry (exactly one correction, never an open loop): a schema or
+    # JSON failure is fed back to the model once, because a local planner that answers with
+    # an extra field otherwise cannot finish the task at temperature 0 -- the same prompt
+    # reproduces the same rejected answer forever. Strict validation is untouched: the
+    # second answer is validated by exactly the same parser, and a second failure parks the
+    # task through the existing PROVIDER_FAILED recovery path.
+    invocation_budget = _planning_invocation_budget(request)
+    correction_feedback: str | None = None
+    prior_failure: dict | None = None
+    response: ProviderResponse | None = None
+    envelope: ProviderCandidateEnvelope | None = None
+    latency_ms = 0
+    for invocation in range(1, invocation_budget + 1):
+        attempt_payload = payload
+        if correction_feedback is not None:
+            corrected = _corrected_payload(
                 payload,
-                timeout_seconds=limits.timeout_seconds,
-                max_output_bytes=limits.max_output_bytes,
-            ),
-            timeout=limits.timeout_seconds + 1,
-        )
-    except Exception as exc:  # noqa: BLE001 - provider boundary must checkpoint every failure
-        # Window B: once propose() is entered, release only if failure is proven
-        # pre-external-effect. Ambiguous post-boundary failures leave the reservation
-        # held so retry takes the Window A refuse-re-invoke path.
-        if spend_reserved and _provider_failure_allows_spend_release(exc):
-            release_provider_spend_call(
-                db,
-                owner_id=request.owner_id,
-                source_ref=spend_source_ref,
-                evidence={"request_hash": request_hash, "phase": "provider_failure"},
+                correction_feedback,
+                max_bytes=limits.max_payload_bytes,
             )
-        safe = classify_provider_exception(exc)
-        detail = {
-            "request_hash": request_hash,
-            "reason": "provider-dependent planning call did not complete",
-            "failure_category": safe.result.value,
-            "failure_message": safe.message,
-            "provider_hint": provider_name,
-            "model_hint": model,
-            "context_set_id": str(context_set.id),
-            "spend_source_ref": spend_source_ref,
-            "spend_released": bool(
-                spend_reserved and _provider_failure_allows_spend_release(exc)
-            ),
-            "unrelated_deterministic_work_preserved": True,
-        }
-        cp = _checkpoint(db, request, "WAITING_PROVIDER", detail)
-        return PlanningResult(
-            "WAITING_PROVIDER",
-            detail,
-            checkpoint_id=cp.id,
-            context_set_id=context_set.id,
+            if corrected is None:
+                break
+            attempt_payload = corrected
+        response, terminal, latency_ms = await _invoke_planning_attempt(
+            db,
+            request=request,
+            request_hash=request_hash,
+            context_set=context_set,
+            payload=attempt_payload,
+            selected_adapter=selected_adapter,
+            planned_provider=planned_provider,
+            planned_model=planned_model,
+            provider_name=provider_name,
+            model=model,
+            limits=limits,
         )
-    usage = response.raw_usage or {}
-    prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
-    completion_tokens = int(usage.get("completion_tokens", 0) or 0)
-    settled_cost = estimate_cost(
-        response.provider, response.model, prompt_tokens, completion_tokens
-    )
-    if settled_cost is None:
-        settled_cost = Decimal("0")
-    settle_provider_spend_call(
-        db,
-        owner_id=request.owner_id,
-        source_ref=spend_source_ref,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        cost_usd=settled_cost,
-        evidence={
-            "request_hash": request_hash,
-            "phase": "settled",
-            "provider": response.provider,
-            "model": response.model,
-        },
-    )
-    latency_ms = int((time.monotonic() - started) * 1000)
-    try:
-        envelope = parse_provider_envelope(
-            response.content, max_output_bytes=limits.max_output_bytes
-        )
-    except CandidateValidationError as exc:
+        if terminal is not None:
+            return terminal
+        if response is None:  # pragma: no cover - the helper returns one or a terminal
+            raise ProviderPlanningError(
+                "provider attempt returned neither a response nor a result"
+            )
+        try:
+            envelope = parse_provider_envelope(
+                response.content, max_output_bytes=limits.max_output_bytes
+            )
+        except CandidateValidationError as exc:
+            prior_failure = {
+                "reason": str(exc),
+                "response_sha256": hashlib.sha256(
+                    response.content.encode()
+                ).hexdigest(),
+                "provider": response.provider,
+                "model": response.model,
+            }
+            if invocation < invocation_budget:
+                correction_feedback = _sanitize_validation_feedback(str(exc))
+                continue
+            detail = {
+                "request_hash": request_hash,
+                "disposition": "PROVIDER_FAILED",
+                "reason": str(exc),
+                "provider": response.provider,
+                "model": response.model,
+                "response_sha256": prior_failure["response_sha256"],
+                "invocations": invocation,
+                "invocation_budget": invocation_budget,
+                "correction_attempts": invocation - 1,
+                "correction_feedback": correction_feedback,
+            }
+            cp = _checkpoint(db, request, "PROVIDER_FAILED", detail)
+            return PlanningResult(
+                "PROVIDER_FAILED",
+                detail,
+                checkpoint_id=cp.id,
+                context_set_id=context_set.id,
+            )
+        break
+    if envelope is None:
+        # Only reachable when the corrective payload cannot fit the byte bound: the first
+        # attempt already failed validation there, so this is a definite failure, not a
+        # provider outage. Fail closed through the same recovery classification.
         detail = {
             "request_hash": request_hash,
             "disposition": "PROVIDER_FAILED",
-            "reason": str(exc),
-            "provider": response.provider,
-            "model": response.model,
-            "response_sha256": hashlib.sha256(response.content.encode()).hexdigest(),
+            "reason": (
+                "plan candidate was rejected and the corrective feedback does not fit the "
+                "provider payload byte bound"
+            ),
+            "invocation_budget": invocation_budget,
+            "correction_feedback": correction_feedback,
+            **(prior_failure or {}),
         }
         cp = _checkpoint(db, request, "PROVIDER_FAILED", detail)
         return PlanningResult(

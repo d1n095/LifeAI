@@ -412,15 +412,19 @@ async def test_provider_outage_checkpoints_without_erasing_deterministic_state(
 @pytest.mark.asyncio
 async def test_malformed_output_and_secret_scope_fail_closed(superuser_db, tmp_path):
     _, _, _, _, _, context, request, _ = _provider_scope(superuser_db, tmp_path)
+    adapter = FakePlanningAdapter(
+        ProviderResponse("not-json", "fake-local", "planner-v2")
+    )
     malformed = await plan_with_provider(
         superuser_db,
         request=request,
         operator_context=context,
-        adapter=FakePlanningAdapter(
-            ProviderResponse("not-json", "fake-local", "planner-v2")
-        ),
+        adapter=adapter,
     )
     assert malformed.classification == "PROVIDER_FAILED"
+    # This request declares max_provider_attempts=1, so no corrective invocation is allowed:
+    # the budget is what the caller declared, and the cap is two, not the other way around.
+    assert len(adapter.calls) == 1
     with pytest.raises(Exception, match="sensitive credential paths"):
         build_provider_request(
             superuser_db,
@@ -631,3 +635,94 @@ async def test_never_egress_content_is_denied_before_the_provider_is_ever_called
     ).scalar_one()
     assert auth.reserved_requests == 0  # reservation was released, not left stranded
     assert auth.spent_requests == 0  # never actually spent -- the call never happened
+
+
+class ScriptedPlanningAdapter(FakePlanningAdapter):
+    """One response per invocation, in order, to script a rejection and then a correction."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+        first = self.responses[0]
+        self.provider_name = first.provider
+        self.model = first.model
+
+    async def propose(self, request_payload, *, timeout_seconds, max_output_bytes):
+        self.calls.append((request_payload, timeout_seconds, max_output_bytes))
+        return self.responses[min(len(self.calls), len(self.responses)) - 1]
+
+
+def _extra_field_candidate_response(calculator):
+    """A well-formed plan carrying one helpful-looking key the schema forbids."""
+    candidate = dict(_candidate_payload(calculator))
+    candidate["notes"] = "an extra key the strict schema rejects"
+    return _response(candidate)
+
+
+@pytest.mark.asyncio
+async def test_rejected_candidate_gets_exactly_one_corrective_invocation(
+    superuser_db, tmp_path
+):
+    _, _, _, _, _, context, request, calculator = _provider_scope(superuser_db, tmp_path)
+    request = replace(request, max_provider_attempts=2)
+    adapter = ScriptedPlanningAdapter(
+        [
+            _extra_field_candidate_response(calculator),
+            _response(_candidate_payload(calculator)),
+        ]
+    )
+    result = await plan_with_provider(
+        superuser_db,
+        request=request,
+        operator_context=context,
+        adapter=adapter,
+    )
+    assert result.classification == "ACCEPTED"
+    assert len(adapter.calls) == 2
+    first_payload, second_payload = adapter.calls[0][0], adapter.calls[1][0]
+    assert "correction" not in first_payload
+    assert (
+        second_payload["correction"]["previous_attempt_rejected"]
+        == "plan candidate contains unknown fields"
+    )
+    # The correction is additive only: nothing else about the request changed, so the two
+    # attempts cannot be describing different work.
+    assert {
+        key: value for key, value in second_payload.items() if key != "correction"
+    } == first_payload
+
+
+@pytest.mark.asyncio
+async def test_second_rejection_parks_through_existing_provider_failed_path(
+    superuser_db, tmp_path
+):
+    _, _, task, _, _, context, request, calculator = _provider_scope(
+        superuser_db, tmp_path
+    )
+    request = replace(request, max_provider_attempts=2)
+    adapter = ScriptedPlanningAdapter(
+        [
+            _extra_field_candidate_response(calculator),
+            _extra_field_candidate_response(calculator),
+        ]
+    )
+    result = await plan_with_provider(
+        superuser_db,
+        request=request,
+        operator_context=context,
+        adapter=adapter,
+    )
+    assert result.classification == "PROVIDER_FAILED"
+    assert len(adapter.calls) == 2  # exactly one correction, never a third attempt
+    assert result.explanation["reason"] == "plan candidate contains unknown fields"
+    assert result.explanation["invocations"] == 2
+    assert result.explanation["invocation_budget"] == 2
+    assert result.explanation["correction_attempts"] == 1
+    assert result.explanation["correction_feedback"]
+    checkpoint = superuser_db.get(MainAICheckpoint, result.checkpoint_id)
+    assert checkpoint.executor_state["classification"] == "PROVIDER_FAILED"
+    detail = checkpoint.executor_state["provider_planning"]
+    assert detail["correction_attempts"] == 1
+    assert detail["response_sha256"]
+    # Recovery, not privilege: the task is parked exactly as any other provider failure.
+    assert task.status == MainAITaskStatus.running

@@ -1133,6 +1133,9 @@ async def run_supervisor(
             ambiguity_refs=binding.ambiguity_refs,
             contradiction_refs=binding.contradiction_refs,
             max_context_members=bounds.max_context_members,
+            # Declared budget, not an open retry: provider planning may invoke the model once
+            # more when strict validation rejected the first answer, and never beyond that.
+            max_provider_attempts=2,
         )
         # Explicit candidate always goes through Safe Planner validation.
         # Gap-derived bindings may use deterministic Safe Planner recipes (no provider spend).
