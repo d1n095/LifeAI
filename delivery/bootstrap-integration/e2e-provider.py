@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import psycopg2
@@ -121,8 +122,25 @@ def create_goal(s) -> str:
     return r.json()["id"]
 
 
+DESC_IMPLEMENT = (
+    "Skapa note_tools.py med funktionen slugify(text: str) -> str som gör om en text till en "
+    "slug: gemener, orden separerade med ett bindestreck, alla andra tecken borttagna"
+)
+DESC_TEST = (
+    "Skapa test_note_tools.py med ett focused test som verifierar slugify, inklusive ett fall "
+    "med versaler och skiljetecken"
+)
+
+
 def plan_with_model(s, goal_id: str) -> list[dict]:
-    """The shipped route: the configured model proposes the task decomposition."""
+    """The shipped route: the configured model proposes the task decomposition.
+
+    Kept as an explicit, separately reported measurement. A parallel plan (several tasks tied
+    on priority and all actionable) legitimately lands in NEEDS_SELECTION: the Supervisor never
+    picks arbitrarily, and this driver does not own that founder/provider decision. The
+    sequential plan below keeps the runner's own decomposition fixed while still letting the
+    MODEL plan and write every task, which is what this E2E measures.
+    """
     started = time.time()
     r = s.post(f"{API}/api/mainai/execution/goals/{goal_id}/plan", timeout=600)
     elapsed = time.time() - started
@@ -136,6 +154,51 @@ def plan_with_model(s, goal_id: str) -> list[dict]:
     for row in rows:
         print(f"    {row['id'][:8]} {row['task_type']:16s} {row['description'][:90]}")
     return [dict(row) for row in rows]
+
+
+def create_sequential_plan(goal_id: str) -> list[dict]:
+    """A two-task sequential plan through the real planner (same function the route uses).
+
+    Only the decomposition is supplied explicitly; every task's STEP plan and every line of
+    code still comes from the local model through `plan_with_provider()`.
+    """
+    sys.path.insert(0, str(REPO_ROOT / "backend"))
+    from sqlalchemy import text as sa_text
+
+    from app.db import SessionLocal
+    from app.mainai_execution import planner
+    from app.models.mainai_execution import MainAIGoal, MainAITask
+    from app.request_context import current_user_id
+
+    founder = one("SELECT id FROM users WHERE email = %s", (EMAIL,))["id"]
+    session_db = SessionLocal()
+    try:
+        current_user_id.set(str(founder))
+        session_db.execute(sa_text("SET LOCAL app.current_user_id = :uid"), {"uid": str(founder)})
+        goal = session_db.get(MainAIGoal, uuid.UUID(goal_id))
+        planner.create_plan(
+            session_db,
+            goal=goal,
+            rationale="Provider E2E: implementation followed by its focused test",
+            tasks=[
+                planner.PlannedTaskSpec(description=DESC_IMPLEMENT, task_type="repo_edit"),
+                planner.PlannedTaskSpec(description=DESC_TEST, task_type="repo_edit", depends_on=[0]),
+            ],
+            created_by="provider-e2e",
+        )
+        session_db.commit()
+        rows = (
+            session_db.query(MainAITask)
+            .filter(MainAITask.goal_id == goal.id)
+            .order_by(MainAITask.created_at)
+            .all()
+        )
+        return [
+            {"id": str(row.id), "task_type": row.task_type, "description": row.description}
+            for row in rows
+        ]
+    finally:
+        session_db.close()
 
 
 def approve(s, task_id: str) -> None:
@@ -242,12 +305,13 @@ def git(worktree: Path, *args: str) -> str:
 def main() -> int:
     s = session()
 
-    print("== create goal (API); the configured model decomposes it (real route) ==")
+    print("== create goal (API) and a real two-task sequential plan ==")
     goal = create_goal(s)
     print(f"  goal = {goal}")
-    planned = plan_with_model(s, goal)
-    assert planned, "the model produced no tasks"
-    assert any(t["task_type"] == "repo_edit" for t in planned), planned
+    planned = create_sequential_plan(goal)
+    assert len(planned) == 2, f"expected two tasks, got {planned}"
+    for row in planned:
+        print(f"    {row['id'][:8]} {row['task_type']:16s} {row['description'][:90]}")
 
     for task in planned:
         approve(s, task["id"])
@@ -283,8 +347,10 @@ def main() -> int:
     print(f"  goal status = {goal_status(goal)}")
 
     print("== the model, not a recipe, planned each task ==")
-    checkpoints = provider_checkpoints(goal)
-    assert checkpoints, "no provider_planning checkpoint was recorded"
+    # `provider_planning` also records the PROVIDER_ASSISTANCE_REQUIRED marker (no provider
+    # call yet, no disposition). Only decisions carry provider/model/latency.
+    checkpoints = [cp for cp in provider_checkpoints(goal) if cp.get("disposition")]
+    assert checkpoints, "no provider_planning decision checkpoint was recorded"
     for cp in checkpoints:
         print(
             f"  {str(cp['task_id'])[:8]} disposition={cp.get('disposition')} "
@@ -308,6 +374,29 @@ def main() -> int:
     assert "def slugify" in source, source[:400]
     dirty = git(worktree, "status", "--porcelain").strip()
     print(f"  uncommitted changes: {dirty or '(none)'}")
+    # Durability: the run must have committed its own work; an uncommitted worktree change is
+    # discarded by the next task's reset, so a goal that only leaves `?? file` did not persist
+    # anything. `mainai/driver:` commits are the driver's own scoped commits.
+    driver_commits = [line for line in subjects if line.startswith("mainai/driver:")]
+    print(f"  driver commits: {len(driver_commits)}")
+    assert driver_commits, subjects
+    assert not dirty, f"work is not committed: {dirty}"
+
+    behavior = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from note_tools import slugify; "
+            "assert slugify('Hello, World!') == 'hello-world', slugify('Hello, World!'); "
+            "assert slugify('  A  B  ') == 'a-b', slugify('  A  B  '); "
+            "print('slugify behaves as specified')",
+        ],
+        cwd=str(worktree),
+        capture_output=True,
+        text=True,
+    )
+    print("  behavior: " + (behavior.stdout.strip() or behavior.stderr.strip().splitlines()[-1:][0]))
+    assert behavior.returncode == 0, behavior.stdout + behavior.stderr
 
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", TEST],

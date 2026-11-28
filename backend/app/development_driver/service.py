@@ -751,6 +751,47 @@ def run_driver(
             {"reason": "job cancel requested after verify before task finalize"},
             cp.id,
         )
+    # DURABLE WORK: a plan can write files and skip staging/committing, which leaves its result
+    # as an uncommitted worktree change -- the next task's worktree reset then discards it while
+    # the task (and the goal) already reported success. Measured on 2026-11-27: two tasks
+    # COMPLETED with verification_passed while the goal worktree still showed `?? note_tools.py`.
+    # Uncommitted work is not durable, so this fails closed through the existing verification
+    # repair path instead of finalizing.
+    wrote = [
+        item
+        for item in state["completed"]
+        if item.get("capability") in {"create_file", "patch_file", "delete_file"}
+    ]
+    committed = [
+        item
+        for item in state["completed"]
+        if item.get("capability") == "commit_scoped_changes"
+        and item.get("result") == "succeeded"
+    ]
+    if wrote and not committed:
+        cp = _checkpoint(
+            db,
+            context,
+            task,
+            goal,
+            phase="VERIFY",
+            classification="VERIFICATION_REQUIRED",
+            state={**state, "uncommitted_write_indexes": [item["index"] for item in wrote]},
+        )
+        return DriverResult(
+            "VERIFY",
+            "VERIFICATION_REQUIRED",
+            len(state["completed"]),
+            {
+                "verification_passed": False,
+                "failed_capability": "commit_scoped_changes",
+                "capability": "commit_scoped_changes",
+                "verification_required": True,
+                "reason": "the plan wrote files but never committed them; uncommitted work is discarded by the next task's reset",
+                "uncommitted_write_indexes": [item["index"] for item in wrote],
+            },
+            cp.id,
+        )
     _finalize_task_outcome(
         db,
         task,

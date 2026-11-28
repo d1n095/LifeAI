@@ -88,6 +88,8 @@ def _provider_scope(db, tmp_path, instruction=COMPLEX_REQUEST):
             "patch_file",
             "create_file",
             "run_focused_test",
+            "stage_scoped_changes",
+            "commit_scoped_changes",
             "verification_evaluate",
         ],
         authorized_risk="low",
@@ -180,6 +182,28 @@ def _candidate_payload(calculator):
                 "arguments": {},
                 "depends_on": ["test"],
             },
+            {
+                # Durable work: an uncommitted write is discarded by the next task's worktree
+                # reset, and the driver now fails such a run closed. The commit runs after the
+                # verification gate because the operator requires a passed verification
+                # checkpoint before it will commit.
+                "step_id": "stage",
+                "purpose": "stage scoped changes",
+                "expected_result": "staged paths",
+                "capability": "stage_scoped_changes",
+                "arguments": {"paths": ["calculator.py", "test_calculator.py"]},
+                "depends_on": ["gate"],
+                "required_risk": "LOCAL_WRITE",
+            },
+            {
+                "step_id": "commit",
+                "purpose": "commit scoped changes",
+                "expected_result": "commit sha",
+                "capability": "commit_scoped_changes",
+                "arguments": {"message": "Add multiplication support"},
+                "depends_on": ["stage"],
+                "required_risk": "LOCAL_WRITE",
+            },
         ],
     }
 
@@ -237,7 +261,7 @@ async def test_complex_provider_plan_runs_end_to_end_and_records_usage(
     assert result.explanation["provider_planning"]["provider"] == "fake-local"
     assert goal.original_instruction == COMPLEX_REQUEST
     completed = run_driver(
-        superuser_db, context=context, plan=result.plan, max_actions=10
+        superuser_db, context=context, plan=result.plan, max_actions=12
     )
     assert completed.classification == "COMPLETE"
     assert task.status == MainAITaskStatus.completed
@@ -264,7 +288,14 @@ async def test_complex_provider_plan_runs_end_to_end_and_records_usage(
         for event in superuser_db.execute(
             select(WorkTraceEvent).order_by(WorkTraceEvent.sequence_number)
         ).scalars()
-    ] == ["read_file", "patch_file", "create_file", "run_focused_test"]
+    ] == [
+        "read_file",
+        "patch_file",
+        "create_file",
+        "run_focused_test",
+        "stage_scoped_changes",
+        "commit_scoped_changes",
+    ]
 
 
 @pytest.mark.asyncio

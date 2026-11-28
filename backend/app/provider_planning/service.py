@@ -141,7 +141,11 @@ PROVIDER_SYSTEM_PROMPT = (
     'run_focused_test -> {"profile_name": "focused_pytest", "arguments": ["<test file>.py"]}; '
     'stage_scoped_changes -> {"paths": ["<allowed path>", "..."]}; '
     'commit_scoped_changes -> {"message": "<one line, max 200 characters>"}. '
-    "A step that writes a file MUST set verification_required: true, and the plan MUST end "
+    "arguments.content must be the COMPLETE, runnable file content: never a placeholder, never "
+    '"...", "<implementation here>", "pass" or a TODO body -- write the real function and the '
+    "real test. A plan that writes a file MUST also stage and commit it (stage_scoped_changes "
+    "then commit_scoped_changes); an uncommitted write is discarded by the next task and the "
+    "plan is rejected. A step that writes a file MUST set verification_required: true, and the plan MUST end "
     'with a final step {"step_id": "verify", "purpose": "record verification", '
     '"expected_result": "verification recorded", "capability": "verification_evaluate", '
     '"arguments": {}, "required_risk": "READ_ONLY", "verification_required": false} -- without '

@@ -195,6 +195,8 @@ _OPERATOR_CAPABILITIES = [
     "read_file",
     "patch_file",
     "run_focused_test",
+    "stage_scoped_changes",
+    "commit_scoped_changes",
 ]
 
 
@@ -240,7 +242,7 @@ def _ssh_coverage_candidate(seed: str) -> dict:
         "unknowns": [],
         "exclusions": [
             "Do not modify app/egress_policy/service.py.",
-            "No remote operations, commits, or extra files.",
+            "No remote operations, no push, no extra files; one local commit of the authorized path.",
         ],
         "steps": [
             {
@@ -285,6 +287,28 @@ def _ssh_coverage_candidate(seed: str) -> dict:
                 "capability": "verification_evaluate",
                 "arguments": {},
                 "depends_on": ["test"],
+            },
+            {
+                # Durable work: an uncommitted patch is discarded by the next task's
+                # worktree reset, and the driver now fails such a run closed. The commit runs
+                # after the gate because the operator requires a passed verification
+                # checkpoint before it will commit.
+                "step_id": "stage",
+                "purpose": "stage the authorized test patch",
+                "expected_result": "staged path",
+                "capability": "stage_scoped_changes",
+                "arguments": {"paths": [AUTHORIZED_TEST_PATH]},
+                "depends_on": ["gate"],
+                "required_risk": "LOCAL_WRITE",
+            },
+            {
+                "step_id": "commit",
+                "purpose": "commit the authorized test patch",
+                "expected_result": "commit sha",
+                "capability": "commit_scoped_changes",
+                "arguments": {"message": "Cover the OpenSSH marker in the egress test"},
+                "depends_on": ["stage"],
+                "required_risk": "LOCAL_WRITE",
             },
         ],
     }
@@ -546,4 +570,10 @@ async def test_first_bounded_self_improvement_ssh_egress_marker_coverage(
         ).scalars()
         if event.action_detail and event.action_detail.get("operator_capability")
     ]
-    assert caps == ["read_file", "patch_file", "run_focused_test"]
+    assert caps == [
+        "read_file",
+        "patch_file",
+        "run_focused_test",
+        "stage_scoped_changes",
+        "commit_scoped_changes",
+    ]
