@@ -359,32 +359,19 @@ async def test_composed_autonomous_milestone_grant_plan_execute_verify_continue(
 
 
 def _committed_multiply_candidate_payload(calculator: str) -> dict:
-    """Same as _candidate_payload plus stage/commit so a later same-goal task can reuse HEAD."""
+    """`_candidate_payload` already ends in gate → stage → commit, so a later same-goal task
+    reuses HEAD as-is.
+
+    This helper used to append a SECOND stage/commit pair on top, and Safe Planner correctly
+    refuses that ("step identities must be non-empty and unique") — the composed autonomy
+    milestone, soak v2/v3 and lease-expiry-takeover tests all failed on an UNCHANGED base
+    (b1a8cb91) because of it. The duplicate was a stale fixture, not a product defect: asserting
+    the steps are present keeps the intent visible without re-adding them.
+    """
     base = _candidate_payload(calculator)
-    steps = list(base["steps"])
-    steps.extend(
-        [
-            {
-                "step_id": "stage",
-                "purpose": "stage helper and test",
-                "expected_result": "staged diff",
-                "capability": "stage_scoped_changes",
-                "arguments": {"paths": ["calculator.py", "test_calculator.py"]},
-                "depends_on": ["gate"],
-                "required_risk": "LOCAL_WRITE",
-            },
-            {
-                "step_id": "commit",
-                "purpose": "commit helper",
-                "expected_result": "commit sha",
-                "capability": "commit_scoped_changes",
-                "arguments": {"message": "Add multiply helper"},
-                "depends_on": ["stage"],
-                "required_risk": "LOCAL_WRITE",
-            },
-        ]
-    )
-    base["steps"] = steps
+    step_ids = [step["step_id"] for step in base["steps"]]
+    assert len(step_ids) == len(set(step_ids)), step_ids
+    assert {"stage", "commit"} <= set(step_ids), step_ids
     return base
 
 
