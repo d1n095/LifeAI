@@ -315,4 +315,11 @@ FIFO-routing, och okänd eller gammal information ger `UNKNOWN`/`STALE` + `INVES
 för att bli "ledig" eller "klar". Dispatch går fortfarande bara genom den befintliga
 fail-closed-grinden i `dispatch.evaluate_dispatch_readiness()`.
 
+Status går också att läsa genom det befintliga adaptergränssnittet: `ShadowReportAdapter` i
+`agent_coordination/adapters.py` implementerar `AgentAdapter`, men kan bara observera. Alla
+kontrollflaggor är `False`, och start/instruktion/avbryt/återuppta/resultat kastar
+`ProviderNotConfiguredError` — den öppnar ingen subprocess, gör inget nätanrop och läser inga
+credentials. Därmed kan runtime view, execution control och dispatch-readiness se en verklig
+agents rapporterade status genom samma kodväg som en framtida riktig adapter kommer att använda.
+
 Mätning och exakta utfall: `evidence/e2e-second-chance-20261128.txt`.

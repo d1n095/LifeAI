@@ -78,3 +78,14 @@ Agent Coordination, runtime view, FIFO-routing och den append-only-händelselogg
   - ingen dispatch, ingen lease, ingen statusändring: en KLAR-rapport gör inte
     assignmenten completed.
 Tester: 8 passed (tests/backend/mainai/test_agent_shadow_observation.py).
+
+5. Läsning genom adaptergränssnittet
+------------------------------------
+`ShadowReportAdapter` (agent_coordination/adapters.py) implementerar AgentAdapter men kan bara
+observera: health() kontrollerar rapportkatalogen, observe() returnerar nyaste rapporten för
+agenten (nyast per reported_at, aldrig filnamnsordning) eller "stale"/"unknown", och
+start/send_instruction/cancel/resume/collect_result kastar ProviderNotConfiguredError.
+control_capabilities() har alla flaggor False, så execution_control vägrar redan före anrop.
+Ingen subprocess, inget nätanrop, inga credentials.
+Tester: 120 passed (shadow observation, execution control, dispatch foundation, runtime control
+plane, real execution bridge), ruff rent.

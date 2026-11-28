@@ -127,7 +127,10 @@ uppgift, okänd/gammal = UNKNOWN/STALE + undersök), utan dispatch, lease eller 
 Mätt: qwen2.5-coder:7b körde den korrigerande chansen live (`invocations=2`,
 `correction_attempts=1`) men föll igen på samma schemafel; llama3.1 accepterades på första
 anropet, skrev båda filerna och failade först på modellens egen testkod (`NameError`), dvs.
-kvarvarande flaskhals är lokal kodkvalitet, inte kedjan. Evidens:
+kvarvarande flaskhals är lokal kodkvalitet, inte kedjan. Samma pass kopplar läsningen till det
+befintliga adaptergränssnittet: `ShadowReportAdapter` kan bara observera (alla kontrollflaggor
+`False`, alla åtgärdsmetoder fail-closed), så runtime view och execution control kan läsa en
+verklig agents status genom samma kodväg som en framtida riktig adapter. Evidens:
 `delivery/bootstrap-integration/evidence/e2e-second-chance-20261128.txt`.
 
 **Överlämning:** grenen är avsedd att ta emot Mini:s och övriga agenters verifierade leveranser

@@ -19,6 +19,7 @@ from app.agent_coordination.shadow_observation import (
     DECISION_ACKNOWLEDGE_AND_PREPARE_NEXT,
     DECISION_INVESTIGATE,
     DECISION_WAIT,
+    STATUS_BLOCKED,
     STATUS_DONE,
     STATUS_STALE,
     STATUS_UNKNOWN,
@@ -293,6 +294,75 @@ def test_done_report_is_acknowledged_once_and_next_task_only_prepared(
     assert len(events) == 1
     assert events[0].detail["reported_status"] == STATUS_DONE
     assert events[0].detail["report_sha256"] == reports[0].sha256
+
+
+@pytest.mark.asyncio
+async def test_shadow_adapter_observes_through_the_standard_interface(tmp_path):
+    from app.agent_coordination.adapters import (
+        ProviderNotConfiguredError,
+        ShadowReportAdapter,
+    )
+
+    adapter = ShadowReportAdapter(agent_key="freebuff", report_dir=str(tmp_path))
+    assert (await adapter.health()).healthy is True
+    capabilities = adapter.control_capabilities()
+    assert not any(
+        (
+            capabilities.supports_streaming,
+            capabilities.supports_instruction,
+            capabilities.supports_resume,
+            capabilities.supports_cancel,
+            capabilities.supports_structured_events,
+        )
+    )
+    unknown = await adapter.observe(uuid.uuid4())
+    assert unknown.raw_status == STATUS_UNKNOWN
+
+    _write_report(
+        tmp_path, _report_payload(agent_key="freebuff", status=STATUS_WORKING)
+    )
+    observed = await adapter.observe(uuid.uuid4())
+    assert observed.raw_status == STATUS_WORKING
+    assert observed.detail["report_sha256"]
+
+    # A newer report must win over an older one, and an old report on its own must read stale
+    # rather than "working": freshness is the only thing that lets a report speak for now.
+    stale_dir = tmp_path / "stale"
+    stale_dir.mkdir()
+    _write_report(
+        stale_dir,
+        _report_payload(
+            agent_key="freebuff",
+            status=STATUS_DONE,
+            reported_at=datetime.now(timezone.utc) - timedelta(hours=2),
+        ),
+        name="old.json",
+    )
+    stale = await ShadowReportAdapter(
+        agent_key="freebuff", report_dir=str(stale_dir), fresh_for_seconds=60
+    ).observe(uuid.uuid4())
+    assert stale.raw_status == "stale"
+    _write_report(
+        stale_dir,
+        _report_payload(agent_key="freebuff", status=STATUS_BLOCKED),
+        name="new.json",
+    )
+    newest = await ShadowReportAdapter(
+        agent_key="freebuff", report_dir=str(stale_dir), fresh_for_seconds=60
+    ).observe(uuid.uuid4())
+    assert newest.raw_status == STATUS_BLOCKED
+
+    # Observation only: the control plane's own capability check already refuses these, and the
+    # adapter refuses them too if called directly.
+    for coroutine in (
+        adapter.start_assignment(uuid.uuid4()),
+        adapter.send_instruction(uuid.uuid4(), "do more"),
+        adapter.cancel(uuid.uuid4()),
+        adapter.resume(uuid.uuid4()),
+        adapter.collect_result(uuid.uuid4()),
+    ):
+        with pytest.raises(ProviderNotConfiguredError, match="observation-only"):
+            await coroutine
 
 
 def test_report_for_another_agents_assignment_is_rejected(superuser_db, owner_id, tmp_path):

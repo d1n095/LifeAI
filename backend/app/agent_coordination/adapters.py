@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
@@ -303,6 +304,121 @@ class LocalCLIAdapter:
             succeeded=succeeded,
             output_refs=({"kind": "stdout_bytes", "length": len(stdout)}, {"kind": "stderr_bytes", "length": len(stderr)}),
             summary=f"'{self._provider_key}' exited with code {proc.returncode}",
+        )
+
+
+class ShadowReportAdapter:
+    """Observation-only adapter over the report channel (`shadow_observation.py`).
+
+    This is the A1 shape of a real agent channel: the SAME `AgentAdapter` interface every
+    future adapter implements, restricted to reading. It opens no subprocess, makes no network
+    call and reads no credential -- its entire capability is parsing small JSON files an agent
+    wrote. Every method that could act on an agent raises `ProviderNotConfiguredError`, and
+    `control_capabilities()` declares every flag False, so `app.agent_coordination
+    .execution_control` refuses an instruction/start/cancel BEFORE any method is called: there
+    is no code path here capable of dispatching work, and no flag a caller could misread as
+    permission.
+
+    What it is FOR: letting the existing runtime view, control plane and dispatch readiness see
+    a real agent's reported state through the interface they already speak, in shadow mode,
+    before any dispatch adapter is enabled.
+    """
+
+    def __init__(
+        self,
+        *,
+        agent_key: str,
+        report_dir: str,
+        fresh_for_seconds: int | None = None,
+    ):
+        self._agent_key = agent_key
+        self._report_dir = report_dir
+        self._fresh_for_seconds = fresh_for_seconds
+
+    async def health(self) -> AgentHealth:
+        from pathlib import Path
+
+        found = Path(self._report_dir).is_dir()
+        return AgentHealth(
+            healthy=found,
+            detail=(
+                f"report channel '{self._report_dir}' {'found' if found else 'NOT found'}; "
+                "observation only -- no dispatch capability"
+            ),
+        )
+
+    def capabilities(self) -> tuple[str, ...]:
+        return ("read_only_review",)
+
+    def control_capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities()  # every flag False: nothing here can act on an agent
+
+    async def observe(self, assignment_id: UUID) -> AgentObservation:
+        from app.agent_coordination.shadow_observation import (
+            DEFAULT_FRESH_SECONDS,
+            STATUS_UNKNOWN,
+            read_report_files,
+        )
+
+        reports, rejected = read_report_files(self._report_dir)
+        fresh_for = self._fresh_for_seconds or DEFAULT_FRESH_SECONDS
+        # The newest report wins, by reported_at -- never by filename order, so adding a file
+        # cannot silently resurrect an older state.
+        latest = None
+        for report in reports:
+            if report.agent_key != self._agent_key:
+                continue
+            if latest is None or report.reported_at > latest.reported_at:
+                latest = report
+        if latest is not None:
+            report = latest
+            age = (datetime.now(timezone.utc) - report.reported_at).total_seconds()
+            if age > fresh_for:
+                return AgentObservation(
+                    raw_status="stale",
+                    summary=f"latest report is {int(age)}s old",
+                    detail={"report_sha256": report.sha256, "assignment_ref": report.assignment_ref},
+                )
+            return AgentObservation(
+                raw_status=report.reported_status,
+                summary=report.summary,
+                detail={
+                    "report_id": report.report_id,
+                    "report_sha256": report.sha256,
+                    "assignment_ref": report.assignment_ref,
+                    "reported_at": report.reported_at.isoformat(),
+                    "rejected_reports": len(rejected),
+                },
+            )
+        return AgentObservation(
+            raw_status=STATUS_UNKNOWN,
+            summary="no report for this agent",
+            detail={"rejected_reports": len(rejected)},
+        )
+
+    async def start_assignment(self, assignment_id: UUID) -> None:
+        raise ProviderNotConfiguredError(
+            "shadow report adapter is observation-only: it cannot start an assignment"
+        )
+
+    async def send_instruction(self, assignment_id: UUID, instruction: str) -> None:
+        raise ProviderNotConfiguredError(
+            "shadow report adapter is observation-only: it cannot send instructions"
+        )
+
+    async def cancel(self, assignment_id: UUID) -> None:
+        raise ProviderNotConfiguredError(
+            "shadow report adapter is observation-only: it cannot cancel an assignment"
+        )
+
+    async def resume(self, assignment_id: UUID) -> None:
+        raise ProviderNotConfiguredError(
+            "shadow report adapter is observation-only: it cannot resume an assignment"
+        )
+
+    async def collect_result(self, assignment_id: UUID) -> AgentResult:
+        raise ProviderNotConfiguredError(
+            "shadow report adapter is observation-only: it cannot collect a result"
         )
 
 
