@@ -67,7 +67,6 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.autonomous_gap.service import is_gap_generated_child
 from app.development_operator.service import COMMAND_PROFILES, OperatorContext
 from app.development_supervisor.lease import (
     claim_supervisor_goal_lease,
@@ -429,18 +428,15 @@ async def run_authorized_goal_supervisor_tick(
                 # claim_specific updates via raw SQL — expire the ORM identity so later
                 # Operator/_require_context reads see running+locked_by, not a stale queued row.
                 db.refresh(job)
-                # EXCEPTION to the reset: a gap-generated child (in practice the verification
-                # repair child) exists to repair the state that just failed. Resetting first
-                # erases exactly that state -- the 2026-11-28 provider E2E measured a plan that
-                # wrote both files and then failed its focused test: the repair child started
-                # from a clean worktree, re-planned from nothing, failed again, and the chain
-                # nested ("Repair ... blocking: Repair ...") while the failed code was gone.
-                # Keeping the leftovers is safe by the same argument as the general reset:
-                # every real write still fails closed on an unexpected before_sha256, so a
-                # reader/planner sees the real content and a write can never silently overwrite
-                # something it did not expect.
-                if not is_gap_generated_child(db, owner_id=goal.owner_id, task=task):
-                    reset_goal_worktree_to_clean_head(repo_root)
+                # Tried and reverted 2026-11-28: skipping this reset for a gap-generated child
+                # (so the repair child would see the code that just failed) BREAKS a verified
+                # scenario -- test_worker_live_gap_repair_reverify_unlocks_downstream passes on
+                # b1a8cb91 and ends `blocked` with the skip, because planning/candidate builders
+                # are written against the clean base. Repair children therefore still start from
+                # the last clean commit; making a model-driven repair self-sufficient (or
+                # capturing the failed writes as a durable base) is a separate change with its
+                # own design and tests, not a reset exception.
+                reset_goal_worktree_to_clean_head(repo_root)
             if claimed_generation is None:
                 db.refresh(job)
                 still_valid = (

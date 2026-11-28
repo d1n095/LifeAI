@@ -665,46 +665,6 @@ async def test_a_fresh_task_claim_always_gets_a_clean_worktree_regardless_of_pri
 
 
 @pytest.mark.asyncio
-async def test_a_gap_generated_child_keeps_the_failed_state_it_must_repair(
-    superuser_db, make_verified_user, source_repo, monkeypatch
-):
-    """The reset-on-fresh-claim has one deliberate exception: a gap-generated child (in
-    practice the verification repair child) exists to repair the state that just failed, so
-    resetting to the last clean commit first erases exactly that state.
-
-    Measured 2026-11-28: a plan created both files and then failed its focused test; the repair
-    child claimed a fresh worktree, found nothing to repair, re-planned from scratch, failed the
-    same way, and the chain nested while the failed code was gone. Keeping the leftovers is safe
-    for the same reason the general reset is safe to skip: every real write fails closed on an
-    unexpected before_sha256, so nothing can be silently overwritten."""
-    import subprocess
-
-    import app.development_supervisor.production_entry as entry_module
-    from app.development_supervisor.production_worktree import ensure_goal_worktree_sync
-
-    owner, _ = make_verified_user()
-    goal = _goal_with_ready_task(superuser_db, owner.id)
-    envelope = _authorize(superuser_db, owner.id, goal.id, authorized_capabilities=["read_file"])
-    superuser_db.commit()
-
-    repo_root, _, _ = ensure_goal_worktree_sync(goal_id=goal.id, source_repo_root=source_repo)
-    failed_write = repo_root / "note_tools.py"
-    failed_write.write_text("def slugify(text: str) -> str:\n    return text.lower()\n", encoding="utf-8")
-    assert subprocess.run(
-        ["git", "status", "--porcelain"], cwd=str(repo_root), capture_output=True, text=True, check=True
-    ).stdout.strip()
-
-    monkeypatch.setattr(entry_module, "is_gap_generated_child", lambda db, *, owner_id, task: True)
-
-    await run_authorized_goal_supervisor_tick(superuser_db, goal=goal, envelope=envelope, worker_id="test-worker")
-    superuser_db.commit()
-
-    # The child still sees the code that failed -- not an empty tree.
-    assert failed_write.is_file()
-    assert "def slugify" in failed_write.read_text(encoding="utf-8")
-
-
-@pytest.mark.asyncio
 async def test_a_permanently_refused_tick_parks_the_task_and_releases_its_goal_lease(
     superuser_db, make_verified_user, source_repo, monkeypatch
 ):
