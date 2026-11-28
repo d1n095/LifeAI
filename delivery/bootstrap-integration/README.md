@@ -250,6 +250,33 @@ Postgres-instansen (varken `lifeai_dev` eller `lifeai_e2e`) och alla `mainai_job
 lokal DB är `ubuntu`, dvs. den claimar inga jobb här. Den ska inte stoppas eller ändras; den
 egna databasen är det som gör konkurrensen strukturellt omöjlig.
 
+## Arbetsledning (P0b): inventering och kortaste säkra väg
+
+Målet är att Life ska leda arbetet mellan utvecklingsagenter — inte att bygga en ny motor.
+Inventeringen 2026-11-28 visar att funktionerna redan har ägare i koden:
+
+| Funktion | Befintlig komponent |
+|---|---|
+| Kö, uppgifter, tillstånd, checkpoints | `mainai_jobs`, `mainai_tasks`, `mainai_goals`, `mainai_checkpoints` |
+| Ömsesidig uteslutning per mål | `supervisor_goal_leases` (0059), `agent_coordination.AgentScopeLease` |
+| Agentregister, uppdrag, scope-lås, path-konflikt | `agent_coordination/service.py` (`register_agent`, `create_work_assignment`, `acquire_lease`, `scan_write_scope_conflict`, `transition_status`) |
+| Läsande statusbild (A1) | `agent_coordination/runtime_view.py` (`all_agents_runtime_snapshot`, `work_registry_snapshot`, `RuntimeStatus`) |
+| Routing och dispatch | `agent_coordination/routing.py`, `dispatch.py` |
+| Agentadapter | `adapters.NotConfiguredAdapter` (standard, invokerar aldrig), `LocalCLIAdapter` (en subprocess-mekanism, inert utan `adapter_config.get_real_adapter()`) |
+| Budget/spend | `provider_planning` + `provider_spend_authorizations` (0060) |
+| Evidens | `work_trace_events`, `mainai_checkpoints`, GitHub evidence-modulerna |
+
+**Vad som saknas för A2 — rapporteras BLOCKED, inte som framgång:**
+
+1. Ingen agentadapter är aktiverad (`get_real_adapter()` är tom), så ingen extern agent kan
+drivas på riktigt. `LocalCLIAdapter` finns men är medvetet inaktiv.
+2. Ingen HTTP-route exponerar `agent_coordination`; status läses i dag via service/DB.
+3. Ingen kvitterings-/reconciliation-kedja för externa leveranser — bara assignment-status.
+
+Kortaste säkra väg: **en** adapter (Codex CLI), **en** avgränsad uppgift inom redan godkänt
+scope, kvittering, checkpoint, oberoende verifiering och först därefter fler agenter. Det
+kräver grundarens separata adapteraktivering; den här grenen slår inte på den själv.
+
 ## Överlämning: ta emot andra agenters verifierade leveranser utan dubbelarbete
 
 Kedjan är avsiktligt byggd för att ta emot Mini och övriga agenters arbete:

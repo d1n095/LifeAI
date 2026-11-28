@@ -43,6 +43,11 @@ DB = os.environ.get("LIFEAI_E2E_DB", "postgresql://postgres@127.0.0.1:55432/life
 APP_DB = os.environ.get(
     "LIFEAI_E2E_APP_DB", "postgresql://mainai_app:mainai_app_pw@127.0.0.1:55432/lifeai_dev"
 )
+# The spend grant must name the SAME provider/model the worker plans with: a hardcoded
+# ollama/llama3.1 grant silently refused every plan as PROVIDER_SPEND_NOT_AUTHORIZED while the
+# worker was configured with another model (measured 2026-11-28, model comparison run).
+PROVIDER = os.environ.get("LIFEAI_E2E_PROVIDER", "ollama")
+MODEL = os.environ.get("LIFEAI_E2E_MODEL", "llama3.1")
 EMAIL = "founder@lifeai.local"
 PASSWORD = os.environ.get("FOUNDER_PASSWORD", "dev-only-founder-pass")
 
@@ -241,8 +246,8 @@ def authorize_spend(s, goal_id: str, envelope_id: str) -> None:
             "max_cost_usd": 1.00,
             "max_requests": 50,
             "max_cost_per_request_usd": 0.20,
-            "allowed_providers": ["ollama"],
-            "allowed_models": ["llama3.1"],
+            "allowed_providers": [PROVIDER],
+            "allowed_models": [MODEL],
             "idempotency_key": f"provider-e2e-{goal_id}-{envelope_id}",
         },
         timeout=60,
@@ -323,7 +328,7 @@ def main() -> int:
         approve(s, task["id"])
     envelope = authorize_envelope(s, goal)
     authorize_spend(s, goal, envelope)
-    print(f"  envelope {envelope} scoped to {PATHS}; spend grant ollama/llama3.1")
+    print(f"  envelope {envelope} scoped to {PATHS}; spend grant {PROVIDER}/{MODEL}")
 
     print("== the running worker executes the tasks through the Supervisor + local model ==")
     approved: set[str] = {task["id"] for task in planned}

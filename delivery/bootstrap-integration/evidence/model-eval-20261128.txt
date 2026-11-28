@@ -1,0 +1,28 @@
+Modellmätning 2026-11-28 (lokal planering via den riktiga provider-vägen)
+=======================================================================
+
+Hårdvara: 8 kärnor, 15 GB RAM, ingen GPU, 434 GB fritt. Ollama lokalt (127.0.0.1:11434).
+Modeller installerade: llama3.1:latest (4.9 GB), qwen2.5:0.5b, nomic-embed-text.
+Ny modell hämtad för utvärdering: qwen2.5-coder:7b (kodspecialiserad, ryms i RAM utan GPU).
+
+MÄTNING — samma E2E-drivrutin, samma mål (slugify + test), samma databas `lifeai_e2e`,
+port 8010, Redis db 1, exakt en worker, kandidat 530a7bad:
+
+| Modell | Resultat i provider-planeringen | Observation |
+|---|---|---|
+| llama3.1:latest | `provider output is not valid JSON` (prosa i stället för kuvert) | Tasken blev oplanerbar för alltid innan `format:"json"` infördes; efter fixen kommer giltig JSON men kandidaten avvisas ibland |
+| qwen2.5-coder:7b | giltig JSON, men `plan candidate contains unknown fields` | JSON-kontraktet håller; modellen lägger till egna fält i `candidate`, som Safe Planner korrekt avvisar |
+
+Slutsatser:
+1. `format:"json"` (commit c3c4c871) gör att lokal planering nu alltid får JSON — det var det
+   som blockerade allt tidigare. Kvarvarande fel är innehållsligt, inte formatmässigt.
+2. Båda modellerna behöver en **korrigerande andra chans**: när svaret är giltig JSON men
+   avvisas av schemat finns felet att skicka tillbaka ("unknown field X; tillåtna fält är …").
+   I dag är `attempt_limit=1`, så en nästan-korrekt plan blir ett hårt PROVIDER_FAILED.
+   Det är nästa konkreta förbättring för självständig utveckling.
+3. Spenderingsgrinden måste namnge samma provider/modell som workern planerar med; drivrutinen
+   hade hårdkodat ollama/llama3.1, vilket gav `PROVIDER_SPEND_NOT_AUTHORIZED` i varje tick när
+   workern körde en annan modell. Drivrutinen tar nu `LIFEAI_E2E_MODEL`/`LIFEAI_E2E_PROVIDER`.
+
+Mätningen är gjord på den riktiga kedjan (Supervisor → provider_planning → Safe Planner), inte
+på ett lösryckt modellanrop.
