@@ -26,3 +26,26 @@ Slutsatser:
 
 Mätningen är gjord på den riktiga kedjan (Supervisor → provider_planning → Safe Planner), inte
 på ett lösryckt modellanrop.
+
+UPPFÖLJNING — andra scenariot (truncate) och skärpt prompt (2026-11-28, 5d390a76)
+-------------------------------------------------------------------------------
+Drivrutinen har nu två scenarier (LIFEAI_E2E_SCENARIO=slugify|truncate) genom samma
+planner/operator/commit/pytest-väg, och planeringsprompten räknar upp exakt vilka nycklar som
+är tillåtna på varje nivå.
+
+Mätning med qwen2.5-coder:7b, mål e2d4ddd4 (truncate + test_text_utils.py):
+  provider_planning: PROVIDER_FAILED | plan candidate contains unknown fields
+Samma utfall som före promptskärpningen. Modellen följer alltså inte nyckelvitlistan, och
+eftersom temperaturen är 0 upprepas svaret vid varje nytt försök — uppgiften kan inte slutföras
+alls i detta läge.
+
+Det betyder att varierande uppgifter end-to-end är BLOCKERADE på ett designbeslut, inte på
+kedjan:
+  a) korrigerande andra chans: skicka tillbaka exakt validationsfel till modellen en gång,
+     inom befintlig spend-reservation (attempt_limit är 1 i dag); eller
+  b) tolerera okända nycklar inuti candidate/step (parsern bygger ändå objektet enbart från
+     vitlistan, så extra fält kan inte ge behörighet) medan toppnivån förblir strikt.
+
+Ingen av dem gjordes i detta pass: (a) kräver att spend-reservationen utökas till två anrop per
+planeringsförsök, och (b) ändrar en uttalad strikthet som har egna tester. Båda bör beslutas
+medvetet, inte som en snabb fix i slutet av ett pass.
