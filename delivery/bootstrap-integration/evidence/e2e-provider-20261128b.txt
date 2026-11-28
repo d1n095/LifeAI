@@ -1,0 +1,81 @@
+Integrationspass 2026-11-28 (efterfrågan: verifiera senaste kandidaten, 51 %-hängningen,
+identifiera den gamla workern, isolera mätmiljön, fortsätt med PR #513-luckorna)
+=================================================================================
+
+MILJÖ
+-----
+Isolerad mätmiljö: databas `lifeai_e2e` (skapad som `CREATE DATABASE lifeai_e2e TEMPLATE
+lifeai_dev`), `start-e2e-backend.sh` på port 8010, `start-e2e-worker.sh` med Redis db 1.
+Drivrutinen tar `LIFEAI_API`, `LIFEAI_E2E_DB`, `LIFEAI_E2E_APP_DB`, `LIFEAI_E2E_REDIS`.
+Kandidat under körningarna: `b1a8cb91` -> `cb5ffcb8` -> `c3c4c871` -> `dcc6adf5`
+(alla pushade; `git ls-remote` verifierad för varje).
+
+DEN GAMLA WORKERN FRÅN 26 NOVEMBER — IDENTIFIERAD, INTE RÖRD
+-------------------------------------------------------------
+  PID 16231  `python -m app.worker`      uid 10001  startad Thu Nov 26 11:51:45 2026
+  PID 15918  `uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers` (samma container)
+  /proc/16231/cgroup: 0::/system.slice/docker-04b3c46f44de4d34cedb848cd9cfb2cb753e710e42ba315dd63abea95594aa3d.scope
+  dvs. en Docker-container på värden (inte den lokala dev-stacken i ~/lifeai-local-stack).
+  Container-id:t finns inte i repot och `docker ps` nekas (ingen socket-åtkomst), och
+  /proc/16231/environ är permission denied — därför ingen läsning av dess miljövariabler.
+
+  Den konkurrerar INTE om arbete: `pg_stat_activity` visar fem klientanslutningar, alla från
+  den lokala stackens egna processer (postgres/mainai_app, startade 07:19–07:20), och
+  `mainai_jobs.locked_by` innehåller bara `ubuntu`. Den har alltså ingen anslutning till
+  `lifeai_dev` eller `lifeai_e2e`.
+
+VARFÖR HELA MAINAI-SVITEN FASTNADE (51 %)
+------------------------------------------
+`tests/conftest.py::_test_database` är en session-scoped autouse-fixture som SKAPAR databasen
+från `DATABASE_URL`, kör `alembic upgrade head`, applicerar RLS/privilegier och DROPPAR
+databasen vid sessionens slut. Den vägrar dessutom namn som inte matchar
+`lifeos_test` / `lifeos_test_<suffix>`.
+
+Två samtidiga sviter med samma `DATABASE_URL` river därför databasen under varandra:
+massor av fel (`alembic`-kollisioner, "permission denied", lås) följt av att en svit står
+stilla mitt i en test — det var 51 %-stoppet. Bevis:
+  * två körningar mot `lifeos_test` samtidigt: 19 failed / 16 errors i ett smalt urval som
+    annars är grönt (55 passed), och `alembic upgrade head` non-zero i fixturen.
+  * samma svit med unikt databasnamn (`lifeos_test_probe`, `lifeos_test_suite`, …) går
+    framåt utan massfel: `2 failed, 246 passed in 290.74s` med `--maxfail=2` (stoppad efter
+    två riktiga fel), och en full session på eget namn gick till 100 % insamling utan att
+    fastna.
+Slutsats: hängningen är inte en hängande test — den är delad testdatabas mellan sessioner.
+Rätt arbetssätt: en egen databas per svit (`lifeos_test_<namn>`), aldrig två sviter samtidigt.
+
+DE TVÅ FELEN SOM --maxfail FÅNGADE
+----------------------------------
+1. `test_worker_live_gap_repair_reverify_unlocks_downstream` — task slutade `blocked` istället
+   för `completed`. ORSAK: mitt eget försök i `cb5ffcb8` att låta en gap-genererad
+   reparationsbarn-task hoppa över reset-on-fresh-claim. Testet PASSERAR på `b1a8cb91`
+   (verifierat i worktree `/tmp/w-base`), så försöket backades i `dcc6adf5`.
+2. `test_composed_autonomy_milestone::test_composed_two_task_same_goal_worktree_continuation` —
+   task `running` istället för `completed`. FALLER ÄVEN PÅ `b1a8cb91` (`1 failed, 1 passed`
+   när båda kördes mot basen), dvs. pre-existerande och inte orsakat av detta pass.
+
+EFTER BACKNINGEN
+----------------
+46 passed i `test_autonomous_gap_worker_live_loop.py`, `test_supervisor_production_entry.py`
+och `test_autonomous_gap_child_task.py` — samma scenario som föll med undantaget är grönt igen.
+
+TRE FIXAR SOM ÄR KVAR PÅ GRENEN
+--------------------------------
+* `c3c4c871` — lokal planering begär Ollamas `format: "json"`. Mätt live: en
+  reparationsbarns planeringsanrop svarade med prosa (`provider output is not valid JSON`)
+  och eftersom temperaturen är 0 upprepade varje försök samma prosa — tasken kunde aldrig
+  planeras igen. Två nya tester pinnar `format`-fältet (och att det inte skickas annars).
+* `c3c4c871` — `failure_evidence` är försöksdata på `LifeProblemEvent`, inte en del av
+  problemets identitet. Mätt live: andra försöket gav samma semantiska gap med annan
+  `failure_evidence` och kolliderade (`idempotency key reused with different fields:
+  provenance`), så felet kunde aldrig registreras och ticken upprepade sig i all oändlighet.
+  Nytt test: samma gap med olika evidens ger samma problem, och evidensen bevaras på eventet.
+* `c3c4c871` — E2E-drivrutinen äger sin databas/API-adress via miljövariabler.
+
+KEDJAN I VERKLIG KÖRNING (mål 14870595-30de-4350-a56e-704a3e535556, `dcc6adf5`)
+------------------------------------------------------------------------------
+Sekventiell tvåuppgiftsplan godkänd; modellen planerade båda tasks genom provider-vägen
+(kuvert ACCEPTED, spend settle). Första tasken slutade `blocked` på sitt eget fokustest,
+därefter skapades reparationsbarn (`d8432dcf` blocked, `bc852e75` running attempts=2) och
+körningen stoppades manuellt. Det bekräftar den kvarvarande luckan: modellens kodkvalitet
+(llama3.1) och att reparationsbarnet re-planerar från ren bas — inte planerings-, budget-
+eller behörighetskedjan, som fungerar.

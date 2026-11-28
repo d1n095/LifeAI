@@ -236,6 +236,13 @@ få igenom en leverans):
 `LIFEAI_API`, `LIFEAI_E2E_DB`, `LIFEAI_E2E_APP_DB`, `LIFEAI_E2E_REDIS`. Kontrollera alltid att
 **exakt en** backend och **exakt en** worker kör mot den databasen innan en mätning.
 
+**Kör aldrig två sviter samtidigt mot samma databasnamn.** `tests/conftest.py` skapar sin
+egen databas från `DATABASE_URL`, kör migrationerna och **droppar** den vid sessionens slut,
+och den accepterar bara `lifeos_test` / `lifeos_test_<suffix>`. Två samtidiga sessioner river
+databasen under varandra; resultatet ser ut som massor av ovidkommande fel följt av att en
+körning "hänger sig" (det var den tidigare observationen vid 51 %). Använd ett unikt namn per
+körning, t.ex. `postgresql://postgres@127.0.0.1:55432/lifeos_test_<namn>`.
+
 **Miljöfakta att känna till:** på värden finns en Docker-container (id `04b3c46f44de…`, uid
 10001) som sedan 2026-11-26 kör en äldre `uvicorn app.main:app --host 0.0.0.0 --port 8000` och
 `python -m app.worker` (PID 15918/16231). Den har **inga** anslutningar till den lokala
