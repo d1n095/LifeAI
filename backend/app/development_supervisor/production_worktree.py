@@ -39,6 +39,11 @@ import subprocess
 from pathlib import Path
 
 WORKTREE_ROOT = Path("/tmp/mainai-supervisor-goal-worktrees")
+# Failed attempts are captured NEXT TO the goal worktree, never inside it: the worktree is
+# deliberately reset/cleaned before the next claim, so a capture stored there would be deleted
+# by exactly the step it is meant to survive.
+FAILED_ATTEMPT_ROOT = Path("/tmp/mainai-supervisor-failed-attempts")
+FAILED_ATTEMPT_DIFF_BOUND = 3000
 _GIT_TIMEOUT_SECONDS = 60
 
 
@@ -98,6 +103,50 @@ def ensure_goal_worktree_sync(*, goal_id, source_repo_root: Path) -> tuple[Path,
     else:
         _run_git(["worktree", "add", "-b", branch, str(path), base_sha], cwd=source_repo_root)
     return path, base_sha, branch
+
+
+def capture_failed_attempt(*, goal_id, task_id) -> dict | None:
+    """Durably checkpoint what a task actually wrote before its work is thrown away.
+
+    WHY THIS EXISTS (founder strategy 2026-11-28: "Persistenta checkpoints även för
+    misslyckade kodförsök"): the goal worktree is reset to its last commit before every fresh
+    claim, so a plan that wrote files and then failed its own focused test leaves NOTHING
+    behind. Measured in the provider E2E 2026-11-28: the repair child then re-planned from an
+    empty tree, wrote a different (also failing) attempt, and the reason the first attempt
+    failed was lost entirely -- by then also unrecoverable from the logs.
+
+    This does NOT change authority or the reset contract: it only records the diff. Returns
+    the capture metadata (patch path, a bounded excerpt, byte count) or None when the worktree
+    is clean/absent, and never raises -- capturing evidence must never break the repair path.
+    """
+    root = goal_worktree_path(goal_id)
+    if not (root / ".git").exists():
+        return None
+    try:
+        # Stage everything first (intent-to-add would omit new files entirely) so the diff is
+        # complete, then unstage again: the worktree itself must be left exactly as it was.
+        _run_git(["add", "-A"], cwd=root)
+        try:
+            diff = _run_git(["diff", "--cached", "--binary", "HEAD"], cwd=root)
+        finally:
+            _run_git(["reset", "-q"], cwd=root)
+    except ProductionWorktreeError:
+        return None
+    if not diff.strip():
+        return None
+    target = FAILED_ATTEMPT_ROOT / str(goal_id) / f"{task_id}.patch"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(diff + "\n", encoding="utf-8")
+    except OSError:
+        return None
+    return {
+        "patch_path": str(target),
+        "diff_excerpt": diff[:FAILED_ATTEMPT_DIFF_BOUND],
+        "diff_sha256": __import__("hashlib").sha256(diff.encode()).hexdigest(),
+        "diff_bytes": len(diff),
+        "truncated": len(diff) > FAILED_ATTEMPT_DIFF_BOUND,
+    }
 
 
 def reset_goal_worktree_to_clean_head(repository_root: Path) -> None:

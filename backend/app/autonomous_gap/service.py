@@ -1001,6 +1001,28 @@ def _repairable_failure_evidence(classification: str, detail: dict | None) -> di
     return None
 
 
+def _with_failed_attempt_capture(*, goal: MainAIGoal, task: MainAITask, evidence: dict) -> dict:
+    """Attach a durable checkpoint of the work this attempt actually wrote before it failed.
+
+    The goal worktree is reset to its last commit before a repair child claims it, so without
+    this the failed code is gone and the reason it failed can never be reconstructed (measured
+    2026-11-28: the repair child re-planned from an empty tree and failed the same way). The
+    capture is evidence only -- it changes no authority, and a failure to capture is recorded
+    as absent rather than allowed to break the repair path.
+    """
+    try:
+        # Imported here, not at module scope: `app.development_supervisor.__init__` imports its
+        # service, which imports this module -- a top-level import would be circular.
+        from app.development_supervisor.production_worktree import capture_failed_attempt
+
+        capture = capture_failed_attempt(goal_id=goal.id, task_id=task.id)
+    except Exception:  # noqa: BLE001 - evidence capture must never fail the repair path
+        capture = None
+    if not capture:
+        return evidence
+    return {**evidence, "failed_attempt": capture}
+
+
 def gap_from_verification_required(
     *,
     db: Session,
@@ -1050,6 +1072,10 @@ def gap_from_verification_required(
         evidence_kind="verification_failure",
         parent_goal_id=goal.id,
         reason=f"Task {task.id} ('{task.description}') did not reach verified completion; bounded repair required.",
+        # Deliberately unchanged format: the repair child's description is a verified contract
+        # (tests and operators match on it exactly). The failed attempt's own diff travels in
+        # `evidence["failed_attempt"]` -> LifeProblem provenance instead, and the full patch is
+        # on disk; putting it in the description broke that contract, measured 2026-11-28.
         required_outcome=f"Repair the verification failure blocking: {task.description}",
         task_type="repo_edit",
         source_task_id=task.id,
@@ -1189,6 +1215,11 @@ def handle_live_gap_signal(
             evidence = _repairable_failure_evidence(classification, driver_detail)
             if evidence is None and classification == "FAILED_NONRETRYABLE":
                 return None
+            evidence = _with_failed_attempt_capture(
+                goal=goal,
+                task=task,
+                evidence=evidence or {"signal": classification, **(driver_detail or {})},
+            )
             gap = gap_from_verification_required(
                 db=db,
                 scope=scope,
@@ -1196,7 +1227,7 @@ def handle_live_gap_signal(
                 task=task,
                 binding_paths=binding_paths,
                 source_job_id=source_job_id,
-                failure_evidence=evidence or {"signal": classification, **(driver_detail or {})},
+                failure_evidence=evidence,
                 operator_context=operator_context,
             )
     except GapLineageError as exc:
