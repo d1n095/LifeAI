@@ -1,0 +1,33 @@
+Full regression 2026-11-28 — isolerad miljö
+===========================================
+
+Kandidat: 530a7bad (grenen freebuff/bootstrap-integration-20261127)
+Kommando: pytest tests/backend/mainai -q
+Miljö: egen databas `lifeos_test_regress` (conftest skapar/droppar sin egen DB), Redis db 4,
+ENVIRONMENT=development. Ingen annan svit körde samtidigt (det var orsaken till den tidigare
+"hängningen" vid 51 %).
+
+RESULTAT
+--------
+  1 failed, 862 passed in 1163.37s (0:19:23)
+  Inga hängningar, inga massfel, hela sessionen gick till slut.
+
+Enda felet:
+  tests/backend/mainai/test_operator_lease_effect_time_race.py::
+  test_winning_worker_resumes_from_stale_authority_checkpoint_and_completes
+  -> winning_result.classification == "VERIFICATION_REQUIRED", förväntat "COMPLETE"
+     (phase=VERIFY, completed_steps=2, operator_action_ids=[])
+
+Analys: fixturen skriver två filer (create_file) och förväntar sig COMPLETE. Sedan 798221f1
+faller drivrutinen stängt som VERIFICATION_REQUIRED när en plan skrivit filer men inte
+committat (worktreen återställs före nästa claim, så "skrivet" är inte "klart"), och operatorn
+vägrar committa utan ett passerat verifierings-checkpoint. Att lägga till
+verification → stage → commit i planen ändrade testets `completed_steps == 2`-kontrakt, så
+fixturen behöver ett eget beslut om vad som ska räknas som steg — det gjordes INTE i detta pass.
+Felet är alltså en känd, dokumenterad fixturgap, inte en produktregression: ingen grind har
+lättats och ingen assertion har försvagats.
+
+Övriga 862 tester passerar, inklusive alla sex composed autonomy-filer (milestone, soak
+v1-v4), gap/repair-kedjan, supervisor, operator, provider-planering och säkerhetsgränserna.
+Tidigare i samma pass: composed autonomy-familjen föll på en oförändrad bas (b1a8cb91) på
+grund av dubblerade stage/commit-steg i fixturen; rättat i 530a7bad.
