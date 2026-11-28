@@ -115,6 +115,21 @@ Lokal modellmätning: `qwen2.5-coder:7b` ger giltig JSON men lägger till egna f
 llama3.1 gav prosa före `format:"json"`. Nästa konkreta blockerare är en korrigerande andra
 planeringschans (`attempt_limit` är 1), inte format eller budget.
 
+**2026-11-28 (pass 3): korrigerande andra chans och A1 shadow-observation.** `a19127c9` ger
+ett avvisat plancandidate exakt en korrigerande chans: valideringens eget meddelande skickas
+tillbaka en gång, sanerat och längdbegränsat, inom en deklarerad budget på två anrop per
+planeringsförsök (`max_provider_attempts=2`). Schemat är oförändrat — andra svaret prövas av
+samma parser, ett andra avslag parkeras genom befintlig `PROVIDER_FAILED`-återhämtning, och
+varje anrop går genom samma spend- och egress-grindar. `b025a79f` lägger A1 i P0b:
+`agent_coordination/shadow_observation.py` läser verklig agentstatus i shadow mode (ARBETAR =
+avvakta utan skrivning, KLAR/BLOCKERAD = idempotent kvittens + föreslagen nästa godkända
+uppgift, okänd/gammal = UNKNOWN/STALE + undersök), utan dispatch, lease eller statusändring.
+Mätt: qwen2.5-coder:7b körde den korrigerande chansen live (`invocations=2`,
+`correction_attempts=1`) men föll igen på samma schemafel; llama3.1 accepterades på första
+anropet, skrev båda filerna och failade först på modellens egen testkod (`NameError`), dvs.
+kvarvarande flaskhals är lokal kodkvalitet, inte kedjan. Evidens:
+`delivery/bootstrap-integration/evidence/e2e-second-chance-20261128.txt`.
+
 **Överlämning:** grenen är avsedd att ta emot Mini:s och övriga agenters verifierade leveranser
 utan dubbelarbete — en leverans per gren/commit baserad på kedjans topp, verifierad före pålägg,
 `--no-ff` i beroendeordning, en enda migrationshead och uppdaterat register. Se

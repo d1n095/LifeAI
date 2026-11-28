@@ -296,3 +296,23 @@ Kedjan är avsiktligt byggd för att ta emot Mini och övriga agenters arbete:
 Dubbelarbete undviks genom att F1/F7, founder-vägen, F2, F4 och transient-E2E:t nu är gemensam
 grund: nya leveranser ska återanvända dem (t.ex. `release_supervisor_goal_leases_from_previous_process`,
 `_recipe_scope`, `supervisor_goal_lease_events`) i stället för att bygga parallella mekanismer.
+
+## Korrigerande andra chans (planering) och A1 shadow-observation (P0b)
+
+`plan_with_provider()` får göra **två** anrop per planeringsförsök, aldrig fler. Om det första
+svaret underkänns av den strikta valideringen skickas valideringens eget meddelande tillbaka en
+gång — sanerat, avkortat och längdbegränsat så payloadens bytegräns hålls. Det andra svaret prövas
+av exakt samma parser; ett andra avslag parkeras genom befintlig `PROVIDER_FAILED`-återhämtning.
+Budgeten är deklarerad (`max_provider_attempts=2`), varje anrop har egen spend-reservation och
+egen egress-prövning, och ingen behörighetskontroll är ändrad.
+
+`app/agent_coordination/shadow_observation.py` är den första riktiga P0b-delen: ett shadow-läge
+som läser en verklig extern agents status utan att kunna starta, styra eller avbryta något.
+Rapporter är små JSON-filer i en katalog (ingen session, inga credentials); schemat valideras
+exakt. ARBETAR ger `WAIT` utan någon skrivning, KLAR/BLOCKERAD ger en idempotent kvittens i den
+befintliga append-only-händelseloggen plus en **föreslagen** nästa godkända uppgift via befintlig
+FIFO-routing, och okänd eller gammal information ger `UNKNOWN`/`STALE` + `INVESTIGATE` i stället
+för att bli "ledig" eller "klar". Dispatch går fortfarande bara genom den befintliga
+fail-closed-grinden i `dispatch.evaluate_dispatch_readiness()`.
+
+Mätning och exakta utfall: `evidence/e2e-second-chance-20261128.txt`.

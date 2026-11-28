@@ -1,0 +1,80 @@
+KORRIGERANDE ANDRA PLANERINGSCHANS + A1 SHADOW — mätning 2026-11-28
+=====================================================================
+
+Kandidat: a19127c9 (korrigerande andra chans) och b025a79f (A1 shadow-observation)
+Miljö: isolerad E2E-stack — databas lifeai_e2e, backend 127.0.0.1:8010, worker med
+Redis db 1, Ollama på 127.0.0.1:11434. Den lokala lifeai_dev-stacken och den
+Docker-körda workern från 2026-11-26 rördes inte.
+
+1. Mekanismen (a19127c9)
+------------------------
+plan_with_provider() har nu två anrop per planeringsförsök, aldrig fler:
+  - anrop 1: vanlig payload;
+  - om svaret underkänns av den STRICTA valideringen (schema/JSON) skickas
+    valideringens eget meddelande tillbaka en gång, sanerat (operator.redact),
+    avkortat till en utskrivbar rad och längdbegränsat så payloadens bytegräns
+    hålls; får det inte plats failar försöket stängt utan att skicka för mycket;
+  - anrop 2 prövas av EXAKT samma parser; ett andra avslag parkeras genom
+    befintlig PROVIDER_FAILED-återhämtning.
+
+Varje anrop — även korrigeringen — går genom samma spend-reservation (eget
+source_ref, `:aN`) och samma egress-grind. Budgeten är deklarerad, inte
+implicit: development_supervisor sätter max_provider_attempts=2 och
+_planning_invocation_budget() kapar till min(2, deklarerad budget).
+
+Tester: 57 passed (provider_assisted_planning, crash_before_settle,
+default_resolution, waiting_provider_wake_release, spend_authorization,
+autonomous_task_provider_spend_e2e) + 23 passed (scoped_development_supervisor,
+composed_autonomy_milestone, composed_autonomy_soak, safe_planner). Ruff rent
+utom de tre kända, redan existerande felen (F401 UsageLog, F401 MainAIJobStatus,
+F841 now i worker.py).
+
+2. Verklig körning med qwen2.5-coder:7b (truncate-scenariot)
+------------------------------------------------------------
+Goal 4366ec9f. Checkpoint provider_planning/PROVIDER_FAILED:
+    invocations = 2
+    invocation_budget = 2
+    correction_attempts = 1
+    correction_feedback = "plan candidate contains unknown fields"
+    reason = "plan candidate contains unknown fields"
+
+Alltså: den korrigerande chansen kördes i den verkliga kedjan, och modellen
+svarade med samma schemafel även efter korrigeringen. Uppgiften parkerades
+genom befintlig återhämtning — exakt det specificerade beteendet. Slutsats:
+mekanismen fungerar; qwen2.5-coder:7b följer inte nyckelvitlistan och är inte en
+användbar planerare för den här uppgiften.
+
+3. Verklig körning med llama3.1 (truncate-scenariot)
+----------------------------------------------------
+Goal 340e54ae. Planen ACCEPTERADES på första anropet (ingen korrigering
+behövdes), och körningen gick igenom hela operator-kedjan:
+    steg 0 create_file      text_utils.py       succeeded
+    steg 1 create_file      test_text_utils.py  succeeded
+    steg 2 run_focused_test focused_pytest      failed
+    -> development_driver: FAILED_NONRETRYABLE, completed=[0,1], failures=1
+
+Testfelet är modellens kod, inte kedjan:
+    test_text_utils.py:4: NameError: name 'truncate' is not defined
+    (den genererade testfilen saknar import av truncate)
+
+Kedjan gjorde alltså rätt: filerna skrevs, testet kördes, felet fångades med
+full evidens (trace event 7d7d1982), och körningen failade stängt i stället för
+att rapportera lyckat arbete. Det som återstår för en grön varierande uppgift är
+lokal kodkvalitet — inte schema, budget, behörighet eller kommunikation.
+
+4. A1 shadow-observation (b025a79f)
+-----------------------------------
+Ny modul app/agent_coordination/shadow_observation.py, byggd ovanpå befintlig
+Agent Coordination, runtime view, FIFO-routing och den append-only-händelseloggen:
+  - rapporter läses från en katalog med små JSON-filer (inget CLI, ingen
+    session, inga credentials), schemat valideras exakt — okänt fält, okänd
+    status, framtida tidsstämpel eller för stor fil avvisas;
+  - ARBETAR (färsk) => WAIT, ingen skrivning alls;
+  - KLAR/BLOCKERAD (färsk) => kvittens i händelseloggen (idempotent på
+    assignment + report_id + sha256) och nästa godkända uppgift FÖRESLÅS via
+    befintlig routing;
+  - okänd eller gammal rapport => UNKNOWN/STALE + INVESTIGATE, aldrig "ledig"
+    och aldrig "klar";
+  - ingen dispatch, ingen lease, ingen statusändring: en KLAR-rapport gör inte
+    assignmenten completed.
+Tester: 8 passed (tests/backend/mainai/test_agent_shadow_observation.py).
